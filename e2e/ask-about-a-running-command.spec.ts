@@ -50,6 +50,7 @@ import {
   standalone as base,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
   settingsReady,
   VaultBackend,
@@ -57,6 +58,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -190,6 +192,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -246,16 +250,7 @@ async function configureAssistant(page: Page): Promise<void> {
  * a marker found there arrived in a tool result and nowhere else.
  */
 function answerFromWhatTheModelWasSent(body: string): string[] {
-  let seen = ''
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-    seen = (parsed.messages ?? [])
-      .filter((m) => m.role !== 'system' && m.role !== 'user')
-      .map((m) => m.content ?? '')
-      .join('\n')
-  } catch {
-    seen = ''
-  }
+  const seen = toolResults(body).join('\n')
   return seen.includes(MARKER)
     ? ['The command is showing ', MARKER, '.']
     : ['I could not see the screen.']

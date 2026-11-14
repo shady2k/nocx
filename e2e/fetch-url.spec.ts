@@ -13,10 +13,11 @@ import { createServer, type Server } from 'node:http'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { standalone as base, VaultBackend, bindEndpoint } from './harness'
+import { standalone as base, ensureAssistantVault, VaultBackend, bindEndpoint } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
@@ -64,6 +65,8 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await ensureAssistantVault(page, endpoint, 'disposable-assistant-passphrase')
+  await page.locator(TITLE).first().click()
 }
 
 async function askFromPrompt(page: Page, question: string): Promise<void> {
@@ -92,7 +95,7 @@ test.describe('fetch.url reaches the page after one approval (nocx-iqywv)', () =
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(PAGE_MARKER)
+        toolResults(body).some((result) => result.includes(PAGE_MARKER))
           ? ['The page says ', PAGE_MARKER]
           : ['The fetch result did not reach the model.'],
     })
@@ -107,7 +110,7 @@ test.describe('fetch.url reaches the page after one approval (nocx-iqywv)', () =
     await expect(prompt).not.toBeVisible({ timeout: 15_000 })
 
     const requests = await fake.waitForRequests(before + 2)
-    expect(requests[before + 1].body).toContain(PAGE_MARKER)
+    expect(toolResults(requests[before + 1].body).join('\n')).toContain(PAGE_MARKER)
     await expect(page.locator('.cmd-output[data-answer-body]').last()).toContainText(PAGE_MARKER, {
       timeout: 20_000,
     })

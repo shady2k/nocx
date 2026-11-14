@@ -40,10 +40,17 @@ import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { standalone as base, appReadyForInput, bindEndpoint, VaultBackend } from './harness'
+import {
+  standalone as base,
+  ensureAssistantVault,
+  appReadyForInput,
+  bindEndpoint,
+  VaultBackend,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -93,6 +100,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 /** Send the drafted line to the ASSISTANT: ⌘/Ctrl+Enter flips where Enter
@@ -157,19 +166,6 @@ function chatRequests(from: number): FakeRequest[] {
     .requests()
     .slice(from)
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
-}
-
-/** The tool-result slots of one model request, verbatim — what the backend
- *  actually handed back for the calls it was asked to make. */
-function toolResults(body: string): string[] {
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-  } catch {
-    return []
-  }
 }
 
 /** The follow-up prose, DERIVED from what came back through the tool: the

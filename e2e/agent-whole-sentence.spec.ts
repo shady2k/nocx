@@ -87,6 +87,7 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
+  ensureAssistantVault,
   settingsReady,
   VaultBackend,
 } from './harness'
@@ -196,6 +197,8 @@ async function backToTerminal(page: Page): Promise<void> {
 /** Allow this journey's effects through the person's policy matrix.
  * Real pi is configured in the disposable home before backend startup. */
 async function configureAssistant(page: Page): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await openSettings(page, SETTINGS_POLICY_NAV)
   for (const effect of ALLOWED_EFFECTS) {
     // answerPermission waits on the LISTED answer, which is the store's own

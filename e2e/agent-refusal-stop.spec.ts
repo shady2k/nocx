@@ -40,10 +40,17 @@ import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { standalone as base, appReadyForInput, VaultBackend, bindEndpoint } from './harness'
+import {
+  standalone as base,
+  ensureAssistantVault,
+  appReadyForInput,
+  VaultBackend,
+  bindEndpoint,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -93,6 +100,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 /** Send a question through the ordinary editor after selecting the agent
@@ -142,21 +151,6 @@ function chatRequests(fake: FakeOpenAI, from: number): FakeRequest[] {
     .requests()
     .slice(from)
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
-}
-
-/** Extract the model-facing refusal messages, preserving the exact text that
- * the backend put in the tool-result slot. */
-function toolResults(body: string): string[] {
-  try {
-    const parsed = JSON.parse(body) as {
-      messages?: { role?: string; content?: unknown }[]
-    }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-  } catch {
-    return []
-  }
 }
 
 /** The follow-up model answer is possible only when the refusal was delivered

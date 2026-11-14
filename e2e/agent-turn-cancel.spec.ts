@@ -52,7 +52,13 @@ import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { standalone as base, appReadyForInput, VaultBackend, bindEndpoint } from './harness'
+import {
+  standalone as base,
+  ensureAssistantVault,
+  appReadyForInput,
+  VaultBackend,
+  bindEndpoint,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { configurePiHome } from './pi-home'
@@ -93,6 +99,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 /** Send a question through the ordinary editor after selecting the agent
@@ -140,16 +148,22 @@ function chatRequests(fake: FakeOpenAI, from: number): FakeRequest[] {
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
 }
 
-/** The model-facing tool messages in a request body. */
+/** All model-facing tool messages, including prior turns. Unlike ordinary
+ * result readers, this must not start at the latest user message: a cancelled
+ * call's late result carried into the next ask would still violate Stop. */
 function toolMessages(body: string): string[] {
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-  } catch {
-    return []
+  const parsed = JSON.parse(body) as {
+    messages?: { role?: string; content?: string | { type?: string; text?: string }[] }[]
   }
+  return (parsed.messages ?? [])
+    .filter((message) => message.role === 'tool')
+    .map((message) => {
+      if (typeof message.content === 'string') return message.content
+      return (message.content ?? [])
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text ?? '')
+        .join('\n')
+    })
 }
 
 interface WireEvent {

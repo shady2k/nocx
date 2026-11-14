@@ -55,6 +55,7 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
+  ensureAssistantVault,
   clickIntoEditor,
   promptReady,
   settingsReady,
@@ -275,6 +276,8 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await appReadyForInput(page)
 
     // ── The assistant is configured, and `run` is allowed to run ──────────
+    await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+    await page.locator(TITLE).first().click()
     await openSettings(page, SETTINGS_POLICY_NAV)
     for (const effect of ['observe', 'mutate-destructive'] as const) {
       await answerPermission(page, effect, 'Allowed')

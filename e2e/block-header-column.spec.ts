@@ -58,6 +58,7 @@ import {
   resolveBackend,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
   settingsReady,
   VaultBackend,
@@ -483,6 +484,8 @@ agentTest.describe('a running command nested in a turn', () => {
     await page.goto('/')
     await expect(page.locator(AGENT_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
     await appReadyForInput(page)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${agentNonce}`)
+    await page.locator(AGENT_TITLE).first().click()
     await configureAssistant(page)
 
     // The confirming turn settles the session; the real turn's run call then

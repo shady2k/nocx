@@ -16,6 +16,7 @@ import {
   standalone as base,
   answerPermission,
   bindEndpoint,
+  ensureAssistantVault,
   settingsReady,
   showSidebarView,
   VaultBackend,
@@ -23,6 +24,7 @@ import {
 import { readStand } from './stand'
 import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { toolResults } from './ask-gesture'
 
 const test = base
 const nonce = Date.now().toString(36)
@@ -76,6 +78,8 @@ async function openApp(page: Page): Promise<void> {
 }
 
 async function configureAssistant(page: Page, allowMutations = false): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   if (allowMutations) {
@@ -138,7 +142,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(PAGE_MARKER)
+        toolResults(body).some((result) => result.includes(PAGE_MARKER))
           ? ['The page says ', PAGE_MARKER]
           : ['The fetch result did not reach the model.'],
     })
@@ -152,7 +156,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
     const requests = await waitForChatRequests(base + 2)
     expect(requests[base].body).toContain(pageURL)
-    expect(requests[base + 1].body).toContain(PAGE_MARKER)
+    expect(toolResults(requests[base + 1].body).join('\n')).toContain(PAGE_MARKER)
     await expectCompletedAnswer(page, pageURL, PAGE_MARKER)
   })
 
@@ -167,7 +171,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(NOTE_TEXT)
+        toolResults(body).some((result) => result.includes(NOTE_TEXT))
           ? ['I remembered it: ', NOTE_TEXT]
           : ['The note result did not reach the model.'],
     })
@@ -175,7 +179,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     await askFromPrompt(page, NOTE_TEXT)
     const requests = await waitForChatRequests(base + 2)
     expect(requests[base].body).toContain(NOTE_TEXT)
-    expect(requests[base + 1].body).toContain(NOTE_TEXT)
+    expect(toolResults(requests[base + 1].body).join('\n')).toContain(NOTE_TEXT)
     await expectCompletedAnswer(page, NOTE_TEXT, NOTE_TEXT)
 
     await showSidebarView(page, 'notes')
@@ -207,9 +211,8 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     expect(requests[base].body).toContain(
       'When the intent is not plain, ask one question and stop.',
     )
-    const payload = JSON.parse(requests[base].body) as {
-      messages?: { role?: string; content?: unknown }[]
-    }
-    expect(payload.messages?.some((message) => message.role === 'tool')).toBe(false)
+    // pi retains earlier turns, including their tool results. This question
+    // must not call a tool; earlier completed questions are not this turn.
+    expect(toolResults(requests[base].body)).toEqual([])
   })
 })

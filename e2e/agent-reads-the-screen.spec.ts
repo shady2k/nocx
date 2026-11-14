@@ -52,6 +52,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   standalone as base,
+  ensureAssistantVault,
   answerPermission,
   appReadyForInput,
   bindEndpoint,
@@ -61,6 +62,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -197,6 +199,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -256,24 +260,14 @@ async function configureAssistant(page: Page): Promise<void> {
 /**
  * The answer the fake model writes FROM the request it is answering.
  *
- * It looks for the marker only in what the PRODUCT told the model — every
- * message that is not the system prompt and not the person's own words — so
- * a marker found there arrived in a tool result and nowhere else. Not found:
+ * It looks for the marker only in the current turn's tool results, including
+ * pi's text-part arrays, so neither earlier turns nor assistant prose can
+ * supply the evidence. Not found:
  * the model says so, and this spec's assertion on the answer text is what
  * turns that into a red run with the reason on it.
  */
 function answerFromWhatTheModelWasSent(body: string): string[] {
-  let seen = ''
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-    seen = (parsed.messages ?? [])
-      .filter((m) => m.role !== 'system' && m.role !== 'user')
-      .map((m) => m.content ?? '')
-      .join('\n')
-  } catch {
-    seen = ''
-  }
-  return seen.includes(MARKER)
+  return toolResults(body).some((result) => result.includes(MARKER))
     ? ['The screen shows ', MARKER, '.']
     : ['I could not see the screen.']
 }

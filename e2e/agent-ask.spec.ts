@@ -14,6 +14,7 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
+  ensureAssistantVault,
   settingsReady,
   setUpVaultThroughTheSheet,
   VaultBackend,
@@ -22,7 +23,7 @@ import { readStand } from './stand'
 import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { fieldChip } from './secret-field'
-import { attachedItemID, terminalContext } from './ask-gesture'
+import { attachedItemID, terminalContext, toolResults } from './ask-gesture'
 
 /** The Test button's probe request, identified by its BODY: a
  *  chat-completions request naming the configured model. The form's silent
@@ -214,6 +215,8 @@ async function createEndpointThroughTheSurface(page: Page): Promise<void> {
 /** Allow the marked-item read through the person's permission surface.
  * Real pi is configured in this backend's disposable home before startup. */
 async function ensureAskingPrerequisites(page: Page): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(SETTINGS_POLICY_NAV).click()
@@ -397,11 +400,7 @@ function answerBlockOf(page: Page, question: string): Locator {
  *  marker therefore has to arrive in session.read's result, not merely in the
  *  command label the prompt announces. */
 function answerFromAttachedItem(body: string, marker: string): string[] {
-  const request = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-  const toolMessages = (request.messages ?? [])
-    .filter((message) => message.role !== 'system' && message.role !== 'user')
-    .map((message) => message.content ?? '')
-    .join('\n')
+  const toolMessages = toolResults(body).join('\n')
   return toolMessages.includes(marker)
     ? ['The first block output contains ', marker, '.']
     : ['The marked block output was not delivered.']

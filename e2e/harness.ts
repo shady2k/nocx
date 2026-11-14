@@ -997,6 +997,33 @@ export async function readVaultState(
   }
 }
 
+/** Initialize protection for tool-result screening without creating an endpoint.
+ * Leaves Settings open after setup; callers choose their next surface. */
+export async function ensureAssistantVault(
+  page: Page,
+  endpoint: BackendEndpoint,
+  passphrase: string,
+): Promise<void> {
+  const state = await readVaultState(endpoint)
+  if (state === 'unsealed') return
+  if (state === 'sealed') {
+    const wire = await openControlPlane(endpoint.port, endpoint.token)
+    try {
+      await wire.call('vault.unseal', { means: 'passphrase', secret: passphrase })
+    } finally {
+      wire.close()
+    }
+  } else {
+    await page.keyboard.press('ControlOrMeta+,')
+    await settingsReady(page)
+    await page.locator('.ui-grouped-nav__item[data-item="vault"]').click()
+    await baseExpect(page.getByText('Where it is stored')).toBeVisible()
+    await page.getByRole('button', { name: 'Set up protection', exact: true }).click()
+    await setUpVaultThroughTheSheet(page, passphrase)
+  }
+  await baseExpect.poll(() => readVaultState(endpoint)).toBe('unsealed')
+}
+
 /**
  * Where the backend keeps its documents — settings, profiles, the vault — under
  * a given isolated home.

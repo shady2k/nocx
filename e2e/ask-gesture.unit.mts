@@ -10,7 +10,7 @@ const compiled = ts
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext },
   })
   .outputText.replace(/import .*? from .*?;\n/g, '')
-const { terminalContext, attachedItemID, systemPrompt } = await import(
+const { terminalContext, attachedItemID, systemPrompt, toolResults } = await import(
   `data:text/javascript,${encodeURIComponent(compiled)}`
 )
 
@@ -36,4 +36,25 @@ test('a turn without an attachment cannot reuse an earlier attachment', () => {
   })
   assert.equal(terminalContext(body), 'new question')
   assert.throws(() => attachedItemID(body), /no attached terminal item id/)
+})
+
+test('tool results read text arrays and strings from only the current user turn', () => {
+  const body = JSON.stringify({
+    messages: [
+      { role: 'user', content: 'earlier question' },
+      { role: 'tool', content: 'stale result' },
+      { role: 'user', content: 'current question' },
+      { role: 'assistant', content: 'not a tool result' },
+      {
+        role: 'tool',
+        content: [
+          { type: 'text', text: 'screen row one' },
+          { type: 'image', data: 'not text' },
+          { type: 'text', text: 'screen row two' },
+        ],
+      },
+      { role: 'tool', content: 'another result' },
+    ],
+  })
+  assert.deepEqual(toolResults(body), ['screen row one\nscreen row two', 'another result'])
 })

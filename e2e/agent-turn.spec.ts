@@ -58,6 +58,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   standalone as base,
+  ensureAssistantVault,
   answerPermission,
   appReadyForInput,
   bindEndpoint,
@@ -241,6 +242,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -439,6 +442,8 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await bindEndpoint(page, endpoint)
     await page.reload()
     await appReadyForInput(page)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+    await backToTerminal(page)
     await expect(page.locator('.pane.active .cmd-block[data-restored="true"]').first()).toBeVisible(
       { timeout: 90_000 },
     )

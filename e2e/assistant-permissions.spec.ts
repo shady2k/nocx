@@ -110,6 +110,7 @@ import {
   standalone as base,
   appReadyForInput,
   bindEndpoint,
+  ensureAssistantVault,
   expectPermissionRule,
   forgetPermission,
   permissionRule,
@@ -120,6 +121,7 @@ import {
 import { readStand } from './stand'
 import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { toolResults } from './ask-gesture'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -277,19 +279,6 @@ function chatRequests(from: number): FakeRequest[] {
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
 }
 
-/** The tool-result slots of one model request, verbatim — what the backend
- *  actually handed back for the calls it was asked to make. */
-function toolResults(body: string): string[] {
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-  } catch {
-    return []
-  }
-}
-
 /**
  * The follow-up prose, DERIVED from what came back through the tool.
  *
@@ -341,6 +330,8 @@ async function activePaneId(page: Page): Promise<string> {
 /** Open Settings before the journey returns to its original pane.
  * Real pi is configured before backend startup. */
 async function configureAssistant(page: Page): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
 }

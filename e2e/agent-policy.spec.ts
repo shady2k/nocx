@@ -53,6 +53,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   standalone as base,
+  ensureAssistantVault,
   answerPermission,
   appReadyForInput,
   bindEndpoint,
@@ -136,6 +137,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, 'disposable-assistant-passphrase')
+  await page.locator(TITLE).first().click()
 }
 
 /** Send the drafted line to the ASSISTANT: ⌘/Ctrl+Enter flips where Enter

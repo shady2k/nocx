@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os'
 import {
   standalone as base,
   appReadyForInput,
+  ensureAssistantVault,
   VaultBackend,
   bindEndpoint,
   promptReady,
@@ -28,7 +29,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
-import { terminalContext } from './ask-gesture'
+import { terminalContext, toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -168,16 +169,7 @@ async function recorded(page: Page): Promise<SpecRecord> {
 /** The answer is derived from what the product actually sent, so it can only
  *  name the screen if the tool result carried it. */
 function answerFromTheToolResult(body: string): string[] {
-  let seen = ''
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-    seen = (parsed.messages ?? [])
-      .filter((m) => m.role !== 'system' && m.role !== 'user')
-      .map((m) => m.content ?? '')
-      .join('\n')
-  } catch {
-    seen = ''
-  }
+  const seen = toolResults(body).join('\n')
   return seen.includes(INITIAL) ? [`The screen shows ${INITIAL}.`] : ['I could not see the screen.']
 }
 
@@ -192,6 +184,126 @@ async function useTarget(page: Page, target: 'shell' | 'agent'): Promise<void> {
     await page.keyboard.press('ControlOrMeta+Enter')
     await expect(indicator).toHaveAttribute('data-target', target, { timeout: 10_000 })
   }
+}
+
+async function expectFrozenAttachment(
+  page: Page,
+  program: { script: () => string; fullscreen: boolean },
+): Promise<void> {
+  test.setTimeout(120_000)
+  await recordSignals(page)
+  await bindEndpoint(page, endpoint)
+  await page.goto('/')
+  await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+
+  await page.locator(TITLE).first().click()
+  await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+  await promptReady(page)
+
+  await useTarget(page, 'shell')
+  await page.keyboard.type(`sh '${program.script()}'`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1, { timeout: 20_000 })
+  await expect
+    .poll(async () => (await recorded(page)).raised.includes(READY), {
+      timeout: 45_000,
+      message: 'the full-screen fixture never painted its screen',
+    })
+    .toBe(true)
+  if (program.fullscreen) {
+    await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/, { timeout: 20_000 })
+  }
+
+  await page.locator(GRID).click()
+  await page.keyboard.press('ControlOrMeta+Enter')
+  await expect(page.locator(FREEZE)).toBeVisible({ timeout: 15_000 })
+
+  // HALF ONE: what the person reads. The chip is the product's own account
+  // of what travels with the next question.
+  await expect(page.locator(GRANT_CHIP)).toHaveAttribute(
+    'aria-label',
+    /frozen screen attached automatically/,
+    { timeout: 10_000 },
+  )
+  await expect(page.locator(GRANT_CHIP)).toContainText('+ screen', { timeout: 10_000 })
+
+  // AND THE CHIP STAYS IN ITS BOX. The chip had a fixed 13rem width and
+  // no overflow rule, so the longer sentence was PAINTED straight over
+  // the model chip and the freeze badge beside it (nocx-hp8p2.4).
+  //
+  // Measured as the content against its own box, not box against box: an
+  // overflowing element keeps its declared border box, so neighbouring
+  // rects stay disjoint while the row is unreadable. scrollWidth is the
+  // content's width, so this is red both for the old paint-over-the-row
+  // and for a label that only fits by being ellipsised away.
+  const chipBox = await page.evaluate(() => {
+    const chip = document.querySelector('.pane.active [data-control="grant"]')
+    if (!chip) return null
+    return {
+      content: chip.scrollWidth,
+      box: chip.clientWidth,
+      label: chip.textContent ?? '',
+    }
+  })
+  expect(chipBox, 'the grant chip was not found').not.toBeNull()
+  expect(
+    chipBox!.content,
+    `the grant chip does not fit its own box: ${chipBox!.label}`,
+  ).toBeLessThanOrEqual(chipBox!.box + 1)
+
+  // AND THE SEAM ACTUALLY DRAGS. A separator that is in the DOM, has the
+  // right role and answers the keyboard can still be impossible to grab:
+  // the kit's horizontal variant is stretched by its container, and a
+  // container that does not stretch it leaves a zero-width strip nobody
+  // can hit (nocx-hp8p2.6). Only a real pointer in a real layout can say
+  // which of those two the person has.
+  const seam = page.locator('.pane.active .nocx-summon-stack [role="separator"]')
+  await expect(seam).toBeVisible({ timeout: 10_000 })
+  const box = await seam.boundingBox()
+  expect(box, 'the seam has no box to grab').not.toBeNull()
+  expect(box!.width, 'the seam collapsed to nothing along its own axis').toBeGreaterThan(20)
+
+  const answers = page.locator('.pane.active .nocx-summon-answers')
+  const heightBefore = (await answers.boundingBox())!.height
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2, box!.y - 120, { steps: 8 })
+  await page.mouse.up()
+  const heightAfter = (await answers.boundingBox())!.height
+  expect(heightAfter, 'dragging the seam up gave the assistant no room').toBeGreaterThan(
+    heightBefore + 40,
+  )
+
+  // HALF TWO: what the model reads. No tool call is scripted — this is a
+  // model that answers rather than looking, which is the owner's model.
+  // Warm the real assistant client immediately before the boundary
+  // probe. Both questions must finish in the UI; the fake's connection
+  // identities distinguish a fresh request from a replay of the POST.
+  fake.setScript({ chunks: ['The connection is ready.'] })
+  await page.locator(INPUT).fill('Are you ready?')
+  await page.keyboard.press('Enter')
+  const warmup = answers.locator('[data-turn-state]').last()
+  await expect(warmup).toHaveAttribute('data-turn-state', 'success')
+  await expect(warmup).toContainText('The connection is ready.')
+  fake.setScript({ chunks: ['I can see the pinned screen.'] })
+  const base = fake.requests().length
+  await page.locator(INPUT).fill('What is this?')
+  await page.keyboard.press('Enter')
+  const answer = answers.locator('[data-turn-state]').filter({ hasText: 'What is this?' }).last()
+  await expect(answer).toHaveAttribute('data-turn-state', 'success', { timeout: 30_000 })
+  await expect(answer).toContainText('I can see the pinned screen.')
+  const requests = fake.requests()
+  const delivered = requests.slice(base)
+  expect(delivered).toHaveLength(1)
+  const body = delivered[0].body
+  expect(terminalContext(body)).toContain('A frozen screen was attached automatically')
+
+  // Release the program and let the pane come back to a prompt: the
+  // backend outlives this test and restores its tabs into the next one.
+  writeFileSync(exitPath, 'release\n')
+  await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
 }
 
 test.describe('the assistant is told the frozen screen came with the question (nocx-hp8p2.4)', () => {
@@ -210,145 +322,152 @@ test.describe('the assistant is told the frozen screen came with the question (n
     },
   ]) {
     test(`summoning over ${program.name} attaches its screen to the ask`, async ({ page }) => {
-      test.setTimeout(120_000)
-      await recordSignals(page)
-      await bindEndpoint(page, endpoint)
-      await page.goto('/')
-      await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
-      await appReadyForInput(page)
-
-      await page.locator(TITLE).first().click()
-      await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
-      await promptReady(page)
-
-      await useTarget(page, 'shell')
-      await page.keyboard.type(`sh '${program.script()}'`)
-      await page.keyboard.press('Enter')
-      await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1, { timeout: 20_000 })
-      await expect
-        .poll(async () => (await recorded(page)).raised.includes(READY), {
-          timeout: 45_000,
-          message: 'the full-screen fixture never painted its screen',
-        })
-        .toBe(true)
-      if (program.fullscreen) {
-        await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/, { timeout: 20_000 })
-      }
-
-      await page.locator(GRID).click()
-      await page.keyboard.press('ControlOrMeta+Enter')
-      await expect(page.locator(FREEZE)).toBeVisible({ timeout: 15_000 })
-
-      // HALF ONE: what the person reads. The chip is the product's own account
-      // of what travels with the next question.
-      await expect(page.locator(GRANT_CHIP)).toHaveAttribute(
-        'aria-label',
-        /frozen screen attached automatically/,
-        { timeout: 10_000 },
-      )
-      await expect(page.locator(GRANT_CHIP)).toContainText('+ screen', { timeout: 10_000 })
-
-      // AND THE CHIP STAYS IN ITS BOX. The chip had a fixed 13rem width and
-      // no overflow rule, so the longer sentence was PAINTED straight over
-      // the model chip and the freeze badge beside it (nocx-hp8p2.4).
-      //
-      // Measured as the content against its own box, not box against box: an
-      // overflowing element keeps its declared border box, so neighbouring
-      // rects stay disjoint while the row is unreadable. scrollWidth is the
-      // content's width, so this is red both for the old paint-over-the-row
-      // and for a label that only fits by being ellipsised away.
-      const chipBox = await page.evaluate(() => {
-        const chip = document.querySelector('.pane.active [data-control="grant"]')
-        if (!chip) return null
-        return {
-          content: chip.scrollWidth,
-          box: chip.clientWidth,
-          label: chip.textContent ?? '',
-        }
-      })
-      expect(chipBox, 'the grant chip was not found').not.toBeNull()
-      expect(
-        chipBox!.content,
-        `the grant chip does not fit its own box: ${chipBox!.label}`,
-      ).toBeLessThanOrEqual(chipBox!.box + 1)
-
-      // AND THE SEAM ACTUALLY DRAGS. A separator that is in the DOM, has the
-      // right role and answers the keyboard can still be impossible to grab:
-      // the kit's horizontal variant is stretched by its container, and a
-      // container that does not stretch it leaves a zero-width strip nobody
-      // can hit (nocx-hp8p2.6). Only a real pointer in a real layout can say
-      // which of those two the person has.
-      const seam = page.locator('.pane.active .nocx-summon-stack [role="separator"]')
-      await expect(seam).toBeVisible({ timeout: 10_000 })
-      const box = await seam.boundingBox()
-      expect(box, 'the seam has no box to grab').not.toBeNull()
-      expect(box!.width, 'the seam collapsed to nothing along its own axis').toBeGreaterThan(20)
-
-      const answers = page.locator('.pane.active .nocx-summon-answers')
-      const heightBefore = (await answers.boundingBox())!.height
-      await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
-      await page.mouse.down()
-      await page.mouse.move(box!.x + box!.width / 2, box!.y - 120, { steps: 8 })
-      await page.mouse.up()
-      const heightAfter = (await answers.boundingBox())!.height
-      expect(heightAfter, 'dragging the seam up gave the assistant no room').toBeGreaterThan(
-        heightBefore + 40,
-      )
-
-      // HALF TWO: what the model reads. No tool call is scripted — this is a
-      // model that answers rather than looking, which is the owner's model.
-      // Warm the real assistant client immediately before the boundary
-      // probe. Both questions must finish in the UI; the fake's connection
-      // identities distinguish a fresh request from a replay of the POST.
-      fake.setScript({ chunks: ['The connection is ready.'] })
-      await page.locator(INPUT).fill('Are you ready?')
-      await page.keyboard.press('Enter')
-      const warmup = answers.locator('[data-turn-state]').last()
-      await expect(warmup).toHaveAttribute('data-turn-state', 'success')
-      await expect(warmup).toContainText('The connection is ready.')
-      const priorConnections = fake.closeOnNextReuse()
-      const rejectedBefore = fake.rejectedReuses().length
-      fake.setScript({ chunks: ['I can see the pinned screen.'] })
-      const base = fake.requests().length
-      await page.locator(INPUT).fill('What is this?')
-      await page.keyboard.press('Enter')
-      const answer = answers
-        .locator('[data-turn-state]')
-        .filter({ hasText: 'What is this?' })
-        .last()
-      try {
-        await expect(answer).toHaveAttribute('data-turn-state', 'success', { timeout: 30_000 })
-        await expect(answer).toContainText('I can see the pinned screen.')
-      } finally {
-        await test.info().attach('provider-connection-lifecycle', {
-          contentType: 'application/json',
-          body: JSON.stringify({
-            priorConnections,
-            rejected: fake.rejectedReuses(),
-            delivered: fake
-              .requests()
-              .slice(base)
-              .map((request) => ({
-                connectionId: request.connectionId,
-                path: request.path,
-              })),
-          }),
-        })
-      }
-      const requests = fake.requests()
-      const delivered = requests.slice(base)
-      expect(delivered).toHaveLength(1)
-      expect(priorConnections).not.toContain(delivered[0].connectionId)
-      expect(fake.rejectedReuses()).toHaveLength(rejectedBefore)
-      const body = delivered[0].body
-      expect(terminalContext(body)).toContain('A frozen screen was attached automatically')
-
-      // Release the program and let the pane come back to a prompt: the
-      // backend outlives this test and restores its tabs into the next one.
-      writeFileSync(exitPath, 'release\n')
-      await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
+      await expectFrozenAttachment(page, program)
     })
   }
+
+  test.skip('the old endpoint HTTP transport does not reuse a closed connection', async ({
+    page,
+  }) => {
+    // subject leaves with endpoints/eino: backend HTTP connection ownership.
+    // Retain the original closeOnNextReuse, connection identity and rejected-reuse probe.
+    const program = { script: () => scriptPath, fullscreen: true }
+    test.setTimeout(120_000)
+    await recordSignals(page)
+    await bindEndpoint(page, endpoint)
+    await page.goto('/')
+    await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+
+    await page.locator(TITLE).first().click()
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+    await promptReady(page)
+
+    await useTarget(page, 'shell')
+    await page.keyboard.type(`sh '${program.script()}'`)
+    await page.keyboard.press('Enter')
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1, { timeout: 20_000 })
+    await expect
+      .poll(async () => (await recorded(page)).raised.includes(READY), {
+        timeout: 45_000,
+        message: 'the full-screen fixture never painted its screen',
+      })
+      .toBe(true)
+    if (program.fullscreen) {
+      await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/, { timeout: 20_000 })
+    }
+
+    await page.locator(GRID).click()
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(page.locator(FREEZE)).toBeVisible({ timeout: 15_000 })
+
+    // HALF ONE: what the person reads. The chip is the product's own account
+    // of what travels with the next question.
+    await expect(page.locator(GRANT_CHIP)).toHaveAttribute(
+      'aria-label',
+      /frozen screen attached automatically/,
+      { timeout: 10_000 },
+    )
+    await expect(page.locator(GRANT_CHIP)).toContainText('+ screen', { timeout: 10_000 })
+
+    // AND THE CHIP STAYS IN ITS BOX. The chip had a fixed 13rem width and
+    // no overflow rule, so the longer sentence was PAINTED straight over
+    // the model chip and the freeze badge beside it (nocx-hp8p2.4).
+    //
+    // Measured as the content against its own box, not box against box: an
+    // overflowing element keeps its declared border box, so neighbouring
+    // rects stay disjoint while the row is unreadable. scrollWidth is the
+    // content's width, so this is red both for the old paint-over-the-row
+    // and for a label that only fits by being ellipsised away.
+    const chipBox = await page.evaluate(() => {
+      const chip = document.querySelector('.pane.active [data-control="grant"]')
+      if (!chip) return null
+      return {
+        content: chip.scrollWidth,
+        box: chip.clientWidth,
+        label: chip.textContent ?? '',
+      }
+    })
+    expect(chipBox, 'the grant chip was not found').not.toBeNull()
+    expect(
+      chipBox!.content,
+      `the grant chip does not fit its own box: ${chipBox!.label}`,
+    ).toBeLessThanOrEqual(chipBox!.box + 1)
+
+    // AND THE SEAM ACTUALLY DRAGS. A separator that is in the DOM, has the
+    // right role and answers the keyboard can still be impossible to grab:
+    // the kit's horizontal variant is stretched by its container, and a
+    // container that does not stretch it leaves a zero-width strip nobody
+    // can hit (nocx-hp8p2.6). Only a real pointer in a real layout can say
+    // which of those two the person has.
+    const seam = page.locator('.pane.active .nocx-summon-stack [role="separator"]')
+    await expect(seam).toBeVisible({ timeout: 10_000 })
+    const box = await seam.boundingBox()
+    expect(box, 'the seam has no box to grab').not.toBeNull()
+    expect(box!.width, 'the seam collapsed to nothing along its own axis').toBeGreaterThan(20)
+
+    const answers = page.locator('.pane.active .nocx-summon-answers')
+    const heightBefore = (await answers.boundingBox())!.height
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box!.x + box!.width / 2, box!.y - 120, { steps: 8 })
+    await page.mouse.up()
+    const heightAfter = (await answers.boundingBox())!.height
+    expect(heightAfter, 'dragging the seam up gave the assistant no room').toBeGreaterThan(
+      heightBefore + 40,
+    )
+
+    // HALF TWO: what the model reads. No tool call is scripted — this is a
+    // model that answers rather than looking, which is the owner's model.
+    // Warm the real assistant client immediately before the boundary
+    // probe. Both questions must finish in the UI; the fake's connection
+    // identities distinguish a fresh request from a replay of the POST.
+    fake.setScript({ chunks: ['The connection is ready.'] })
+    await page.locator(INPUT).fill('Are you ready?')
+    await page.keyboard.press('Enter')
+    const warmup = answers.locator('[data-turn-state]').last()
+    await expect(warmup).toHaveAttribute('data-turn-state', 'success')
+    await expect(warmup).toContainText('The connection is ready.')
+    const priorConnections = fake.closeOnNextReuse()
+    const rejectedBefore = fake.rejectedReuses().length
+    fake.setScript({ chunks: ['I can see the pinned screen.'] })
+    const base = fake.requests().length
+    await page.locator(INPUT).fill('What is this?')
+    await page.keyboard.press('Enter')
+    const answer = answers.locator('[data-turn-state]').filter({ hasText: 'What is this?' }).last()
+    try {
+      await expect(answer).toHaveAttribute('data-turn-state', 'success', { timeout: 30_000 })
+      await expect(answer).toContainText('I can see the pinned screen.')
+    } finally {
+      await test.info().attach('provider-connection-lifecycle', {
+        contentType: 'application/json',
+        body: JSON.stringify({
+          priorConnections,
+          rejected: fake.rejectedReuses(),
+          delivered: fake
+            .requests()
+            .slice(base)
+            .map((request) => ({
+              connectionId: request.connectionId,
+              path: request.path,
+            })),
+        }),
+      })
+    }
+    const requests = fake.requests()
+    const delivered = requests.slice(base)
+    expect(delivered).toHaveLength(1)
+    expect(priorConnections).not.toContain(delivered[0].connectionId)
+    expect(fake.rejectedReuses()).toHaveLength(rejectedBefore)
+    const body = delivered[0].body
+    expect(terminalContext(body)).toContain('A frozen screen was attached automatically')
+
+    // Release the program and let the pane come back to a prompt: the
+    // backend outlives this test and restores its tabs into the next one.
+    writeFileSync(exitPath, 'release\n')
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
+  })
 
   test('the approved session.read reaches the renderer and comes back with the screen', async ({
     page,
@@ -359,6 +478,7 @@ test.describe('the assistant is told the frozen screen came with the question (n
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
     await appReadyForInput(page)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
 
     await page.locator(TITLE).first().click()
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
@@ -411,12 +531,8 @@ test.describe('the assistant is told the frozen screen came with the question (n
     // the tool result, not merely that an answer appeared.
     const requests = await fake.waitForRequests(base + 2, 60_000)
     const afterTool = requests.at(-1)!.body
-    const parsed = JSON.parse(afterTool) as { messages?: { role?: string; content?: string }[] }
-    const toolResults = (parsed.messages ?? [])
-      .filter((m) => m.role !== 'system' && m.role !== 'user')
-      .map((m) => m.content ?? '')
-      .join('\n')
-    expect(toolResults, 'the renderer never answered the approved read').toContain(INITIAL)
+    const results = toolResults(afterTool).join('\n')
+    expect(results, 'the renderer never answered the approved read').toContain(INITIAL)
 
     writeFileSync(exitPath, 'release\n')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })

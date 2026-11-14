@@ -36,7 +36,13 @@ import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { standalone as base, appReadyForInput, VaultBackend, bindEndpoint } from './harness'
+import {
+  standalone as base,
+  ensureAssistantVault,
+  appReadyForInput,
+  VaultBackend,
+  bindEndpoint,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
@@ -92,6 +98,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function askFromPrompt(page: Page, question: string): Promise<void> {

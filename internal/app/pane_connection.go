@@ -18,6 +18,7 @@ import (
 // paneConnectionWire renders one snapshot as the notification's payload.
 func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 	p := transport.PaneConnection{
+		Generation:         s.Generation,
 		PaneID:             s.PaneID,
 		ConnectionID:       s.ConnectionID,
 		ConnectionEpoch:    s.ConnectionEpoch,

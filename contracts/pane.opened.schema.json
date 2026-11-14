@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/pane.opened.schema.json",
+  "title": "PaneOpened",
+  "description": "An owned replacement open answer. Queued before any session frames.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "generation", "open"],
+  "properties": {
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "open": {
+      "$ref": "open.schema.json"
+    }
+  }
+}

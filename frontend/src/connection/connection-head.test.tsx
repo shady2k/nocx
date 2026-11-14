@@ -42,6 +42,7 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     paneId: 'pane-1',
     connectionId: 'conn-1',
     connectionEpoch: 1,
+    generation: 1,
     instanceId: 'instance-1',
     transport: { state: 'opening', stage: 'tcp', stateMs: 2000 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },

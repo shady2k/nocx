@@ -27,9 +27,14 @@ func (o *failingHostedOpener) OpenHosted(context.Context, session.Config, string
 
 type openingOwner struct{ driver *panedriver.Driver }
 
-func (o openingOwner) PaneOpening(paneID string)       { o.driver.Bind(paneID, "pending:"+paneID) }
-func (o openingOwner) PaneOpeningFailed(paneID string) { o.driver.FailOpening(paneID) }
-func (o openingOwner) PaneClosed(paneID string)        { o.driver.PaneClosed(paneID) }
+func (o openingOwner) PaneOpening(paneID string) uint64 {
+	return o.driver.Bind(paneID, "pending:"+paneID)
+}
+
+func (o openingOwner) PaneOpeningFailed(paneID string, generation uint64) {
+	o.driver.FailOpening(paneID, generation)
+}
+func (o openingOwner) PaneClosed(paneID string) { o.driver.PaneClosed(paneID) }
 
 type snapshotSink struct {
 	mu   sync.Mutex
@@ -94,5 +99,54 @@ func TestAFailedOpenSettlesTheOpeningItPublished(t *testing.T) {
 				t.Fatalf("settlement offer %+v, want a reconnect offer", last.Reconnect)
 			}
 		})
+	}
+}
+
+// A late resolver/helper failure belongs to the opening that published it,
+// not another open of the same pane on the same socket.
+type overlappingFailureOpener struct {
+	entered, release chan struct{}
+	mu               sync.Mutex
+	calls            int
+}
+
+func (o *overlappingFailureOpener) OpenHosted(context.Context, session.Config, string) (HostedSessionOpen, bool, error) {
+	o.mu.Lock()
+	o.calls++
+	n := o.calls
+	o.mu.Unlock()
+	if n == 1 {
+		close(o.entered)
+		<-o.release
+	}
+	return HostedSessionOpen{}, false, errors.New("opening failed")
+}
+
+func TestOldOpenFailureCannotSettleConcurrentNewOpen(t *testing.T) {
+	ctx, logger := logtest.New(t)
+	driver := panedriver.New("instance", logger)
+	sink := &snapshotSink{}
+	driver.SetPublisher(sink.add)
+	helper := &overlappingFailureOpener{entered: make(chan struct{}), release: make(chan struct{})}
+	ws := NewWSServer(logger, session.New(logger, nil), WithHelperSessionOpener(helper), WithPaneConnectionPolicy(openingOwner{driver: driver}), WithProfileResolver(&fakeResolver{resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+		return "remote.example", &ssh.ConnectConfig{User: "alice"}, nil
+	}}))
+	if err := ws.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	h := openHandlers{opener: ws.opener, sess: ws, log: logger}
+	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
+	wc := &wsConn{}
+	state := newConnState()
+	done := make(chan error, 1)
+	go func() { _, err := h.openInto(ctx, wc, state, params, func(openResult) {}); done <- err }()
+	<-helper.entered
+	_, _ = h.openInto(ctx, wc, state, params, func(openResult) {})
+	before := len(sink.all())
+	close(helper.release)
+	<-done
+	if len(sink.all()) != before {
+		t.Fatal("older failure emitted a settlement for newer opening")
 	}
 }

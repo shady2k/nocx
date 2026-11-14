@@ -352,20 +352,7 @@ async function mountTerminal(
     profileClient ?? null,
     () => {},
     opts.ssh,
-    {
-      // THE FIXTURE'S ADOPTION PATH (review finding C): the backend's
-      // replacement session is taken from the sessions the fixture already
-      // holds, exactly as the product's live-inventory claim takes it.
-      adoptReplacement: async (sessionId: string) => {
-        // THE PRODUCTION ADOPTION PATH: the live inventory names the
-        // replacement and the claim takes it back. No ready-made handle.
-        const listed = await clientFake.listLiveSessions()
-        const entry = listed.find((candidate) => candidate.sessionId === sessionId)
-        if (entry === undefined) return null
-        return asSessionHandleForTest(await clientFake.reclaimSession(entry))
-      },
-      ...opts.hooks,
-    },
+    opts.hooks,
   )
   const tab = new Pane(
     content,
@@ -436,6 +423,7 @@ function publishConnection(
     paneId,
     connectionId: 'conn-1',
     connectionEpoch: epoch,
+    generation: 1,
     instanceId: CONNECTION_INSTANCE,
     ...(session !== null ? { sessionId: session.sessionId } : {}),
     transport: { state: 'connected', stateMs: 0, plainShells: 1 },
@@ -23701,7 +23689,7 @@ describe('the pane screen mapping follows the session lifetime', () => {
       onExit!({ sessionId: first.sessionId, cause: 'interrupted' })
       publishLost(client, content)
       await expect(content.pressReconnect()).resolves.toBe(true)
-      // The replacement is adopted from pane.connection, not from the ack.
+      // The replacement is adopted from pane.opened, not from the reconnect ack.
       await vi.waitFor(() => expect(sessionOf(content).sessionId).not.toBe(first.sessionId))
 
       // Exercise the public renderer seam with the departed session identity.

@@ -25802,6 +25802,9 @@
       "$ref": "https://nocx.local/contracts/pane.connection.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/pane.opened.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/pane.reconnect.schema.json"
     },
     {

@@ -11,8 +11,8 @@
 // RECONNECT IS NOT A SECOND OPEN. The renderer sends one call — `pane.reconnect`
 // with the pane and the epoch of the observation that offered the button — and
 // the backend REGISTERS the work and answers {paneId, registered}. The dial and
-// the replacement shell follow on pane.connection, and the session is taken
-// through the existing adoption path there. Nothing here retries, back offs or
+// the replacement shell follows on pane.opened, carrying the same result
+// as an open acknowledgement. Nothing here retries, back offs or
 // decides whether an attempt is allowed: the offer's presence already decided
 // that, and the epoch refuses a press that is about a state the person is no
 // longer looking at.
@@ -89,8 +89,8 @@ export class ConnectionClient {
    * reconnect with the backend.
    *
    * The answer is an ACKNOWLEDGEMENT, not a session: `{paneId, registered}`.
-   * The dial and the replacement shell arrive on pane.connection, and that
-   * observation is where the pane adopts it. Treating this result as an open
+   * The dial is observed on pane.connection; pane.opened answers with the
+   * replacement open result, which the pane adopts. Treating this result as an open
    * ack (the branch's first defect) adopted nothing and threw on every press.
    *
    * The epoch is the observation's own — the one whose button was pressed.

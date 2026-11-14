@@ -39,6 +39,7 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     paneId: 'pane-1',
     connectionId: 'conn-1',
     connectionEpoch: 1,
+    generation: 1,
     instanceId: 'instance-1',
     transport: { state: 'opening', stage: 'tcp', stateMs: 1200 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
@@ -46,6 +47,44 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     ...over,
   }
 }
+
+describe('replacement open notifications', () => {
+  it('delivers only current replacement opens, independently of session observations', () => {
+    const wire = source()
+    const store = new ConnectionStore(wire, 'pane-1', () => 'instance-1')
+    const opened = vi.fn<(fact: { generation: number }) => void>()
+    store.onOpened(opened)
+    const replacement = (generation: number) => ({
+      paneId: 'pane-1',
+      generation,
+      open: { sessionId: `session-${generation}`, instanceId: 'instance-1', sessionEpoch: 1 },
+    })
+    wire.deliver('pane.connection', observation({ generation: 2 }))
+    wire.deliver('pane.opened', replacement(1))
+    expect(opened).not.toHaveBeenCalled()
+    wire.deliver('pane.opened', replacement(2))
+    wire.deliver('pane.opened', replacement(3))
+    wire.deliver('pane.opened', replacement(2))
+    wire.deliver('pane.opened', replacement(3))
+    expect(opened.mock.calls.map(([fact]) => fact.generation)).toEqual([2, 3])
+    wire.deliver('pane.opened', { ...replacement(4), paneId: 'another-pane' })
+    wire.deliver('pane.opened', {
+      ...replacement(4),
+      open: { ...replacement(4).open, instanceId: 'old' },
+    })
+    wire.deliver(
+      'pane.connection',
+      observation({
+        generation: 2,
+        connectionEpoch: 99,
+        transport: { state: 'ended', cause: 'lost-link', stateMs: 0 },
+      }),
+    )
+    expect(store.current()?.observation.transport.state).toBe('opening')
+    expect(opened).toHaveBeenCalledTimes(2)
+    store.dispose()
+  })
+})
 
 describe('parsePaneConnection', () => {
   it('accepts every state branch the contract declares', () => {

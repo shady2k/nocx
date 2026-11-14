@@ -1644,27 +1644,6 @@ export class PaneManager {
     return this.reclaimLiveSession(paneId, entry)
   }
 
-  /**
-   * Take a session the BACKEND opened for this pane — the replacement a
-   * manual or automatic reconnect produces. It is the same adoption path a
-   * restore uses: read the live inventory, then claim the entry that is this
-   * pane's. Nothing is opened and nothing is closed here.
-   */
-  private async adoptReplacementSession(
-    paneId: string,
-    sessionId: string,
-  ): Promise<SessionHandle | null> {
-    const listed = await this.client.listLiveSessions()
-    const entry = listed.find((s) => s.paneId === paneId && s.sessionId === sessionId)
-    if (entry === undefined) return null
-    // THE EXISTING RE-ADOPTION PATH (the one a pane uses after a backend
-    // restart): the backend opened the replacement unowned, so this claim is
-    // valid, and the attach replays the session's screen and carries the
-    // facts the new shell was launched with — nothing is copied from the old
-    // one.
-    return this.reclaimLiveSession(paneId, entry)
-  }
-
   /** Claim one listed session, or say what the failure was.
    *
    *  A CLAIM THAT FAILED WITHOUT A VERDICT KEEPS THE ENTRY (nocx-3an1s.1.5):
@@ -1909,7 +1888,6 @@ export class PaneManager {
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
         adoptSession,
-        adoptReplacement: (sessionId) => this.adoptReplacementSession(identity.paneId, sessionId),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),
         sessionHome: this.sessionHome,
@@ -2073,7 +2051,6 @@ export class PaneManager {
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
         adoptSession,
-        adoptReplacement: (sessionId) => this.adoptReplacementSession(identity.paneId, sessionId),
         onAdoptabilityChange: (adoptable: boolean) => {
           const pane = paneRef.current
           if (!pane) return

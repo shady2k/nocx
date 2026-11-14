@@ -25,6 +25,7 @@ func paneConnectionStates() map[string]PaneConnection {
 	shells := func(n int) *int { return &n }
 	base := func(epoch uint64, state string) PaneConnection {
 		return PaneConnection{
+			Generation:      1,
 			PaneID:          "pane-1",
 			ConnectionID:    "conn-1",
 			ConnectionEpoch: epoch,

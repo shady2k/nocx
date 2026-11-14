@@ -16,6 +16,10 @@ export type PaneConnection = {
   [k: string]: unknown
 } & {
   /**
+   * The driver's binding generation, shared with pane.opened; older opening results and failures do not apply to a newer binding.
+   */
+  generation: number
+  /**
    * The pane this observation belongs to (AD-7). It is the durable identity the renderer minted, and it is what makes the first observation expressible before any session exists. A receiver routes by this and never by the session id.
    */
   paneId: string

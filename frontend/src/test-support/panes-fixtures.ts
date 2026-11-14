@@ -803,16 +803,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     // keeps that shape so a test that stated what its replacement open must
     // answer still states it. A test that wants a different answer overrides
     // this mock.
-    _reconnectPane: vi.fn(async (paneId: string) => {
+    _reconnectPane: vi.fn(async () => {
       const created = await client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
-      liveEntries.push({
-        sessionId: created.sessionId,
-        instanceId: backendInstance ?? 'instance-1',
-        sessionEpoch: 1,
-        paneId,
-        replayFrom: 0,
-        attached: false,
-      })
       return created
     }),
     // The fake's own open mock resolves the handle itself; the ack and the
@@ -876,9 +868,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
           ) as never
         }
         if (method === 'pane.reconnect') {
-          // THE BACKEND'S SHAPE (review finding C): an acknowledgement, then
-          // the replacement shell on pane.connection. The fixture opens a new
-          // session so the pane's ordinary adoption path has one to claim.
+          // Reconnect acknowledges the request and answers the open separately.
           const paneId = text(record.paneId)
           const replacement = await client._reconnectPane(paneId)
           const epoch = (connectionEpochs.get(paneId) ?? 0) + 1
@@ -886,11 +876,17 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
             paneId,
             connectionId: 'conn-1',
             connectionEpoch: epoch,
+            generation: 1,
             instanceId: backendInstance ?? 'test-instance',
             sessionId: replacement.sessionId,
             transport: { state: 'connected', stateMs: 0, plainShells: 1 },
             attempt: { shown: 'none', candidate: 'none', reason: '' },
             observedAt: new Date().toISOString(),
+          })
+          client._fireNotification('pane.opened', {
+            paneId,
+            generation: epoch,
+            open: { ...replacement, instanceId: backendInstance ?? 'test-instance' },
           })
           return { paneId, registered: true } as never
         }

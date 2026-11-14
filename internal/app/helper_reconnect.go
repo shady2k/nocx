@@ -35,18 +35,18 @@ type paneConnectionOwner struct {
 // PaneOpening paints the pane's first observation before the opener is asked
 // anything. It binds a provisional connection id; the opener's real bind
 // replaces it before the spawn, and the provisional entry is dropped.
-func (o paneConnectionOwner) PaneOpening(paneID string) {
+func (o paneConnectionOwner) PaneOpening(paneID string) uint64 {
 	if o.Driver == nil || paneID == "" {
-		return
+		return 0
 	}
-	o.Driver.Bind(paneID, "pending:"+paneID)
+	return o.Driver.Bind(paneID, "pending:"+paneID)
 }
 
 // PaneOpeningFailed settles a provisional opening whose opener failed before
 // the real bind, so the pane is not left counting "Connecting".
-func (o paneConnectionOwner) PaneOpeningFailed(paneID string) {
+func (o paneConnectionOwner) PaneOpeningFailed(paneID string, generation uint64) {
 	if o.Driver != nil {
-		o.Driver.FailOpening(paneID)
+		o.Driver.FailOpening(paneID, generation)
 	}
 }
 

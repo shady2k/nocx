@@ -25,7 +25,7 @@ type PaneConnectionPolicy interface {
 
 // paneShellPolicy is the pane action owner's failure and retry boundary.
 type paneShellPolicy interface {
-	ShellFailed(context.Context, string, int, string, any)
+	ShellFailed(context.Context, string, uint64, int, string, any)
 	RequestShellRetry(context.Context, string, uint64) error
 }
 
@@ -41,6 +41,13 @@ var (
 	// errPaneReconnectBusy is a second reconnect while one is still dialing.
 	errPaneReconnectBusy = errors.New("transport: a reconnect is already running for this pane")
 )
+
+// paneOpened is an open answer delivered on the pane's owning socket.
+type paneOpened struct {
+	PaneID     string     `json:"paneId"`
+	Generation uint64     `json:"generation"`
+	Open       openResult `json:"open"`
+}
 
 type paneReconnectResult struct {
 	PaneID     string `json:"paneId"`
@@ -101,6 +108,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 		return errPaneReconnectBusy
 	}
 	rec.busy = true
+	attemptGeneration := expectedBinding
 	s.paneMu.Unlock()
 	defer func() { s.paneMu.Lock(); rec.busy = false; s.paneMu.Unlock() }()
 	if s.opener == nil {
@@ -124,7 +132,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 		if policy, ok := s.paneConnectionPolicy.(paneShellPolicy); ok {
 			capture := &openFailureCapture{}
 			(openHandlers{}).answerOpenFailure(ctx, capture, jsonrpcRequest{}, resultErr)
-			policy.ShellFailed(rec.ctx, paneID, capture.failure.Code, capture.failure.Message, capture.failure.Data)
+			policy.ShellFailed(rec.ctx, paneID, attemptGeneration, capture.failure.Code, capture.failure.Message, capture.failure.Data)
 		}
 	}()
 	var replaced []session.Session
@@ -154,33 +162,20 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 	openCtx, cancel := context.WithCancel(rec.ctx)
 	stop := context.AfterFunc(ctx, cancel)
 	defer func() { stop(); cancel() }()
-	// THE REPLACEMENT IS OPENED UNOWNED (review finding: adopt the backend's
-	// facts through the one re-adoption path). A session attached here would
-	// refuse the renderer's claim ("already attached to this session") and
-	// would have delivered frames before the renderer had a record for them.
-	// Opened without a client, it is listed by sessions.live and the renderer
-	// attaches through the SAME path a pane uses after a backend restart,
-	// with the attach's screen resend and replay.
 	bindCtx := context.WithValue(openCtx, paneBindingKey{}, func(generation uint64) {
-		s.paneMu.Lock()
-		if s.paneRecords[paneID] == rec {
-			rec.bindingGeneration = generation
-		}
-		s.paneMu.Unlock()
+		attemptGeneration = generation
 	})
-	result, err := h.openInto(context.WithValue(bindCtx, paneReconnectOpenKey{}, rec), nil, newConnState(), rec.params, func(openResult) {})
-	if err == nil && result.SessionID != "" {
-		if rx := s.getRx(session.ID(result.SessionID)); rx != nil {
-			// The nil subscriber was installed by openInto so its bookkeeping
-			// path is one shape; the ring must stay free for the claim. A
-			// renderer may already have claimed it (pane.connection preceded
-			// this return), and clearing THAT subscriber would strand the
-			// attach it just made.
-			if attached, _ := rx.getSubscriber(); attached == nil {
-				rx.clearSubscriber(nil)
-			}
+	_, err := h.openInto(context.WithValue(bindCtx, paneReconnectOpenKey{}, rec), rec.wconn, rec.state, rec.params, func(result openResult) {
+		s.paneMu.Lock()
+		defer s.paneMu.Unlock()
+		if s.paneRecords[paneID] != rec || rec.bindingGeneration != attemptGeneration || openCtx.Err() != nil || rec.ctx.Err() != nil {
+			cancel()
+			return
 		}
-	}
+		if err := rec.wconn.TryNotify("pane.opened", mustMarshal(paneOpened{PaneID: paneID, Generation: attemptGeneration, Open: result})); err != nil {
+			cancel()
+		}
+	})
 	return err
 }
 

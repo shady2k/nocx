@@ -1491,7 +1491,7 @@ export class WSClient {
   }
 
   /**
-   * Take an `open` or `pane.reconnect` ack into this client and answer the
+   * Take an `open` result or `pane.opened` notification into this client and answer the
    * handle for its session.
    *
    * IT IS NOT AN OPEN. The connection owner (`frontend/src/connection/`) makes
@@ -1552,13 +1552,8 @@ export class WSClient {
     reported: SessionSize | null = null,
   ): void {
     this.backendInstance = identity.instanceId
-    // A SESSION CAN BE REGISTERED TWICE, AND THE SECOND TIME IT MAY ALREADY
-    // HAVE NEWS. An automatic replacement is observed through pane.connection
-    // before this pane claims it, so the claim's registration used to replace
-    // a live SessionState — wiping the integration fact the backend had
-    // already sent and the callbacks the pane had installed. Updating the one
-    // identity in place keeps what arrived between the observation and the
-    // claim.
+    // Re-registration updates identity in place without discarding callbacks
+    // or facts already received by this incarnation.
     const existing = this.sessions.get(sessionId)
     if (existing) {
       if (existing.sessionEpoch !== identity.sessionEpoch) {

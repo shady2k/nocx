@@ -108,12 +108,12 @@ func TestShellFailurePreservesConnectionAndOffersShellRetryUntilAdopted(t *testi
 	apply(d, connected(1, 0))
 	generation := d.Bind("pane", "conn-a")
 	reporter, ok := any(d).(interface {
-		ShellFailed(context.Context, string, int, string, any)
+		ShellFailed(context.Context, string, uint64, int, string, any)
 	})
 	if !ok {
 		t.Fatal("driver cannot publish shell failures")
 	}
-	reporter.ShellFailed(context.Background(), "pane", -32001, "Unlock the vault", map[string]any{"reason": "vault-sealed"})
+	reporter.ShellFailed(context.Background(), "pane", generation, -32001, "Unlock the vault", map[string]any{"reason": "vault-sealed"})
 	snap := out.last()
 	if snap.Transport.State != proto.ConnectionConnected || snap.Reconnect == nil || snap.Reconnect.EndsShells != 0 {
 		t.Fatalf("failure did not offer shell-only retry: %+v", snap)
@@ -126,5 +126,18 @@ func TestShellFailurePreservesConnectionAndOffersShellRetryUntilAdopted(t *testi
 	d.AdoptSession("pane", "conn-a", "stale", "instance", generation)
 	if out.last().Reconnect == nil {
 		t.Fatal("stale adoption cleared failure")
+	}
+}
+
+func TestOlderShellFailureCannotSettleNewerBinding(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, connected(1, 0))
+	older := d.Bind("pane", "conn-a")
+	newer := d.Bind("pane", "conn-a")
+	d.AdoptSession("pane", "conn-a", "new-shell", "instance", newer)
+	before := len(out.all())
+	d.ShellFailed(context.Background(), "pane", older, -32001, "old failure", nil)
+	if len(out.all()) != before || out.last().SessionID != "new-shell" {
+		t.Fatal("stale shell failure replaced newer shell")
 	}
 }

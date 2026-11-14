@@ -47,6 +47,7 @@ type PaneShellFailure struct {
 // plain shell says plainShells 0, while an opening connection must not carry the
 // key at all. A value with omitempty cannot express the first.
 type PaneConnection struct {
+	Generation         uint64                   `json:"generation"`
 	ShellFailure       *PaneShellFailure        `json:"shellFailure,omitempty"`
 	ConnectionSequence uint64                   `json:"-"`
 	PaneID             string                   `json:"paneId"`

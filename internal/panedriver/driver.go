@@ -98,6 +98,7 @@ type ShellFailure struct {
 
 // Snapshot is one pane's observation, ready to be carried to the renderer.
 type Snapshot struct {
+	Generation         uint64
 	ShellFailure       *ShellFailure
 	PaneID             string
 	ConnectionID       string
@@ -292,13 +293,13 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 // connection the helper will not name — the pane is left with the opening
 // forever unless somebody closes it here. Only the provisional binding is
 // settled: a real connection already owns its own failure.
-func (d *Driver) FailOpening(paneID string) {
+func (d *Driver) FailOpening(paneID string, generation uint64) {
 	if d == nil || paneID == "" {
 		return
 	}
 	d.mu.Lock()
 	b := d.panes[paneID]
-	if b == nil || b.connectionID != "pending:"+paneID {
+	if b == nil || b.connectionID != "pending:"+paneID || b.generation != generation {
 		d.mu.Unlock()
 		return
 	}
@@ -350,10 +351,10 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 }
 
 // ShellFailed records the pane-local refusal without changing connection truth.
-func (d *Driver) ShellFailed(ctx context.Context, paneID string, code int, message string, data any) {
+func (d *Driver) ShellFailed(ctx context.Context, paneID string, generation uint64, code int, message string, data any) {
 	d.mu.Lock()
 	b := d.panes[paneID]
-	if b == nil || ctx.Err() != nil {
+	if b == nil || b.generation != generation || ctx.Err() != nil {
 		d.mu.Unlock()
 		return
 	}
@@ -523,6 +524,7 @@ func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapsh
 		offer = &Reconnect{EndsShells: 0}
 	}
 	return Snapshot{
+		Generation:         b.generation,
 		ShellFailure:       b.shellFailure,
 		PaneID:             paneID,
 		ConnectionID:       b.connectionID,

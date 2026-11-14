@@ -11,23 +11,24 @@ package transport
 // above) tells the policy owner to paint the opening now. The opener's real
 // bind replaces it before the spawn; this notice carries no events and makes
 // no claim about a connection id.
-func (s *WSServer) notePaneOpening(paneID string) {
+func (s *WSServer) notePaneOpening(paneID string) uint64 {
 	if paneID == "" || s.paneConnectionPolicy == nil {
-		return
+		return 0
 	}
-	if owner, ok := s.paneConnectionPolicy.(interface{ PaneOpening(string) }); ok {
-		owner.PaneOpening(paneID)
+	if owner, ok := s.paneConnectionPolicy.(interface{ PaneOpening(string) uint64 }); ok {
+		return owner.PaneOpening(paneID)
 	}
+	return 0
 }
 
 // settlePaneOpening closes the provisional opening when the opener failed
 // before its real bind. It is a no-op for a policy owner that never published
 // one.
-func (s *WSServer) settlePaneOpening(paneID string) {
+func (s *WSServer) settlePaneOpening(paneID string, generation uint64) {
 	if paneID == "" || s.paneConnectionPolicy == nil {
 		return
 	}
-	if owner, ok := s.paneConnectionPolicy.(interface{ PaneOpeningFailed(string) }); ok {
-		owner.PaneOpeningFailed(paneID)
+	if owner, ok := s.paneConnectionPolicy.(interface{ PaneOpeningFailed(string, uint64) }); ok {
+		owner.PaneOpeningFailed(paneID, generation)
 	}
 }

@@ -23,6 +23,7 @@ func bindTestPane(t *testing.T, ws *WSServer, conn *wsConn, paneID string) {
 // publishTestConnection sends one pane.connection the driver would have sent.
 func publishTestConnection(ws *WSServer, paneID string, epoch uint64, state string, offer *PaneConnectionReconnect) {
 	ws.PublishPaneConnection(PaneConnection{
+		Generation:      1,
 		PaneID:          paneID,
 		ConnectionID:    "conn-1",
 		ConnectionEpoch: epoch,

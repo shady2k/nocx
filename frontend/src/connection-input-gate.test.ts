@@ -27,7 +27,7 @@ import {
   type ClientFake,
 } from './test-support/panes-fixtures'
 import type { PaneConnection } from './generated/pane.connection'
-import type { SessionHandle, WSClient } from './ipc'
+import type { WSClient } from './ipc'
 
 vi.mock('./ui/toast', () => ({
   showToast: vi.fn(),
@@ -38,6 +38,7 @@ function connection(over: Partial<PaneConnection> = {}): PaneConnection {
     paneId: 'pane-gate',
     connectionId: 'conn-gate',
     connectionEpoch: 1,
+    generation: 1,
     instanceId: 'instance-gate',
     transport: { state: 'connected', stateMs: 10, plainShells: 1 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
@@ -63,17 +64,7 @@ async function mount(hooks: TerminalContentHooks = {}): Promise<void> {
     null,
     () => {},
     { profileId: 'p1', host: 'h' },
-    {
-      adoptReplacement: async (wanted: string) => {
-        // THE PRODUCTION ADOPTION PATH: the live inventory names the
-        // replacement, then the claim takes it back with replay.
-        const listed = await client.listLiveSessions()
-        const entry = listed.find((candidate) => candidate.sessionId === wanted)
-        if (entry === undefined) return null
-        return (await client.reclaimSession(entry)) as unknown as SessionHandle
-      },
-      ...hooks,
-    },
+    hooks,
   )
   tab = new Pane(
     content,
@@ -220,6 +211,11 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
       attached: false,
     })
     publish({ sessionId: 'replacement-shell' })
+    client._fireNotification('pane.opened', {
+      paneId: 'pane-gate',
+      generation: 1,
+      open: { ...replacement, instanceId: 'instance-gate' },
+    })
     await vi.waitFor(() =>
       expect(
         (content as unknown as { session: { sessionId: string } | null }).session?.sessionId,
@@ -305,6 +301,11 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
       attached: false,
     })
     publish({ sessionId: 'automatic-shell' })
+    client._fireNotification('pane.opened', {
+      paneId: 'pane-gate',
+      generation: 1,
+      open: { ...automatic, instanceId: 'instance-gate' },
+    })
     await vi.waitFor(() =>
       expect(
         (content as unknown as { session: { sessionId: string } | null }).session?.sessionId,

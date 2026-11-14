@@ -21,6 +21,7 @@
 // without inventing a second wire.
 
 import type { PaneConnection } from '../generated/pane.connection'
+import type { PaneOpened } from '../generated/pane.opened'
 import { connectionCondition, type ConnectionCondition } from '../connection-condition'
 
 /** The narrow subscription seam this module needs. The dispatcher implements
@@ -106,6 +107,7 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
       'paneId',
       'connectionId',
       'connectionEpoch',
+      'generation',
       'instanceId',
       'sessionId',
       'transport',
@@ -120,6 +122,7 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
   }
   if (!isString(value.paneId) || !isString(value.connectionId)) return null
   if (!isPositiveInteger(value.connectionEpoch)) return null
+  if (!isPositiveInteger(value.generation)) return null
   if (!isString(value.instanceId)) return null
   if (value.sessionId !== undefined && !isString(value.sessionId)) return null
   if (!isString(value.observedAt) || Number.isNaN(Date.parse(value.observedAt))) return null
@@ -227,6 +230,9 @@ function parseTransport(value: unknown): boolean {
 export class ConnectionStore {
   private state: PaneConnectionState | null = null
   private lastEpoch = 0
+  private generation = 0
+  private openedGeneration = 0
+  private readonly openedListeners = new Set<(fact: PaneOpened) => void>()
   /** The backend this store's epochs are ordered against. Only the CLIENT's
    *  current identity may move it; a new value resets the epoch counter,
    *  because a replacement backend starts its per-pane epochs over. */
@@ -243,7 +249,10 @@ export class ConnectionStore {
      *  backend for the life of the window. */
     private readonly backendIdentity: () => string | null = () => null,
   ) {
-    this.unsubscribe = [source.subscribe('pane.connection', (params) => this.receive(params))]
+    this.unsubscribe = [
+      source.subscribe('pane.connection', (params) => this.receive(params)),
+      source.subscribe('pane.opened', (params) => this.receiveOpened(params)),
+    ]
   }
 
   /** The latest observation, or null for a pane that has never had one — a
@@ -276,36 +285,49 @@ export class ConnectionStore {
     }
   }
 
+  onOpened(listener: (fact: PaneOpened) => void): () => void {
+    this.openedListeners.add(listener)
+    return () => this.openedListeners.delete(listener)
+  }
+
   dispose(): void {
     for (const stop of this.unsubscribe) stop()
+    this.openedListeners.clear()
     this.listeners.clear()
     this.state = null
+  }
+
+  private acceptInstance(instanceId: string): boolean {
+    const backend = this.backendIdentity()
+    if (backend === null) return true
+    if (this.observedBackend !== backend) {
+      this.observedBackend = backend
+      this.lastEpoch = 0
+      this.generation = 0
+      this.openedGeneration = 0
+      this.state = null
+    }
+    return instanceId === backend
+  }
+
+  private receiveOpened(params: unknown): void {
+    if (!isRecord(params) || params.paneId !== this.paneId) return
+    if (!isPositiveInteger(params.generation) || !isRecord(params.open)) return
+    if (!isString(params.open.instanceId) || !this.acceptInstance(params.open.instanceId)) return
+    if (params.generation < this.generation || params.generation <= this.openedGeneration) return
+    this.generation = params.generation
+    this.openedGeneration = params.generation
+    for (const listener of [...this.openedListeners]) listener(params as unknown as PaneOpened)
   }
 
   private receive(params: unknown): void {
     const observation = parsePaneConnection(params)
     if (observation === null || observation.paneId !== this.paneId) return
-    // THE CLIENT'S IDENTITY, NOT THE FIRST OBSERVATION'S. A backend restart
-    // keeps this renderer alive: the replacement's per-pane epochs start at 1
-    // again, so the old counter must be dropped with the old instance. When
-    // the client does not know an identity yet, observations are accepted and
-    // nothing is pinned — the first one to arrive may be a stale one.
-    const backend = this.backendIdentity()
-    if (backend !== null) {
-      if (this.observedBackend !== backend) {
-        // BOTH A REPLACEMENT AND THE FIRST NAME. Observations accepted while
-        // the client knew no identity advanced a counter that belongs to an
-        // unknown backend; once the name arrives, that counter and its state
-        // are not this backend's, so the identified backend's epoch 1 must
-        // not be suppressed by an anonymous epoch 9.
-        this.observedBackend = backend
-        this.lastEpoch = 0
-        this.state = null
-      }
-      if (observation.instanceId !== backend) return
-    }
+    if (!this.acceptInstance(observation.instanceId)) return
+    if (observation.generation < this.generation) return
     if (observation.connectionEpoch <= this.lastEpoch) return
     this.lastEpoch = observation.connectionEpoch
+    this.generation = observation.generation
     this.state = { observation }
     this.emit()
   }

@@ -95,7 +95,6 @@ import { connectionWarning, type ConnectionCondition } from './connection-condit
 import { ConnectionClient } from './connection/connection-client'
 import { ConnectionStore } from './connection/connection-store'
 import { mountConnectionHead, type ConnectionHeadHandle } from './connection/connection-head'
-import type { PaneConnection } from './generated/pane.connection'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import { connectionLabel } from './connection-label'
@@ -185,6 +184,7 @@ import {
   type WSClient,
   type SessionHandle,
   type OpenAnchor,
+  type OpenResult,
   type SessionSize,
 } from './ipc'
 import type { PendingCallView } from './dispatcher'
@@ -830,10 +830,6 @@ export interface TerminalContentHooks {
    *  behind it — the liveness notifications and whether the session has ended
    *  — so it is the owner, and every surface reads the same answer. */
   onConnectionConditionChange?: (condition: ConnectionCondition) => void
-  /** Take a session the BACKEND opened for this pane (a reconnect, manual or
-   *  automatic) through the existing live-inventory + claim path. The pane
-   *  never adopts by opening, closing or releasing anything itself. */
-  adoptReplacement?: (sessionId: string) => Promise<SessionHandle | null>
   /** Where this pane reads "is what my session prints being written down"
    *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
    *  and the card has to be able to say both halves; the fact belongs to
@@ -2009,13 +2005,7 @@ export class TerminalContent extends BasePaneContent {
   private _connectionHead: ConnectionHeadHandle | null = null
   private _connectionUnsub: () => void = () => undefined
   private _connectionCondition: ConnectionCondition = 'reachable'
-  /** A replacement session being adopted, and the bind's abort. One at a time;
-   *  a newer observation for another session supersedes the old attempt. */
-  private _adoptingSessionId: string | null = null
-  private _adoptAbort: AbortController | null = null
-  /** True while `_bindSession` wires a session. An observation naming that
-   *  session must not start a second adoption while its own ack is arriving. */
-  private _bindRunning = false
+  private _openedUnsub: () => void = () => undefined
   /** The session id whose screen seam this pane last installed, so a rebind
    *  removes that entry whatever `this.session` is at that instant. */
   private _boundSessionId: string | null = null
@@ -2088,62 +2078,23 @@ export class TerminalContent extends BasePaneContent {
       this.session?.cancelPendingIntents()
     }
     this._applyTypeAhead(previous)
-    this._adoptObservedSession(observation)
   }
 
-  /**
-   * A session named by the backend that this pane does not hold yet is a
-   * REPLACEMENT — a manual reconnect or an automatic one. It is adopted
-   * through the existing path (the live inventory and a claim), never by the
-   * renderer opening, closing or releasing anything itself.
-   *
-   * One attempt per session id. If the session is not listed yet the attempt
-   * ends and the next observation (a new epoch) asks again; a first open's
-   * session is skipped while its own bind is running, because its open ack is
-   * already on the way with the handle.
-   */
-  private _adoptObservedSession(observation: PaneConnection | null): void {
-    const sessionId = observation?.sessionId
-    if (sessionId === undefined || sessionId === '') return
-    if (this._bindRunning) return
-    if (this.session?.sessionId === sessionId) return
-    if (this._adoptingSessionId === sessionId) return
-    const adopt = this.hooks.adoptReplacement
-    if (adopt === undefined) return
-    this._adoptingSessionId = sessionId
-    const controller = new AbortController()
-    this._adoptAbort = controller
-    const hadSession = this.session !== null
-    if (hadSession) this.scrollback?.blockManager.markReconnected()
-    // THE CLAIM HAPPENS INSIDE THE BIND, AFTER ITS SUBSCRIPTIONS EXIST. A
-    // claim taken before _bindSession would attach and replay the session's
-    // lifecycle facts and initial screen to a pane that is not listening yet;
-    // the existing restore path claims at exactly this point for that reason.
-    void this._bindSession(controller.signal, 'rebind', async () => {
-      const handle = await adopt(sessionId)
-      if (handle === null) return null
-      if (this._disposed || controller.signal.aborted) {
-        handle.close()
-        return null
-      }
-      const current = this._connectionStore.current()?.observation.sessionId
-      if (current !== undefined && current !== sessionId) {
-        handle.close()
-        return null
-      }
-      return handle
-    })
-      .catch((err: unknown) => {
+  /** A replacement is an open answered by notification. Register and wire it
+   * synchronously, before the socket can deliver its first frame. */
+  private _adoptReplacement(result: OpenResult): void {
+    if (this._disposed) return
+    const session = this.client.adoptOpen(result, this._reportedSize())
+    if (this.session !== null) this.scrollback?.blockManager.markReconnected()
+    void this._bindSession(new AbortController().signal, 'rebind', session).catch(
+      (err: unknown) => {
         log.warn('nocx: the replacement session could not be adopted', {
           pane: this.pane.paneId,
-          session: sessionId,
+          session: result.sessionId,
           error: err instanceof Error ? err.message : String(err),
         })
-      })
-      .finally(() => {
-        if (this._adoptingSessionId === sessionId) this._adoptingSessionId = null
-        if (this._adoptAbort === controller) this._adoptAbort = null
-      })
+      },
+    )
   }
 
   /** The type-ahead rule (design §5.8): held while the connection opens, sent
@@ -2411,6 +2362,7 @@ export class TerminalContent extends BasePaneContent {
     )
     this._connectionClient = new ConnectionClient(this.client)
     this._connectionUnsub = this._connectionStore.onChange(() => this._publishConnectionState())
+    this._openedUnsub = this._connectionStore.onOpened(({ open }) => this._adoptReplacement(open))
   }
 
   /**
@@ -5211,7 +5163,7 @@ export class TerminalContent extends BasePaneContent {
    * validates the epoch and closes the old shell as part of the action; a
    * renderer that closed first could kill a shell whose reconnect the backend
    * then refuses. The divider and the new binding wait for the replacement
-   * session on pane.connection, which is also the path an automatic reconnect
+   * session on pane.opened, which is also the path an automatic reconnect
    * takes.
    */
   private async reconnectFromHead(): Promise<boolean> {
@@ -5246,7 +5198,7 @@ export class TerminalContent extends BasePaneContent {
   /**
    * Stop listening as the OLD session. It is not closed and its handle is not
    * released (review finding C): the backend owns when a shell ends, and the
-   * replacement is adopted from pane.connection. What must stop are the
+   * replacement is adopted from pane.opened. What must stop are the
    * subscriptions on the shared dispatcher, which would otherwise deliver a
    * dead session's facts into the new pane, and the seam readers keyed by a
    * session id that will never paint again.
@@ -5311,12 +5263,8 @@ export class TerminalContent extends BasePaneContent {
   private async _bindSession(
     signal: AbortSignal,
     mode: 'first' | 'rebind',
-    /** The shell this bind adopts instead of opening one: either a handle an
-     *  opener already produced, or the claim that produces it. A claim is a
-     *  thunk because it must run HERE, after the bind's subscriptions exist —
-     *  an attach replays lifecycle facts and the initial screen into the
-     *  pane that is listening. */
-    preset?: SessionHandle | (() => Promise<SessionHandle | null>),
+    /** The open result already registered by the client. */
+    preset?: SessionHandle,
   ): Promise<'bound' | 'uncertain' | 'aborted'> {
     // Bumped for every bind, including this one: the recovery-ack claim
     // further below (_recoveryAckClaim) reads this._bindGeneration directly
@@ -5331,7 +5279,6 @@ export class TerminalContent extends BasePaneContent {
     // delivered by this one: the new object starts `opening`, with an UNKNOWN
     // verdict, and the old object is unreachable. (Rounds 5 and 7 each reset a
     // field here; the object is why there is nothing left to remember.)
-    this._bindRunning = true
     this._detachSessionWiring()
     this._sessionExited = false
     this._discardQueuedIntents()
@@ -5576,11 +5523,7 @@ export class TerminalContent extends BasePaneContent {
       }),
     )
     let session: SessionHandle
-    if (typeof preset === 'function') {
-      const claimed = await preset()
-      if (claimed === null) return this._finishBind('uncertain')
-      session = claimed
-    } else if (preset !== undefined) {
+    if (preset !== undefined) {
       session = preset
     } else {
       try {
@@ -7916,11 +7859,9 @@ export class TerminalContent extends BasePaneContent {
    *  is now here, and the ones this bind accepted are offered to it (they go
    *  out only if it is already at a prompt; otherwise its own settle does).
    *
-   *  ONE exit per bind — 'bound', 'uncertain', 'aborted' — and every one of
-   *  them clears the flag, so a failed rebind cannot leave the composer
-   *  holding lines forever. */
+   *  A bind's phase is settled here, so submissions no longer wait for an
+   *  opening that already finished. */
   private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
-    this._bindRunning = false
     if (this._bind.phase === 'opening') {
       this._bind.phase = 'live'
       if (this._startupCanHold()) this._releaseDeferredShellSubmissions()
@@ -10685,8 +10626,7 @@ export class TerminalContent extends BasePaneContent {
     this._connectionHead = null
     this._connectionUnsub()
     this._connectionStore.dispose()
-    this._adoptAbort?.abort()
-    this._adoptAbort = null
+    this._openedUnsub()
     // The painter dies before the input layer that sits above it: the
     // batch's pending frame is cancelled (a callback landing on a disposed
     // pane is a leak, not a paint), the fit's probe and font listener leave

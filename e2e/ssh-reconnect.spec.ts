@@ -329,6 +329,29 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
   test.setTimeout(150_000)
   const home = testInfo.outputPath('cut-home')
   mkdirSync(home, { recursive: true })
+  const opened: Array<{
+    paneId: string
+    generation: number
+    open: {
+      sessionId: string
+      desiredMode: string
+      awaitsIntegration: boolean
+      cwd: string
+      workspaceId: string
+    }
+  }> = []
+  const sent: Array<{ method?: string }> = []
+  page.on('websocket', (socket) => {
+    if (!socket.url().includes('/session')) return
+    socket.on('framereceived', ({ payload }) => {
+      if (typeof payload !== 'string') return
+      const message = JSON.parse(payload) as { method?: string; params: (typeof opened)[number] }
+      if (message.method === 'pane.opened') opened.push(message.params)
+    })
+    socket.on('framesent', ({ payload }) => {
+      if (typeof payload === 'string') sent.push(JSON.parse(payload) as { method?: string })
+    })
+  })
   let w: Wired | null = null
 
   try {
@@ -397,8 +420,16 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     // sockets it carried were destroyed. Without a working relay the reconnect
     // would dial a deaf proxy, which is a different test.
     w.proxy.pass()
+    const sentBeforeReconnect = sent.length
 
     await page.getByRole('button', { name: 'Reconnect', exact: true }).click()
+    await expect.poll(() => opened.length).toBeGreaterThan(0)
+    const replacement = opened.at(-1)!
+    expect(replacement.generation).toBeGreaterThan(0)
+    expect(replacement.open.desiredMode).toBe('script')
+    expect(replacement.open.awaitsIntegration).toBe(true)
+    expect(replacement.open.cwd).not.toBe('')
+    expect(replacement.open.workspaceId).not.toBe('')
 
     // A working shell at the same endpoint: the prompt returns and a command
     // runs on it.
@@ -417,6 +448,13 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     // again.
     await expect(page.locator(HEAD)).toHaveAttribute('data-state', 'connected')
     await expect(page.locator(INDICATOR)).toHaveCount(0)
+    // Replacement opens are delivered, not discovered or claimed. A command
+    // completed above, so its socket traffic has passed the adoption boundary.
+    expect(
+      sent
+        .slice(sentBeforeReconnect)
+        .filter(({ method }) => method === 'sessions.live' || method === 'attach'),
+    ).toEqual([])
   } finally {
     await unwire(page, w)
   }

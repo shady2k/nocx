@@ -509,6 +509,8 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		return openResult{}, err
 	}
 	var paneRecord *paneRecord
+	var openingGeneration uint64
+	var bindingGeneration uint64
 	if machine, ok := h.sess.(*WSServer); ok && params.PaneID != "" && wconn != nil {
 		var bindErr error
 		paneRecord, bindErr = machine.bindPaneForOpen(ctx, params.PaneID, wconn, state, params)
@@ -525,10 +527,15 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		// bind replaces it, with the helper's connection id, before a dial.
 		// A local pane has no connection to be opening.
 		if params.Kind == "ssh" && ctx.Value(paneReconnectOpenKey{}) == nil {
-			machine.notePaneOpening(params.PaneID)
+			openingGeneration = machine.notePaneOpening(params.PaneID)
 		}
 		bindCtx := ctx
+		bindingObserver, _ := ctx.Value(paneBindingKey{}).(func(uint64))
 		ctx = context.WithValue(ctx, paneBindingKey{}, func(generation uint64) {
+			bindingGeneration = generation
+			if bindingObserver != nil {
+				bindingObserver(generation)
+			}
 			machine.paneMu.Lock()
 			defer machine.paneMu.Unlock()
 			if machine.paneRecords[params.PaneID] == paneRecord && bindCtx.Err() == nil {
@@ -544,7 +551,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		// counting "Connecting" beside a startup error.
 		if machine, ok := h.sess.(*WSServer); ok && params.Kind == "ssh" &&
 			ctx.Value(paneReconnectOpenKey{}) == nil {
-			machine.settlePaneOpening(params.PaneID)
+			machine.settlePaneOpening(params.PaneID, openingGeneration)
 		}
 		return openResult{}, err
 	}
@@ -560,7 +567,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 
 	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
 		machine.paneMu.Lock()
-		if machine.paneRecords[params.PaneID] != paneRecord || ctx.Err() != nil {
+		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || ctx.Err() != nil {
 			machine.paneMu.Unlock()
 			h.opener.close(cleanupCtx, sess.ID())
 			return openResult{}, context.Canceled
@@ -658,7 +665,24 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		AwaitsIntegration: awaitsIntegration,
 		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
 	}
-	ack(result)
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil && ctx.Value(paneReconnectOpenKey{}) == nil {
+		machine.paneMu.Lock()
+		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
+			machine.paneMu.Unlock()
+			state.remove(sess.ID())
+			h.opener.close(cleanupCtx, sess.ID())
+			return openResult{}, context.Canceled
+		}
+		ack(result)
+		machine.paneMu.Unlock()
+	} else {
+		ack(result)
+	}
+	if err := ctx.Err(); err != nil {
+		state.remove(sess.ID())
+		h.opener.close(cleanupCtx, sess.ID())
+		return openResult{}, err
+	}
 	if hosted != nil && hosted.StartLifecycle != nil {
 		hosted.StartLifecycle()
 	}
@@ -674,7 +698,19 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// slot is empty by construction on this path, and a displacement that
 	// cannot happen must not be dressed up as one that did.
 	if wconn != nil {
-		_, _ = rx.setSubscriber(wconn, state)
+		if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+			machine.paneMu.Lock()
+			if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
+				machine.paneMu.Unlock()
+				state.remove(sess.ID())
+				h.opener.close(cleanupCtx, sess.ID())
+				return openResult{}, context.Canceled
+			}
+			_, _ = rx.setSubscriber(wconn, state)
+			machine.paneMu.Unlock()
+		} else {
+			_, _ = rx.setSubscriber(wconn, state)
+		}
 		h.sess.replayLifecycleFacts(sess.ID())
 		// The axis was already entered above, before the ack — only the
 		// NOTIFICATION waits for AD-7. This is the first fact this session's
@@ -690,10 +726,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		// -race.
 		h.sess.replayToolSurface(sess.ID())
 	}
-	// AN UNOWNED OPEN (a reconnect's replacement) has no subscriber to tell:
-	// the renderer claims it through attach, which replays all four retained
-	// projections and asks for the screen. Installing a nil subscriber here
-	// would instead race the claim and clobber it.
 	// The publish's own outcome, from the opener that attempted it
 	// (nocx-1kejz.4). After the ack and after the subscriber above, like every
 	// other session-scoped fact (AD-7); retained, so a renderer that attaches
@@ -750,9 +782,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	if conn, ok := connectionContext(ctx); ok {
 		pumpCtx = conn
 	}
-	// No client, no pump: a reconnect's replacement is opened UNOWNED so the
-	// renderer can claim it through the attach path, and a pump aimed at a
-	// nil subscriber has nothing to write and must not be started.
 	if wconn != nil {
 		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
 	}

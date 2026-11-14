@@ -322,11 +322,11 @@ func TestABindAfterAHelperReplacementReplaysNothing(t *testing.T) {
 // open, and a real connection's failure is its own.
 func TestFailOpeningSettlesOnlyTheProvisionalBinding(t *testing.T) {
 	d, out := newDriver(t)
-	d.Bind("pane-1", "pending:pane-1")
+	generation := d.Bind("pane-1", "pending:pane-1")
 	if snap := out.last(); snap.Transport.State != proto.ConnectionOpening {
 		t.Fatalf("provisional bind published %+v", snap.Transport)
 	}
-	d.FailOpening("pane-1")
+	d.FailOpening("pane-1", generation)
 	snap := out.last()
 	if snap.Transport.State != proto.ConnectionEnded || snap.Transport.Cause != "lost-link" {
 		t.Fatalf("settle published %+v, want ended/lost-link", snap.Transport)
@@ -339,7 +339,7 @@ func TestFailOpeningSettlesOnlyTheProvisionalBinding(t *testing.T) {
 	// supervisor's to report and this must not overwrite it.
 	before := len(out.all())
 	d.Bind("pane-1", "conn-a")
-	d.FailOpening("pane-1")
+	d.FailOpening("pane-1", generation)
 	if got := len(out.all()); got != before+1 {
 		t.Fatalf("settling a real binding published %d extra notification(s)", got-before-1)
 	}
@@ -483,5 +483,20 @@ func TestADroppedPaneOffersTheButton(t *testing.T) {
 	d.Bind("pane-1", "conn-a")
 	if snap := out.last(); snap.Reconnect == nil {
 		t.Fatal("a dropped pane has no reconnect offer")
+	}
+}
+
+func TestOlderOpeningFailureCannotSettleNewerOpening(t *testing.T) {
+	d, out := newDriver(t)
+	older := d.Bind("pane-1", "pending:pane-1")
+	newer := d.Bind("pane-1", "pending:pane-1")
+	before := len(out.all())
+	d.FailOpening("pane-1", older)
+	if len(out.all()) != before {
+		t.Fatal("stale failure settled newer opening")
+	}
+	d.FailOpening("pane-1", newer)
+	if out.last().Transport.State != proto.ConnectionEnded {
+		t.Fatal("current failure did not settle opening")
 	}
 }

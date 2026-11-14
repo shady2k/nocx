@@ -19,13 +19,16 @@ type Peer struct {
 	// asserted pane may stand for — the endpoint only establishes that the
 	// report was made by the process allowed to make it.
 	Pane string
-	// Token is the bearer the connection PRESENTED, as the pane's own agent
-	// bridge wrote it (nocx-50w7p.16). It is a different party's claim from
-	// Pane: the helper's record says which pane the connection arrived on and
-	// no process on the far side can forge it, while this one says the caller
-	// holds the bearer the coordinator minted for that pane — and only the
-	// authorizer can decide whether the two belong together. EMPTY means
-	// nothing was presented, which is a refusal rather than a default.
+	// Token is the bearer the connection PRESENTED, written by a bridge before
+	// its first request. On the helper's lane it is the pane's bearer, which
+	// the pane's own agent bridge writes (nocx-50w7p.16); off that lane it is
+	// the bearer nocx-server minted for one assistant turn, which the turn's
+	// bridge presents (ADR-anntnxdj decision 3). It is a different party's
+	// claim from Pane: the helper's record says which pane the connection
+	// arrived on and no process on the far side can forge it, while this one
+	// says the caller holds a bearer — and only the authorizer can decide what
+	// that bearer admits. EMPTY means nothing was presented, which for the
+	// helper's lane is a refusal rather than a default.
 	Token string
 }
 
@@ -61,6 +64,18 @@ type Peer struct {
 // one that has already been retired (nocx-9mn6z).
 type AdmissionEpoch uint64
 
+// TurnScope is the admission scope ONE assistant turn's connections publish
+// under. It is deliberately not the pane's session id: a turn's slot is its
+// own, so the assistant's bridge and a pane's caller are admitted side by side,
+// and retiring the turn closes the turn's connection without touching the
+// pane's caller (ADR-anntnxdj decision 3).
+func TurnScope(runID string) string { return "turn:" + runID }
+
+// TurnEpoch is the admission epoch a turn publishes under. The scope already
+// names exactly one turn, so the epoch only has to be non-zero: a turn is
+// admitted and retired once, and its run id is never minted again.
+const TurnEpoch AdmissionEpoch = 1
+
 // Authorizer turns an accepted peer into the already-bound invocation it may
 // use. The endpoint supplies Method and RawParams for each request; the
 // authorizer owns Context, RunContext, Grant and the session they imply. The
@@ -90,6 +105,19 @@ type Authorizer interface {
 	// — where the decision reads the ended state — or after the publication —
 	// where the retirement finds the connection and closes it.
 	Admit(peer Peer, publish func(session string, epoch AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error)
+}
+
+// TurnBearerAdmitter is implemented by an Authorizer that can admit a
+// connection presenting a bearer minted for one assistant turn
+// (ADR-anntnxdj decision 3).
+//
+// The endpoint asks BEFORE it reads a preamble off the helper's lane. Where no
+// turn can be admitted, those bytes are a claim nobody can decide on, and a
+// peer that connects and says nothing must be refused at once — as it always
+// was — rather than held for the preamble's hang limit. The answer is a
+// capability of the authorizer, not a property of the connection.
+type TurnBearerAdmitter interface {
+	AdmitsTurnBearer() bool
 }
 
 // ErrSessionCallerActive means another live connection already owns the
@@ -133,3 +161,13 @@ var ErrNoLiveInterval = errors.New("toolendpoint: the pane holds no live admissi
 // round trip; the fact is that the value it presented is not the one the pane
 // holds, and the ordinary repair is to restart that agent.
 var ErrBearerRefused = errors.New("toolendpoint: caller did not present the pane's bearer")
+
+// ErrTurnBearerRefused means a connection off the helper's lane presented a
+// bearer that no live assistant turn minted: a wrong value, a value from
+// another turn, or a turn that has been retired (ADR-anntnxdj decision 3).
+//
+// It is its own refusal because the caller is not a pane's agent at all: it is
+// the assistant's bridge, which nocx-server started, and the repair is never
+// "restart the agent in that pane" — the turn is over, or the value is not the
+// one nocx handed to this bridge.
+var ErrTurnBearerRefused = errors.New("toolendpoint: caller did not present a live turn bearer")

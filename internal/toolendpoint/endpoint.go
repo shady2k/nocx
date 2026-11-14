@@ -541,6 +541,52 @@ func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, string, error) {
 	return "", "", err
 }
 
+// readPresentedToken reads the bearer a connection off the helper's lane
+// presents ahead of its first request, and answers empty when it presents
+// none.
+//
+// A BEARER IS OPTIONAL HERE AND A RECORD IS NOT. On the helper's lane the
+// helper's pane record must come first (readPaneRecord); a connection that
+// dials this socket itself is either an ordinary local agent, which presents
+// nothing, or the assistant turn's bridge, which presents the bearer
+// nocx-server minted for that turn (ADR-anntnxdj decision 3). The first byte
+// decides: a JSON-RPC request starts with '{' or whitespace, and a bearer
+// starts with a lower-case hex digit. Bytes that begin like a bearer and then
+// fail its reader are refused rather than read as a request — those bytes are
+// a claim, and a malformed claim is not silence.
+//
+// The deadline is a HANG LIMIT and is cleared whether or not the read worked:
+// it bounds a peer that connected and said nothing, and what follows is a
+// long-lived request loop whose own window starts at the top of the loop.
+func (e *Endpoint) readPresentedToken(conn *net.UnixConn, reader *bufio.Reader) (string, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
+		return "", err
+	}
+	first, err := reader.Peek(1)
+	if err != nil {
+		_ = conn.SetReadDeadline(time.Time{})
+		// A peer that said nothing and is gone is not a claim about a turn;
+		// the decision below answers it exactly as it did before this way in
+		// existed, and the read loop ends on the same EOF.
+		if isReadTimeout(err) || errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", err
+	}
+	if !panebind.StartsToken(first[0]) {
+		_ = conn.SetReadDeadline(time.Time{})
+		return "", nil
+	}
+	token, err := panebind.ReadToken(reader)
+	_ = conn.SetReadDeadline(time.Time{})
+	return token, err
+}
+
+func isReadTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	defer e.untrack(conn)
 	defer func() { _ = conn.Close() }()
@@ -551,6 +597,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// authorizer decides on — and a failure to produce one is a refusal with a
 	// sentence, never a fall back to the local rule (which would admit the
 	// connection as whatever tree the kernel happened to match).
+	var reader *bufio.Reader
 	if onLane {
 		pane, token, err := e.readPaneRecord(conn)
 		if err != nil {
@@ -560,6 +607,27 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			return
 		}
 		peer.Pane, peer.Token = pane, token
+	} else if admitter, ok := e.cfg.Auth.(TurnBearerAdmitter); ok && admitter.AdmitsTurnBearer() {
+		// A CONNECTION OFF THE HELPER'S LANE MAY PRESENT A TURN'S BEARER
+		// (ADR-anntnxdj decision 3). It is read BEFORE the decision, like the
+		// helper's record, because the authorizer decides on it: nocx-server
+		// starts the assistant's agent, so its bridge is not in a pane's
+		// process tree, and the bearer is the only thing that names the turn
+		// it belongs to. A connection that presents none is served exactly as
+		// before — no bytes consumed, the same JSON ahead of it.
+		//
+		// The capability is asked first: an authorizer that cannot admit a
+		// turn has nothing to decide from these bytes, and a peer that
+		// connects and says nothing must still be refused at once.
+		reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
+		token, err := e.readPresentedToken(conn, reader)
+		if err != nil {
+			code, message, reason := rpcErrorFor(err)
+			e.observePeerRefusal(peer, reason)
+			e.writeError(conn, nil, code, message, reason)
+			return
+		}
+		peer.Token = token
 	}
 
 	// published records that the authorizer admitted this connection through
@@ -609,7 +677,9 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	})
 	connectionCtx, cancel := context.WithCancel(base)
 
-	reader := bufio.NewReaderSize(conn, maxEnvelopeBytes)
+	if reader == nil {
+		reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
+	}
 	var requests sync.WaitGroup
 	defer func() {
 		cancel()
@@ -1031,6 +1101,14 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// has to present the value the pane actually holds.
 		return rpcPeerRefused, "worker caller refused",
 			"this connection did not present the bearer nocx holds for the pane it arrived on, so nothing it asked for was run. A bearer belongs to one pane and one interval: one from another pane, an earlier launch, or an interval that has been replaced is refused here. Tell the person to restart the agent in that pane."
+	case errors.Is(err, ErrTurnBearerRefused):
+		// THE TURN'S BEARER, off the helper's lane (ADR-anntnxdj decision 3).
+		// The caller is the assistant's bridge, which nocx-server started, so
+		// the repair is not the pane's: either the value is not the one nocx
+		// handed this bridge, or the turn it belonged to has ended and its
+		// bearer is retired with it.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection presented a bearer that does not belong to a live assistant turn, so nothing it asked for was run. A turn's bearer lives only for that turn: a wrong value, a value from another turn, or one retired when its turn ended is refused here. Tell the person the assistant turn is over."
 	case errors.Is(err, panebind.ErrShortRecord):
 		// THE HELPER'S REPORT DID NOT ARRIVE WHOLE. Nothing of the call ran,
 		// and retrying on this connection is not possible — but the fact is

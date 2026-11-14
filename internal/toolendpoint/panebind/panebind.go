@@ -156,6 +156,17 @@ var (
 	ErrNotAToken  = errors.New("toolendpoint: these bytes are not a tool token")
 )
 
+// StartsToken reports whether b can begin a bearer this build understands.
+//
+// A connection off the helper's lane presents a bearer only when it has one —
+// every local agent presents none — so a reader has to decide from the FIRST
+// byte whether the bytes ahead are a preamble or the first request. A JSON-RPC
+// request starts with '{' or whitespace; a bearer starts with a lower-case hex
+// digit. The alphabet is stated here because this package owns it.
+func StartsToken(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
+}
+
 // isTokenHex is the bearer's alphabet and length: lower-case hex, exactly
 // TokenHexLen of it. Deliberately not isSessionHex, which is the same shape today
 // and a different question.
@@ -163,8 +174,8 @@ func isTokenHex(s string) bool {
 	if len(s) != TokenHexLen {
 		return false
 	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+	for i := 0; i < len(s); i++ {
+		if !StartsToken(s[i]) {
 			return false
 		}
 	}

@@ -649,9 +649,18 @@ type s14MCPClient struct {
 // "in flight" assertion exercises.
 func newS14MCPClient(t *testing.T, socket string) *s14MCPClient {
 	t.Helper()
+	return newS14MCPClientWithToken(t, socket, "")
+}
+
+// newS14MCPClientWithToken is the same bridge presenting a bearer, which is
+// what an assistant turn's bridge does: the token reaches mcpstdio through the
+// environment the mint handed back, and a test sets it the same way rather
+// than reaching past the bridge into the socket.
+func newS14MCPClientWithToken(t *testing.T, socket, token string) *s14MCPClient {
+	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	srv, err := mcpstdio.New(mcpstdio.Config{Socket: socket})
+	srv, err := mcpstdio.New(mcpstdio.Config{Socket: socket, Token: token})
 	if err != nil {
 		t.Fatalf("mcpstdio.New: %v", err)
 	}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentRecords.detect.schema.json",
+  "title": "agentRecords.detect result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "properties": {
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    }
+  },
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "found", "version", "readiness"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        },
+        "readiness": {
+          "type": "string",
+          "enum": ["not_installed", "installed", "ready", "not_ready", "invalid", "unknown"]
+        }
+      }
+    }
+  }
+}

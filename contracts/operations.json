@@ -1291,6 +1291,59 @@
       "preempts": []
     },
     {
+      "id": "agentRecords.detect",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [],
+          "dependencies": [
+            "config",
+            "filesystem"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "read: five version probes and one readiness probe, each bounded at 2 s, and one login shell bounded at 5 s"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "same-key",
+      "waiting": "Finding your agents",
+      "row": "past-wait",
+      "expired": "retry-read",
+      "resources": [],
+      "dependencies": [
+        "config",
+        "filesystem"
+      ],
+      "preempts": []
+    },
+    {
       "id": "agentRecords.list",
       "kind": "method",
       "owner": "request",

@@ -20,6 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentcalib"
+	"github.com/shady2k/nocx/internal/agentdetect"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/agentrule"
@@ -1775,6 +1776,10 @@ func New(opts ...Option) (*App, error) {
 	// session registry, which does not exist that early (nocx-6jbad).
 	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
 	tpOpts = append(tpOpts, transport.WithAgentRecords(agentRecords))
+	// Which agents the assistant can run are on this machine, found on the
+	// person's login shell's PATH (nocx-a62cl.12.1). Built here, cached by the
+	// detector until Settings asks for a refresh.
+	tpOpts = append(tpOpts, transport.WithAgentDetection(agentdetect.New(agentdetect.LoginShell{})))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 

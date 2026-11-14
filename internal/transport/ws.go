@@ -542,6 +542,10 @@ type WSServer struct {
 	// agentRecords is the existing per-agent launch record store, surfaced to
 	// Settings so edits change the same source the wrappers and spawner read.
 	agentRecords AgentRecordsStore
+	// agentDetection answers which of the agents the assistant can run are on
+	// this computer (nocx-a62cl.12.1). Named by the composition root; unset,
+	// agentRecords.detect answers "not available" rather than an empty list.
+	agentDetection AgentDetector
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -1578,6 +1582,12 @@ func WithAgentRecords(store AgentRecordsStore) WSServerOption {
 	return func(ws *WSServer) { ws.agentRecords = store }
 }
 
+// WithAgentDetection connects Settings to the detection of which agents are on
+// this machine. Unset, agentRecords.detect is not available.
+func WithAgentDetection(detector AgentDetector) WSServerOption {
+	return func(ws *WSServer) { ws.agentDetection = detector }
+}
+
 // WithLiveEffects names which effect classes a declared tool actually
 // carries — policy.get's "live". The value is agenttools.LiveEffects(), read
 // at the composition root beside WithAgentPolicy: the policy says what a run
@@ -2214,6 +2224,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentAccessSpecs()...)
 	specs = append(specs, s.agentRecordsSpecs()...)
+	specs = append(specs, s.agentDetectionSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)

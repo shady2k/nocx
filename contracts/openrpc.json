@@ -2231,6 +2231,108 @@
       }
     },
     {
+      "name": "agentRecords.detect",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/agentRecords.detect.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "agentRecords.detect",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [],
+            "dependencies": [
+              "config",
+              "filesystem"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "read: five version probes and one readiness probe, each bounded at 2 s, and one login shell bounded at 5 s"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "same-key",
+        "waiting": "Finding your agents",
+        "row": "past-wait",
+        "expired": "retry-read",
+        "resources": [],
+        "dependencies": [
+          "config",
+          "filesystem"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "agentRecords.detectResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/agentRecords.detect.schema.json"
+        }
+      }
+    },
+    {
       "name": "agentRecords.list",
       "params": [
         {
@@ -25954,6 +26056,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/agentAccess.list.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/agentRecords.detect.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/agentRecords.list.schema.json"

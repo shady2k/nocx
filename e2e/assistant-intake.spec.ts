@@ -16,21 +16,18 @@ import {
   standalone as base,
   answerPermission,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   showSidebarView,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 
 const test = base
 const nonce = Date.now().toString(36)
 const INPUT = '.pane.active .nocx-editor-input'
 const TITLE = '.nocx-tab-title'
-const ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 const PAGE_MARKER = `ASSISTANT_INTAKE_PAGE_${nonce}`
@@ -63,7 +60,7 @@ test.beforeAll(async () => {
 
   const root = mkdtempSync(join(tmpdir(), 'nocx-p5rjv-e2e-'))
   backend = new VaultBackend(readStand().server, { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -78,26 +75,9 @@ async function openApp(page: Page): Promise<void> {
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
 }
 
-async function configureAssistant(
-  page: Page,
-  endpointName: string,
-  allowMutations = false,
-): Promise<void> {
+async function configureAssistant(page: Page, allowMutations = false): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator(ENDPOINTS_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-
-  await page.locator(ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-
   if (allowMutations) {
     await page.locator(POLICY_NAV).click()
     await answerPermission(page, 'mutate-reversible', 'Allowed')
@@ -149,7 +129,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
   test('a bare link is fetched and summarised', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Link ${nonce}`)
+    await configureAssistant(page)
 
     const base = chatRequests().length
     fake.setScript({
@@ -178,7 +158,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
   test('a bare paragraph becomes a note the person can find', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Note ${nonce}`, true)
+    await configureAssistant(page, true)
 
     const base = chatRequests().length
     fake.setScript({
@@ -211,7 +191,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
   test('unclear input produces one question and no tool call', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Unclear ${nonce}`)
+    await configureAssistant(page)
 
     const base = chatRequests().length
     const question = 'What would you like me to do?'

@@ -52,29 +52,19 @@ import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import {
-  standalone as base,
-  appReadyForInput,
-  VaultBackend,
-  bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
-  settingsReady,
-} from './harness'
+import { standalone as base, appReadyForInput, VaultBackend, bindEndpoint } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Turn Cancel ${nonce}`
 
 /** The command the assistant proposes, and the marker the running block is
  *  found by. Sixty seconds is long enough that nothing but the person's Stop
@@ -90,7 +80,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-a62cl-4-1-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -134,26 +124,6 @@ async function answerState(page: Page, question: string, word: string): Promise<
   await expect(
     block.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
   ).toHaveText(word, { timeout: 30_000 })
-}
-
-async function openSettings(page: Page, navSelector: string): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await settingsReady(page)
-  await page.locator(navSelector).click()
-}
-
-async function configureAssistant(page: Page): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
 }
 
 async function backToTerminal(page: Page): Promise<void> {
@@ -235,7 +205,6 @@ test.describe('cancelling a turn stops the call it is running (nocx-a62cl.4.1)',
     test.setTimeout(180_000)
     const wire = recordWire(page)
     await openApp(page)
-    await configureAssistant(page)
     await backToTerminal(page)
 
     // The first ask's scripted response proposes the long command; the

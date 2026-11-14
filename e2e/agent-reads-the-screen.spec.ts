@@ -5,7 +5,7 @@
  * WHAT THIS FILE IS FOR, AND WHY THE GO TEST BESIDE IT IS NOT ENOUGH.
  * internal/transport/ws_agent_locates_itself_test.go already watches the
  * whole loop over the real socket: the model reads the session id out of the
- * system prompt, calls session.read with it, and the answer reaches the
+ * turn message, calls session.read with it, and the answer reaches the
  * block.
  * The app's backend now captures the session runtime's screen directly; the
  * renderer is not asked to mint or resolve a screen frame. This check proves
@@ -55,20 +55,17 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 const test = base
@@ -81,7 +78,6 @@ const MARKER = `NOCX-SCREEN-${nonce}`
 /** The OSC 9 body the background job writes AFTER the marker — the ordering
  *  signal, never a delay. */
 const SIGNAL = `screen-ready-${nonce}`
-const ENDPOINT_NAME = `E2E Read Screen ${nonce}`
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -99,7 +95,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-z4hgm-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-z4hgm-screen-'))
   scriptPath = join(fixtureDir, 'put-marker-on-screen.sh')
@@ -252,21 +248,8 @@ async function answerFinished(page: Page, question: string): Promise<void> {
 }
 
 async function configureAssistant(page: Page): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-  // The `observe` row is set to Allowed through the page a person uses, so
-  // the proposed session.read EXECUTES rather than suspending on an approval.
-  // The asking is agent-policy.spec.ts's subject, not this file's.
-  await page.locator(SETTINGS_POLICY_NAV).click()
+  await openSettings(page, SETTINGS_POLICY_NAV)
+  // Allow screen reads; approval itself is covered by agent-policy.spec.ts.
   await answerPermission(page, 'observe', 'Allowed')
 }
 
@@ -301,7 +284,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
   test('the answer names what was on that pane’s screen, and nothing else could have told it', async ({
     page,
   }) => {
-    // Vault setup, an endpoint, a role, a policy row, a real shell command
+    // A policy row, a real shell command
     // and two asks — each of them a wait on an observable state, none of
     // them a clock. The number is a hang detector for a run that has
     // already gone wrong, never an expectation about how fast the machine
@@ -476,9 +459,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     const runBodies = fake
       .requests()
       .slice(firstRequestOfTheRun)
-      // Chat requests only. The endpoint's connection check is a GET to
-      // /models with an empty body and is recorded like any other request;
-      // counting it here would shift the pair by one.
+      // Chat requests only, excluding model discovery.
       .filter((r) => r.body.includes('"messages"'))
       .map((r) => r.body)
     expect(runBodies.length).toBeGreaterThanOrEqual(2)

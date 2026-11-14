@@ -80,3 +80,27 @@ test('a fresh connection delivers exactly one completion while the reuse close i
     await fake.stop()
   }
 })
+
+test('scripted nocx tools use the name advertised by pi in both response shapes', async () => {
+  const fake = new FakeOpenAI()
+  try {
+    const url = await fake.start()
+    for (const stream of [false, true]) {
+      const calls = [{ name: 'session.read', arguments: { itemId: 'block' } }]
+      fake.setScript({ chunks: [], toolCalls: stream ? () => calls : calls })
+      const response = await fetch(`${url}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stream,
+          tools: [{ function: { name: 'mcp__nocx__session_read' } }],
+        }),
+      })
+      const body = await response.text()
+      assert.match(body, /"name":"mcp__nocx__session_read"/)
+      assert.ok(body.includes('block'))
+    }
+  } finally {
+    await fake.stop()
+  }
+})

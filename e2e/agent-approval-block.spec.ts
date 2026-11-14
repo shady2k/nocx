@@ -40,17 +40,10 @@ import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import {
-  standalone as base,
-  appReadyForInput,
-  bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
-  settingsReady,
-  VaultBackend,
-} from './harness'
+import { standalone as base, appReadyForInput, bindEndpoint, VaultBackend } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -58,16 +51,12 @@ const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
 
-/** One nonce per file, so this file's endpoint name and every question and
- *  command in it are unique in the whole run. */
+/** Keep questions and commands unique in the whole run. */
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Approval Block ${nonce}`
 
 /** The approved round's command, its output marker, and the sentence the model
  *  may say only if that output came back through the tool. */
@@ -92,7 +81,7 @@ test.beforeAll(async () => {
   // keychain to ask, and the derived content key makes the vault available
   // without user setup — the arrangement agent-ask.spec.ts uses.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -165,8 +154,7 @@ async function answerFinished(page: Page, question: string): Promise<void> {
   })
 }
 
-/** Chat-completion requests after `from`. The endpoint's model-discovery GET
- *  has no messages and must not count as a round. */
+/** Chat-completion requests after `from`, excluding model discovery. */
 function chatRequests(from: number): FakeRequest[] {
   return fake
     .requests()
@@ -196,33 +184,12 @@ function proseFromToolResult(want: string, sentence: string): (body: string) => 
       : [`Nothing carrying ${want} reached me, so I cannot say that.`]
 }
 
-/** Create the endpoint and give its model the answering role, through the
- *  surfaces a person uses. A fresh home has no vault, so the first save stops
- *  on the setup sheet and is retried once the vault exists; createAiEndpoint
- *  reads which of the two happened rather than assuming. */
-async function configureAssistant(page: Page): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await settingsReady(page)
-  await page.locator(SETTINGS_AI_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-}
-
 test.describe('an ask blocks the call, and the answer releases it (nocx-a62cl.3.1)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
   test('approving runs the call once and its result lands in the same block', async ({ page }) => {
     test.setTimeout(180_000)
     await openApp(page)
-    await configureAssistant(page)
     await page.locator(TITLE).first().click()
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
 
@@ -272,8 +239,7 @@ test.describe('an ask blocks the call, and the answer releases it (nocx-a62cl.3.
 
   test('declining runs nothing and the block says declined', async ({ page }) => {
     test.setTimeout(180_000)
-    // A fresh page, the SAME backend: the endpoint and the answering role the
-    // test above configured are settings, and they survive a tab.
+    // A fresh page, the SAME backend and disposable pi configuration.
     await openApp(page)
 
     const base = fake.requests().length

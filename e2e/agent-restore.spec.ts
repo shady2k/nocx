@@ -56,21 +56,18 @@ import {
   appReadyForInput,
   bindEndpoint,
   clickIntoEditor,
-  createAiEndpoint,
   promptReady,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI } from './fake-openai'
 
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 /* `echo` resolves to observe; `session.run` can also reach mutate-destructive. */
 const APPROVAL_TITLE = 'This action needs your approval'
@@ -101,7 +98,7 @@ test.beforeAll(async () => {
   // keychain to ask, and the derived content key makes the vault available
   // without user setup — the arrangement the other agent specs use.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -280,20 +277,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await appReadyForInput(page)
 
     // ── The assistant is configured, and `run` is allowed to run ──────────
-    await openSettings(page, SETTINGS_AI_NAV)
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-    const endpointName = `E2E Restore ${nonce}`
-    await createAiEndpoint(page, {
-      name: endpointName,
-      baseUrl: fake.baseUrl(),
-      models: ['e2e-model'],
-      key: `e2e-key-${nonce}`,
-      vaultPassphrase: `vault-pass-${nonce}`,
-    })
-    await page.locator(SETTINGS_ROLES_NAV).click()
-    await setDefaultModel(page, endpointName, 'e2e-model')
-
-    await page.locator(SETTINGS_POLICY_NAV).click()
+    await openSettings(page, SETTINGS_POLICY_NAV)
     for (const effect of ['observe', 'mutate-destructive'] as const) {
       await answerPermission(page, effect, 'Allowed')
     }

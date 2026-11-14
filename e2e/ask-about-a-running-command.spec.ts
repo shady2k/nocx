@@ -51,13 +51,12 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 const serverBin = () => readStand().server
 
@@ -65,8 +64,6 @@ const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const GRID = '.pane.active .terminal-live-container'
 const RUNNING_BLOCK = '.pane.active .cmd-block.cmd-block-running'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 const test = base
@@ -80,7 +77,6 @@ const MARKER = `NOCX-RUNNING-${nonce}`
 /** The OSC 9 body the job writes AFTER the marker — the ordering signal that
  *  says the marker is on the grid. Never a delay. */
 const SIGNAL = `running-ready-${nonce}`
-const ENDPOINT_NAME = `E2E Ask While Running ${nonce}`
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -94,7 +90,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-92gfl-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-92gfl-job-'))
   scriptPath = join(fixtureDir, 'slow-job.sh')
@@ -237,21 +233,8 @@ async function answerFinished(page: Page, question: string): Promise<void> {
 }
 
 async function configureAssistant(page: Page): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-  // The `observe` row is set to Allowed through the page a person uses, so
-  // the proposed session.read EXECUTES rather than suspending on an approval.
-  // The asking is agent-policy.spec.ts's subject, not this file's.
-  await page.locator(SETTINGS_POLICY_NAV).click()
+  await openSettings(page, SETTINGS_POLICY_NAV)
+  // Allow screen reads through the same policy page a person uses.
   await answerPermission(page, 'observe', 'Allowed')
 }
 
@@ -284,7 +267,7 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
   test('Ctrl+C interrupts the command, Escape stops its held answer, and both remain independently usable', async ({
     page,
   }) => {
-    // Vault setup, an endpoint, a role, a policy row, a real shell command
+    // A configured pi home, a policy row, a real shell command
     // and two asks — each a wait on an observable state, none of them a
     // clock. The number is a hang detector for a run that has already gone
     // wrong, never an expectation about how fast the machine is.

@@ -15,9 +15,8 @@
  * streamOK/chunkJSON): each content delta is one
  * `data: {chat.completion.chunk JSON}\n\n` frame carrying
  * delta.role/content and finish_reason ("" on content chunks, "stop" on the
- * last), then a `data: [DONE]\n\n` terminator. The eino adapter is the
- * single consumer of both, so a drift here would be a second protocol
- * variant with a delay fuse — the whole reason the shapes must match.
+ * last), then a `data: [DONE]\n\n` terminator. Real pi consumes these
+ * responses using the provider configured in the disposable home.
  *
  * AND THE MODEL CAN PROPOSE A TOOL. `toolCalls` scripts one
  * `delta.tool_calls` frame finishing the response with `tool_calls` — the
@@ -116,6 +115,19 @@ export interface StreamScript {
    *  with an id the product actually announced, rather than with a
    *  test-invented id. */
   toolCalls?: ScriptedToolCall[] | ((body: string) => ScriptedToolCall[])
+}
+
+/** Match semantic tool scripts to the MCP names the agent actually offered. */
+function scriptedCalls(body: string, script: StreamScript): ScriptedToolCall[] {
+  const calls =
+    typeof script.toolCalls === 'function' ? script.toolCalls(body) : (script.toolCalls ?? [])
+  const request = JSON.parse(body) as { tools?: { function: { name: string } }[] }
+  return calls.map((call) => {
+    const advertised = request.tools?.find(
+      (tool) => tool.function.name === `mcp__nocx__${call.name.replaceAll('.', '_')}`,
+    )
+    return advertised ? { ...call, name: advertised.function.name } : call
+  })
 }
 
 const CHUNK_ID = 'chatcmpl-e2e'
@@ -387,10 +399,7 @@ export class FakeOpenAI {
       )
       return
     }
-    const calls =
-      typeof script.toolCalls === 'function'
-        ? script.toolCalls(record.body)
-        : (script.toolCalls ?? [])
+    const calls = scriptedCalls(record.body, script)
     const model = script.model ?? 'e2e-model'
     const message: Record<string, unknown> = {
       role: 'assistant',
@@ -433,10 +442,7 @@ export class FakeOpenAI {
     res.flushHeaders()
 
     const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
-    const calls =
-      typeof script.toolCalls === 'function'
-        ? script.toolCalls(record.body)
-        : (script.toolCalls ?? [])
+    const calls = scriptedCalls(record.body, script)
     const model = script.model ?? 'e2e-model'
     const holdAfter = script.holdAfter ?? chunks.length
     let i = 0

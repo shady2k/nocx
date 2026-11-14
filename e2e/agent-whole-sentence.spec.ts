@@ -28,7 +28,7 @@
  *   1  MARKED     — the mark is on THAT block (`data-granted`) and the input
  *                   line's chip counts it, before a word is typed.
  *   2  CARRIED    — asserted on the REAL request body reaching the fake
- *                   endpoint: the system prompt names the marked block's
+ *                   model: the user context names the marked block's
  *                   announced id and its command, and the OTHER block on
  *                   screen is ABSENT from it. The absent half is the whole
  *                   assertion — without it, "everything is attached" passes.
@@ -76,8 +76,7 @@
  * machine to pass is broken on a fast one too (AGENTS.md).
  *
  * THE BACKEND IS THIS FILE'S OWN nocx-server on a disposable home, so the
- * endpoint it configures never leaks into the shard's shared stand and the
- * fresh-dev-stand state (no endpoint, no vault) is real here.
+ * pi configuration never leaks into the shard's shared stand.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
@@ -88,12 +87,11 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI } from './fake-openai'
 import {
   INPUT,
@@ -104,7 +102,7 @@ import {
   markBlock,
   runCommand,
   switchToAsk,
-  systemPrompt,
+  terminalContext,
   toolResults,
 } from './ask-gesture'
 
@@ -113,8 +111,6 @@ import {
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
@@ -136,7 +132,6 @@ const ALLOWED_EFFECTS = [
 const test = base
 const nonce = Date.now().toString(36)
 
-const ENDPOINT_NAME = `E2E Sentence ${nonce}`
 /** The block the person MARKS, and the marker only its output carries. */
 const MARKED_MARKER = `sentence-marked-${nonce}`
 const MARKED_CMD = `echo ${MARKED_MARKER}`
@@ -169,7 +164,7 @@ test.beforeAll(async () => {
   // in: the container has no keychain to ask, and the derived content key makes
   // the vault available without user setup.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -202,18 +197,7 @@ async function backToTerminal(page: Page): Promise<void> {
  *  Endpoints form (which mints the key into a vault that does not exist yet and
  *  is created by the same save), the Roles default, and the policy matrix. */
 async function configureAssistant(page: Page): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-  await page.locator(SETTINGS_POLICY_NAV).click()
+  await openSettings(page, SETTINGS_POLICY_NAV)
   for (const effect of ALLOWED_EFFECTS) {
     // answerPermission waits on the LISTED answer, which is the store's own
     // word for what it took — not the draft this test just clicked.
@@ -346,8 +330,8 @@ test.describe('one person, one run, the whole assistant sentence (nocx-hp8p2.2)'
     expect(
       firstRound.authorization,
       'PROMISE 2 (the ask carries the marked item): the stored key did not ride the ask',
-    ).toBe(`Bearer e2e-key-${nonce}`)
-    const askPrompt = systemPrompt(firstRound.body)
+    ).toBe('Bearer disposable-e2e-key')
+    const askPrompt = terminalContext(firstRound.body)
     expect(
       askPrompt,
       'PROMISE 2 (the ask carries the marked item): the ask carried no attached terminal content',

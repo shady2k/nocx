@@ -16,18 +16,16 @@ import {
   standalone as base,
   answerPermission,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   showSidebarView,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI } from './fake-openai'
 
 const test = base
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Notes ${nonce}`
 const NOTE_TITLE = 'Assistant-created note'
 const NOTE_BODY = `${NOTE_TITLE}\nassistant-note-${nonce}`
 const QUESTION = `Create a note for me, ${nonce}.`
@@ -43,7 +41,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-klqjo-e2e-'))
   backend = new VaultBackend(readStand().server, { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -60,19 +58,6 @@ async function openApp(page: Page): Promise<void> {
 async function configureAssistant(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator('.ui-grouped-nav__item[data-item="endpoints"]').click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-
-  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-
   await page.locator('.ui-grouped-nav__item[data-item="policy"]').click()
   await answerPermission(page, 'mutate-reversible', 'Allowed')
 

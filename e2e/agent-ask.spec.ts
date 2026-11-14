@@ -83,8 +83,10 @@ import {
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { fieldChip } from './secret-field'
+import { attachedItemID, terminalContext } from './ask-gesture'
 
 /** The Test button's probe request, identified by its BODY: a
  *  chat-completions request naming the configured model. The form's silent
@@ -173,7 +175,7 @@ let backend: VaultBackend
 let fake: FakeOpenAI
 let endpoint: { port: number; token: string }
 
-test.describe.configure({ mode: 'serial' })
+test.describe.configure({ mode: 'default' })
 
 test.beforeAll(async () => {
   fake = new FakeOpenAI()
@@ -184,7 +186,7 @@ test.beforeAll(async () => {
   // content key makes the vault available without user setup — the same
   // arrangement history-persistence.spec.ts relies on.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -223,40 +225,6 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(input).toBeVisible({ timeout: 10_000 })
   await input.click()
   await expect(input).toBeFocused({ timeout: 10_000 })
-}
-
-/** Assign the answering role to one endpoint's model — Settings → Roles,
- *  the surface the model-roles epic (nocx-e6kn2) gave the ask path: the
- *  ask resolves the ANSWERING ROLE to its assigned (endpoint, model) pair,
- *  so creating an endpoint never makes it askable and an unassigned role
- *  refuses with "no model assigned" before any request reaches the model.
- *  The two selects are the kit's native `<select>`s (ADR-0014): the first
- *  picks the endpoint, the second completes the pair and writes it — a
- *  half-pair is never written. */
-async function assignAnsweringRole(page: Page, endpointName: string, model: string): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
-  const answering = page
-    .locator('.roles-role')
-    .filter({ has: page.locator('.roles-role__title', { hasText: /^Answering$/ }) })
-  await expect(answering).toBeVisible({ timeout: 10_000 })
-  await answering.locator('select').first().selectOption({ label: endpointName })
-  const modelSelect = answering.locator('select').nth(1)
-  await expect(modelSelect).toBeEnabled()
-  await modelSelect.selectOption({ label: model })
-  // The SELECTS are where an explicit assignment is legible, and since
-  // nocx-rikz5 they are the only place. The row's state sentence used to
-  // repeat them — "Answers with openrouter · m-a" directly under two controls
-  // already saying exactly that — and it now stays SILENT when a role
-  // resolves to what the selects show, speaking only when resolution goes
-  // somewhere they cannot show (through the default) or fails. So waiting for
-  // that sentence here waits for a line the product deliberately no longer
-  // draws.
-  await expect(answering.locator('select').first().locator('option:checked')).toHaveText(
-    endpointName,
-    { timeout: 10_000 },
-  )
-  await expect(answering.locator('select').nth(1).locator('option:checked')).toHaveText(model)
 }
 
 /** Create this file's endpoint through the surface a user uses, and the vault
@@ -310,38 +278,13 @@ async function createEndpointThroughTheSurface(page: Page): Promise<void> {
   await expect(savedRow).toBeVisible({ timeout: 10_000 })
 }
 
-/** Answer the measured read, then assign the answering role to this file's
- *  endpoint and model. The endpoint must exist; the answer is idempotent
- *  (harness.ts says so), and selecting the role a row already holds writes
- *  nothing. */
-async function answerAndAssign(page: Page): Promise<void> {
-  // Allow the measured session.read so the model request can reach a second
-  // completion without an approval sheet unrelated to the join under test.
+/** Allow the marked-item read through the person's permission surface.
+ * Real pi is configured in this backend's disposable home before startup. */
+async function ensureAskingPrerequisites(page: Page): Promise<void> {
+  await page.keyboard.press('Meta+,')
+  await settingsReady(page)
   await page.locator(SETTINGS_POLICY_NAV).click()
   await answerPermission(page, 'observe', 'Allowed')
-  // Askable only once the role names an endpoint-model pair: an unassigned
-  // role refuses with "no model assigned" before any request reaches the
-  // fake. The assignment goes through the surface a person uses.
-  await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
-}
-
-/** THE PREREQUISITES AN ASKING CASE NEEDS, said by the case that needs them.
- *
- *  The file is serial, so the endpoint case normally creates the endpoint and
- *  the role before any later case asks, and the later ones inherited that.
- *  A serial file does not run its earlier tests under --grep, so the second
- *  streaming ask met an unassigned role and failed with "the answering role
- *  has no model assigned" instead of at what it measures (nocx-atpw5.1.11).
- *
- *  Idempotent on purpose: a full run finds both already done and changes
- *  nothing, an isolated run performs exactly the walk the endpoint case
- *  performs. */
-async function ensureAskingPrerequisites(page: Page): Promise<void> {
-  await openAIEndpoints(page)
-  if ((await page.locator('.ep-root').textContent())?.includes('No endpoints yet')) {
-    await createEndpointThroughTheSurface(page)
-  }
-  await answerAndAssign(page)
 }
 
 /** Run one command and wait for its finished (frozen) block. */
@@ -517,20 +460,6 @@ function answerBlockOf(page: Page, question: string): Locator {
   return page.locator('.cmd-block').filter({ hasText: question })
 }
 
-function systemPrompt(body: string): string {
-  const request = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-  return (request.messages ?? []).find((message) => message.role === 'system')?.content ?? ''
-}
-
-/** Read the attached item id from the model's actual system prompt. The
- *  scripted model must use this id, not one the spec invents, so a successful
- *  answer proves the grant survives the frontend-to-ledger join. */
-function attachedItemID(body: string): string {
-  const match = systemPrompt(body).match(/\n- id: ([^;]+); state: (?:running|exited)/)
-  if (!match) throw new Error('model request has no attached terminal item id')
-  return match[1]
-}
-
 /** Derive the scripted answer only from non-system, non-user messages. The
  *  marker therefore has to arrive in session.read's result, not merely in the
  *  command label the prompt announces. */
@@ -546,6 +475,7 @@ function answerFromAttachedItem(body: string, marker: string): string[] {
 }
 
 test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
+  test.describe.configure({ mode: 'serial' })
   test.use({ viewport: { width: 1280, height: 900 } })
 
   test('a restored tool mentioning a command does not hide its frozen output', async ({ page }) => {
@@ -566,54 +496,11 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(block.locator('.cmd-output .term-grid-row').first()).toContainText(marker)
   })
 
-  test('with no endpoint configured, the surfaces say so (agent.status)', async ({ page }) => {
-    // The first state a dev stand is in — no endpoint — and it needs no fake
-    // server at all. What the product owes a person here is not a status
-    // line: it is the way out. Asking without an endpoint says what is
-    // wrong AND opens where it is fixed (nocx-jh2rv), and that is what this
-    // asserts, on the surface, never on a log line.
-    await openApp(page)
-    const marker = `ask-status-${nonce}`
-    const { block } = await runCommand(page, `echo ${marker}`, marker)
-
-    // The gesture still works with nothing configured: the selection marks
-    // the block it was made in, and the input line says one block is marked.
-    await pointAtFromRun(block)
-    await expectGranted(page, [`echo ${marker}`])
-
-    // The ask is refused, and the refusal carries its repair: the toast
-    // names the problem and the Endpoints page opens with the editor up on
-    // a blank endpoint. A sentence with nowhere to go is how a person
-    // concludes the feature is broken rather than unconfigured.
-    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
-    // resolves the role to its assigned (endpoint, model) pair, so the
-    // first dev-stand state refuses with "no model assigned" and points at
-    // Settings → Roles, not with the pre-roles "no endpoint configured".
-    await askFromPrompt(page, 'What did this print?')
-    await expect(page.locator('.ui-toast')).toContainText(
-      'the answering role has no model assigned — assign one in Settings → Roles',
-      {
-        timeout: 15_000,
-      },
-    )
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
-      timeout: 15_000,
-    })
-  })
-
   test("point at a finished block, ask, and the answer streams in naming the block's output", async ({
     page,
   }) => {
-    // ── The endpoint, configured through the surface a user uses ────────
     await openApp(page)
-    await openAIEndpoints(page)
-    // The starting state, asserted so the "Ready" below means something: the
-    // empty state owns the no-endpoint sentence here, and the readiness badge
-    // is deliberately absent until there is something to be ready about.
-    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
-    await createEndpointThroughTheSurface(page)
-    await answerAndAssign(page)
+    await ensureAskingPrerequisites(page)
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
@@ -662,15 +549,15 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const requestBeforeRead = askRequests[0]
     const requestAfterRead = askRequests[1]
     expect(requestBeforeRead.path.endsWith('/chat/completions')).toBe(true)
-    expect(requestBeforeRead.authorization).toBe(`Bearer e2e-key-${nonce}`)
-    const beforeSystem = systemPrompt(requestBeforeRead.body)
-    const afterSystem = systemPrompt(requestAfterRead.body)
-    expect(beforeSystem).toContain('Attached terminal content')
-    expect(beforeSystem).toContain('state: exited')
-    expect(beforeSystem).toContain(cmdA)
-    expect(beforeSystem).not.toContain(markerB)
-    expect(afterSystem).toContain(markerA)
-    expect(afterSystem).not.toContain(markerB)
+    expect(requestBeforeRead.authorization).toBe('Bearer disposable-e2e-key')
+    const beforeContext = terminalContext(requestBeforeRead.body)
+    const afterContext = terminalContext(requestAfterRead.body)
+    expect(beforeContext).toContain('Attached terminal content')
+    expect(beforeContext).toContain('state: exited')
+    expect(beforeContext).toContain(cmdA)
+    expect(beforeContext).not.toContain(markerB)
+    expect(afterContext).toContain(markerA)
+    expect(afterContext).not.toContain(markerB)
 
     // The answer block appears in the flow: a .cmd-block whose header is the
     // QUESTION and whose output is the agent answer body — a shell command
@@ -710,69 +597,6 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // tests (terminal-content.test.ts), which can observe the seam this e2e
     // cannot.
     await expect(answerBody).not.toContainText('command not found')
-  })
-
-  test('custom headers ride the completion AND the connection check (nocx-lyyk)', async ({
-    page,
-  }) => {
-    // The endpoint from test 2 exists with a key. Give it a custom header
-    // through the same form a user uses: the header list is the kit's
-    // EditableRowList, and the value's source is the same control the key
-    // uses (acceptance 7's shape).
-    await openApp(page)
-    await openAIEndpoints(page)
-    const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
-    const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: 'Add header' }).click()
-    await dialog.locator('#endpoint-header-0-name').fill('HTTP-Referer')
-    await dialog.locator('#endpoint-header-0-value').fill('https://nocx.dev')
-    await dialog.getByRole('button', { name: 'Save Endpoint', exact: true }).click()
-    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-
-    // ── The connection check carries the header (acceptance 1, half 2) ──
-    // The model field's silent discovery probes GET /models with the draft's
-    // headers — the same request the no-model Test button makes.
-    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
-    const dialog2 = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(dialog2).toBeVisible()
-    const before = fake.requests().length
-    await dialog2.locator('#endpoint-model-0-name').focus()
-    await expect
-      .poll(
-        () => {
-          const reqs = fake.requests()
-          const check = reqs.slice(before).find((r) => r.path.endsWith('/models'))
-          return check ? (check.headers['http-referer'] as string | undefined) : undefined
-        },
-        { timeout: 15_000 },
-      )
-      .toBe('https://nocx.dev')
-    await dialog2.getByRole('button', { name: 'Cancel', exact: true }).click()
-
-    // ── The completion carries the header (acceptance 1, half 1) ────────
-    await backToTerminal(page)
-    const marker = `hdr-${nonce}`
-    const { block } = await runCommand(page, `echo ${marker}`, marker)
-    const base = fake.requests().length
-    fake.setScript({ chunks: ['ok ', marker] })
-    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
-    // half of that rule has its own coverage in pointAtFromRun; here the
-    // flip is setup, made through the same real chord.
-    await switchToAsk(page)
-    await pointAt(block)
-    // The block is marked before the question is sent; then the question
-    // goes out and the completion lands — the ask must actually be SENT for
-    // there to be a completion to inspect.
-    await expectGranted(page, [`echo ${marker}`])
-    await askFromPrompt(page, 'What did it print?')
-    const req = await fake.waitForRequests(base + 1)
-    expect(req[base].path.endsWith('/chat/completions')).toBe(true)
-    expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
-    // The credential still rides as the stored Bearer, and the custom header
-    // does not replace it.
-    expect(req[base].authorization).toBe(`Bearer e2e-key-${nonce}`)
   })
 
   test('a second ask while the first streams lands its deltas on the right entry', async ({
@@ -866,6 +690,119 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(body2).not.toContainText(answerA)
     await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
     await expect(blockQ2).toHaveAttribute('data-outcome', 'success')
+  })
+})
+
+// Subject leaves with endpoints/eino. Keep their serial dependencies separate
+// so a removed endpoint surface cannot skip the surviving assistant journeys.
+test.describe('endpoint subjects retained for removal with endpoints/eino', () => {
+  test.describe.configure({ mode: 'serial' })
+  test.use({ viewport: { width: 1280, height: 900 } })
+
+  test('with no endpoint configured, the surfaces say so (agent.status)', async ({ page }) => {
+    // The first state a dev stand is in — no endpoint — and it needs no fake
+    // server at all. What the product owes a person here is not a status
+    // line: it is the way out. Asking without an endpoint says what is
+    // wrong AND opens where it is fixed (nocx-jh2rv), and that is what this
+    // asserts, on the surface, never on a log line.
+    await openApp(page)
+    const marker = `ask-status-${nonce}`
+    const { block } = await runCommand(page, `echo ${marker}`, marker)
+
+    // The gesture still works with nothing configured: the selection marks
+    // the block it was made in, and the input line says one block is marked.
+    await pointAtFromRun(block)
+    await expectGranted(page, [`echo ${marker}`])
+
+    // The ask is refused, and the refusal carries its repair: the toast
+    // names the problem and the Endpoints page opens with the editor up on
+    // a blank endpoint. A sentence with nowhere to go is how a person
+    // concludes the feature is broken rather than unconfigured.
+    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
+    // resolves the role to its assigned (endpoint, model) pair, so the
+    // first dev-stand state refuses with "no model assigned" and points at
+    // Settings → Roles, not with the pre-roles "no endpoint configured".
+    await askFromPrompt(page, 'What did this print?')
+    await expect(page.locator('.ui-toast')).toContainText(
+      'the answering role has no model assigned — assign one in Settings → Roles',
+      {
+        timeout: 15_000,
+      },
+    )
+    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
+      timeout: 15_000,
+    })
+  })
+
+  test('creating an endpoint through a fresh vault keeps its key (nocx-4egm)', async ({ page }) => {
+    await openApp(page)
+    await openAIEndpoints(page)
+    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
+    await createEndpointThroughTheSurface(page)
+  })
+
+  test('custom headers ride the completion AND the connection check (nocx-lyyk)', async ({
+    page,
+  }) => {
+    // The endpoint from test 2 exists with a key. Give it a custom header
+    // through the same form a user uses: the header list is the kit's
+    // EditableRowList, and the value's source is the same control the key
+    // uses (acceptance 7's shape).
+    await openApp(page)
+    await openAIEndpoints(page)
+    const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
+    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
+    const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Add header' }).click()
+    await dialog.locator('#endpoint-header-0-name').fill('HTTP-Referer')
+    await dialog.locator('#endpoint-header-0-value').fill('https://nocx.dev')
+    await dialog.getByRole('button', { name: 'Save Endpoint', exact: true }).click()
+    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
+
+    // ── The connection check carries the header (acceptance 1, half 2) ──
+    // The model field's silent discovery probes GET /models with the draft's
+    // headers — the same request the no-model Test button makes.
+    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
+    const dialog2 = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(dialog2).toBeVisible()
+    const before = fake.requests().length
+    await dialog2.locator('#endpoint-model-0-name').focus()
+    await expect
+      .poll(
+        () => {
+          const reqs = fake.requests()
+          const check = reqs.slice(before).find((r) => r.path.endsWith('/models'))
+          return check ? (check.headers['http-referer'] as string | undefined) : undefined
+        },
+        { timeout: 15_000 },
+      )
+      .toBe('https://nocx.dev')
+    await dialog2.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+    // ── The completion carries the header (acceptance 1, half 1) ────────
+    await backToTerminal(page)
+    const marker = `hdr-${nonce}`
+    const { block } = await runCommand(page, `echo ${marker}`, marker)
+    const base = fake.requests().length
+    fake.setScript({ chunks: ['ok ', marker] })
+    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
+    // half of that rule has its own coverage in pointAtFromRun; here the
+    // flip is setup, made through the same real chord.
+    await switchToAsk(page)
+    await pointAt(block)
+    // The block is marked before the question is sent; then the question
+    // goes out and the completion lands — the ask must actually be SENT for
+    // there to be a completion to inspect.
+    await expectGranted(page, [`echo ${marker}`])
+    await askFromPrompt(page, 'What did it print?')
+    const req = await fake.waitForRequests(base + 1)
+    expect(req[base].path.endsWith('/chat/completions')).toBe(true)
+    expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
+    // The credential still rides as the stored Bearer, and the custom header
+    // does not replace it.
+    expect(req[base].authorization).toBe(`Bearer e2e-key-${nonce}`)
   })
 
   test('the Test button on a saved endpoint probes with the STORED credential, and a typed key wins (nocx-reu5)', async ({

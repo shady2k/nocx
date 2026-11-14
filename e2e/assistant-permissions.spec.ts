@@ -110,16 +110,15 @@ import {
   standalone as base,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
   expectPermissionRule,
   forgetPermission,
   permissionRule,
   readCommandForPermission,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -129,8 +128,6 @@ const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const NEW_TAB = '[aria-label="New tab"]'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 /** The approval prompt is a kit Prompt: a role="dialog" carrying the title a
@@ -173,7 +170,6 @@ const test = base
  *  questions reading alike would make one locator resolve to two elements and
  *  fail for the other question's reason (nocx-3xjou). */
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Permissions ${nonce}`
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -187,7 +183,7 @@ test.beforeAll(async () => {
   // to ask, and the derived content key makes the vault available without user
   // setup — the arrangement agent-ask.spec.ts uses.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
   // So that the absence of this file MEANS something later. It is outside the
   // disposable $HOME by construction — the command the acceptance criterion
   // names is an absolute path — so a leftover from anything is cleared here
@@ -353,17 +349,6 @@ async function activePaneId(page: Page): Promise<string> {
 async function configureAssistant(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator(SETTINGS_AI_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
 }
 
 /**

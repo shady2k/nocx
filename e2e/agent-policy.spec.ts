@@ -56,15 +56,14 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
   permissionAnswer,
   expectPermissionAnswer,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -73,8 +72,6 @@ const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const NEW_TAB = '[aria-label="New tab"]'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 /** The approval prompt is a kit Prompt: a role="dialog" carrying the title
  *  AgentApprovalPrompt gives a POLICY question. Named, not bare: Settings is
@@ -87,16 +84,11 @@ const OBSERVE_WORDS = 'read and inspect'
 
 const test = base
 
-/** One nonce per file, so this file's endpoint name is unique in the whole
- *  run. */
-const nonce = Date.now().toString(36)
-
 let backend: VaultBackend
 let fake: FakeOpenAI
 let endpoint: { port: number; token: string }
 
-// Serial: the second test reuses the endpoint, the model role and the vault
-// the first one created through the surfaces — and it also depends on the
+// Serial: the second test reuses the policy, and depends on the
 // first having put the `observe` row BACK to "Ask every time", which is its
 // last assertion. If the first test fails, the second is skipped rather than
 // run against a policy nobody knows the shape of.
@@ -110,7 +102,7 @@ test.beforeAll(async () => {
   // keychain to ask, and the derived content key makes the vault available
   // without user setup — the arrangement agent-ask.spec.ts uses.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -281,26 +273,6 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
 }
 
-/** Create the endpoint and give its model the answering role, through the
- *  surfaces a person uses. A fresh home has no vault, so the first save stops
- *  on the setup sheet and is retried once the vault exists; createAiEndpoint
- *  reads which of the two happened rather than assuming. */
-async function configureAssistant(page: Page, endpointName: string): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-}
-
-const ENDPOINT_NAME = `E2E Policy ${nonce}`
-
 test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4ab)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
@@ -309,7 +281,6 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
   }) => {
     const asks = recordAskSessions(page)
     await openApp(page)
-    await configureAssistant(page, ENDPOINT_NAME)
     await backToTerminal(page)
 
     // ── The session this person is working in, established by the product's

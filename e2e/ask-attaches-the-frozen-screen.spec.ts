@@ -11,7 +11,7 @@
  *
  * So this spec asserts the two halves of being told, and scripts NO tool call:
  *  - the chip a person reads says the frozen screen is attached, and
- *  - the system prompt the backend built names an automatic attachment with
+ *  - the turn facts the backend built name an automatic attachment with
  *    the id session.read accepts.
  */
 import { expect, type Page } from '@playwright/test'
@@ -23,13 +23,12 @@ import {
   appReadyForInput,
   VaultBackend,
   bindEndpoint,
-  createAiEndpoint,
   promptReady,
-  setDefaultModel,
-  settingsReady,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
+import { terminalContext } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -40,14 +39,11 @@ const GRANT_CHIP = '.pane.active [data-control="grant"]'
 const FREEZE = '.pane.active .nocx-editor [role="status"]'
 const RUNNING_BLOCK = '.pane.active .cmd-block.cmd-block-running'
 const APPROVAL_TITLE = 'This action needs your approval'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 
 const test = base
 const nonce = Date.now().toString(36)
 const INITIAL = `NOCX-FROZEN-${nonce}`
 const READY = `frozen-ready-${nonce}`
-const ENDPOINT_NAME = `E2E Frozen Attachment ${nonce}`
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -63,7 +59,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-hp8p2-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-hp8p2-job-'))
   scriptPath = join(fixtureDir, 'fullscreen-job.sh')
   topLikePath = join(fixtureDir, 'top-like-job.sh')
@@ -206,13 +202,11 @@ test.describe('the assistant is told the frozen screen came with the question (n
       name: 'a full-screen program on the alternate screen',
       script: () => scriptPath,
       fullscreen: true,
-      endpoint: `${ENDPOINT_NAME} — alt`,
     },
     {
       name: 'a full-viewport program in the normal buffer (the `top` shape)',
       script: () => topLikePath,
       fullscreen: false,
-      endpoint: `${ENDPOINT_NAME} — normal`,
     },
   ]) {
     test(`summoning over ${program.name} attaches its screen to the ask`, async ({ page }) => {
@@ -223,19 +217,6 @@ test.describe('the assistant is told the frozen screen came with the question (n
       await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
       await appReadyForInput(page)
 
-      await page.keyboard.press('Meta+,')
-      await settingsReady(page)
-      await page.locator(SETTINGS_AI_NAV).click()
-      await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-      await createAiEndpoint(page, {
-        name: program.endpoint,
-        baseUrl: fake.baseUrl(),
-        models: ['e2e-model'],
-        key: `e2e-key-${nonce}`,
-        vaultPassphrase: `vault-pass-${nonce}`,
-      })
-      await page.locator(SETTINGS_ROLES_NAV).click()
-      await setDefaultModel(page, program.endpoint, 'e2e-model')
       await page.locator(TITLE).first().click()
       await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
       await promptReady(page)
@@ -360,9 +341,7 @@ test.describe('the assistant is told the frozen screen came with the question (n
       expect(priorConnections).not.toContain(delivered[0].connectionId)
       expect(fake.rejectedReuses()).toHaveLength(rejectedBefore)
       const body = delivered[0].body
-      const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-      const system = (parsed.messages ?? []).find((m) => m.role === 'system')?.content ?? ''
-      expect(system).toContain('A frozen screen was attached automatically')
+      expect(terminalContext(body)).toContain('A frozen screen was attached automatically')
 
       // Release the program and let the pane come back to a prompt: the
       // backend outlives this test and restores its tabs into the next one.
@@ -381,19 +360,6 @@ test.describe('the assistant is told the frozen screen came with the question (n
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
     await appReadyForInput(page)
 
-    await page.keyboard.press('Meta+,')
-    await settingsReady(page)
-    await page.locator(SETTINGS_AI_NAV).click()
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-    await createAiEndpoint(page, {
-      name: `${ENDPOINT_NAME} — approved`,
-      baseUrl: fake.baseUrl(),
-      models: ['e2e-model'],
-      key: `e2e-key-${nonce}`,
-      vaultPassphrase: `vault-pass-${nonce}`,
-    })
-    await page.locator(SETTINGS_ROLES_NAV).click()
-    await setDefaultModel(page, `${ENDPOINT_NAME} — approved`, 'e2e-model')
     await page.locator(TITLE).first().click()
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
     await promptReady(page)
@@ -414,7 +380,7 @@ test.describe('the assistant is told the frozen screen came with the question (n
     await expect(page.locator(FREEZE)).toBeVisible({ timeout: 15_000 })
 
     // The id the product itself attached — the same one the model is handed
-    // in the system prompt and hands back to session.read.
+    // in the turn facts and hands back to session.read.
     const itemId = await page.evaluate(
       () =>
         document

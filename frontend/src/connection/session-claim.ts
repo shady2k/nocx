@@ -42,6 +42,11 @@ export function isProvenSessionAbsence(err: unknown): boolean {
   return claimRefusalReason(err) === 'unknown-session'
 }
 
+/** Definitive absence after a restart, answered by the backend, not inventory inference. */
+export function isEndedAfterRestart(err: unknown): boolean {
+  return claimRefusalReason(err) === 'session-ended-after-restart'
+}
+
 /** The binding is stale, and the session can be claimed again under this
  *  incarnation (nocx-xn63t.6.33). */
 export function isForeignBinding(err: unknown): boolean {

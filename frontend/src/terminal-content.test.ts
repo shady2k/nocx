@@ -3989,6 +3989,92 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   // write happens after the attempt round trip, and .sendIntent uses
   // THIS.session — the new one — so an unfenced write reconnects a command into
   // a shell nobody typed it for.
+  it('a local pane shows the ordinary open offer only after an interrupted session is confirmed ended by restart', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = client._sessions[0]
+      const exit = session.onExit.mock.calls[0]?.[0] as
+        ((fact: import('./generated/exit').Exit) => void) | undefined
+      expect(exit).toBeDefined()
+      const identity = {
+        sessionId: session.sessionId,
+        instanceId: 'test-instance',
+        sessionEpoch: 1,
+      }
+      const head = () =>
+        (content as unknown as { _connectionHead: { element: HTMLElement } | null })._connectionHead
+      expect(head()).toBeNull()
+      exit!({ ...identity, cause: 'interrupted' })
+      expect(head()).toBeNull()
+      expect(await content.pressReconnect()).toBe(false)
+      exit!({ ...identity, cause: 'backend-restarted' })
+      await vi.waitFor(() => expect(head()?.element.textContent).toContain('Reconnect'))
+      expect(tab.pane.firstChild).toBe(head()?.element)
+      const before = client.dispatcher.call.mock.calls.length
+      const openedBefore = client.openSession.mock.calls.length
+      expect(await content.pressReconnect()).toBe(true)
+      expect(head()).toBeNull()
+      expect(client.openSession).toHaveBeenCalledTimes(openedBefore + 1)
+      expect(client._sessions[client._sessions.length - 1]?.sessionId).not.toBe(session.sessionId)
+      const calls = client.dispatcher.call.mock.calls.slice(before)
+      expect(calls.some(([method]) => method === 'pane.reconnect')).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it.each([
+    { profileId: 'saved-route', host: 'example.test' },
+    { profileId: '', host: 'unsaved.example' },
+  ])('a backend restart end opens again through its persisted route $host', async (route) => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: route,
+      },
+      client,
+    )
+    try {
+      const session = client._sessions[0]
+      const exit = session.onExit.mock.calls[0]?.[0] as
+        ((fact: import('./generated/exit').Exit) => void) | undefined
+      expect(exit).toBeDefined()
+      expect(await content.pressReconnect()).toBe(false)
+      exit!({
+        sessionId: session.sessionId,
+        instanceId: 'test-instance',
+        sessionEpoch: 1,
+        cause: 'backend-restarted',
+      })
+      await vi.waitFor(() =>
+        expect(
+          (content as unknown as { _connectionHead: { element: HTMLElement } })._connectionHead
+            .element.textContent,
+        ).toContain('Reconnect'),
+      )
+      const before = client.dispatcher.call.mock.calls.length
+      expect(await content.pressReconnect()).toBe(true)
+      const calls = client.dispatcher.call.mock.calls.slice(before)
+      expect(calls.some(([method]) => method === 'pane.reconnect')).toBe(false)
+      expect(calls).toEqual(
+        expect.arrayContaining([
+          expect.arrayContaining([
+            'open',
+            expect.objectContaining(
+              route.profileId
+                ? { kind: 'ssh', profileId: route.profileId }
+                : { kind: 'ssh', host: route.host },
+            ),
+          ]),
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('a released command whose session is replaced before its write is dropped (sequence 8)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

@@ -1,3 +1,4 @@
+import { t } from './i18n/locale-model'
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
 import { Dispatcher, RpcError, type CallOptions, type PendingCallView } from './dispatcher'
@@ -38,7 +39,7 @@ import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import { log } from './log'
-import { isForeignBinding } from './connection/session-claim'
+import { isEndedAfterRestart, isForeignBinding } from './connection/session-claim'
 
 /** Refusals whose answer cannot change for this incarnation of the session: a
  *  second attempt costs a round trip and is refused for the same reason. Every
@@ -1068,12 +1069,21 @@ export class WSClient {
       const wellFormed =
         cause === 'exited'
           ? Number.isInteger(raw.status)
-          : cause === 'interrupted' && !('status' in raw)
+          : (cause === 'interrupted' || cause === 'backend-restarted') && !('status' in raw)
       if (!wellFormed) return
       const exit = { ...raw, sessionId: sid, instanceId, sessionEpoch } as unknown as Exit
       this._flushAck(sid)
+      if (cause === 'interrupted' && state) {
+        // A lost helper channel does not prove the shell ended. Retain its
+        // identity for the next backend claim, but never its input access.
+        state.protocolBlocked = true
+        this._setAttachment(state, {
+          kind: 'unavailable',
+          message: t('connection.sessionInterrupted', 'The session connection was interrupted.'),
+        })
+      }
       state?.exitCallback?.(exit)
-      this.sessions.delete(sid)
+      if (cause !== 'interrupted') this.sessions.delete(sid)
     })
 
     // The backend revised what it believes about reaching a session
@@ -1385,6 +1395,7 @@ export class WSClient {
   // document is handed over as parsed, refusals and all.
   private _routeScreenFrame(frame: DecodedFrame): void {
     const state = this.sessions.get(frame.sessionId)
+    if (state?.protocolBlocked) return
     if (!state) {
       log.debug('nocx: screen frame dropped: unknown session', {
         sessionId: frame.sessionId,
@@ -1628,6 +1639,16 @@ export class WSClient {
         // again under the live incarnation (nocx-xn63t.6.33). The verdict is
         // the connection owner's reading (src/connection/session-claim.ts),
         // never a message match here.
+        if (isEndedAfterRestart(err)) {
+          state.exitCallback?.({
+            sessionId,
+            instanceId: state.instanceId,
+            sessionEpoch: state.sessionEpoch,
+            cause: 'backend-restarted',
+          })
+          this.sessions.delete(sessionId)
+          return 'lost'
+        }
         if (isForeignBinding(err)) return this._reclaimReAdopted(sessionId, state)
         return this._attachUnavailable(sessionId, state, err)
       })
@@ -1884,7 +1905,8 @@ export class WSClient {
   sendToSession(sessionId: string, data: string): void {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    if (!this.sessions.has(sessionId)) return
+    const state = this.sessions.get(sessionId)
+    if (!state || state.protocolBlocked) return
     const error = this._sessionInputError(sessionId)
     if (error) throw error
     const payload = new TextEncoder().encode(data)
@@ -1930,7 +1952,8 @@ export class WSClient {
     const closed = (): boolean =>
       this.dispatcher.socket !== ws ||
       ws.readyState !== WebSocket.OPEN ||
-      this.sessions.get(sessionId) !== state
+      this.sessions.get(sessionId) !== state ||
+      state.protocolBlocked
     state.reported = { ...size }
     const report: ResizeReport = {
       socket: ws,

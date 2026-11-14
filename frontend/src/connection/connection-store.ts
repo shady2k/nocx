@@ -22,6 +22,7 @@
 
 import type { PaneConnection } from '../generated/pane.connection'
 import type { PaneOpened } from '../generated/pane.opened'
+import type { Exit } from '../generated/exit'
 import { connectionCondition, type ConnectionCondition } from '../connection-condition'
 
 /** The narrow subscription seam this module needs. The dispatcher implements
@@ -31,9 +32,8 @@ export interface ConnectionSource {
   subscribe(method: string, handler: (params: unknown) => void): () => void
 }
 
-/** One pane's applied observation. The backend's answer is the whole of it:
- *  an exit is the session's end, not the connection's verdict (design §5.6),
- *  so nothing about it is folded here. */
+/** One pane's applied connection observation. A restart's explicit session
+ * end is stored separately; it never becomes an invented observation. */
 export interface PaneConnectionState {
   readonly observation: PaneConnection
 }
@@ -229,6 +229,7 @@ function parseTransport(value: unknown): boolean {
  */
 export class ConnectionStore {
   private state: PaneConnectionState | null = null
+  private endedAfterRestart = false
   private lastEpoch = 0
   private generation = 0
   private openedGeneration = 0
@@ -261,9 +262,32 @@ export class ConnectionStore {
     return this.state
   }
 
+  /** A session end is distinct from a connection observation. Only the
+   * backend's explicit restart verdict permits ordinary open again. */
+  sessionEnded(exit: Pick<Exit, 'cause'>): void {
+    if (exit.cause !== 'backend-restarted') return
+    this.endedAfterRestart = true
+    this.state = null
+    this.emit()
+  }
+
+  restartEnded(): boolean {
+    return this.endedAfterRestart
+  }
+
+  beginOpen(): void {
+    this.endedAfterRestart = false
+    this.state = null
+    this.lastEpoch = 0
+    this.generation = 0
+    this.openedGeneration = 0
+    this.observedBackend = null
+    this.emit()
+  }
+
   /** The one condition a mark or a tab draws, from the one fold. */
   condition(): ConnectionCondition {
-    return connectionCondition(this.state?.observation ?? null)
+    return this.endedAfterRestart ? 'lost' : connectionCondition(this.state?.observation ?? null)
   }
 
   /** The button's offer, or null when the backend offers nothing. Its
@@ -332,10 +356,6 @@ export class ConnectionStore {
     this.emit()
   }
 
-  /** The session's own end, when it was a loss. A clean exit closes the tab
-   *  and never reaches a connection state; a loss is the fact the head's
-   *  `lost` paragraph is for, and it outranks a `connected` observation that
-   *  was minted before the channel died. */
   private emit(): void {
     for (const listener of [...this.listeners]) listener()
   }

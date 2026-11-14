@@ -475,6 +475,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connection.retryShellTitle': 'Open a new shell on this connection',
   'connection.shellFailed': 'Shell failed',
   'connection.lost': 'Connection lost',
+  'connection.sessionInterrupted': 'The session connection was interrupted.',
+  'connection.backendRestarted': 'The backend restarted and this shell is gone',
   'connection.notAnswering': 'Host not answering',
   'connection.endsShells': 'ends {n} shell(s)',
   'connection.connecting': 'Connecting',

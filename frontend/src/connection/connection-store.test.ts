@@ -48,6 +48,26 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
   }
 }
 
+describe('backend restart session end', () => {
+  it('offers an ordinary open only for the authoritative restart exit, cleared by a new bind', () => {
+    const wire = source()
+    const store = new ConnectionStore(wire, 'pane-1')
+    wire.deliver('pane.connection', observation({ connectionEpoch: 90, generation: 9 }))
+    expect(store.restartEnded()).toBe(false)
+    store.sessionEnded({ cause: 'interrupted' })
+    expect(store.restartEnded()).toBe(false)
+    store.sessionEnded({ cause: 'backend-restarted' })
+    expect(store.condition()).toBe('lost')
+    expect(store.restartEnded()).toBe(true)
+    expect(store.offer()).toBeNull()
+    store.beginOpen()
+    expect(store.restartEnded()).toBe(false)
+    wire.deliver('pane.connection', observation({ instanceId: 'new-backend' }))
+    expect(store.current()?.observation.instanceId).toBe('new-backend')
+    store.dispose()
+  })
+})
+
 describe('replacement open notifications', () => {
   it('delivers only current replacement opens, independently of session observations', () => {
     const wire = source()

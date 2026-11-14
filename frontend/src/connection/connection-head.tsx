@@ -29,7 +29,6 @@ import { Show, createEffect, createRoot, createSignal } from 'solid-js'
 import { render } from 'solid-js/web'
 
 import type { PaneConnection } from '../generated/pane.connection'
-import { connectionCondition } from '../connection-condition'
 import type { ConnectionStore } from './connection-store'
 import { createCommandBlockFrame } from '../ui/command-block-frame'
 import { Button } from '../ui/button'
@@ -297,18 +296,28 @@ export function mountConnectionHead(
   const [observation, setObservation] = createSignal<PaneConnection | null>(
     deps.store.current()?.observation ?? null,
   )
+  const [restartEnded, setRestartEnded] = createSignal(deps.store.restartEnded())
   const [pressed, setPressed] = createSignal(false)
   const startedAt = Date.now()
   const [now, setNow] = createSignal(startedAt)
   const tick = window.setInterval(() => setNow(Date.now()), 1000)
 
   const facts = (): HeadFacts => {
+    if (restartEnded())
+      return {
+        state: 'ended',
+        text: t('connection.backendRestarted', 'The backend restarted and this shell is gone'),
+        tone: 'bad',
+        busy: false,
+        offer: { endsShells: 0, shellOnly: false },
+      }
     const offer = deps.store.offer()
     return factsFor(observation(), startedAt, now(), offer?.endsShells ?? null)
   }
 
   const unsubscribe = deps.store.onChange(() => {
     setObservation(deps.store.current()?.observation ?? null)
+    setRestartEnded(deps.store.restartEnded())
     // A NEW OBSERVATION IS A NEW ANSWER: the press that was in flight has been
     // answered (or the connection moved on), so the button is live again.
     setPressed(false)
@@ -361,7 +370,7 @@ export function mountConnectionHead(
     const current = facts()
     frame.header.dataset.state = current.state
     frame.header.dataset.tone = current.tone
-    frame.header.dataset.condition = connectionCondition(observation())
+    frame.header.dataset.condition = deps.store.condition()
     if (current.stage === undefined) delete frame.header.dataset.stage
     else frame.header.dataset.stage = current.stage
     if (observation()?.shellFailure !== undefined) {

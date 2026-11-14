@@ -3256,6 +3256,13 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
+  private _mountConnectionHead(target: HTMLElement): void {
+    this._connectionHead = mountConnectionHead(target, {
+      store: this._connectionStore,
+      onReconnect: () => void this.reconnectFromHead(),
+    })
+  }
+
   async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this._disposed) return
     this.host = host
@@ -3272,10 +3279,7 @@ export class TerminalContent extends BasePaneContent {
     // after the backend's first observation. It claims nothing until that
     // observation arrives; the placement below moves it above the transcript.
     if (this.sshOpts !== undefined) {
-      this._connectionHead = mountConnectionHead(target, {
-        store: this._connectionStore,
-        onReconnect: () => void this.reconnectFromHead(),
-      })
+      this._mountConnectionHead(target)
     }
 
     // Wire the signal: if the tab is disposed during mount, abort.
@@ -5168,6 +5172,26 @@ export class TerminalContent extends BasePaneContent {
    */
   private async reconnectFromHead(): Promise<boolean> {
     if (this._disposed) return false
+    if (this._connectionStore.restartEnded()) {
+      // A local pane has no connection observations to drive a persistent
+      // head after reopening. Its temporary ended-session offer is over.
+      if (this.sshOpts === undefined) {
+        this._connectionHead?.dispose()
+        this._connectionHead = null
+      }
+      this._connectionStore.beginOpen()
+      this.scrollback?.blockManager.markReconnected()
+      try {
+        return (await this._bindSession(new AbortController().signal, 'rebind')) === 'bound'
+      } catch (err) {
+        showToast({ level: 'danger', message: String(err) })
+        log.warn('nocx: opening the ended pane again failed', {
+          pane: this.pane.paneId,
+          error: String(err),
+        })
+        return false
+      }
+    }
     const offer = this._connectionStore.offer()
     if (offer === null) return false
     try {
@@ -6001,11 +6025,17 @@ export class TerminalContent extends BasePaneContent {
       this.hooks.onPaneObservationChange?.(observation.state, observation.children ?? [])
     })
     session.onExit((exit) => {
-      // The connection store's one fact about an end comes through here as
-      // well as through its own `exit` subscription: the pane already holds
-      // the authoritative event, and an embedding that drives the handle
-      // directly (a test, a host without the socket) must reach the same
-      // owner rather than a second one.
+      // The handle delivers the backend's session end. The store keeps the
+      // explicit restart verdict separate from connection observations, so
+      // the head can offer ordinary open again without inventing a binding.
+      this._connectionStore.sessionEnded(exit)
+      if (
+        exit.cause === 'backend-restarted' &&
+        this._connectionHead === null &&
+        this._paneTarget !== null
+      ) {
+        this._mountConnectionHead(this._paneTarget)
+      }
       log.info('nocx: session exited', {
         sid: exit.sessionId,
         cause: exit.cause,
@@ -6023,7 +6053,7 @@ export class TerminalContent extends BasePaneContent {
       this.hooks.onActiveOriginChange?.()
       this._projections?.reset()
       this.lifecycle.reset()
-      if (exit.cause === 'interrupted') {
+      if (exit.cause === 'interrupted' || exit.cause === 'backend-restarted') {
         // AND THE HELD ROWS COME BACK (nocx-djx1u). The running block's body
         // holds the rows its painted screen has not passed; the screen that
         // was going to pass them is on a channel that just failed, so the body

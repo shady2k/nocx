@@ -804,8 +804,9 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 // operations (SessionOperation via ForSession) plus the transport lanes. It
 // needs the connection's connState (session ownership checks) per call.
 type sessionOpsHandlers struct {
-	ops *capability.SessionOperations // nil → session store not wired
-	r   Responder
+	ops  *capability.SessionOperations // nil → session store not wired
+	live capability.SessionOperation
+	r    Responder
 	// instance is THIS backend's identity, read from the registry at
 	// construction and held as a value: a claim is judged against it, and the
 	// judgement must be possible when the registry holds nothing. A value
@@ -1033,13 +1034,25 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 
 	sid := session.ID(params.SessionID)
 
-	// The instance is judged before the session is looked up at all, so a
-	// claim carried across a coordinator restart is answered "that is a
-	// different backend" rather than "no such session" — see judgeClaim.
-	// ForSession's own failure is indistinguishable from an unknown session,
-	// so it is answered in the claim's vocabulary too.
+	// A foreign claim first asks the authoritative inventory whether its
+	// shell survived. A live shell needs re-adoption; only confirmed absence
+	// means the old session ended when the backend restarted.
 	if foreignInstance(h.instance, params.InstanceID) {
-		_ = r.TryError(req.ID, foreignInstanceRefusal())
+		// Inventory is read under the same gate as sessions.live. A stale
+		// identity alone says nothing about whether its helper shell survived.
+		err := h.live.Run(ctx, func(_ context.Context, svc capability.SessionService) error {
+			for _, sess := range svc.List() {
+				if sess.ID() == sid {
+					_ = r.TryError(req.ID, foreignInstanceRefusal())
+					return nil
+				}
+			}
+			_ = r.TryError(req.ID, refuseClaim(reasonSessionEndedAfterRestart, "The backend restarted and no longer holds this session"))
+			return nil
+		})
+		if err != nil {
+			answerOperationRefusal(r, req, err)
+		}
 		return
 	}
 
@@ -1450,7 +1463,7 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
 		keyedBySession(reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
+			h := sessionOpsHandlers{ops: sessionOps, live: liveOp, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		})),
 		// Recovery metadata shares the session operation queue with attach and

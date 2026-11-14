@@ -41,11 +41,12 @@ import (
 // The set is closed and each member is a different fact about the claim:
 const (
 	// reasonForeignInstance: the claim names a backend instance that is not
-	// this one. Every session that instance held died with it, so the claim
-	// could never be true here — as opposed to merely not being true now.
-	// This is the answer a binding remembered across a coordinator restart
-	// gets, and it is why the instance is judged before anything is looked up.
+	// this one. The binding is stale, but its helper shell may still be
+	// alive. Attach checks the authoritative inventory before answering:
+	// a live id keeps this verdict and can be re-adopted under its new identity.
 	reasonForeignInstance = "foreign-instance"
+	// A foreign claim whose session is absent from the authoritative inventory.
+	reasonSessionEndedAfterRestart = "session-ended-after-restart"
 	// reasonForeignIncarnation: this instance, this session id, a different
 	// epoch. The id resolves and it is not the session the claim was written
 	// against — the ambiguity the identity exists to remove (nocx-3oupk).
@@ -248,9 +249,9 @@ func judgeClaim(mine session.InstanceID, claimedInstance string, claimedEpoch ui
 // foreignInstance reports whether a claim names a backend instance that is not
 // this one. Its own function because it is the one component of a claim that
 // can be judged with nothing looked up, and two callers need exactly that: the
-// attach handler asks BEFORE resolving the session id (so a binding from a dead
-// coordinator is not reported as a bad id), and judgeClaim asks again as the
-// first of the three verdicts. One owner, two moments.
+// attach handler asks before looking for a surviving shell in the inventory,
+// and judgeClaim asks again as the first of the three binding verdicts.
+// One owner, two moments.
 func foreignInstance(mine session.InstanceID, claimed string) bool {
 	return claimed != "" && session.InstanceID(claimed) != mine
 }

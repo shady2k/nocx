@@ -310,3 +310,28 @@ func TestShellRetryContractKeepsFailureSeparateFromConnection(t *testing.T) {
 	raw, _ = json.Marshal(p)
 	validateJSON(t, schema, raw, "retained shell refusal after transport failure")
 }
+
+func TestShellFailureContractRejectsStrandedOrAdoptedPane(t *testing.T) {
+	schema := loadSchema(t, "pane.connection.schema.json")
+	for _, state := range []string{"connected", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			p := paneConnectionStates()[state]
+			p.SessionID = ""
+			p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault"}
+			if state == "connected" {
+				raw, _ := json.Marshal(p)
+				if validateJSONErr(schema, raw) == nil {
+					t.Error("connected shell failure without recovery offer was accepted")
+				}
+				p.Reconnect = &PaneConnectionReconnect{EndsShells: 0}
+			}
+			raw, _ := json.Marshal(p)
+			validateJSON(t, schema, raw, "shell failure with recovery offer")
+			p.SessionID = "new-shell"
+			raw, _ = json.Marshal(p)
+			if validateJSONErr(schema, raw) == nil {
+				t.Error("shell failure alongside adopted session was accepted")
+			}
+		})
+	}
+}

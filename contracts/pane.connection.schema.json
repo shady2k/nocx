@@ -14,7 +14,15 @@
         "required": ["shellFailure"],
         "properties": { "reconnect": { "properties": { "endsShells": { "const": 0 } } } }
       }
-    }
+    },
+    {
+      "if": {
+        "properties": { "transport": { "properties": { "state": { "const": "connected" } } } },
+        "required": ["shellFailure"]
+      },
+      "then": { "required": ["reconnect"] }
+    },
+    { "not": { "required": ["shellFailure", "sessionId"] } }
   ],
   "additionalProperties": false,
   "required": [

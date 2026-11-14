@@ -1068,6 +1068,15 @@ type WSServer struct {
 	tunnelMu     sync.Mutex
 	tunnels      map[string]*tunnel.Tunnel
 	ownerTunnels map[*wsConn]map[string]struct{}
+	// paneMu guards the pane half of the connection map: which renderer a
+	// pane's notifications go to, and the newest epoch sent for it
+	// (ws_pane_connection.go). It is separate from connsMu because a
+	// notification is written per observation, while connsMu is taken at
+	// accept and teardown.
+	paneMu     sync.Mutex
+	paneSubs   map[string]*wsConn
+	paneEpochs map[string]uint64
+
 	// connsMu protects conns and connsRegistered. One entry per active
 	// WebSocket connection.
 	connsMu sync.Mutex
@@ -3551,6 +3560,10 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	state.mu.Unlock()
+	// A pane's state notification has no reader once its window is gone; the
+	// binding would otherwise keep a dead connection alive for the life of
+	// the process (ws_pane_connection.go).
+	s.unbindPanesFor(wconn)
 
 	// Back to the named default, one session at a time. NoClient is the report
 	// rather than a size, because that is what is true: nobody is measuring

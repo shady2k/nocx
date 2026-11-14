@@ -51,6 +51,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -429,6 +430,12 @@ type localHelperOpener struct {
 	// process's OWN endpoint is a fact this process knows and the daemon
 	// cannot, so it says it per pane.
 	toolSocketPath string
+	// paneConns maps each pane to the SSH connection it rides, and turns the
+	// helper's observations of that connection into what each pane is told
+	// (internal/panedriver, design §5.6). It is set at New and never replaced;
+	// nil is a wiring for a backend that opens no SSH pane, and then an
+	// observation is dropped, which is the truth for a pane nobody can name.
+	paneConns *panedriver.Driver
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
 	client *helperclient.Client
@@ -551,6 +558,14 @@ func (o *localHelperOpener) setSSHTargets(resolver sshTargetResolver) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.sshTargets = resolver
+}
+
+// paneConnections answers the driver this opener reports connection state
+// through, read under the opener's own lock with the rest of its wiring.
+func (o *localHelperOpener) paneConnections() *panedriver.Driver {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.paneConns
 }
 
 // resolveTarget is the read side of the setter above, under the same lock, so a
@@ -801,6 +816,16 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		return transport.HostedSessionOpen{}, true, c, fmt.Errorf("open a pane on this machine's helper: %w", err)
 	}
 	sid := res.Session.ID()
+	// The shell exists now, and the pane's head learns its session id on the
+	// same notification that has been telling it about the connection all
+	// along (design §5.6). It is a separate observation rather than a field
+	// repeated on every later one: a state that did not change must not look
+	// like one that did.
+	if cfg.PaneID != "" {
+		if driver := o.paneConnections(); driver != nil {
+			driver.AdoptSession(cfg.PaneID, string(sid), string(res.Session.Identity().InstanceID))
+		}
+	}
 	// Adoption transferred the shell to the registry, but no pane owns it
 	// until this open succeeds. A later refusal ends that ownership; Close
 	// would only detach and strand both the registry entry and helper budget.
@@ -999,6 +1024,21 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
+	}
+	// THE PANE IS BOUND TO ITS CONNECTION BEFORE ANYTHING DIALS (design §5.5,
+	// §5.6). The helper derives the identity its own acquire will use from the
+	// destination, so this costs no socket and no credential question; what it
+	// buys is that the first observation of the dial — opening, at a stage —
+	// reaches the pane while the shell does not exist yet. Binding after the
+	// spawn would deliver exactly the news the pane was opened for to nobody.
+	if cfg.PaneID != "" {
+		connectionID, cerr := spawn.client.ConnectionID(ctx, ssh.WireDestination(target))
+		if cerr != nil {
+			return hostedSpawnResult{}, fmt.Errorf("name the ssh pane's connection: %w", cerr)
+		}
+		if driver := o.paneConnections(); driver != nil {
+			driver.Bind(cfg.PaneID, connectionID)
+		}
 	}
 	// THE GENERATION THE LAUNCH NAMES HAS TO BE ON THE FAR SIDE BEFORE THE
 	// LAUNCH IS ASKED FOR (nocx-50w7p.21).
@@ -1577,7 +1617,7 @@ func (o *localHelperOpener) reattachedConn(sid session.ID) (localSessionConn, bo
 
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
-	installed, dir, existing, reverse := o.installed, o.dir, o.client, o.reverse
+	installed, dir, existing, reverse, paneConns := o.installed, o.dir, o.client, o.reverse, o.paneConns
 	installFailure := o.installFailure
 	o.mu.Unlock()
 
@@ -1609,6 +1649,14 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		// connection is built from, so a connection is opened with ONE view of
 		// what this coordinator can answer.
 		Reverse: reverse,
+		// THE CONNECTION'S OBSERVATIONS COME BACK ON THIS CONNECTION (design
+		// §5.6): the helper that dials reports each pane's connection state
+		// here, and the driver maps it to the panes bound to that connection.
+		OnConnectionEvent: func(ev proto.ConnectionStateEvent) {
+			if paneConns != nil {
+				paneConns.Apply(ev)
+			}
+		},
 	})
 	if err != nil {
 		o.mu.Lock()

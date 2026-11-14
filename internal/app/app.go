@@ -59,6 +59,7 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/peerpin"
@@ -827,6 +828,13 @@ func New(opts ...Option) (*App, error) {
 	// Reg.Open says so by name when something asks it for a local session
 	// anyway, in the same words it has always used for a missing ssh factory.
 	sess := session.New(logger, nil)
+	// THE PANE'S CONNECTION MAP, built with the registry so its instance id is
+	// the one every notification carries (design §5.6). The publisher is bound
+	// later, when the transport exists — the same late-binding the opener's
+	// other transport halves get — and until then nothing is attached to hear
+	// an observation.
+	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger))
+	localOpener.paneConns = paneConns
 
 	// SSH config resolver: shared by both the SSH client and the profile
 	// resolver so the authorization comparison matches canonical hostnames.
@@ -2126,6 +2134,12 @@ func New(opts ...Option) (*App, error) {
 	helperReg.publishScreen = tp.PublishScreenFrame
 	localOpener.publishEffect = tp.PublishSessionEffect
 	localOpener.blockRows = tp
+	// THE LAST MILE OF pane.connection (design §5.6): the driver decides what a
+	// pane is told, and the transport addresses that pane's own renderer and
+	// refuses an epoch it has already moved past.
+	paneConns.SetPublisher(func(snapshot panedriver.Snapshot) {
+		tp.PublishPaneConnection(paneConnectionWire(snapshot))
+	})
 	helperReg.publishEffect = tp.PublishSessionEffect
 	helperReg.blockRows = tp
 	// The two row buffers are the person's settings (nocx-2v80t.3.36): the

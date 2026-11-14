@@ -137,6 +137,12 @@ type openMachine interface {
 	recordPublishFailure(sid session.ID, reason shellintegration.PublishFailureReason)
 	// resendScreen is sessionMachine's, for the same install on this path.
 	resendScreen(ctx context.Context, sid session.ID)
+	// bindPane points a pane's connection notifications at the renderer that
+	// opened it (ws_pane_connection.go). Called BEFORE the open's own work:
+	// the first observation can arrive while the dial is still opening, and a
+	// binding installed after the ack would miss the stage the pane exists
+	// for.
+	bindPane(paneID string, wconn *wsConn)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -466,6 +472,12 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			},
 		}
 	}
+
+	// THE PANE'S ROUTE IS BOUND BEFORE ANYTHING DIALS (design §5.5, §5.6).
+	// The connection's first observation is opening, and it is the pane's
+	// first news; binding after the open returned would deliver it to nobody.
+	// A pane with no id has no renderer to address and is not bound.
+	h.sess.bindPane(params.PaneID, wconn)
 
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {

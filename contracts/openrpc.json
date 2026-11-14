@@ -25672,6 +25672,9 @@
       "$ref": "https://nocx.local/contracts/operation.rowDone.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/pane.connection.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/panes.close.schema.json"
     },
     {

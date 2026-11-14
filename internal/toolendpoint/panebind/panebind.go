@@ -188,7 +188,13 @@ func EncodeToken(token string) ([]byte, error) {
 // ReadToken reads one bearer, never past it.
 func ReadToken(r io.Reader) (string, error) {
 	buf := make([]byte, TokenLen)
-	if _, err := io.ReadFull(r, buf); err != nil {
+	if _, err := io.ReadFull(r, buf[:1]); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
+	}
+	if buf[0] != TokenMagic[0] {
+		return "", ErrNotAToken
+	}
+	if _, err := io.ReadFull(r, buf[1:]); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
 	}
 	if string(buf[:len(TokenMagic)]) != TokenMagic || buf[TokenLen-1] != '\n' || !isTokenHex(string(buf[len(TokenMagic):TokenLen-1])) {

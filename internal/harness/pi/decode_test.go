@@ -81,3 +81,47 @@ func TestDecoderMapsStreamingAndTools(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 }
+
+func TestCancellationSettlesAsFailureEvenAfterCompletedAnswer(t *testing.T) {
+	state := &cancelState{}
+	decode := newDecoder(state)
+	if _, err := decode([]byte(`{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"answer"}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	state.requested.Store(true)
+	events, err := decode([]byte(`{"type":"agent_settled","aborted":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != harness.EventFailure || events[0].Failure.Reason != "cancelled" {
+		t.Fatalf("cancelled settlement = %+v", events)
+	}
+}
+
+func TestHandledPromptEndsWithExplicitFailure(t *testing.T) {
+	decode := newDecoder()
+	events, err := decode([]byte(`{"type":"response","command":"prompt","success":true,"data":{"disposition":"handled"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != harness.EventFailure || events[0].Failure == nil || events[0].Failure.Reason != "pi extension handled the prompt without an answer" {
+		t.Fatalf("handled prompt response = %+v", events)
+	}
+}
+
+func TestCancellationSuppressesLateStreamingAndTools(t *testing.T) {
+	state := &cancelState{}
+	decode := newDecoder(state)
+	state.requested.Store(true)
+	for _, line := range []string{
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"late"}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"late"}}`,
+		`{"type":"tool_execution_start","toolName":"probe","toolCallId":"call"}`,
+		`{"type":"tool_execution_end","toolName":"probe","toolCallId":"call"}`,
+	} {
+		events, err := decode([]byte(line))
+		if err != nil || len(events) != 0 {
+			t.Fatalf("cancelled stream = %+v, %v", events, err)
+		}
+	}
+}

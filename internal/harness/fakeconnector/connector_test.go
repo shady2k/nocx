@@ -29,6 +29,13 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	script := protocol.Script{EnvironmentFile: path("environment"), PIDFile: path("agent.pid"), PromptFile: path("prompt"), ResultFile: path("result"), HangFile: path("hang")}
 	end := protocol.Step{Kind: protocol.StepEnd, Model: "fake-model", Usage: &protocol.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2}}
 	switch setup.Scenario {
+	case harnesstest.ModelPin:
+		script.DefaultModelFile = path("default-model")
+		if err := os.WriteFile(script.DefaultModelFile, []byte("fake-model"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		end.Model = ""
+		script.Steps = []protocol.Step{{Kind: protocol.StepAnswer, Text: "answer"}, end}
 	case harnesstest.Ordered:
 		script.Gate = path("gate")
 		if err := syscall.Mkfifo(script.Gate, 0o600); err != nil {
@@ -51,6 +58,12 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	}
 	return harnesstest.Fixture{
 		Harness: fakeconnector.New(fakeconnector.Config{AgentPath: setup.AgentPath, Script: script}), Model: "fake-model", ToolName: "probe",
+		ChangeDefaultModel: func() string {
+			if err := os.WriteFile(script.DefaultModelFile, []byte("changed-model"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return "changed-model"
+		},
 		Release: func() { harnesstest.ReleaseGate(t, script.Gate) },
 		Ready: func() {
 			switch setup.Scenario {

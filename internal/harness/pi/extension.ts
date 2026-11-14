@@ -1,7 +1,14 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, unlinkSync } from 'node:fs'
 
 export default function (pi) {
-  const turn = JSON.parse(readFileSync(process.env.NOCX_PI_TURN_FILE, 'utf8'))
+  const configPath = process.env.NOCX_PI_TURN_FILE
+  let turn
+  try {
+    turn = JSON.parse(readFileSync(configPath, 'utf8'))
+  } finally {
+    unlinkSync(configPath)
+    delete process.env.NOCX_PI_TURN_FILE
+  }
   if (turn.command?.length) {
     pi.registerMcpServer('nocx', {
       command: turn.command[0],

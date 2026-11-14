@@ -55,6 +55,9 @@ func realPiDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixtu
 	if setup.Scenario == harnesstest.History {
 		responses = []fakemodel.Response{response, {Text: []string{"second answer"}}, {Text: []string{"isolated answer"}}}
 	}
+	if setup.Scenario == harnesstest.ModelPin {
+		responses = []fakemodel.Response{{Text: []string{"default answer"}}, {Text: []string{"pinned answer"}}, {Text: []string{"changed default answer"}}}
+	}
 	fake := fakemodel.New(responses...)
 	observationPath := filepath.Join(t.TempDir(), "process.json")
 	preloadPath := filepath.Join(t.TempDir(), "observe.cjs")
@@ -93,6 +96,52 @@ func realPiDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixtu
 	}
 	return harnesstest.Fixture{
 		Harness: c, Model: "nocx-test/test-model", ToolName: "mcp__nocx__probe", HostConfig: string(hostConfig),
+		WorkingDirectoryRoot: filepath.Join(c.dataDir, "pi", "workspaces"),
+		ChangeDefaultModel: func() string {
+			var agentDir string
+			for _, entry := range c.env {
+				if strings.HasPrefix(entry, "PI_CODING_AGENT_DIR=") {
+					agentDir = strings.TrimPrefix(entry, "PI_CODING_AGENT_DIR=")
+				}
+			}
+			modelsPath := filepath.Join(agentDir, "models.json")
+			raw, err := os.ReadFile(modelsPath) //nolint:gosec // isolated pi configuration
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				Providers map[string]map[string]json.RawMessage `json:"providers"`
+			}
+			if err = json.Unmarshal(raw, &config); err != nil {
+				t.Fatal(err)
+			}
+			provider := config.Providers["nocx-test"]
+			var models []map[string]any
+			if err = json.Unmarshal(provider["models"], &models); err != nil {
+				t.Fatal(err)
+			}
+			other := make(map[string]any, len(models[0]))
+			for key, value := range models[0] {
+				other[key] = value
+			}
+			other["id"], other["name"] = "other-model", "Changed default model"
+			provider["models"], err = json.Marshal(append(models, other))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err = json.Marshal(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(modelsPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			settings := []byte(`{"defaultProvider":"nocx-test","defaultModel":"other-model"}`)
+			if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), settings, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return "nocx-test/other-model"
+		},
 		Release: func() { close(gate) },
 		Ready: func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

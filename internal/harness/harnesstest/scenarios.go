@@ -20,6 +20,7 @@ import (
 type Scenario string
 
 const (
+	ModelPin     Scenario = "model-pin"
 	History      Scenario = "history"
 	Ordered      Scenario = "ordered"
 	Tool         Scenario = "tool"
@@ -58,6 +59,10 @@ type Fixture struct {
 	AgentPID         func() int
 	AgentEnvironment func() string
 	HostConfig       string
+	// ChangeDefaultModel changes native configuration and returns the new model ID.
+	ChangeDefaultModel func() string
+	// WorkingDirectoryRoot declares a connector-owned cwd instead of the pane cwd.
+	WorkingDirectoryRoot string
 }
 
 // Run applies the same behavioral assertions to every connector driver.
@@ -145,9 +150,10 @@ func Run(t *testing.T, driver Driver) {
 				}
 
 				got := f.Prompt()
-				if got.Text != "hello" || !strings.Contains(got.SystemPrompt, "system") || got.Model != f.Model || got.Dir != target {
+				if got.Text != "hello" || !strings.Contains(got.SystemPrompt, "system") || got.Model != f.Model {
 					t.Fatalf("forwarded prompt = %+v", got)
 				}
+				assertWorkingDirectory(t, f, got.Dir, target)
 
 			case Tool:
 				var started, finished *harness.ToolCall
@@ -221,6 +227,52 @@ func Run(t *testing.T, driver Driver) {
 		})
 	}
 
+	t.Run("model pin survives changed native default", func(t *testing.T) {
+		setup := DriverSetup{ModelPin, t.TempDir(), agent, server, ""}
+		f := driver(t, setup)
+		if f.ChangeDefaultModel == nil {
+			t.Skip("driver has no native default model configuration")
+		}
+		pinned := ""
+		changed := ""
+		for i := 0; i < 3; i++ {
+			chosen, want := "", f.Model
+			if i == 1 {
+				changed = f.ChangeDefaultModel()
+				if changed == "" || changed == pinned {
+					t.Fatalf("changed default = %q, pinned model = %q", changed, pinned)
+				}
+				chosen, want = pinned, pinned
+			} else if i == 2 {
+				want = changed
+			}
+			conversation := "model-pin-conversation"
+			if i == 2 {
+				conversation = "default-control"
+			}
+			turn, err := f.Harness.Run(context.Background(), harness.TurnSpec{ConversationID: conversation, Text: "hello", Model: chosen, Dir: setup.Dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			events := collect(t, turn)
+			outcome, err := turn.Wait(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) == 0 || events[len(events)-1].Kind != harness.EventEnd || events[len(events)-1].End == nil {
+				t.Fatalf("model selection events = %+v", events)
+			}
+			observed := f.Prompt().Model
+			end := events[len(events)-1].End
+			if observed != want || end.Model != want || outcome.Model != want {
+				t.Fatalf("chosen %q: provider model = %q, end = %q, outcome = %q; want %q", chosen, observed, end.Model, outcome.Model, want)
+			}
+			if i == 0 {
+				pinned = end.Model
+			}
+		}
+	})
+
 	t.Run("conversation history and stable system prompt", func(t *testing.T) {
 		setup := DriverSetup{History, t.TempDir(), agent, server, ""}
 		f := driver(t, setup)
@@ -247,8 +299,14 @@ func Run(t *testing.T, driver Driver) {
 			observations = append(observations, f.Prompt())
 		}
 		first, second, isolated := observations[0], observations[1], observations[2]
-		if first.SystemPrompt != second.SystemPrompt || first.SystemPrompt != isolated.SystemPrompt || !strings.Contains(first.SystemPrompt, "system") {
-			t.Fatal("system prompt changed between conversation turns")
+		if first.SystemPrompt != second.SystemPrompt || !strings.Contains(first.SystemPrompt, "system") || !strings.Contains(isolated.SystemPrompt, "system") {
+			t.Fatal("system prompt changed within a conversation or omitted instructions")
+		}
+		if f.WorkingDirectoryRoot != "" {
+			assertWorkingDirectory(t, f, first.Dir, setup.Dir)
+			if first.Dir != second.Dir {
+				t.Fatalf("conversation working directory changed: %q -> %q", first.Dir, second.Dir)
+			}
 		}
 		if !strings.Contains(second.History, "hello") || !strings.Contains(second.History, "first answer") {
 			t.Fatalf("continuation lost history: %s", second.History)
@@ -261,6 +319,20 @@ func Run(t *testing.T, driver Driver) {
 		t.Run(string(state), func(t *testing.T) {
 			sharedParentDeath(t, driver, DriverSetup{state, t.TempDir(), agent, server, ""}, caller)
 		})
+	}
+}
+
+func assertWorkingDirectory(t *testing.T, f Fixture, observed, pane string) {
+	t.Helper()
+	if f.WorkingDirectoryRoot == "" {
+		if observed != pane {
+			t.Fatalf("agent cwd = %q, want pane cwd %q", observed, pane)
+		}
+		return
+	}
+	rel, err := filepath.Rel(f.WorkingDirectoryRoot, observed)
+	if observed == pane || err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("agent cwd = %q, want private directory under %q, distinct from pane %q", observed, f.WorkingDirectoryRoot, pane)
 	}
 }
 

@@ -8,11 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
@@ -27,15 +25,24 @@ var extension []byte
 
 // Connector runs one pi process per turn; dataDir owns extensions and sessions.
 type Connector struct {
-	dataDir string
-	env     []string
-	base    harness.Base
+	dataDir       string
+	env           []string
+	base          harness.Base
+	catalogGate   chan struct{}
+	cachedModels  []harness.Model
+	cachedDefault string
+	catalogUntil  time.Time
+	stateErr      error
 }
 
 // New keeps pi's own provider configuration. env supplies process overrides,
 // including PI_CODING_AGENT_DIR for isolated installations and tests.
 func New(dataDir string, env []string) *Connector {
-	return &Connector{dataDir: dataDir, env: append([]string(nil), env...)}
+	c := &Connector{dataDir: dataDir, env: append([]string(nil), env...), catalogGate: make(chan struct{}, 1)}
+	if dataDir != "" {
+		c.stateErr = c.sweepTurnFiles()
+	}
+	return c
 }
 
 func (*Connector) Facts() harness.Facts {
@@ -70,6 +77,8 @@ func (c *Connector) Readiness(ctx context.Context) harness.Readiness {
 // Settings can check the same selection that a turn will use without changing
 // pi's saved configuration.
 func (c *Connector) ReadinessForModel(ctx context.Context, chosen string) harness.Readiness {
+	ctx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
 	env, dir, err := (environment{overrides: c.env}).Environment(ctx)
 	if err != nil {
 		return harness.Readiness{State: harness.NotConfigured, Message: fmt.Sprint("pi could not be checked: ", err)}
@@ -92,8 +101,11 @@ func (c *Connector) ReadinessForModel(ctx context.Context, chosen string) harnes
 			chosen = models[0].ID
 		}
 	}
+	if !slices.ContainsFunc(models, func(m harness.Model) bool { return m.ID == chosen }) {
+		return harness.Readiness{State: harness.NotConfigured, Message: "The selected model is not in pi's catalogue: " + chosen}
+	}
 	// The command uses the same login-shell executable and environment as turns.
-	cmd := exec.CommandContext(ctx, executable, "auth", "check", "--model", chosen) //nolint:gosec // resolved pi executable, direct argv
+	cmd := exec.CommandContext(ctx, executable, "auth", "check", "--model", chosen, "--no-refresh") //nolint:gosec // resolved pi executable, direct argv
 	cmd.Env = env
 	cmd.Dir = dir
 	proc.InOwnGroup(cmd)
@@ -134,82 +146,44 @@ func (w *authOutput) Write(p []byte) (int, error) {
 }
 
 func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
-	if c.dataDir == "" {
-		return nil, errors.New("pi needs nocx's data directory")
-	}
-	dir := filepath.Join(c.dataDir, "pi")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	config, err := os.CreateTemp(dir, "turn-*.json")
-	if err != nil {
-		return nil, err
+	if c.stateErr != nil {
+		return nil, c.stateErr
 	}
-	configPath := config.Name()
-	bridgeEnv := map[string]string{}
-	for _, v := range spec.Tools.Env {
-		key, value, ok := strings.Cut(v, "=")
-		if !ok {
-			_ = config.Close()
-			_ = os.Remove(configPath)
-			return nil, fmt.Errorf("invalid bridge environment variable %q", key)
+	if spec.Model != "" {
+		models, _, err := c.queryCatalog(ctx)
+		if err != nil {
+			return nil, err
 		}
-		bridgeEnv[key] = value
+		if !slices.ContainsFunc(models, func(m harness.Model) bool { return m.ID == spec.Model }) {
+			return nil, fmt.Errorf("model %q is not in pi's catalogue", spec.Model)
+		}
 	}
-	err = json.NewEncoder(config).Encode(struct {
-		Command      []string          `json:"command"`
-		Env          map[string]string `json:"env"`
-		SystemPrompt string            `json:"systemPrompt"`
-	}{spec.Tools.Command, bridgeEnv, spec.SystemPrompt})
-	err = errors.Join(err, config.Close())
+	files, err := c.prepareTurn(spec)
 	if err != nil {
-		_ = os.Remove(configPath)
 		return nil, err
 	}
-	ext, err := os.CreateTemp(dir, "extension-*.mjs")
-	if err != nil {
-		_ = os.Remove(configPath)
-		return nil, err
-	}
-	extPath := ext.Name()
-	_, err = ext.Write(extension)
-	err = errors.Join(err, ext.Close())
-	cleanup := func() { _ = os.Remove(configPath); _ = os.Remove(extPath) }
-	if err != nil {
-		cleanup()
-		return nil, err
-	}
-	argv := []string{"pi", "--mode", "rpc", "--session-dir", filepath.Join(dir, "sessions"), "--session-id", spec.ConversationID, "--no-builtin-tools", "--tools", "mcp__nocx__*"}
+	cleanup := files.cleanup
+	argv := []string{"pi", "--mode", "rpc", "--session-dir", files.sessionDir, "--session-id", spec.ConversationID, "--no-builtin-tools", "--tools", "mcp__nocx__*"}
 	if spec.Model != "" {
 		argv = append(argv, "--model", spec.Model)
 	}
-	argv = append(argv, "-e", extPath)
-	p, err := c.base.Start(ctx, harness.Launch{Argv: argv, Env: append(append([]string(nil), c.env...), "NOCX_PI_TURN_FILE="+configPath), Dir: spec.Dir, Decode: newDecoder(), CompleteOnEnd: true, FailureReason: failureReason})
+	argv = append(argv, "-e", files.extensionPath)
+	state := &cancelState{}
+	p, err := c.base.Start(context.WithoutCancel(ctx), harness.Launch{Argv: argv, Env: append(append([]string(nil), c.env...), "NOCX_PI_TURN_FILE="+files.configPath), Dir: files.dir, Decode: newDecoder(state), CompleteOnEnd: true, FailureReason: failureReason})
 	if err != nil {
 		cleanup()
 		return nil, err
 	}
-	turn := &turn{Process: p, cleanup: cleanup}
 	if err = json.NewEncoder(p.Stdin()).Encode(map[string]string{"type": "prompt", "message": spec.Text}); err != nil {
 		_ = p.Cancel(context.Background())
-		_, _ = turn.Wait(context.Background())
+		_, _ = p.Wait(context.Background())
+		cleanup()
 		return nil, err
 	}
-	return turn, nil
-}
-
-type turn struct {
-	*harness.Process
-	cleanup func()
-	once    sync.Once
-}
-
-func (t *turn) Wait(ctx context.Context) (harness.Outcome, error) {
-	outcome, err := t.Process.Wait(ctx)
-	if ctx.Err() == nil {
-		t.once.Do(t.cleanup)
-	}
-	return outcome, err
+	return newTurn(ctx, p, cleanup, state), nil
 }
 
 func failureReason(stderr string, exitErr error) string {
@@ -225,7 +199,35 @@ func (c *Connector) Models(ctx context.Context) ([]harness.Model, error) {
 	return models, err
 }
 
+const (
+	readinessTimeout   = 10 * time.Second
+	catalogCacheWindow = 2 * time.Second
+)
+
+// catalog shares successful discovery between Settings readiness and Models.
 func (c *Connector) catalog(ctx context.Context) ([]harness.Model, string, error) {
+	select {
+	case c.catalogGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
+	defer func() { <-c.catalogGate }()
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if time.Now().Before(c.catalogUntil) {
+		return slices.Clone(c.cachedModels), c.cachedDefault, nil
+	}
+	models, selected, err := c.queryCatalog(ctx)
+	if err == nil {
+		c.cachedModels = slices.Clone(models)
+		c.cachedDefault = selected
+		c.catalogUntil = time.Now().Add(catalogCacheWindow)
+	}
+	return models, selected, err
+}
+
+func (c *Connector) queryCatalog(ctx context.Context) ([]harness.Model, string, error) {
 	var models []harness.Model
 	var selected string
 	var gotModels, gotState bool

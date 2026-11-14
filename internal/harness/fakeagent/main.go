@@ -83,6 +83,14 @@ func main() {
 		_ = os.WriteFile(script.EnvironmentFile, raw, 0o600)
 	}
 
+	if prompt.Model == "" && script.DefaultModelFile != "" {
+		raw, err := os.ReadFile(script.DefaultModelFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent: default model: %v\n", err)
+			os.Exit(2)
+		}
+		prompt.Model = string(raw)
+	}
 	bridge := prompt.Tools
 	if script.PromptFile != "" {
 		prompt.Dir, _ = os.Getwd()

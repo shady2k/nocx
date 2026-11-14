@@ -24,12 +24,16 @@ type message struct {
 	} `json:"usage"`
 }
 
-func newDecoder() harness.Decoder {
+func newDecoder(cancellation ...*cancelState) harness.Decoder {
 	var last message
 	var usage *harness.Usage
 	return func(line []byte) ([]harness.Event, error) {
 		var record struct {
-			Type       string          `json:"type"`
+			Type    string `json:"type"`
+			Command string `json:"command"`
+			Data    struct {
+				Disposition string `json:"disposition"`
+			} `json:"data"`
 			Aborted    bool            `json:"aborted"`
 			Success    *bool           `json:"success"`
 			Error      string          `json:"error"`
@@ -45,16 +49,25 @@ func newDecoder() harness.Decoder {
 			return nil, err
 		}
 		failure := func(reason string) ([]harness.Event, error) {
+			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+				reason = "cancelled"
+			}
 			return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: reason}}}, nil
 		}
 		switch record.Type {
 		case "response":
+			if record.Command == "prompt" && record.Success != nil && *record.Success && record.Data.Disposition == "handled" {
+				return failure("pi extension handled the prompt without an answer")
+			}
 			if record.Success != nil && !*record.Success {
 				return failure(record.Error)
 			}
 		case "extension_error":
 			return failure(record.Error)
 		case "message_update":
+			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+				return nil, nil
+			}
 			switch record.Update.Type {
 			case "text_delta":
 				return []harness.Event{{Kind: harness.EventAnswerDelta, Text: record.Update.Delta}}, nil
@@ -62,6 +75,9 @@ func newDecoder() harness.Decoder {
 				return []harness.Event{{Kind: harness.EventReasoningDelta, Text: record.Update.Delta}}, nil
 			}
 		case "tool_execution_start", "tool_execution_end":
+			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+				return nil, nil
+			}
 			kind := harness.EventToolStarted
 			if record.Type == "tool_execution_end" {
 				kind = harness.EventToolFinished
@@ -89,6 +105,9 @@ func newDecoder() harness.Decoder {
 				}
 			}
 		case "agent_settled":
+			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+				return failure("cancelled")
+			}
 			if record.Aborted {
 				return failure("pi aborted the turn")
 			}

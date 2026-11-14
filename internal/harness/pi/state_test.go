@@ -20,13 +20,13 @@ func TestTurnFilesStableWorkspaceAndPrivateConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.cleanup()
+	defer func() { _ = a.cleanup() }()
 	spec.Dir = t.TempDir()
 	b, err := c.prepareTurn(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.cleanup()
+	defer func() { _ = b.cleanup() }()
 	if a.dir != b.dir || a.dir == spec.Dir {
 		t.Fatalf("workspace changed: %q %q", a.dir, b.dir)
 	}
@@ -43,7 +43,7 @@ func TestTurnFilesStableWorkspaceAndPrivateConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.cleanup()
+	defer func() { _ = other.cleanup() }()
 	if other.dir == a.dir {
 		t.Fatal("conversations share workspace")
 	}
@@ -55,7 +55,7 @@ func TestSweepTurnFilesPreservesLiveUnreadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer live.cleanup()
+	defer func() { _ = live.cleanup() }()
 	stale, err := c.prepareTurn(harness.TurnSpec{ConversationID: "stale"})
 	if err != nil {
 		t.Fatal(err)
@@ -75,16 +75,90 @@ func TestSweepTurnFilesPreservesLiveUnreadConfig(t *testing.T) {
 	}
 }
 
+func TestSweepTurnFilesPreservesChildAfterBackendLockCloses(t *testing.T) {
+	c := New(t.TempDir(), nil)
+	files, err := c.prepareTurn(harness.TurnSpec{ConversationID: "surviving-child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = files.cleanup() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	turn, err := (harness.Base{}).Start(ctx, harness.Launch{
+		Argv:       []string{"/bin/sh", "-c", `read -r ready; cat "$1" "$2" >/dev/null || exit 1; echo consumed`, "pi-startup", files.extensionPath, files.configPath},
+		ExtraFiles: []*os.File{files.lock},
+		Decode: func([]byte) ([]harness.Event, error) {
+			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: "test"}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = turn.Cancel(context.Background()); _, _ = turn.Wait(context.Background()) }()
+	// Backend death closes its descriptor, but the child still needs both files.
+	if err := files.lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(c.dataDir, nil)
+	if restarted.stateErr != nil {
+		t.Fatal(restarted.stateErr)
+	}
+	for _, path := range []string{files.extensionPath, files.configPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("restart removed unread child file: %v", err)
+		}
+	}
+	if _, err := turn.Stdin().Write([]byte("continue\n")); err != nil {
+		t.Fatal(err)
+	}
+	for range turn.Events() {
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.sweepTurnFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(files.configPath)); !os.IsNotExist(err) {
+		t.Fatalf("exited child's turn files retained: %v", err)
+	}
+}
+
 func TestTurnFilesCleanupRemovesSecrets(t *testing.T) {
 	c := New(t.TempDir(), nil)
 	files, err := c.prepareTurn(harness.TurnSpec{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	files.cleanup()
-	files.cleanup()
+	if err := files.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.cleanup(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Dir(files.configPath)); !os.IsNotExist(err) {
 		t.Fatalf("turn files retained: %v", err)
+	}
+}
+
+func TestTurnFilesCleanupPreservesError(t *testing.T) {
+	c := New(t.TempDir(), nil)
+	files, err := c.prepareTurn(harness.TurnSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first := files.cleanup()
+	if first == nil {
+		t.Fatal("cleanup discarded close error")
+	}
+	if again := files.cleanup(); again != first {
+		t.Fatalf("cleanup error changed: %v then %v", first, again)
+	}
+	if _, err := os.Stat(filepath.Dir(files.configPath)); !os.IsNotExist(err) {
+		t.Fatalf("close error prevented file removal: %v", err)
 	}
 }
 

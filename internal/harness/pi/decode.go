@@ -49,8 +49,14 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 			return nil, err
 		}
 		failure := func(reason string) ([]harness.Event, error) {
-			if len(cancellation) != 0 && cancellation[0].requested.Load() {
-				reason = "cancelled"
+			if len(cancellation) != 0 {
+				cancelled, first := cancellation[0].terminal()
+				if !first {
+					return nil, nil
+				}
+				if cancelled {
+					reason = "cancelled"
+				}
 			}
 			return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: reason}}}, nil
 		}
@@ -65,7 +71,7 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 		case "extension_error":
 			return failure(record.Error)
 		case "message_update":
-			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+			if len(cancellation) != 0 && cancellation[0].cancelled() {
 				return nil, nil
 			}
 			switch record.Update.Type {
@@ -75,7 +81,7 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 				return []harness.Event{{Kind: harness.EventReasoningDelta, Text: record.Update.Delta}}, nil
 			}
 		case "tool_execution_start", "tool_execution_end":
-			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+			if len(cancellation) != 0 && cancellation[0].cancelled() {
 				return nil, nil
 			}
 			kind := harness.EventToolStarted
@@ -105,7 +111,7 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 				}
 			}
 		case "agent_settled":
-			if len(cancellation) != 0 && cancellation[0].requested.Load() {
+			if len(cancellation) != 0 && cancellation[0].cancelled() {
 				return failure("cancelled")
 			}
 			if record.Aborted {
@@ -129,6 +135,15 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 			model := last.Model
 			if last.Provider != "" {
 				model = last.Provider + "/" + model
+			}
+			if len(cancellation) != 0 {
+				cancelled, first := cancellation[0].terminal()
+				if !first {
+					return nil, nil
+				}
+				if cancelled {
+					return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: "cancelled"}}}, nil
+				}
 			}
 			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: model, Usage: usage}}}, nil
 		}

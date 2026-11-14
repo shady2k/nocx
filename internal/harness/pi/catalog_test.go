@@ -55,13 +55,20 @@ func TestRunRefusesRemovedOrSimilarlyNamedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn, err := c.Run(context.Background(), harness.TurnSpec{ConversationID: "removed", Text: "question", Model: "nocx-test/test-model", Dir: t.TempDir()})
-	if err == nil {
-		_ = turn.Cancel(context.Background())
-		_, _ = turn.Wait(context.Background())
-		t.Fatal("Run accepted removed model through fuzzy matching")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "not in pi's catalogue") {
-		t.Fatalf("Run error = %v", err)
+	var reason string
+	for event := range turn.Events() {
+		if event.Kind == harness.EventFailure {
+			reason = event.Failure.Reason
+		}
+	}
+	if _, err = turn.Wait(context.Background()); err == nil {
+		t.Fatal("removed model succeeded")
+	}
+	if !strings.Contains(reason, "not in pi's catalogue") {
+		t.Fatalf("failure = %q", reason)
 	}
 	if len(fake.Requests()) != 0 {
 		t.Fatal("removed model reached provider")

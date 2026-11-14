@@ -18,17 +18,19 @@ type turnFiles struct {
 	dir, configPath, extensionPath, sessionDir string
 	lock                                       *os.File
 	once                                       sync.Once
+	cleanupErr                                 error
 }
 
-func (f *turnFiles) cleanup() {
+func (f *turnFiles) cleanup() error {
 	f.once.Do(func() {
-		_ = os.RemoveAll(filepath.Dir(f.configPath))
-		_ = f.lock.Close()
+		f.cleanupErr = errors.Join(os.RemoveAll(filepath.Dir(f.configPath)), f.lock.Close())
 	})
+	return f.cleanupErr
 }
 
 // The persistent guard serializes directory creation with sweeping. Individual
-// turn locks survive until cleanup; the kernel releases them on backend death.
+// turn locks are inherited by the agent, so sweeping cannot remove unread files
+// after backend death while the agent is still starting.
 func (c *Connector) turnGuard() (*os.File, error) {
 	root := filepath.Join(c.dataDir, "pi", "turns")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -115,15 +117,13 @@ func (c *Connector) prepareTurn(spec harness.TurnSpec) (*turnFiles, error) {
 	}
 	f := &turnFiles{dir: workspace, configPath: filepath.Join(dir, "config.json"), extensionPath: filepath.Join(dir, "extension.mjs"), sessionDir: filepath.Join(root, "sessions"), lock: lock}
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.cleanup()
-		return nil, err
+		return nil, errors.Join(err, f.cleanup())
 	}
 	bridgeEnv := map[string]string{}
 	for _, v := range spec.Tools.Env {
 		key, value, ok := strings.Cut(v, "=")
 		if !ok {
-			f.cleanup()
-			return nil, errors.New("invalid bridge environment variable " + key)
+			return nil, errors.Join(errors.New("invalid bridge environment variable "+key), f.cleanup())
 		}
 		bridgeEnv[key] = value
 	}
@@ -139,8 +139,7 @@ func (c *Connector) prepareTurn(spec harness.TurnSpec) (*turnFiles, error) {
 		err = os.WriteFile(f.extensionPath, extension, 0o600)
 	}
 	if err != nil {
-		f.cleanup()
-		return nil, err
+		return nil, errors.Join(err, f.cleanup())
 	}
 	return f, nil
 }

@@ -48,6 +48,9 @@ type Launch struct {
 	// belongs to the agent; the turn's tool bridge environment is added to
 	// the bridge child alone.
 	Env []string
+	// ExtraFiles are inherited by the agent at descriptors 3 and above. The
+	// connector retains ownership of the parent descriptors.
+	ExtraFiles []*os.File
 	// Dir is the agent's working directory; empty inherits the backend's.
 	Dir string
 	// Decode reads the agent's own protocol off stdout.
@@ -92,6 +95,7 @@ func (b Base) Start(ctx context.Context, launch Launch) (*Process, error) {
 	}
 	cmd := exec.Command(executable, launch.Argv[1:]...) //nolint:gosec // the connector states the agent's argv
 	cmd.Env = env
+	cmd.ExtraFiles = launch.ExtraFiles
 	cmd.WaitDelay = time.Second
 	cmd.Dir = launch.Dir
 	// The agent leads its own group, so Cancel and a leftover child are one

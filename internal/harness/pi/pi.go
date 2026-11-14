@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -152,15 +153,6 @@ func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Tur
 	if c.stateErr != nil {
 		return nil, c.stateErr
 	}
-	if spec.Model != "" {
-		models, _, err := c.queryCatalog(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !slices.ContainsFunc(models, func(m harness.Model) bool { return m.ID == spec.Model }) {
-			return nil, fmt.Errorf("model %q is not in pi's catalogue", spec.Model)
-		}
-	}
 	files, err := c.prepareTurn(spec)
 	if err != nil {
 		return nil, err
@@ -172,18 +164,23 @@ func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Tur
 	}
 	argv = append(argv, "-e", files.extensionPath)
 	state := &cancelState{}
-	p, err := c.base.Start(context.WithoutCancel(ctx), harness.Launch{Argv: argv, Env: append(append([]string(nil), c.env...), "NOCX_PI_TURN_FILE="+files.configPath), Dir: files.dir, Decode: newDecoder(state), CompleteOnEnd: true, FailureReason: failureReason})
+	decode := newDecoder(state)
+	var selection *modelSelection
+	if spec.Model != "" {
+		selection = newModelSelection(spec.Model, decode)
+		decode = selection.Decode
+	}
+	p, err := c.base.Start(context.WithoutCancel(ctx), harness.Launch{Argv: argv, Env: append(append([]string(nil), c.env...), "NOCX_PI_TURN_FILE="+files.configPath), Dir: files.dir, Decode: decode, ExtraFiles: []*os.File{files.lock}, CompleteOnEnd: true, FailureReason: failureReason})
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, cleanup())
 	}
-	if err = json.NewEncoder(p.Stdin()).Encode(map[string]string{"type": "prompt", "message": spec.Text}); err != nil {
-		_ = p.Cancel(context.Background())
-		_, _ = p.Wait(context.Background())
-		cleanup()
-		return nil, err
+	turn := newTurn(ctx, p, cleanup, state)
+	if selection != nil {
+		go selection.prompt(turn, spec.Text)
+	} else {
+		turn.startPrompt(spec.Text)
 	}
-	return newTurn(ctx, p, cleanup, state), nil
+	return turn, nil
 }
 
 func failureReason(stderr string, exitErr error) string {

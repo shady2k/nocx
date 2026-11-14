@@ -88,7 +88,7 @@ func TestCancellationSettlesAsFailureEvenAfterCompletedAnswer(t *testing.T) {
 	if _, err := decode([]byte(`{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"answer"}]}}`)); err != nil {
 		t.Fatal(err)
 	}
-	state.requested.Store(true)
+	state.status.Store(turnCancelled)
 	events, err := decode([]byte(`{"type":"agent_settled","aborted":false}`))
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestHandledPromptEndsWithExplicitFailure(t *testing.T) {
 func TestCancellationSuppressesLateStreamingAndTools(t *testing.T) {
 	state := &cancelState{}
 	decode := newDecoder(state)
-	state.requested.Store(true)
+	state.status.Store(turnCancelled)
 	for _, line := range []string{
 		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"late"}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"late"}}`,

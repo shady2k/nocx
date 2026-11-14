@@ -66,14 +66,6 @@ func (c *channelConn) Close() error {
 
 func (c *channelConn) closeCount() int { return int(c.closes.Load()) }
 
-// reads counts the reads started on this connection: one per look read, which is
-// what "no second look is started" is measured in.
-func (c *channelConn) reads() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.wire
-}
-
 // endTransport is the connection ending, which is the only thing that frees an
 // abandoned read and a parked close. Idempotent: the tests end it to assert, and
 // again at cleanup.

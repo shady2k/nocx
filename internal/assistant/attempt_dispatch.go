@@ -78,10 +78,10 @@ func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string
 		// The outcome is already a refusal/failure owned by the inner
 		// dispatcher. Preserve its typed error for the JSON-RPC mapper; a
 		// close failure on this path must not hide the original answer.
-		_ = finishAttempt(finishCtx, d.ledger, execID, dispatchErr)
+		_ = finishAttempt(finishCtx, contextOrBackground(invocation.Context), d.ledger, execID, dispatchErr)
 		return "", dispatchErr
 	}
-	if err := finishAttempt(finishCtx, d.ledger, execID, nil); err != nil {
+	if err := finishAttempt(finishCtx, contextOrBackground(invocation.Context), d.ledger, execID, nil); err != nil {
 		return "", fmt.Errorf("assistant dispatch: record outcome: %w", err)
 	}
 	return result, nil
@@ -246,18 +246,34 @@ func startAttemptExecution(ctx context.Context, ledger AttemptLedger, grant cont
 	return execID, nil
 }
 
-func finishAttempt(ctx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
+// finishAttempt closes the attempt of a call the endpoint dispatched. finishCtx
+// is the DETACHED context the record is written under (see
+// detachedFinishContext), and callCtx is the call's own — the two are separate
+// because the verdict and the write have opposite requirements: the verdict
+// must see that the call was cancelled, and the write must not be.
+//
+// A call the caller stopped is recorded as stopped, through the same predicate
+// the in-process kernel uses (stoppedEnding): a calls.cancel whose executor
+// returns its cancelled context is not a tool that broke, and "failed" would
+// tell a person to look for a fault that does not exist (nocx-a62cl.4.2,
+// closing nocx-a62cl.4.1's finding 2).
+func finishAttempt(finishCtx, callCtx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
 	end := content.FinishExecution{
 		EndedAt: time.Now().UnixMilli(),
 	}
-	if dispatchErr == nil {
+	switch {
+	case dispatchErr == nil:
 		end.TerminationReason = content.TermCompleted
 		end.Status = content.EntrySuccess
-	} else {
-		end.TerminationReason = terminationReasonOf(dispatchErr)
-		end.Status = content.EntryFailure
+	default:
+		if ended, status, stopped := stoppedEnding(callCtx, dispatchErr); stopped {
+			end.TerminationReason, end.Status = ended, status
+		} else {
+			end.TerminationReason = terminationReasonOf(dispatchErr)
+			end.Status = content.EntryFailure
+		}
 	}
-	return ledger.FinishExecution(ctx, execID, end)
+	return ledger.FinishExecution(finishCtx, execID, end)
 }
 
 var (

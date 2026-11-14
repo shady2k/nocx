@@ -1766,26 +1766,11 @@ func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason co
 // closeFailedAttempt closes the attempt of a call that did not succeed, and it
 // separates ONE fact from failure: the call was STOPPED (nocx-a62cl.4.1). The
 // tool did not break — the person stopped the answer, or took back the answer
-// the call ran under — and "failed" would say it did.
-//
-// Two shapes of the same fact, because a call can be stopped in two places. A
-// tool whose executor observes the turn's own context sees it end, and the
-// ending carries the reason somebody chose (TurnEndedCause: the person's stop,
-// a revoked answer); a run ended for any other reason — the window closed, the
-// request was cancelled — carries none and records TermInterrupted, which is
-// what the run records too. A call that runs IN THE RENDERER (session.run,
-// session.wait) is stopped by its run lease withdrawing the request before the
-// turn's context is cancelled — deliberately, because the ladder must name the
-// process group before the withdrawal (nocx-uvac6.11) — so what reaches here is
-// the request's own cancellation and the attempt records TermInterrupted. The
-// run's row is what says the person pressed Stop.
+// the call ran under — and "failed" would say it did. What a stop is, and the
+// reason it records, is stoppedEnding's answer and nobody else's.
 func (m *effectKernel) closeFailedAttempt(ctx context.Context, execID int64, reason content.TerminationReason, cause error) error {
-	if ctx.Err() != nil || errors.Is(cause, context.Canceled) {
-		ended := content.TermInterrupted
-		if stated, ok := TurnEndedReason(context.Cause(ctx)); ok {
-			ended = stated
-		}
-		return m.closeAttempt(ctx, execID, ended, content.EntryInterrupted)
+	if ended, status, stopped := stoppedEnding(ctx, cause); stopped {
+		return m.closeAttempt(ctx, execID, ended, status)
 	}
 	return m.closeAttempt(ctx, execID, reason, content.EntryFailure)
 }

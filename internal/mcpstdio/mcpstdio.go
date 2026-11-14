@@ -90,6 +90,12 @@ type Server struct {
 	serverName    string
 	serverVersion string
 	logger        *slog.Logger
+	// progressTicks is this session's clock for a long call's progress. It is
+	// a field rather than a direct time.NewTicker because progress is an EVENT
+	// a test must be able to produce without waiting for a duration: the
+	// production value is newProgressTicks, and the interval itself is stated
+	// once, in progressInterval.
+	progressTicks func(time.Duration) (<-chan time.Time, func())
 }
 
 // New validates configuration and constructs an adapter.
@@ -116,6 +122,7 @@ func New(cfg Config) (*Server, error) {
 		serverName:    cfg.ServerName,
 		serverVersion: cfg.ServerVersion,
 		logger:        cfg.Logger,
+		progressTicks: newProgressTicks,
 	}, nil
 }
 
@@ -663,6 +670,13 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		// Meta is MCP's per-request metadata, and the one member this adapter
+		// reads is the progress token: a client that sent one is asking to be
+		// told the call is still running, which is what keeps a wait longer
+		// than its own request timeout from being cut off (nocx-a62cl.4.2).
+		Meta struct {
+			ProgressToken json.RawMessage `json:"progressToken"`
+		} `json:"_meta"`
 	}
 	if err := json.Unmarshal(params, &call); err != nil || call.Name == "" {
 		return writer.errorResponse(id, -32602, "invalid params", "tools/call requires a name")
@@ -691,7 +705,13 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 			return writer.toolError(id, fmt.Sprintf("tool %q is not offered by the endpoint", call.Name))
 		}
 	}
+	// PROGRESS STARTS WITH THE CALL AND ENDS BEFORE ITS ANSWER. The call's own
+	// lifetime is the backend's — the declaration the catalogue gives the tool
+	// — and this only reports while it runs; stop is called before any answer
+	// is written, so a frame can never follow the result it was reporting on.
+	progress := s.startProgress(ctx, writer, call.Meta.ProgressToken)
 	result, upstream, err := link.call(ctx, call.Name, call.Arguments)
+	progress.stop()
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil

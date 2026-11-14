@@ -342,6 +342,14 @@ func TestAttemptRecordingDispatcherSuccessSurvivesAnAbandonedInvocationContext(t
 // The failure twin of the test above: the inner dispatcher's own failure must
 // still be recorded (not silently dropped) when the invocation context is
 // already cancelled, and the original error must reach the caller unchanged.
+//
+// THE VERDICT IS THE SHARED PREDICATE'S, and it changed with nocx-a62cl.4.2:
+// this call's own context had already ended when its attempt closed, so the
+// record says it was interrupted rather than that the tool failed — the same
+// answer effectKernel.closeFailedAttempt gives the in-process path for the
+// same facts. What this test still owns is the DETACHMENT: the outcome is
+// recorded at all, and it is written on a context that did not inherit the
+// caller's cancellation.
 func TestAttemptRecordingDispatcherFailureRecordedWithAnAbandonedInvocationContext(t *testing.T) {
 	reg, err := agenttools.Assemble(toolsDirFS(t))
 	if err != nil {
@@ -369,8 +377,8 @@ func TestAttemptRecordingDispatcherFailureRecordedWithAnAbandonedInvocationConte
 	}
 
 	calls := ledger.calls()
-	if len(calls) == 0 || calls[len(calls)-1] != "finish:failure" {
-		t.Fatalf("ledger calls = %v, want the failure outcome recorded despite the abandoned context", calls)
+	if len(calls) == 0 || calls[len(calls)-1] != "finish:interrupted" {
+		t.Fatalf("ledger calls = %v, want the ending recorded despite the abandoned context", calls)
 	}
 	records := ledger.finishCallRecords()
 	if len(records) != 1 || records[0].errAtCall != nil {

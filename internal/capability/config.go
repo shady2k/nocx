@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -133,25 +134,8 @@ type ConfigService interface {
 	// roles.list completes them to the closed role set, so an unassigned
 	// role is a visible null row, never an absent one.
 	ListRoleAssignments() ([]profile.RoleAssignment, error)
-	// AssignRole upserts ONE role's (endpoint, model) pair.
 	AssignRole(a profile.RoleAssignment) error
-	// ResolveRole maps a role to its assigned endpoint and model, or
-	// refuses (profile.ErrRoleUnassigned / ErrRoleEndpointGone /
-	// ErrRoleModelGone) — resolution is the truth-teller: a deleted
-	// endpoint or removed model stays a refusal, never a neighbour hop.
-	ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error)
-	// DefaultModel returns the one pair every role WITHOUT an assignment
-	// of its own resolves through (bead nocx-rikz5), or the zero value
-	// when the person has chosen none. Unset is a value, not an error.
-	DefaultModel() (profile.DefaultModel, error)
-	// SetDefaultModel replaces the default; the empty pair clears it. A
-	// pair naming an endpoint that does not exist, or a model that
-	// endpoint does not offer, is REFUSED and nothing is stored: a
-	// dangling default breaks every unassigned role at once, and nothing
-	// on screen names which choice did it. The refusal comes from the
-	// store, which checks and writes under one lock — see
-	// profile.RoleRepository.SetDefaultModel.
-	SetDefaultModel(d profile.DefaultModel) error
+	ResolveRole(role profile.ModelRole, agentID string, models []harness.Model) (string, error)
 }
 
 // ConfigOperation is the typed operation for the config domain. Its admission
@@ -644,10 +628,7 @@ func (s *configService) ListRoleAssignments() ([]profile.RoleAssignment, error) 
 	return s.roles.LoadRoleAssignments()
 }
 
-// AssignRole upserts ONE role's (endpoint, model) pair (bead nocx-e6kn2).
-// The assignment references the endpoint and model by NAME — nothing
-// secret — so this is a config-domain write like any endpoint write, with
-// no vault involvement.
+// AssignRole persists one agent's role choice.
 func (s *configService) AssignRole(a profile.RoleAssignment) error {
 	if err := s.guard.check(); err != nil {
 		return err
@@ -658,80 +639,13 @@ func (s *configService) AssignRole(a profile.RoleAssignment) error {
 	return s.roles.AssignRole(a)
 }
 
-// ResolveRole is the config domain's one role→(endpoint, model) resolution
-// (bead nocx-e6kn2): it loads the assignments, the default and the endpoints
-// and calls
-// profile.ResolveRole — the pure, storage-free resolver — so the refusal
-// rules (unassigned, endpoint gone, model gone) live in exactly one place
-// and every consumer (agent.ask, the classifier bead, the roles surface
-// itself) sees the same answers. Re-read per call: an assignment made a
-// moment ago is picked up by the next ask (acceptance: "picks up the
-// change").
-func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	if s.roles == nil {
-		return profile.Endpoint{}, "", errors.New("role store not wired")
-	}
-	assignments, err := s.roles.LoadRoleAssignments()
+// ResolveRole reads current choices through the one pure resolver.
+func (s *configService) ResolveRole(role profile.ModelRole, agentID string, models []harness.Model) (string, error) {
+	assignments, err := s.ListRoleAssignments()
 	if err != nil {
-		return profile.Endpoint{}, "", err
+		return "", err
 	}
-	// The default is READ here and handed to the resolver as an input, so
-	// the resolution itself stays in one place (bead nocx-rikz5). Its error
-	// is RETURNED, never swallowed into "no default": a store that cannot
-	// answer must not look like a person who chose nothing, or an unreadable
-	// file renders as an honest "choose a model" and sends someone to
-	// re-choose what they already chose.
-	def, err := s.roles.LoadDefaultModel()
-	if err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	eps, err := s.endpoints.LoadEndpoints()
-	if err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	return profile.ResolveRole(role, assignments, def, eps)
-}
-
-// DefaultModel returns the chosen default, or the zero value when nobody
-// has chosen one (bead nocx-rikz5). It is a plain config read: the pair
-// names an endpoint and a model by identity, nothing secret.
-func (s *configService) DefaultModel() (profile.DefaultModel, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.DefaultModel{}, err
-	}
-	if s.roles == nil {
-		return profile.DefaultModel{}, errors.New("role store not wired")
-	}
-	return s.roles.LoadDefaultModel()
-}
-
-// SetDefaultModel replaces the default in one write, refusing a pair whose
-// endpoint does not exist or whose model that endpoint does not offer
-// (bead nocx-rikz5).
-//
-// Those two refusals are the STORE's, not this layer's, and that is the
-// correction: this method used to load the endpoint list, decide, and then
-// call the store, which reloads and writes under its own lock. Between the
-// decision and the write a concurrent DeleteEndpoint could land, and the
-// write would then store a default naming an endpoint that is gone — the
-// state the design's interval forbids. Only the holder of the lock can make
-// the checks and the write one operation, so the invariant lives with the
-// lock (profile.JSONStore.SetDefaultModel) and this layer keeps what is
-// genuinely its own: the config guard and the wiring check. In-process
-// callers are serialized by ConfigOperation, so the window needed an
-// external writer to bite; an invariant that holds only because somebody
-// else takes a lock is not held.
-func (s *configService) SetDefaultModel(d profile.DefaultModel) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	if s.roles == nil {
-		return errors.New("role store not wired")
-	}
-	return s.roles.SetDefaultModel(d)
+	return profile.ResolveRole(role, agentID, assignments, models)
 }
 
 // loadEndpoint returns the stored endpoint with the given id, or nil when

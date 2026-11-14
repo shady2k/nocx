@@ -1505,16 +1505,6 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 30000,
     answerMs: null,
   },
-  'roles.setDefault': {
-    waiting: 'Saving the model roles',
-    row: 'past-wait',
-    expired: 'outcome-unknown',
-    merge: 'none',
-    domain: 'config',
-    turnMs: 30000,
-    maxMs: 30000,
-    answerMs: null,
-  },
   'rpc.cancel': {
     waiting: 'Stopping the operation',
     row: 'never',

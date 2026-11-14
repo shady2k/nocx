@@ -934,10 +934,10 @@ export interface TerminalContentHooks {
    *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
-  onOpenRoles?: () => void
+  onOpenAgentSettings?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
-   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
    *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
@@ -3917,7 +3917,7 @@ export class TerminalContent extends BasePaneContent {
         // No endpoint: the toast says what is wrong and this opens where it
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
-        onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        onNoEndpoint: () => this.hooks.onOpenAgentSettings?.(),
         // Where a standing answer is managed, for the receipt the turn
         // draws when one is saved (nocx-2019q).
         openPermissions: () => this.hooks.onManagePermissions?.(),
@@ -4142,10 +4142,7 @@ export class TerminalContent extends BasePaneContent {
       // The model chip's two destinations (nocx-rikz5). The endpoints one
       // is the seam a refusal already uses — one owner for "open where an
       // endpoint is fixed", reused rather than duplicated.
-      this.editor.onModelChipClick((page) => {
-        if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
-        else this.hooks.onOpenRoles?.()
-      })
+      this.editor.onModelChipClick(() => this.hooks.onOpenAgentSettings?.())
       // Shell is active at start, so this paints the chip's absence — the
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()

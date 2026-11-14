@@ -187,7 +187,6 @@ var (
 	OpResize                          = methodHandle("resize")
 	OpRolesAssign                     = methodHandle("roles.assign")
 	OpRolesList                       = methodHandle("roles.list")
-	OpRolesSetDefault                 = methodHandle("roles.setDefault")
 	OpRpcCancel                       = methodHandle("rpc.cancel")
 	OpSecretsCaptureDismiss           = methodHandle("secrets.captureDismiss")
 	OpSecretsCaptureSave              = methodHandle("secrets.captureSave")

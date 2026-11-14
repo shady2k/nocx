@@ -166,6 +166,7 @@ var schemaLadder = []migrationStep{
 	{from: 21, to: 22, apply: migrateAddEntriesByEndedAt21to22, schemaDigest: "2187c4e3d03e421e2f9b305dd6fcea7d1cb559ce49caffe04118c0a7c4a7f27d"},
 	{from: 22, to: 23, apply: migrateAddTabPanel22to23, schemaDigest: "e14a246a0a8c98ff7f818f4081305a653111bc3adf0c10cfd7abda64b3b243db"},
 	{from: 23, to: 24, apply: migrateRetireSkillChecks23to24, schemaDigest: "69be96d0a97bf1670d22fd1bf49539684180982f01e20b98844036c3b77afbb4"},
+	{from: 24, to: 25, apply: migrateAgentConversations24to25, schemaDigest: "c7eb610c7ddff12d6536027e7ef6259b309efae06f0776de30e49f5d05fafdb1"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -347,6 +348,7 @@ var schemaShapeDigests = map[int]string{
 	// e2d552658, frozen as testdata/schema_v23.sql. Schema 24 drops the
 	// skill_checks table with the skill library (ADR-anntnxdj §7).
 	23: "b74fd15629e38d82392d6a99dac1d2e9a64ae50fe176622ba8a0c49dbe86eeea",
+	24: "86ec94bc17fbaa27d1db675c83407c5343f9b6a5745cb215d9ee6a70577c1433",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -360,6 +362,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	21: schema21ObjectNames(),
 	22: schema22ObjectNames(),
 	23: schema23ObjectNames(),
+	24: schema24ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -487,6 +490,13 @@ func schema22ObjectNames() map[string]struct{} {
 // no object, and schema 24 only drops skill_checks.
 func schema23ObjectNames() map[string]struct{} {
 	return schema22ObjectNames()
+}
+
+func schema24ObjectNames() map[string]struct{} {
+	names := schema23ObjectNames()
+	delete(names, "table:skill_checks")
+	delete(names, "index:sqlite_autoindex_skill_checks_1")
+	return names
 }
 
 type sqliteSchemaObject struct {

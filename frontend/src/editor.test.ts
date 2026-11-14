@@ -1270,14 +1270,16 @@ describe('the model chip (nocx-rikz5)', () => {
   it('names the endpoint and the model, each with the full value as its title and accessible name', () => {
     const { ed } = setup()
     const model = 'deepseek/deepseek-v4-flash-0731-preview'
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model })
     expect(textsOf(ed)).toEqual(['openrouter', model])
     const [endpointChip, modelChip] = chipsOf(ed)
     expect(endpointChip.title).toBe('openrouter')
-    expect(endpointChip.getAttribute('aria-label')).toBe('Answers with openrouter. Open Endpoints.')
+    expect(endpointChip.getAttribute('aria-label')).toBe(
+      'Answers with openrouter. Open agent settings.',
+    )
     expect(modelChip.title).toBe(model)
     expect(modelChip.getAttribute('aria-label')).toBe(
-      `Answers with the model ${model}. Open Roles.`,
+      `Answers with the model ${model}. Open agent settings.`,
     )
   })
 
@@ -1285,21 +1287,21 @@ describe('the model chip (nocx-rikz5)', () => {
     const { ed } = setup()
     const opened: string[] = []
     ed.onModelChipClick((page) => opened.push(page))
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     const [endpointChip, modelChip] = chipsOf(ed)
     endpointChip.click()
     modelChip.click()
-    expect(opened).toEqual(['endpoints', 'roles'])
+    expect(opened).toEqual(['agent-installed', 'agent-installed'])
   })
 
   it('carries one rung sentence when the role does not resolve, and opens the page it names', () => {
     const { ed } = setup()
     const opened: string[] = []
     ed.onModelChipClick((page) => opened.push(page))
-    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'endpoints' })
+    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'agent-installed' })
     expect(textsOf(ed)).toEqual(['Add an endpoint first'])
     chipsOf(ed)[0].click()
-    expect(opened).toEqual(['endpoints'])
+    expect(opened).toEqual(['agent-installed'])
   })
 
   it('a rung no page repairs is not a control — the chip is disabled and clicking it does nothing', () => {
@@ -1324,12 +1326,12 @@ describe('the model chip (nocx-rikz5)', () => {
     const opened: string[] = []
     ed.onModelChipClick((page) => opened.push(page))
     ed.setModelChip({ kind: 'action', text: 'unavailable', page: null })
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     const [endpointChip, modelChip] = chipsOf(ed)
     expect((endpointChip as HTMLButtonElement).disabled).toBe(false)
     expect((modelChip as HTMLButtonElement).disabled).toBe(false)
     modelChip.click()
-    expect(opened).toEqual(['roles'])
+    expect(opened).toEqual(['agent-installed'])
   })
 
   it('one click is one call however many states the chip has worn', () => {
@@ -1339,16 +1341,16 @@ describe('the model chip (nocx-rikz5)', () => {
     const { ed } = setup()
     const opened: string[] = []
     ed.onModelChipClick((page) => opened.push(page))
-    ed.setModelChip({ kind: 'action', text: 'Choose a model', page: 'roles' })
-    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'endpoints' })
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'action', text: 'Choose a model', page: 'agent-installed' })
+    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'agent-installed' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     chipsOf(ed)[1].click()
-    expect(opened).toEqual(['roles'])
+    expect(opened).toEqual(['agent-installed'])
   })
 
   it('null takes both chips away again — a Run target has no model to name', () => {
     const { ed } = setup()
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     expect(textsOf(ed)).toHaveLength(2)
     ed.setModelChip(null)
     expect(textsOf(ed)).toEqual([])
@@ -1356,7 +1358,7 @@ describe('the model chip (nocx-rikz5)', () => {
 
   it('is a kit ghost Button that truncates, in the controls group (spec §5.2)', () => {
     const { ed } = setup()
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     for (const chip of chipsOf(ed)) {
       expect(chip.classList.contains('ui-button')).toBe(true)
       expect(chip.dataset.truncate).toBe('true')
@@ -1375,7 +1377,7 @@ describe('the grant chip (nocx-wcswn)', () => {
     const grant = controls.querySelector<HTMLElement>('[data-control="grant"]')!
     expect(grant.classList.contains('ui-button')).toBe(true)
     expect([...controls.children].indexOf(grant)).toBe(controls.children.length - 1)
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     expect([...controls.children].indexOf(grant)).toBe(controls.children.length - 1)
   })
 

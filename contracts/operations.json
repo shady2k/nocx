@@ -11717,69 +11717,6 @@
       "preempts": []
     },
     {
-      "id": "roles.setDefault",
-      "kind": "method",
-      "owner": "request",
-      "phases": [
-        {
-          "name": "run",
-          "resources": [
-            {
-              "kind": "store",
-              "name": "config",
-              "mode": "key"
-            }
-          ],
-          "dependencies": [
-            "config"
-          ]
-        }
-      ],
-      "turn": {
-        "millis": 30000,
-        "basis": "read",
-        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
-      },
-      "max": {
-        "millis": 30000,
-        "basis": "read",
-        "note": "read: role assignment write in the config store; no explicit bound today"
-      },
-      "silence": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "answer": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "recovery": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "merge": "none",
-      "waiting": "Saving the model roles",
-      "row": "past-wait",
-      "expired": "outcome-unknown",
-      "resources": [
-        {
-          "kind": "store",
-          "name": "config",
-          "mode": "key"
-        }
-      ],
-      "dependencies": [
-        "config"
-      ],
-      "preempts": []
-    },
-    {
       "id": "rpc.cancel",
       "kind": "method",
       "owner": "request",

@@ -30,7 +30,6 @@ import { SnippetsSection } from './snippets/snippets-settings'
 import { UpdatesSection } from './updates-section'
 import { reconcileRailPages, type SettingsPage } from './settings-rail-pages'
 import type { SnippetsStore } from './snippets/snippets-store'
-import { RolesSection } from './roles-section'
 import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
 import { AgentAccessSection } from './agent-access-section'
@@ -689,29 +688,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    const rolesPage: SettingsPage = {
-      kind: 'component',
-      id: 'roles',
-      title: t('settings.fallback.roles.title', 'Roles'),
-      groupId: 'assistant',
-      scrollMode: 'page',
-      // Registered unconditionally for the same reason endpointsPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable. The guard is the client being absent.
-      renderContent: () => (
-        <Show
-          when={props.endpointsClient}
-          fallback={
-            <PageSection title={t('settings.fallback.roles.title', 'Roles')}>
-              {t('settings.fallback.roles.body', 'Model roles are not available in this window.')}
-            </PageSection>
-          }
-        >
-          <RolesSection client={props.endpointsClient} />
-        </Show>
-      ),
-    }
-
     const policyPage: SettingsPage = {
       kind: 'component',
       id: 'policy',
@@ -819,7 +795,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </PageSection>
           }
         >
-          <AgentInstalledSection client={props.agentRecordsClient!} />
+          <AgentInstalledSection
+            client={props.agentRecordsClient!}
+            rolesClient={props.endpointsClient}
+          />
         </Show>
       ),
     }
@@ -970,7 +949,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
-      rolesPage,
       policyPage,
       // Beside the permissions page because both are about what may act, and
       // after it because the assistant is ours and these are the programs a

@@ -39,7 +39,7 @@ import type { AgentClient } from './agent'
 // EndpointsProbeResult. This module consumes the latter (the type is
 // structurally identical) so the dead-export ratchet sees every generated
 // export used — the same union trick endpoints.ts documents.
-import type { EndpointsProbeResult } from './generated/agent.status'
+import type { EndpointsProbeResult } from './generated/endpoints.probe'
 import { EndpointClient, type Endpoint } from './endpoints'
 import { SecretTextField, secretMarks, type VaultState } from './api/secret-text-field'
 import type { SecretEntry, SecretPickerSource } from './ui/secret-picker'

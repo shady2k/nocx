@@ -997,10 +997,10 @@ export class PaneManager {
   /** The composer's model chip, clicked on the model — opens Settings →
    *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
    *  beside onCreateEndpoint, which the chip's other destination reuses. */
-  onOpenRoles?: () => void
+  onOpenAgentSettings?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
-   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
    *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
@@ -1907,7 +1907,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
-        onOpenRoles: this.onOpenRoles,
+        onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state, children) =>
@@ -2088,7 +2088,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
-        onOpenRoles: this.onOpenRoles,
+        onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
       },
     )

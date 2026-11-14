@@ -3,8 +3,14 @@
   "$id": "https://nocx.local/contracts/roles.list.params.schema.json",
   "title": "RolesListParams",
   "description": "Params for roles.list.",
-  "type": ["object", "null"],
+  "type": "object",
   "additionalProperties": false,
-  "required": [],
-  "properties": {}
+  "required": ["agentId"],
+  "properties": {
+    "agentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
 }

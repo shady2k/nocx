@@ -684,7 +684,7 @@ function main(): void {
   // made. Beside onCreateEndpoint because it is the same idea — a state
   // names the one page that repairs it — and it reuses that seam for the
   // endpoints destination rather than growing a second one.
-  tm.onOpenRoles = () => openSettingsPane().openPage('roles')
+  tm.onOpenAgentSettings = () => openSettingsPane().openPage('agent-installed')
   // The approval receipt's Manage permissions: the page that governs the
   // standing answer the line is about (nocx-2019q). The same idea again — a
   // fact on screen names the one page that manages it.

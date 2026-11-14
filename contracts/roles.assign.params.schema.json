@@ -5,17 +5,21 @@
   "description": "Params for roles.assign.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["role"],
+  "required": ["agentId", "role"],
   "properties": {
     "role": {
       "type": "string",
       "enum": ["answering", "classifier", "summarizing", "auditing"]
     },
-    "endpointId": {
-      "type": ["string", "null"]
-    },
     "model": {
-      "type": ["string", "null"]
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "agentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
     }
   }
 }

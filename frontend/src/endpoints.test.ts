@@ -31,10 +31,10 @@ describe("a write to the assistant's configuration announces its landing (nocx-1
     const heard: string[] = []
     const off = onAiConfigChanged(() => heard.push('changed'))
     try {
-      const settling = client.setDefault({ endpointId: 'ep-1', model: 'm-a' })
+      const settling = client.assignRole({ agentId: 'pi', role: 'answering', model: 'm-a' })
       await Promise.resolve()
       expect(heard).toEqual([])
-      resolveReply({ roles: [], default: { endpointId: 'ep-1', model: 'm-a' } })
+      resolveReply({ roles: [], default: { agentId: 'pi', model: 'm-a' } })
       await settling
       expect(heard).toEqual(['changed'])
     } finally {
@@ -56,15 +56,14 @@ describe("a write to the assistant's configuration announces its landing (nocx-1
     try {
       await client.createEndpoint(write)
       await client.updateEndpoint('ep-1', { ...write, key: '' })
-      await client.setDefault({ endpointId: 'ep-1', model: 'm-a' })
-      await client.assignRole({ role: 'answering', endpointId: 'ep-1', model: 'm-a' })
+      await client.assignRole({ agentId: 'pi', role: 'answering', model: 'm-a' })
       await client.deleteEndpoint('ep-1')
       // A read is not a write, and neither is a probe: nothing behind the
       // chip changed, so nothing is announced.
       await client.listEndpoints()
-      await client.listRoles()
-      expect(methods).toHaveLength(7)
-      expect(heard).toHaveLength(5)
+      await client.listRoles('pi')
+      expect(methods).toHaveLength(6)
+      expect(heard).toHaveLength(4)
     } finally {
       off()
     }
@@ -75,9 +74,9 @@ describe("a write to the assistant's configuration announces its landing (nocx-1
     const heard: string[] = []
     const off = onAiConfigChanged(() => heard.push('changed'))
     try {
-      await expect(client.setDefault({ endpointId: 'ep-1', model: 'm-a' })).rejects.toThrow(
-        'the store refused it',
-      )
+      await expect(
+        client.assignRole({ agentId: 'pi', role: 'answering', model: 'm-a' }),
+      ).rejects.toThrow('the store refused it')
       await expect(client.createEndpoint(write)).rejects.toThrow('the store refused it')
       expect(heard).toEqual([])
     } finally {
@@ -90,7 +89,7 @@ describe("a write to the assistant's configuration announces its landing (nocx-1
     const heard: string[] = []
     const off = onAiConfigChanged(() => heard.push('changed'))
     off()
-    await client.setDefault({ endpointId: 'ep-1', model: 'm-a' })
+    await client.assignRole({ agentId: 'pi', role: 'answering', model: 'm-a' })
     expect(heard).toEqual([])
   })
 })

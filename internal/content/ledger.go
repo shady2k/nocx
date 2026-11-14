@@ -963,11 +963,12 @@ type FrameRegion struct {
 // reinterprets what the run used. The credential is never part of this:
 // the key is resolved at stream time, never persisted.
 type RunFacts struct {
-	Harness    string `json:"harness,omitempty"`
-	Mode       string `json:"mode"` // "explain" — the only mode this slice knows
-	EndpointID string `json:"endpointId,omitempty"`
-	BaseURL    string `json:"baseUrl,omitempty"`
-	Model      string `json:"model,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	Harness        string `json:"harness,omitempty"`
+	Mode           string `json:"mode"` // "explain" — the only mode this slice knows
+	EndpointID     string `json:"endpointId,omitempty"`
+	BaseURL        string `json:"baseUrl,omitempty"`
+	Model          string `json:"model,omitempty"`
 }
 
 // AgentAsk is one ask transaction (agent.ask, design §5, §7): the question
@@ -2003,6 +2004,8 @@ type ArtifactRange struct {
 // write both. The header above keeps the by-hand list of which methods have
 // a production caller and which do not.
 type LedgerRepository interface {
+	// ConversationModel reads the first resolved model of this agent conversation.
+	ConversationModel(ctx context.Context, conversationID, harnessID string) (string, error)
 	// CreateSession records a restore key under a workspace. The workspace
 	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error

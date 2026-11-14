@@ -2,13 +2,9 @@
  * WHICH OF THE AGENTS THE ASSISTANT CAN RUN ARE ON THIS COMPUTER
  * (nocx-a62cl.12.2, ADR-anntnxdj decision 6).
  *
- * The backend answers `agentRecords.detect` and `agentRecords.catalogue`; this page is
- * the surface for it: five rows, each found or not on the person's login
- * shell's PATH, the version the command printed, and the readiness the
- * agent's connector reports (or its static probe without a connector). Ready
- * connectors also list their models as information. Nothing here starts an agent, and nothing here
- * changes how the assistant answers: eino still answers until 4b, and this
- * page is the list 4b's entry will read.
+ * The backend reports installed agents, readiness and each connector's catalogue.
+ * Each connector row carries its model roles. Choices are stored per agent;
+ * an unassigned role uses that agent's default for new conversations.
  *
  * A PULL, and the request is the whole of the interval. The page reads when it
  * opens and when the person presses Refresh, and asks nothing while it is not
@@ -38,12 +34,15 @@ import { PageSection } from './ui/page-section'
 import { RecordRow } from './ui/record-row'
 import { StatusCard } from './ui/status-card'
 import type { StatusDotTone } from './ui/status-dot'
+import { RolesSection } from './roles-section'
+import type { EndpointClient } from './endpoints'
 import { t } from './i18n/locale-model'
 
 type ConnectorAgent = AgentRecordsCatalogueResult['agents'][number]
 
 export interface AgentInstalledSectionProps {
   client: AgentRecordsClient
+  rolesClient?: EndpointClient
 }
 
 /**
@@ -141,7 +140,7 @@ export function AgentInstalledSection(props: AgentInstalledSectionProps) {
       title={t('agents.installed.title', 'Agents on this computer')}
       description={t(
         'agents.installed.desc',
-        "Which of the agents nocx can run are on your login shell's PATH, the version each reports, and whether it says it can answer. Nothing here starts an agent or changes how the assistant answers.",
+        'Which agents are installed and ready to answer. Choose role models from each agent’s catalogue; changes apply to new conversations.',
       )}
     >
       <div>
@@ -193,6 +192,13 @@ export function AgentInstalledSection(props: AgentInstalledSectionProps) {
                   detail={connectorDetail(connector(agent.id))}
                   actions={null}
                 />
+                <Show when={props.rolesClient && connector(agent.id)}>
+                  <RolesSection
+                    client={props.rolesClient!}
+                    agentId={agent.id}
+                    models={connector(agent.id)!.models}
+                  />
+                </Show>
               </div>
             )}
           </For>

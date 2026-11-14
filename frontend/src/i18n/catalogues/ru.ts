@@ -1323,7 +1323,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.access.forget.ariaOn': 'на',
   'agents.installed.title': 'Агенты на этом компьютере',
   'agents.installed.desc':
-    'Какие из агентов, которых умеет запускать nocx, есть в PATH вашей командной оболочки входа, какую версию сообщает каждый и говорит ли он, что готов отвечать. Здесь ничего не запускается и не меняется то, как отвечает ассистент.',
+    'Какие агенты установлены и готовы отвечать. Выберите модели ролей из каталога агента; изменения действуют для новых разговоров.',
   'agents.installed.listAria': 'Агенты на этом компьютере',
   'agents.installed.refresh': 'Обновить',
   'agents.installed.loading': 'Ищем агентов в PATH вашей командной оболочки входа…',
@@ -1962,4 +1962,21 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.workspaces.recolour': 'Меняем раскладку окна',
   'operations.waiting.workspaces.rename': 'Меняем раскладку окна',
   'operations.waiting.workspaces.reorder': 'Меняем раскладку окна',
+  'roles.agentDefault.desc':
+    'Неназначенные роли используют модель агента по умолчанию. Разговор сохраняет модель первого ответа; изменения действуют для новых разговоров.',
+  'roles.noCatalogue':
+    'Этот агент не предлагает выбор модели. Используется его модель по умолчанию.',
+  'roles.failed': 'Не удалось прочитать или сохранить модели ролей:',
+  'roles.agentDefault': 'По умолчанию агента',
+  'roles.removed': 'Выбранной модели больше нет в каталоге агента:',
+  'roles.answering.name': 'Ответы',
+  'roles.classifier.name': 'Классификация',
+  'roles.summarizing.name': 'Сводки',
+  'roles.auditing.name': 'Аудит',
+  'roles.unused': 'Объявлена для будущей функции; в этой версии не используется.',
+  'agents.status.ready': 'Готов',
+  'agents.status.unavailable': 'Отвечающий агент недоступен.',
+  'agents.status.manage': 'Проверить настройки агента',
+  'editor.chip.agent': 'Отвечает агент {agent}. Открыть настройки агента.',
+  'editor.chip.agentModel': 'Отвечает модель {model}. Открыть настройки агента.',
 }

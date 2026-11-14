@@ -914,13 +914,27 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "the answering agent is not available"})
 		return
 	}
-	ready := h.harness.Readiness(ctx)
+	conversation := string(sid)
+	if in.PaneID != nil {
+		conversation = *in.PaneID
+	}
+	model, err := h.answeringModel(ctx, conversation)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprint(err)})
+		return
+	}
+	var ready agentharness.Readiness
+	if checker, ok := h.harness.(agentharness.ModelReadiness); ok {
+		ready = checker.ReadinessForModel(ctx, model)
+	} else {
+		ready = h.harness.Readiness(ctx)
+	}
 	if ready.State != agentharness.Ready {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: ready.Message})
 		return
 	}
 	var endpoint profile.Endpoint
-	facts := content.RunFacts{Mode: "explain", Harness: h.harnessID}
+	facts := content.RunFacts{Mode: "explain", Harness: h.harnessID, ConversationID: conversation, Model: model}
 	in.Facts = facts
 
 	// Endpoint material (the credential and secret-valued headers) is NOT
@@ -938,7 +952,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// starts — the renderer places the block from the response, then
 	// appends deltas to it.
 	var askRes content.AgentAskResult
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+	err = h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		res, submitErr := svc.SubmitAsk(ctx, in)
 		if submitErr == nil {
 			askRes = res
@@ -993,10 +1007,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
 		automaticSessionItems: automaticSessionItems(attached),
 		markedSessionWindows:  markedSessionWindows(attached),
-	}
-	conversation := string(sid)
-	if in.PaneID != nil {
-		conversation = *in.PaneID
 	}
 	h.state.mu.Lock()
 	if h.state.agentConversations == nil {
@@ -2148,12 +2158,16 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		return
 	}
 	unarmedBounds := unarmedRunLeaseSentences(rc)
+	notices := h.runNotices(rc.runID)
+	if model == "" && h.harness != nil {
+		notices = append(notices, "the agent did not report which model answered; this conversation cannot promise to keep the same model")
+	}
 	notification := agentRunState{
 		RunID:         rc.runID,
 		State:         string(state),
 		DroppedDeltas: dropped,
 		UnarmedBounds: unarmedBounds,
-		Notices:       h.runNotices(rc.runID),
+		Notices:       notices,
 	}
 	if wireError {
 		notification.Error = sentence
@@ -2495,6 +2509,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 		return h
 	}
 	return []methodSpec{
+		reg(contentSub, catalog.OpAgentStatus, noParams(), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
+			return h.handleHarnessStatus
+		}),
 		reg(contentSub, catalog.OpAgentAsk, params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }

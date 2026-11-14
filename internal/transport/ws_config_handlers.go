@@ -2397,12 +2397,12 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		// The role methods (beads nocx-e6kn2, nocx-rikz5): roles.list,
-		// roles.assign and roles.setDefault ride the same config operation
+		// Role choices are kept per agent through the config operation.
+		// roles.list and roles.assign ride the same config operation
 		// as the endpoints they reference — one queue, so a default and an
 		// assignment can never be written against two different endpoint
 		// tables.
-		regResponder(configSub, catalog.OpRolesList, noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpRolesList, params(validateRoleListRaw), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -2410,10 +2410,7 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, catalog.OpRolesSetDefault, params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
-			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
+
 		// The assistant's methods (nocx-edio): endpoints.probe is the Test
 		// button — a streaming probe that can take tens of seconds, so it
 		// owns a capacity-one admission off the read loop exactly like
@@ -2430,10 +2427,7 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
-		regResponder(configSub, catalog.OpAgentStatus, noParams(), func(r Responder) handlerFunc {
-			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
-		}),
+
 		regResponder(configSub, catalog.OpGroupsList, noParams(), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

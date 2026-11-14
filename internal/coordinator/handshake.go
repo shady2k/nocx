@@ -131,7 +131,8 @@ package coordinator
 //
 // 32 (nocx-a62cl.14.4): agentRecords.catalogue is added, so a window built
 // against 31 does not know the method Settings now calls for an agent's models.
-const ProtocolVersion = 32
+// 33: roles select a model per agent; conversations keep their first model.
+const ProtocolVersion = 33
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

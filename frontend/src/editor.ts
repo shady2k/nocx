@@ -254,10 +254,10 @@ export class CommandEditor {
    *  listeners are permanent. Re-adding a listener per state change is how
    *  one click ends up firing three times. */
   private _modelChipTargets: {
-    endpoint: 'endpoints' | 'roles' | null
-    model: 'endpoints' | 'roles' | null
+    endpoint: 'agent-installed' | null
+    model: 'agent-installed' | null
   } = { endpoint: null, model: null }
-  private _onModelChipClick: ((page: 'endpoints' | 'roles') => void) | null = null
+  private _onModelChipClick: ((page: 'agent-installed') => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
@@ -697,13 +697,13 @@ export class CommandEditor {
   /** Where a model chip's click goes. Installed once by the host; the
    *  chips themselves carry no destination — they read the slot the last
    *  setModelChip wrote. */
-  onModelChipClick(handler: (page: 'endpoints' | 'roles') => void): void {
+  onModelChipClick(handler: (page: 'agent-installed') => void): void {
     this._onModelChipClick = handler
   }
 
   /**
    * The model chip's ONE writer (nocx-rikz5). Null hides both of ITS chips —
-   * the endpoint and the model — which is the state a Run target is in, where
+   * the agent and the model — which is the state a Run target is in, where
    * no model answers anything and a chip claiming one would be decoration.
    * The grant chip beside them is not this writer's: GrantController owns its
    * visibility (nocx-a7mw7.5), and naming it here again would be the second
@@ -717,15 +717,15 @@ export class CommandEditor {
       return
     }
     if (state.kind === 'ready') {
-      this._modelChipTargets = { endpoint: 'endpoints', model: 'roles' }
+      this._modelChipTargets = { endpoint: 'agent-installed', model: 'agent-installed' }
       this.modelEndpointChip.disabled = false
       this.modelEndpointChip.style.display = ''
-      this.modelEndpointChip.textContent = state.endpoint
-      this.modelEndpointChip.title = state.endpoint
+      this.modelEndpointChip.textContent = state.agentId
+      this.modelEndpointChip.title = state.agentId
       this.modelEndpointChip.setAttribute(
         'aria-label',
-        t('editor.chip.endpoint', 'Answers with {endpoint}. Open Endpoints.', {
-          endpoint: state.endpoint,
+        t('editor.chip.agent', 'Answers with {agent}. Open agent settings.', {
+          agent: state.agentId,
         }),
       )
       // The id is long and must not wrap: a wrapped chip is the layout
@@ -738,7 +738,7 @@ export class CommandEditor {
       this.modelChip.title = state.model
       this.modelChip.setAttribute(
         'aria-label',
-        t('editor.chip.model', 'Answers with the model {model}. Open Roles.', {
+        t('editor.chip.agentModel', 'Answers with the model {model}. Open agent settings.', {
           model: state.model,
         }),
       )

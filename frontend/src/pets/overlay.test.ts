@@ -831,7 +831,7 @@ describe('the composer is not ground (spec §5.5)', () => {
     ed.mount(pane)
     ed.show()
     ed.setLocation('root@host')
-    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setModelChip({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
     for (const { selector } of DEFAULT_LEDGES) {
       const inside = [...document.querySelectorAll(selector)].filter((el) => ed.root.contains(el))
       expect(inside, selector).toEqual([])

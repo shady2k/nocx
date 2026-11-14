@@ -48,6 +48,11 @@ type Steerer interface {
 	Steer(ctx context.Context, text string) error
 }
 
+// ModelReadiness checks a specific chosen model instead of the native default.
+type ModelReadiness interface {
+	ReadinessForModel(ctx context.Context, model string) Readiness
+}
+
 // Cataloguer is an optional capability: the models an agent can run, for the
 // role picker. A connector without it runs on the agent's own default.
 type Cataloguer interface {

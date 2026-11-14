@@ -75,7 +75,7 @@ export class AgentInputTarget implements InputTarget {
     if (!this.seams.status || !this.seams.onNoEndpoint) return
     try {
       const st = await this.seams.status()
-      if (!st.endpointConfigured) this.seams.onNoEndpoint()
+      if (!st.answering.ready) this.seams.onNoEndpoint()
     } catch {
       // The refusal is already visible; only the repair offer is lost.
     }

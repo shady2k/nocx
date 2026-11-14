@@ -49,16 +49,14 @@ test.beforeAll(async () => {
           baseUrl,
           api: 'openai-completions',
           apiKey: 'disposable-e2e-key',
-          models: [
-            {
-              id: 'e2e-model',
-              name: 'Disposable E2E model',
-              reasoning: false,
-              contextWindow: 128000,
-              maxTokens: 4096,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            },
-          ],
+          models: ['e2e-model', 'e2e-alternate'].map((id) => ({
+            id,
+            name: id === 'e2e-model' ? 'Disposable E2E model' : 'Alternate E2E model',
+            reasoning: false,
+            contextWindow: 128000,
+            maxTokens: 4096,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          })),
         },
       },
     }),
@@ -89,6 +87,37 @@ async function openAgentSection(page: Page): Promise<void> {
 test.describe('Settings lists connector readiness and models (nocx-a62cl.14.4)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
   test.setTimeout(120_000)
+
+  test('chooses an answering model from pi and the answer names that model (nocx-a62cl.5.3)', async ({
+    page,
+  }) => {
+    await openAgentSection(page)
+    const answering = page.locator(PI_ROW).getByRole('combobox', { name: 'Answering' })
+    await expect(answering).toBeEnabled({ timeout: 20_000 })
+    await answering.selectOption('nocx-e2e/e2e-alternate')
+    await expect(answering).toHaveValue('nocx-e2e/e2e-alternate')
+    await expect(answering).toBeEnabled()
+    await page.locator(TITLE).first().click()
+    const input = page.locator('.pane.active .nocx-editor-input')
+    await expect(input).toBeVisible()
+    await input.click()
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(page.locator('.pane.active .ui-mode-indicator:visible')).toHaveAttribute(
+      'data-target',
+      'agent',
+    )
+    fake.setScript({ chunks: ['The selected model answered.'] })
+    await input.fill('Which selected model answers this question?')
+    await page.keyboard.press('Enter')
+    const answer = page
+      .locator('.cmd-block')
+      .filter({ hasText: 'Which selected model answers this question?' })
+      .first()
+    await expect(answer).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
+    await expect(answer).toContainText('The selected model answered.')
+    await expect(answer).toHaveAttribute('data-answered-by', 'nocx-e2e/e2e-alternate')
+    await expect(answer.locator('.cmd-answer-provenance')).toContainText('nocx-e2e/e2e-alternate')
+  })
 
   test('shows pi ready with its configured model, then not configured without a provider', async ({
     page,

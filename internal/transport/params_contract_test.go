@@ -346,13 +346,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"id":"profile:test:1","name":"profile","type":"ssh","options":{"host":"host.example.com"}}`),
 		},
 		"roles.assign": {
-			[]byte(`{"role":"answering"}`),
+			[]byte(`{"agentId":"pi","role":"answering","model":null}`),
 		},
 		"roles.list": {
-			[]byte(`{}`),
-		},
-		"roles.setDefault": {
-			[]byte(`{"endpointId":"","model":""}`),
+			[]byte(`{"agentId":"pi"}`),
 		},
 		"session.signal": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","signal":"interrupt"}`),

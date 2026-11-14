@@ -251,3 +251,77 @@ func TestAsk_ConcurrentLazySearchUsesPrivateLoadedState(t *testing.T) {
 		}
 	}
 }
+
+func TestAsk_ApprovalWideningKeepsInitialToolDeclarations(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		name := "nil presentation"
+		if explicit {
+			name = "explicit presentation"
+		}
+		t.Run(name, func(t *testing.T) {
+			policy := allRows(content.DecisionRefuse)
+			policy.Observe.Decision = content.DecisionAsk
+			grant, dir := testDirGrant(t, policy)
+			path := filepath.Join(dir, "read.txt")
+			writeFile(t, path, "approved read")
+			widened := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
+			var mu sync.Mutex
+			var requests []string
+			_, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read request: %v", err)
+					return
+				}
+				mu.Lock()
+				requests = append(requests, string(body))
+				n := len(requests)
+				mu.Unlock()
+				if n == 1 {
+					streamToolCalls(w, toolCallSpec{name: "files.read", args: `{"path":` + quoted(path) + `}`, id: "read-call"})
+					return
+				}
+				streamOK(w)
+			})
+			defer srv.Close()
+			cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			approvals := NewApprovalStore()
+			q := &recordingQuestioner{store: approvals, answer: Approved{}}
+			p := askParams(srv.URL, &grant, &fakeLedger{}, approvals)
+			p.Questioner = q
+			mints := 0
+			p.FreshGrant = func() *content.Grant { mints++; return &widened }
+			if explicit {
+				p.Presentation = &agenttools.PresentationConfig{}
+			} else {
+				p.Presentation = nil
+			}
+			if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if len(q.asked) != 1 || mints != 1 {
+				t.Fatalf("approval questions=%d refreshes=%d, want one each", len(q.asked), mints)
+			}
+			mu.Lock()
+			bodies := append([]string(nil), requests...)
+			mu.Unlock()
+			if len(bodies) != 2 {
+				t.Fatalf("model requests=%d, want two", len(bodies))
+			}
+			before := toolNames(t, requestTools(t, bodies[0]))
+			after := toolNames(t, requestTools(t, bodies[1]))
+			if !reflect.DeepEqual(before, []string{"files.read"}) {
+				t.Fatalf("initial tools=%v, want files.read only", before)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("approval widened declarations from %v to %v", before, after)
+			}
+			if !strings.Contains(bodies[1], "approved read") {
+				t.Fatal("approved read did not reach next model request")
+			}
+		})
+	}
+}

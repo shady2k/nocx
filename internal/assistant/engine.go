@@ -37,7 +37,6 @@ import (
 	"github.com/eino-contrib/jsonschema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
-	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -338,9 +337,6 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		if p.Presentation != nil {
 			mw.presentation = *p.Presentation
 			mw.presentationState = newPresentationState(p.Presentation.Loaded)
-			mw.grantProvider = func() content.Grant {
-				return grant
-			}
 			mw.searchSchema = append([]byte(nil), c.searchSchema...)
 		}
 		declared, err = mw.Declare(permitted)

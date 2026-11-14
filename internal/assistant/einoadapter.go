@@ -54,10 +54,13 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 }
 
 func middlewareForKernel(k *effectKernel) *policyMiddleware {
+	// Declarations and executable tools share the initial authority. Execution
+	// still reads the kernel's refreshed grant after an approval.
+	grant := k.currentGrant()
 	return &policyMiddleware{
 		carrier:           &callsCarrier{effectKernel: k},
 		kernel:            k,
-		grantProvider:     k.currentGrant,
+		grantProvider:     func() content.Grant { return grant },
 		presentationState: newPresentationState(nil),
 	}
 }

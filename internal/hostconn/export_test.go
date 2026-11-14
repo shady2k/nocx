@@ -19,3 +19,5 @@ func ControlEdgesSeen(s *Supervisor) uint64 {
 	}
 	return l.controlProcessed.Load()
 }
+
+func (s *Supervisor) RetryScheduled() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.retryScheduled }

@@ -30,6 +30,8 @@ package transport
 // subscriber lookup. The composition root adapts one to the other, which keeps
 // this package out of the connection state machine (design §5.1.1).
 
+import "context"
+
 // PaneConnection is the wire payload, declared once
 // (contracts/pane.connection.schema.json) and pinned by the contract tests.
 //
@@ -38,16 +40,17 @@ package transport
 // plain shell says plainShells 0, while an opening connection must not carry the
 // key at all. A value with omitempty cannot express the first.
 type PaneConnection struct {
-	PaneID          string                   `json:"paneId"`
-	ConnectionID    string                   `json:"connectionId"`
-	ConnectionEpoch uint64                   `json:"connectionEpoch"`
-	InstanceID      string                   `json:"instanceId"`
-	SessionID       string                   `json:"sessionId,omitempty"`
-	Transport       PaneConnectionTransport  `json:"transport"`
-	Quality         *PaneConnectionQuality   `json:"quality,omitempty"`
-	Attempt         PaneConnectionAttempt    `json:"attempt"`
-	Reconnect       *PaneConnectionReconnect `json:"reconnect,omitempty"`
-	ObservedAt      string                   `json:"observedAt"`
+	ConnectionSequence uint64                   `json:"-"`
+	PaneID             string                   `json:"paneId"`
+	ConnectionID       string                   `json:"connectionId"`
+	ConnectionEpoch    uint64                   `json:"connectionEpoch"`
+	InstanceID         string                   `json:"instanceId"`
+	SessionID          string                   `json:"sessionId,omitempty"`
+	Transport          PaneConnectionTransport  `json:"transport"`
+	Quality            *PaneConnectionQuality   `json:"quality,omitempty"`
+	Attempt            PaneConnectionAttempt    `json:"attempt"`
+	Reconnect          *PaneConnectionReconnect `json:"reconnect,omitempty"`
+	ObservedAt         string                   `json:"observedAt"`
 }
 
 // PaneConnectionTransport is the state, with exactly the fields that state
@@ -105,6 +108,8 @@ type paneRecord struct {
 	wconn  *wsConn
 	state  *connState
 	params openParams
+	ctx    context.Context
+	cancel context.CancelFunc
 	// offer is the last published answer to "may this person press Reconnect".
 	// The RPC refuses unless an offer stands, and it is the SAME value the
 	// renderer was told, so the button and the call cannot disagree.
@@ -113,7 +118,9 @@ type paneRecord struct {
 	// asked. It is the transport's own guard, because a second press arrives
 	// on another request and would otherwise open a second shell while the
 	// first is still dialing.
-	busy bool
+	busy               bool
+	registering        chan struct{}
+	connectionSequence uint64
 }
 
 // bindPane records that this connection is the one a pane's notifications go
@@ -122,15 +129,31 @@ type paneRecord struct {
 // a subscription installed after the ack would miss exactly the stage the pane
 // exists for.
 func (s *WSServer) bindPane(paneID string, wconn *wsConn, state *connState, params openParams) {
+	s.bindPaneForOpen(s.lifetimeCtx, paneID, wconn, state, params)
+}
+
+func (s *WSServer) bindPaneForOpen(ctx context.Context, paneID string, wconn *wsConn, state *connState, params openParams) *paneRecord {
 	if paneID == "" || wconn == nil {
-		return
+		return nil
 	}
 	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	if s.paneRecords == nil {
 		s.paneRecords = make(map[string]*paneRecord)
 	}
-	s.paneRecords[paneID] = &paneRecord{wconn: wconn, state: state, params: params}
-	s.paneMu.Unlock()
+	if rec := s.paneRecords[paneID]; rec != nil && rec.wconn == wconn && rec.busy {
+		rec.params = params
+	} else {
+		if rec != nil {
+			rec.cancel()
+		}
+		ctx, cancel := context.WithCancel(s.lifetimeCtx)
+		s.paneRecords[paneID] = &paneRecord{wconn: wconn, state: state, params: params, ctx: ctx, cancel: cancel}
+	}
+	return s.paneRecords[paneID]
 }
 
 // unbindPane forgets one pane. It is called when the pane closes, not when its
@@ -145,6 +168,9 @@ func (s *WSServer) unbindPane(paneID string) {
 		return
 	}
 	s.paneMu.Lock()
+	if rec := s.paneRecords[paneID]; rec != nil {
+		rec.cancel()
+	}
 	delete(s.paneRecords, paneID)
 	delete(s.paneEpochs, paneID)
 	policy := s.paneConnectionPolicy
@@ -155,11 +181,6 @@ func (s *WSServer) unbindPane(paneID string) {
 }
 
 // paneRecordOf answers one pane's backend record, or nil.
-func (s *WSServer) paneRecordOf(paneID string) *paneRecord {
-	s.paneMu.Lock()
-	defer s.paneMu.Unlock()
-	return s.paneRecords[paneID]
-}
 
 // unbindPanesFor drops every pane this connection opened. A pane's state lives
 // on its connection, and a pane whose window is gone has nobody to draw it.
@@ -171,6 +192,7 @@ func (s *WSServer) unbindPanesFor(wconn *wsConn) {
 	defer s.paneMu.Unlock()
 	for paneID, rec := range s.paneRecords {
 		if rec.wconn == wconn {
+			rec.cancel()
 			delete(s.paneRecords, paneID)
 		}
 	}
@@ -207,9 +229,6 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 	if rec != nil {
 		wconn = rec.wconn
 	}
-	if s.panePublishGate != nil {
-		s.panePublishGate()
-	}
 	if wconn != nil {
 		if err := wconn.TryNotify("pane.connection", mustMarshal(p)); err != nil {
 			s.log.Debug("write pane.connection notification", "pane", p.PaneID, "error", err)
@@ -218,6 +237,7 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 	s.paneEpochs[p.PaneID] = p.ConnectionEpoch
 	if rec != nil {
 		rec.offer = p.Reconnect != nil
+		rec.connectionSequence = p.ConnectionSequence
 	}
 	s.paneMu.Unlock()
 }

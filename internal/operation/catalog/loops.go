@@ -20,6 +20,10 @@ type Loop struct {
 
 var loopTable = []Loop{
 	{
+		ID: "loop.ssh.reconnect", Owner: OwnerBinding, Iteration: "internal.ssh.attempt",
+		Stop: d(10000, BasisRead, "releasing the last pane cancels the supervisor retry wait and its active attempt"),
+	},
+	{
 		ID: "loop.session.readPump", Owner: OwnerSession, Iteration: "internal.session.recorder",
 		Stop: d(10000, BasisRead, "session teardown joins the read pump within the transport's control drain bound (session close path)"),
 	},

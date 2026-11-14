@@ -1121,17 +1121,14 @@ func New(opts ...Option) (*App, error) {
 	// same late-binding the opener's other transport halves get; until then
 	// nothing is attached to hear an observation and nothing reconnects by
 	// itself.
-	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger),
-		panedriver.WithPolicy(func() string {
-			value, readErr := settingsRegistry.GetSelect(settings.SSHReconnect)
-			if readErr != nil {
-				// A registry that cannot answer is the CONSERVATIVE answer:
-				// nothing reconnects without a person. `auto` is the default
-				// VALUE, not a default for a failed read.
-				return panedriver.PolicyNever
-			}
-			return value
-		}))
+	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger))
+	localOpener.reconnectPolicy = func() string {
+		value, readErr := settingsRegistry.GetSelect(settings.SSHReconnect)
+		if readErr != nil {
+			return "never"
+		}
+		return value
+	}
 	localOpener.paneConns = paneConns
 
 	// The content key opens BOTH encrypted stores — the history database
@@ -2138,7 +2135,7 @@ func New(opts ...Option) (*App, error) {
 	// The policy owner's in-flight notice (design §5.1.1: transport declares the
 	// seam it calls, the root adapts). It is how a person's press tells the
 	// automatic retry not to start beside it.
-	tpOpts = append(tpOpts, transport.WithPaneConnectionPolicy(paneConns))
+	tpOpts = append(tpOpts, transport.WithPaneConnectionPolicy(paneConnectionOwner{Driver: paneConns, opener: localOpener}))
 	tpOpts = append(tpOpts, transport.WithDiagnostics(diag, appDiagnosticsProvider{
 		opener: localOpener, logPath: logFilePath,
 	}))
@@ -2161,8 +2158,8 @@ func New(opts ...Option) (*App, error) {
 	// to do it, through the SAME path a person's press takes. The context is
 	// the server's, not the request's: an automatic reconnect must outlive the
 	// frame that caused it.
-	paneConns.SetAction(func(paneID string, _ uint64) error {
-		return tp.ReconnectPane(context.Background(), paneID)
+	paneConns.SetAction(func(ctx context.Context, paneID string, _ uint64) error {
+		return tp.ReconnectPane(ctx, paneID)
 	})
 	helperReg.publishEffect = tp.PublishSessionEffect
 	helperReg.blockRows = tp

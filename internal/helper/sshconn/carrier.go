@@ -51,7 +51,8 @@ type Carrier struct {
 // Options is what a caller decides about the carrier's connection manager.
 type Options struct {
 	// Clock is the supervisor's time source; nil is the process's.
-	Clock hostconn.Clock
+	Clock   hostconn.Clock
+	Attempt hostconn.AttemptRunner
 	// Wake is the machine's wake source; nil is ONE WITH NO SIGNAL, which is
 	// what a test driving its own signal wants. The production constructor
 	// (New) supplies internal/wakesource's.
@@ -64,7 +65,7 @@ type Options struct {
 // second pool (AD-4), and the two clocks the helper itself cannot read any
 // other way (design §5.3, "On a wake signal").
 func New(client *ssh.RealClient, logger log.Logger) *Carrier {
-	return NewWithOptions(client, logger, Options{Wake: wakesource.New(logger)})
+	return NewWithOptions(client, logger, Options{Wake: wakesource.New(logger), Attempt: runAttempt})
 }
 
 // NewWithOptions is New with the clock and the wake source decided by the
@@ -75,7 +76,7 @@ func New(client *ssh.RealClient, logger log.Logger) *Carrier {
 func NewWithOptions(client *ssh.RealClient, logger log.Logger, opts Options) *Carrier {
 	c := &Carrier{client: client, log: logger}
 	c.conns = hostconn.NewManager(c, logger,
-		hostconn.WithClock(opts.Clock), hostconn.WithWakeSource(opts.Wake))
+		hostconn.WithClock(opts.Clock), hostconn.WithWakeSource(opts.Wake), hostconn.WithAttempt(opts.Attempt))
 	return c
 }
 
@@ -116,8 +117,8 @@ func (c *Carrier) WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func
 	return c.conns.Supervisor(key).Watch(fn)
 }
 
-// Disconnect closes the live connection for key, if there is one, and reports
-// whether it closed one. It is the reconnect's first move (design §5.3).
+// Disconnect implements the explicit ssh.disconnect operation. Manual pane
+// reconnection instead uses RegisterReconnect, which closes and registers atomically.
 func (c *Carrier) Disconnect(key connkey.Key) bool {
 	return c.conns.Supervisor(key).Disconnect()
 }
@@ -150,6 +151,13 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 	spec, ok := plan.Material.(ssh.PooledSpec)
 	if !ok {
 		return nil, fmt.Errorf("sshconn: a plan for %s carries %T, not a pooled spec", plan.Key, plan.Material)
+	}
+	if spec.Prepare != nil {
+		var err error
+		spec.Config, spec.Route, err = spec.Prepare(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if spec.Config == nil {
 		return nil, fmt.Errorf("sshconn: a plan for %s carries no client configuration", plan.Key)
@@ -316,4 +324,14 @@ func (c *Carrier) acquireHop(ctx context.Context, hop ssh.PooledHop, prefix []ss
 		return nil, fmt.Errorf("sshconn: the hop %s@%s:%d has a carrier with no channels", hop.User, hop.Host, hop.Port)
 	}
 	return ssh.Borrow(pooled.Client(), lease.Release), nil
+}
+
+// RetainConnection keeps a pane's logical interest alive across transport loss.
+func (c *Carrier) RetainConnection(key connkey.Key, policy string) func() {
+	return c.conns.Supervisor(key).Retain(policy)
+}
+
+// RegisterReconnect atomically claims the supervisor's offer, closing first.
+func (c *Carrier) RegisterReconnect(key connkey.Key, expectedSeq uint64) error {
+	return c.conns.Supervisor(key).RequestReconnect(expectedSeq)
 }

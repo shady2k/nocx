@@ -263,6 +263,7 @@ type Manager struct {
 	log     log.Logger
 	clock   Clock
 	wake    WakeSource
+	attempt AttemptRunner
 	mu      sync.Mutex
 	sups    map[Key]*Supervisor
 }
@@ -375,7 +376,7 @@ func (m *Manager) Supervisor(key Key) *Supervisor {
 	if sup == nil {
 		sup = &Supervisor{
 			key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m,
-			changed: make(chan struct{}),
+			changed: make(chan struct{}), attemptRunner: m.attempt,
 		}
 		m.sups[key] = sup
 	}
@@ -390,7 +391,15 @@ type Supervisor struct {
 	clock   Clock
 	mgr     *Manager
 
-	mu sync.Mutex
+	mu              sync.Mutex
+	plan            Plan
+	planContext     context.Context
+	retained        int
+	reconnectPolicy string
+	retryCancel     context.CancelFunc
+	retryScheduled  bool
+	keep            *Lease
+	attemptRunner   AttemptRunner
 	// state is the current point of the machine.
 	state State
 	// steps is the path this supervisor has taken, oldest first, bounded: a
@@ -666,6 +675,9 @@ const maxSteps = 32
 // exist: before the first call there is a supervisor and no connection, which
 // is the state a person is in while the first dial runs.
 func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
+	s.mu.Lock()
+	s.plan, s.planContext = plan, context.WithoutCancel(ctx)
+	s.mu.Unlock()
 	for {
 		var (
 			fenced   chan struct{}
@@ -777,7 +789,18 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		dialStarted := s.clock.Now()
 		s.mu.Unlock()
 
-		link, err := s.carrier.Dial(ctx, plan, s.report)
+		var link Link
+		var err error
+		dial := func(attemptCtx context.Context) error {
+			report := func(event Event) { s.report(event); ReportAttempt(attemptCtx, event) }
+			link, err = s.carrier.Dial(WithAttemptReporter(attemptCtx, report), plan, report)
+			return err
+		}
+		if s.attemptRunner != nil {
+			err = s.attemptRunner(ctx, dial)
+		} else {
+			err = dial(ctx)
+		}
 
 		s.mu.Lock()
 		s.dialing = nil
@@ -787,6 +810,7 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			// through the sink (refused, waiting for a person, or lost); a
 			// carrier that said nothing leaves the attempt where its last stage
 			// was, which is honest.
+			s.scheduleRetryLocked()
 			s.mu.Unlock()
 			return nil, err
 		}
@@ -865,6 +889,7 @@ func (s *Supervisor) finishFenced(l *live, event Event) {
 		s.live = nil
 		s.generation++
 		s.advance(event)
+		s.scheduleRetryLocked()
 	}
 	close(l.closed)
 	s.mu.Unlock()
@@ -936,6 +961,9 @@ func (s *Supervisor) report(event Event) {
 // held.
 func (s *Supervisor) advance(event Event) {
 	next := Next(s.state, event)
+	if next.Kind == Reconnecting && next.Cause == CauseTainted {
+		next = State{Kind: Ended, Cause: CauseTainted}
+	}
 	if next == s.state {
 		return
 	}
@@ -1011,6 +1039,11 @@ func (s *Supervisor) release(lease *Lease) {
 	}
 	delete(held.observers, lease)
 	last = held.holders == 0
+	if last && s.live == held && !held.closing.Load() && s.retained > 0 {
+		held.holders++
+		s.keep = &Lease{sup: s, held: held, link: held.link}
+		last = false
+	}
 	// THE FENCE HAPPENS UNDER THIS SAME HOLD (review verification, the
 	// last-release race). Decrementing to zero, unlocking, and only then
 	// marking the connection closing left a window in which an acquire joined
@@ -1020,7 +1053,7 @@ func (s *Supervisor) release(lease *Lease) {
 	if fenced {
 		s.dropRidersLocked(held)
 		s.notifyWaiters(held, ErrLinkLost)
-		if s.live == nil && s.state.Kind == Reconnecting {
+		if s.live == nil && s.state.Kind == Reconnecting && s.retained == 0 {
 			// The transport ended while this holder still had it, and now the
 			// last one has let go: there is nothing left to reconnect for.
 			s.advance(Event{Kind: Closed, Cause: CauseReleased})

@@ -14,12 +14,6 @@ const baseURL = 'https://nocx.local/contracts/'
 
 const resultAliases = new Map([
   ['connections.test', 'connections.probe.schema.json'],
-  // A reconnect answers with the SAME result as `open`, because it IS an open:
-  // the same session identity, workspace and geometry, produced by the same
-  // path. A second declaration of that shape would be a second thing to keep in
-  // step with `open.schema.json`, and the renderer already holds the `Open`
-  // type.
-  ['pane.reconnect', 'open.schema.json'],
   ['uistate.get', 'uistate.schema.json'],
   ['uistate.set', 'uistate.schema.json'],
   // The window half (ADR-0086) shares one result shape between nothing else:

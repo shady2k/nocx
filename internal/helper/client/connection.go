@@ -58,3 +58,22 @@ func (c *Client) connectionState(raw json.RawMessage) {
 	}
 	c.cfg.OnConnectionEvent(c.instanceID, ev)
 }
+
+// BindConnection registers a pane's logical hold before its first dial.
+func (c *Client) BindConnection(ctx context.Context, destination proto.SSHDestination, paneID, policy string) (string, error) {
+	var res proto.ConnectionResult
+	err := c.Call(ctx, proto.ServiceSSH, proto.OpConnection, proto.ConnectionParams{Destination: destination, PaneID: paneID, ReconnectPolicy: policy}, &res)
+	return res.ConnectionID, err
+}
+
+// RegisterReconnect closes the socket first and answers before the new dial.
+func (c *Client) RegisterReconnect(ctx context.Context, destination proto.SSHDestination, expectedSeq uint64) error {
+	var res proto.ReconnectResult
+	return c.Call(ctx, proto.ServiceSSH, proto.OpReconnect, proto.ReconnectParams{Destination: destination, ExpectedSeq: expectedSeq}, &res)
+}
+
+// ReleaseConnection drops the logical pane hold when its layout pane closes.
+func (c *Client) ReleaseConnection(ctx context.Context, paneID string) error {
+	var res proto.ReleaseConnectionResult
+	return c.Call(ctx, proto.ServiceSSH, proto.OpReleaseConnection, proto.ReleaseConnectionParams{PaneID: paneID}, &res)
+}

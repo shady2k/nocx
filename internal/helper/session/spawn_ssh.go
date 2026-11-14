@@ -57,7 +57,6 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/bootstrapstream"
-	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -76,10 +75,6 @@ import (
 type ShellOpener interface {
 	OpenPaneListeners(ctx context.Context, spec sshsvc.PaneSpec) (*sshsvc.PaneListeners, error)
 	OpenShell(ctx context.Context, spec sshsvc.ShellSpec) (*sshsvc.ShellChannel, error)
-	// Disconnect closes the destination's live connection, if this helper has
-	// one. It is the reconnect's first move (design §5.3): a stalled connection
-	// is still pooled, and the shell that follows must dial rather than park.
-	Disconnect(ctx context.Context, destination proto.SSHDestination) (bool, error)
 }
 
 // sshSpawner is the SSHSpawner this build wires into the session service.
@@ -127,15 +122,6 @@ func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
 // that waited would hold the op for the whole bootstrap budget, and a
 // coordinator's pane would appear fifteen seconds after it was asked for.
 func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process, error) {
-	// THE OLD CONNECTION GOES FIRST, if this is a reconnect (design §5.3:
-	// "Reconnect closes the socket first"). It is still in the pool while
-	// stalled, so a shell asked for on the same destination would join it; the
-	// close fences it, and the acquires below dial afresh.
-	if req.Reconnect {
-		if _, derr := p.opener.Disconnect(ctx, req.Destination); derr != nil {
-			return nil, derr
-		}
-	}
 	kind := shellintegration.ShellKind(req.Shell)
 	if kind == "" {
 		kind = shellintegration.ShellAuto

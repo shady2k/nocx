@@ -35,9 +35,6 @@ type pooledSSHConn struct {
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
 
-	// mu guards nothing that outlives construction any more; kept so a field
-	// added here has one place to be read under.
-	mu sync.Mutex
 	// ended is set by the dial's own connection marker the instant the library
 	// closes the socket — inside x/crypto's teardown, before Wait returns. It
 	// is what makes "this transport has ended" answerable synchronously, so

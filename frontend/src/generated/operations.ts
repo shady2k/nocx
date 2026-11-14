@@ -1182,7 +1182,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     merge: 'none',
     domain: 'session',
     turnMs: 30000,
-    maxMs: 300000,
+    maxMs: 10000,
     answerMs: null,
   },
   'panes.close': {

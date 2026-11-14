@@ -416,10 +416,11 @@ func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool
 }
 
 type WSServer struct {
-	log      log.Logger
-	registry session.Registry
-	server   *http.Server
-	port     int
+	lifetimeCtx context.Context
+	log         log.Logger
+	registry    session.Registry
+	server      *http.Server
+	port        int
 	// heartbeatReadWindow bounds how long a half-open connection may hold its
 	// session before an inbound frame proves the peer is still present.
 	heartbeatReadWindow time.Duration
@@ -1076,10 +1077,6 @@ type WSServer struct {
 	paneMu      sync.Mutex
 	paneRecords map[string]*paneRecord
 	paneEpochs  map[string]uint64
-	// panePublishGate is a test seam: called under paneMu between admission and
-	// enqueue, so a test can force the two-publisher interleaving the epoch
-	// guard exists for. Nil in production.
-	panePublishGate func()
 	// paneConnectionPolicy is the connection policy's notice that a reconnect
 	// is being carried out and that a pane is gone (ws_pane_reconnect.go). Nil
 	// is a server with no connection policy wired; no offer exists then.
@@ -2282,6 +2279,7 @@ func (s *WSServer) domainGates() domainGates {
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
+	s.lifetimeCtx = ctx
 	// Fail closed: no entropy → no token → no connections.
 	if err := s.mintToken(); err != nil {
 		return err
@@ -4940,12 +4938,12 @@ func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
 		panes[pane] = struct{}{}
 	}
 	for pane := range panes {
-		s.closePaneSessions(pane)
 		// THE PANE IS GONE, so its binding goes too. A shared connection
 		// outlives one pane, and without this every later observation of it
 		// would still be produced and published for a pane that no longer
 		// exists — in the transport's maps and in the policy owner's.
 		s.unbindPane(pane)
+		s.closePaneSessions(pane)
 	}
 }
 

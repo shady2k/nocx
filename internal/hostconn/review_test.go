@@ -54,12 +54,12 @@ func TestATaintedConnectionIsNotGivenToANewCaller(t *testing.T) {
 	}
 	tainted := false
 	for _, state := range first.States() {
-		if state.Kind == hostconn.Reconnecting && state.Cause == hostconn.CauseTainted {
+		if state.Kind == hostconn.Ended && state.Cause == hostconn.CauseTainted {
 			tainted = true
 		}
 	}
 	if !tainted {
-		t.Fatalf("the retired connection never read reconnecting(tainted): %v", first.States())
+		t.Fatalf("the retired connection never read ended(tainted): %v", first.States())
 	}
 }
 

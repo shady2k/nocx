@@ -13,6 +13,20 @@
 package catalog
 
 var internalDeclarations = []Declaration{
+	decl("internal.ssh.release", KindInternal, OwnerBinding,
+		[]Phase{ph("run", []Resource{{Kind: ResourceBinding, Name: "", Mode: ModeKey}}, []Domain{DomainSSH, DomainHelper})},
+		d(1000, BasisRead, "a pane close releases its logical connection hold"),
+		d(10000, BasisRead, "bounded helper registration cleanup, not shell teardown"),
+		none(), none(), none(),
+		MergeNone, nil,
+		"Releasing the pane connection", RowNever, ExpiredOutcomeUnknown),
+	decl("internal.ssh.attempt", KindInternal, OwnerBinding,
+		[]Phase{ph("run", []Resource{{Kind: ResourceBinding, Name: "", Mode: ModeKey}}, []Domain{DomainSSH, DomainNetwork, DomainConfig, DomainVault})},
+		d(1000, BasisRead, "the supervisor serializes attempts per connection"),
+		d(600000, BasisRead, "design §5.5: each progressing handshake or sign-in stage may wait ten minutes; person waits are separately bounded and pause the stage budget"),
+		none(), none(), none(),
+		MergeNone, nil,
+		"Connecting to the host", RowPastWait, ExpiredOutcomeUnknown),
 	decl("internal.files.watchPoll", KindInternal, OwnerBinding,
 		[]Phase{ph("run", []Resource{{Kind: ResourceBinding, Name: "", Mode: ModeKey}}, []Domain{DomainFilesystem, DomainSSH})},
 		d(1000, BasisRead, "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"),

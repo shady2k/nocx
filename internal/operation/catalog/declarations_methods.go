@@ -1084,7 +1084,7 @@ var methodDeclarations = []Declaration{
 	decl("pane.reconnect", KindMethod, OwnerRequest,
 		[]Phase{ph("run", []Resource{{Kind: ResourceSession, Name: "", Mode: ModeKey}}, []Domain{DomainSession, DomainHelper, DomainSSH, DomainConfig, DomainVault})},
 		d(personTurnMillis, BasisRead, personTurnBasis),
-		d(300000, BasisRead, "read: the reconnect closes a connection, dials, installs and launches a shell — the same work `open` declares and with no explicit bound today"),
+		d(10000, BasisRead, "read: validates and registers the reconnect; supervisor attempts and pane adoption continue on pane.connection after the RPC answers"),
 		none(),
 		none(),
 		within(10000, BasisRead, "read: a reconnect that produced no shell must release the session it retired, like the open's own rollback"),

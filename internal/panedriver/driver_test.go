@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -44,14 +44,9 @@ func apply(d *panedriver.Driver, ev proto.ConnectionStateEvent) { d.ApplyFrom("h
 
 func newDriver(t *testing.T) (*panedriver.Driver, *sent) {
 	t.Helper()
-	return newDriverWith(t)
-}
-
-// newDriverWith is newDriver with options (a policy, a scheduler, an action).
-func newDriverWith(t *testing.T, opts ...panedriver.Option) (*panedriver.Driver, *sent) {
-	t.Helper()
 	out := &sent{}
-	d := panedriver.New("instance-1", log.NewSlogAdapter(nil), opts...)
+	_, logger := logtest.New(t)
+	d := panedriver.New("instance-1", logger)
 	d.SetPublisher(out.add)
 	return d, out
 }
@@ -197,7 +192,7 @@ func TestAdoptSessionNamesTheSessionItBecame(t *testing.T) {
 	d, out := newDriver(t)
 	apply(d, opening(1, "shell"))
 	d.Bind("pane-1", "conn-a")
-	d.AdoptSession("pane-1", "conn-a", "sess-1", "instance-1")
+	d.AdoptSession("pane-1", "conn-a", "sess-1", "instance-1", 1)
 
 	last := out.last()
 	if last.SessionID != "sess-1" {
@@ -218,7 +213,7 @@ func TestRebindingClearsThePreviousConnectionsSession(t *testing.T) {
 	d, out := newDriver(t)
 	apply(d, connected(1, 1))
 	d.Bind("pane-1", "conn-a")
-	d.AdoptSession("pane-1", "conn-a", "sess-a", "instance-1")
+	d.AdoptSession("pane-1", "conn-a", "sess-a", "instance-1", 1)
 	if snap := out.last(); snap.SessionID != "sess-a" {
 		t.Fatalf("sessionId = %q, want sess-a", snap.SessionID)
 	}
@@ -245,7 +240,7 @@ func TestADelayedAdoptionFromTheOldConnectionIsRefused(t *testing.T) {
 	d.Bind("pane-1", "conn-b")
 	before := len(out.all())
 
-	d.AdoptSession("pane-1", "conn-a", "sess-a", "instance-1")
+	d.AdoptSession("pane-1", "conn-a", "sess-a", "instance-1", 1)
 	if got := len(out.all()); got != before {
 		t.Fatalf("a stale adoption published %d snapshot(s)", got-before)
 	}
@@ -253,7 +248,7 @@ func TestADelayedAdoptionFromTheOldConnectionIsRefused(t *testing.T) {
 		t.Fatalf("the stale adoption set sessionId %q", snap.SessionID)
 	}
 
-	d.AdoptSession("pane-1", "conn-b", "sess-b", "instance-1")
+	d.AdoptSession("pane-1", "conn-b", "sess-b", "instance-1", 2)
 	if snap := out.last(); snap.SessionID != "sess-b" {
 		t.Fatalf("the current connection's adoption set sessionId %q", snap.SessionID)
 	}
@@ -365,6 +360,9 @@ func TestAStateWithoutItsCompanionIsRefused(t *testing.T) {
 		{ConnectionID: "conn-a", Seq: 9, State: proto.ConnectionConnected, Cause: "released"},
 		{ConnectionID: "conn-a", Seq: 10, State: proto.ConnectionWaitingPerson, Cause: "auth-rejected"},
 		{ConnectionID: "conn-a", Seq: 11, State: proto.ConnectionReconnecting, Attempt: 1},
+		{ConnectionID: "conn-a", Seq: 12, State: proto.ConnectionReconnecting, Attempt: 1, Cause: "auth-rejected"},
+		{ConnectionID: "conn-a", Seq: 13, State: proto.ConnectionFailed, Cause: "lost-link"},
+		{ConnectionID: "conn-a", Seq: 14, State: proto.ConnectionEnded, Cause: "host-key-changed"},
 	} {
 		apply(d, ev)
 	}
@@ -434,17 +432,11 @@ func TestStalledWithNoPlainShellOffersNothing(t *testing.T) {
 	}
 }
 
-// TestADroppedPaneOffersTheButtonUnderEveryPolicy: ssh.reconnect decides what
-// the BACKEND does by itself, not whether a person may choose (design 5.4).
-func TestADroppedPaneOffersTheButtonUnderEveryPolicy(t *testing.T) {
-	for _, policy := range []string{panedriver.PolicyAuto, panedriver.PolicyAsk, panedriver.PolicyNever} {
-		t.Run(policy, func(t *testing.T) {
-			d, out := newDriverWith(t, panedriver.WithPolicy(func() string { return policy }))
-			apply(d, reconnecting(1, 1, "lost-link"))
-			d.Bind("pane-1", "conn-a")
-			if snap := out.last(); snap.Reconnect == nil {
-				t.Fatalf("policy %q leaves a dropped pane with no button", policy)
-			}
-		})
+func TestADroppedPaneOffersTheButton(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, reconnecting(1, 1, "lost-link"))
+	d.Bind("pane-1", "conn-a")
+	if snap := out.last(); snap.Reconnect == nil {
+		t.Fatal("a dropped pane has no reconnect offer")
 	}
 }

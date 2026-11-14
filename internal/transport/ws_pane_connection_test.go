@@ -161,45 +161,34 @@ func TestTheEpochGuardSerializesPublication(t *testing.T) {
 	wc := soleWSConn(t, ws)
 	bindTestPane(t, ws, wc, "pane-1")
 
-	admitted := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
-	ws.panePublishGate = func() {
-		once.Do(func() {
-			close(admitted)
-			<-release
-		})
+	var workers sync.WaitGroup
+	for epoch := uint64(1); epoch <= 50; epoch++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			state := paneConnectionStates()["opening"]
+			state.ConnectionEpoch = epoch
+			ws.PublishPaneConnection(state)
+		}()
 	}
+	workers.Wait()
+	final := paneConnectionStates()["opening"]
+	final.ConnectionEpoch = 51
+	ws.PublishPaneConnection(final)
 
-	first := paneConnectionStates()["opening"]
-	first.ConnectionEpoch = 1
-	go func() { ws.PublishPaneConnection(first) }()
-	<-admitted
-
-	second := paneConnectionStates()["opening"]
-	second.ConnectionEpoch = 2
-	done := make(chan struct{})
-	go func() {
-		ws.PublishPaneConnection(second)
-		close(done)
-	}()
-	// The second publisher must be waiting on the guard the first holds.
-	close(release)
-	<-done
-
-	var epochs []uint64
-	for i := 0; i < 2; i++ {
+	var previous uint64
+	for previous < 51 {
 		raw := readNotification(t, conn, "pane.connection", wantWithin)
 		var got struct {
 			Epoch uint64 `json:"connectionEpoch"`
 		}
 		if err := json.Unmarshal(raw, &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+			t.Fatal(err)
 		}
-		epochs = append(epochs, got.Epoch)
-	}
-	if epochs[0] != 1 || epochs[1] != 2 {
-		t.Fatalf("epochs over the wire = %v, want [1 2]", epochs)
+		if got.Epoch <= previous {
+			t.Fatalf("epoch %d followed %d", got.Epoch, previous)
+		}
+		previous = got.Epoch
 	}
 }
 

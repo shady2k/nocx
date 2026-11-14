@@ -459,7 +459,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		defer reporter.End()
 	}
 
-	_, err := h.openInto(ctx, wconn, state, params, false, func(result openResult) {
+	_, err := h.openInto(ctx, wconn, state, params, func(result openResult) {
 		resultJSON, _ := json.Marshal(result)
 		_ = respond(r, newJSONRPCResult(req.ID, resultJSON))
 	})
@@ -474,10 +474,8 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 // its ack through ack; `pane.reconnect` does the same work for a pane whose
 // shell died, which is why this is one function and not a second beside it.
 //
-// reconnect asks the opener to close the pane's existing connection before it
-// dials (design §5.3: "Reconnect closes the socket first"); nothing else about
-// the path differs, and nothing about a reconnect re-runs a command.
-func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, reconnect bool, ack func(openResult)) (openResult, error) {
+// The supervisor has already restored the connection when a return callback opens a new shell.
+func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, ack func(openResult)) (openResult, error) {
 	spec := OpenSpec{
 		PaneID: params.PaneID,
 		Kind:   params.Kind,
@@ -492,10 +490,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		DesiredMode: params.DesiredMode,
 		Shell:       params.Shell,
 		Cwd:         params.Cwd,
-		// A RECONNECT IS THE SAME OPEN WITH ONE EXTRA INSTRUCTION (design
-		// §5.3): close the pane's connection first, because a stalled one is
-		// still pooled and a new shell would join it rather than dial.
-		Reconnect: reconnect,
 	}
 	if params.Parent != nil {
 		spec.Parent = &session.Ref{
@@ -511,15 +505,45 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// The connection's first observation is opening, and it is the pane's
 	// first news; binding after the open returned would deliver it to nobody.
 	// A pane with no id has no renderer to address and is not bound.
-	h.sess.bindPane(params.PaneID, wconn, state, params)
+	if err := ctx.Err(); err != nil {
+		return openResult{}, err
+	}
+	var paneRecord *paneRecord
+	if machine, ok := h.sess.(*WSServer); ok && params.PaneID != "" && wconn != nil {
+		paneRecord = machine.bindPaneForOpen(ctx, params.PaneID, wconn, state, params)
+		if paneRecord == nil {
+			return openResult{}, context.Canceled
+		}
+	} else {
+		h.sess.bindPane(params.PaneID, wconn, state, params)
+	}
 
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
 		return openResult{}, err
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
+	cleanupCtx := ctx
+	if machine, ok := h.sess.(*WSServer); ok {
+		cleanupCtx = machine.lifetimeCtx
+	}
+	if err := ctx.Err(); err != nil {
+		h.opener.close(cleanupCtx, sess.ID())
+		return openResult{}, err
+	}
 
-	state.add(sess)
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		machine.paneMu.Lock()
+		if machine.paneRecords[params.PaneID] != paneRecord || ctx.Err() != nil {
+			machine.paneMu.Unlock()
+			h.opener.close(cleanupCtx, sess.ID())
+			return openResult{}, context.Canceled
+		}
+		state.add(sess)
+		machine.paneMu.Unlock()
+	} else {
+		state.add(sess)
+	}
 	if hosted != nil && hosted.LifecycleLane != "" {
 		if registrar, ok := h.sess.(interface {
 			RegisterLifecycleLane(lifecycle.LaneID, session.ID)

@@ -73,7 +73,9 @@ const (
 // ConnectionParams is the `connection` op's request: one RESOLVED destination,
 // the same shape probe, open, forward and spawn-ssh carry.
 type ConnectionParams struct {
-	Destination SSHDestination `json:"destination"`
+	Destination     SSHDestination `json:"destination"`
+	PaneID          string         `json:"paneId,omitempty"`
+	ReconnectPolicy string         `json:"reconnectPolicy,omitempty"`
 }
 
 // DisconnectParams names the connection to close: the same resolved destination
@@ -156,4 +158,24 @@ type ConnectionStateEvent struct {
 	// Slow is the backend's GRADE of that measurement, with hysteresis; see
 	// hostconn.GradeRoundTrip. Slow without a measurement never happens.
 	Slow bool `json:"slow,omitempty"`
+}
+
+// OpReconnect registers one supervisor-owned reconnect; progress is an event.
+const OpReconnect = "reconnect"
+
+// OpReleaseConnection drops the pane's logical hold, even after its shell died.
+const OpReleaseConnection = "release-connection"
+
+type ReconnectParams struct {
+	Destination SSHDestination `json:"destination"`
+	ExpectedSeq uint64         `json:"expectedSeq,omitempty"`
+}
+type ReleaseConnectionParams struct {
+	PaneID string `json:"paneId"`
+}
+type ReconnectResult struct {
+	Registered bool `json:"registered"`
+}
+type ReleaseConnectionResult struct {
+	Released bool `json:"released"`
 }

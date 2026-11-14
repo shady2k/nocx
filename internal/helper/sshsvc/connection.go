@@ -69,6 +69,9 @@ func (s *Service) connection(ctx context.Context, p proto.ConnectionParams) (pro
 	key := connectionKey(p.Destination)
 	if conn, _ := host.ConnectionFrom(ctx).(*host.Host); conn != nil {
 		s.ensureConnectionWatch(conn, key)
+		if p.PaneID != "" {
+			s.retainPane(conn, p.PaneID, key, p.ReconnectPolicy)
+		}
 	}
 	return proto.ConnectionResult{ConnectionID: key.ID()}, nil
 }
@@ -88,6 +91,7 @@ type connectionWatch struct {
 	mu      sync.Mutex
 	stop    func()
 	stopped bool
+	ready   chan struct{}
 }
 
 func (w *connectionWatch) set(stop func()) {
@@ -118,13 +122,14 @@ func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 	if s.connectionWatches == nil {
 		s.connectionWatches = make(map[connectionWatchKey]*connectionWatch)
 	}
-	if _, ok := s.connectionWatches[k]; ok {
+	if existing, ok := s.connectionWatches[k]; ok {
 		// SOMEONE ALREADY LISTENS FOR THIS COORDINATOR. The earlier
 		// subscription is the one; a second would duplicate every observation.
 		s.mu.Unlock()
+		<-existing.ready
 		return
 	}
-	holder := &connectionWatch{}
+	holder := &connectionWatch{ready: make(chan struct{})}
 	s.connectionWatches[k] = holder
 	s.mu.Unlock()
 
@@ -142,6 +147,7 @@ func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 		s.forgetConnectionWatch(k, holder)
 	})
 	holder.set(stop)
+	close(holder.ready)
 }
 
 // forgetConnectionWatch ends and removes one subscription, if it is still the
@@ -154,7 +160,17 @@ func (s *Service) forgetConnectionWatch(k connectionWatchKey, holder *connection
 		return
 	}
 	delete(s.connectionWatches, k)
+	var releases []func()
+	for pane, held := range s.paneHolds {
+		if pane.host == k.host {
+			releases = append(releases, held.release)
+			delete(s.paneHolds, pane)
+		}
+	}
 	s.mu.Unlock()
+	for _, release := range releases {
+		release()
+	}
 	if stop := holder.close(); stop != nil {
 		stop()
 	}
@@ -179,15 +195,6 @@ func (s *Service) disconnect(p proto.DisconnectParams) (proto.DisconnectResult, 
 		ConnectionID: key.ID(),
 		Closed:       s.client.Disconnect(key),
 	}, nil
-}
-
-// Disconnect is the spawner's half of the op: the same close, asked with the
-// destination the request carried rather than over the wire. One implementation
-// behind both, so a helper-internal reopen cannot close a different connection
-// from the one the wire op names.
-func (s *Service) Disconnect(_ context.Context, d proto.SSHDestination) (bool, error) {
-	res, err := s.disconnect(proto.DisconnectParams{Destination: d})
-	return res.Closed, err
 }
 
 // connectionKey derives the pool/supervisor identity a destination's dial will
@@ -250,4 +257,73 @@ func connectionEvent(f hostconn.Facts) proto.ConnectionStateEvent {
 		ev.Slow = f.Slow
 	}
 	return ev
+}
+
+// A pane's hold is scoped to its coordinator, not to a physical shell channel.
+type paneHoldKey struct {
+	host *host.Host
+	pane string
+}
+
+func (s *Service) retainPane(conn *host.Host, pane string, key connkey.Key, policy string) {
+	k := paneHoldKey{conn, pane}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paneHolds == nil {
+		s.paneHolds = make(map[paneHoldKey]paneHold)
+	}
+	if old, ok := s.paneHolds[k]; ok {
+		if old.key == key {
+			return
+		}
+		old.release()
+	}
+	s.paneHolds[k] = paneHold{key: key, release: s.client.RetainConnection(key, policy)}
+}
+
+func (s *Service) releaseConnection(ctx context.Context, p proto.ReleaseConnectionParams) proto.ReleaseConnectionResult {
+	conn, _ := host.ConnectionFrom(ctx).(*host.Host)
+	k := paneHoldKey{conn, p.PaneID}
+	s.mu.Lock()
+	held := s.paneHolds[k]
+	delete(s.paneHolds, k)
+	s.mu.Unlock()
+	if held.release != nil {
+		held.release()
+	}
+	return proto.ReleaseConnectionResult{Released: held.release != nil}
+}
+
+type paneHold struct {
+	key     connkey.Key
+	release func()
+}
+
+// ConnectionClosed ends logical pane holds even if a healthy transport emits
+// no further observations after its coordinator disconnects.
+func (s *Service) ConnectionClosed(conn *host.Host) {
+	s.mu.Lock()
+	var stops []func()
+	var releases []func()
+	for key, watch := range s.connectionWatches {
+		if key.host == conn {
+			delete(s.connectionWatches, key)
+			if watch.stop != nil {
+				stops = append(stops, watch.stop)
+			}
+		}
+	}
+	for key, hold := range s.paneHolds {
+		if key.host == conn {
+			delete(s.paneHolds, key)
+			releases = append(releases, hold.release)
+		}
+	}
+	s.mu.Unlock()
+	for _, stop := range stops {
+		stop()
+	}
+	for _, release := range releases {
+		release()
+	}
 }

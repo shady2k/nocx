@@ -21,6 +21,9 @@ type Service interface {
 	Call(ctx context.Context, op string, params json.RawMessage) (any, error)
 }
 
+// ConnectionObserver releases connection-scoped resources after serving ends.
+type ConnectionObserver interface{ ConnectionClosed(*Host) }
+
 // CancelPolicy is an optional capability a Service implements to declare
 // operations that REFUSE cancellation (D11): a cancel naming one is
 // answered with ErrCodeCancelRefused and the operation runs to completion,

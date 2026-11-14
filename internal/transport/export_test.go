@@ -53,3 +53,9 @@ func WithTransferTicketTTL(d time.Duration) WSServerOption {
 		s.transfers.ttlSet = true
 	}
 }
+
+func (s *WSServer) paneRecordOf(paneID string) *paneRecord {
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	return s.paneRecords[paneID]
+}

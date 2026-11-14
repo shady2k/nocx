@@ -1,60 +1,22 @@
 package transport
 
-// pane.reconnect — the one action a person takes on a pane's connection, and the
-// one path that carries it out (design §5.3, §5.4, §5.6; nocx-oalo1.5.4).
-//
-// # Why this is not the renderer's open again
-//
-// Until now a reconnect was the renderer calling `open` a second time for the
-// same pane, with its own attempt count, its own backoff and its own reading of
-// whether a retry could help. ADR-ba6xet1b makes that a second owner of a
-// connection fact. So the backend answers it here, and it is deliberately not a
-// second open: `openInto` is the one open path, and this runs it with one extra
-// instruction — close the pane's connection first, because a stalled one is
-// still pooled (design §5.3, "Reconnect closes the socket first").
-//
-// # What is closed, and what is opened
-//
-// The OLD SESSION goes first, through the same closer the layout uses when a
-// pane leaves it: the id is retired, the exit is marked expected, and the
-// transport tears the session down. Then the open runs, which asks the helper
-// to close the pane's connection before it dials and gives the pane a new shell
-// at the same endpoint. Nothing about the old shell is replayed, and no command
-// is re-run: what comes back is a new shell under a divider the renderer draws
-// (nocx-oalo1.5.5), exactly as the renderer's own reconnect did before.
-//
-// # What this does not decide
-//
-// WHETHER an offer stands is the policy owner's answer (internal/panedriver),
-// published on pane.connection; this file only refuses a press when the offer it
-// last told the renderer is not standing, and when the epoch is stale. Whether
-// to reconnect by itself under `auto` is the same owner's decision; the seam
-// below is how it tells this package that a press is already being carried out,
-// so the automatic retry does not race the person's.
+// pane.reconnect registers one operation on the connection supervisor. The
+// supervisor closes the socket before dialing; its return event replaces each
+// held shell through the existing open path. The RPC never waits for a shell.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/session"
 )
 
-// PaneConnectionPolicy is the policy owner, as the transport calls it.
-//
-// It is a seam this package DECLARES and the composition root adapts to
-// internal/panedriver (design §5.1.1): the transport knows how to carry a
-// reconnect out and when a pane is gone, and panedriver knows whether a retry
-// should happen and which panes it still owns. A nil seam is a server with no
-// connection policy wired; every offer is then absent, because only the policy
-// owner publishes one.
+// PaneConnectionPolicy receives pane lifetime notices. The composition root
+// releases the helper supervisor hold and the driver binding together.
 type PaneConnectionPolicy interface {
-	// ReconnectStarted notes that this pane's reconnect is being carried out.
-	// It must be cheap and must not block: it runs inside the request.
-	ReconnectStarted(paneID string)
-	// ReconnectFinished ends that interval, whether the reconnect succeeded or
-	// not. It is safe to call once per Started.
-	ReconnectFinished(paneID string)
 	// PaneClosed says this pane no longer exists. The policy owner drops its
 	// binding — and with it any automatic retry — because an observation of a
 	// connection the pane no longer rides has nobody to be about.
@@ -73,6 +35,11 @@ var (
 	// errPaneReconnectBusy is a second reconnect while one is still dialing.
 	errPaneReconnectBusy = errors.New("transport: a reconnect is already running for this pane")
 )
+
+type paneReconnectResult struct {
+	PaneID     string `json:"paneId"`
+	Registered bool   `json:"registered"`
+}
 
 // paneReconnectParams is the request, declared once
 // (contracts/pane.reconnect.params.schema.json) and pinned by the contract
@@ -105,77 +72,91 @@ func (s *WSServer) closePaneSessions(paneID string) {
 	}
 }
 
-// ReconnectPane carries out one pane's reconnect: the pane's old session is
-// closed, its connection is closed by the helper, and a new shell is opened for
-// the same pane at the same endpoint. It is the backend's own door — the
-// automatic retry under `auto` — and it learns the outcome the same way the
-// person's press does: from pane.connection.
+// ReconnectPane replaces a held shell after the supervisor restores transport.
 func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) error {
-	_, err := s.reconnectPaneWithAck(ctx, paneID, nil)
-	return err
-}
-
-// reconnectPaneWithAck is the one implementation of the action. The RPC calls
-// it with the responder as its acknowledgement; the automatic retry passes
-// none, because the new session reaches it on pane.connection.
-func (s *WSServer) reconnectPaneWithAck(ctx context.Context, paneID string, ack func(openResult)) (openResult, error) {
-	// THE PANE IS CLAIMED UNDER THE SAME LOCK THE PRESSES READ IT THROUGH, so
-	// two of them cannot both decide it is idle. The guard is here and not in
-	// the handler because the automatic retry takes this path too.
 	s.paneMu.Lock()
 	rec := s.paneRecords[paneID]
 	if rec == nil {
 		s.paneMu.Unlock()
-		return openResult{}, errPaneNotBound
+		return errPaneNotBound
+	}
+	if rec.registering != nil {
+		registered := rec.registering
+		s.paneMu.Unlock()
+		select {
+		case <-registered:
+			return s.ReconnectPane(ctx, paneID)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	if rec.busy {
 		s.paneMu.Unlock()
-		return openResult{}, errPaneReconnectBusy
+		return errPaneReconnectBusy
 	}
 	rec.busy = true
 	s.paneMu.Unlock()
-	defer func() {
-		s.paneMu.Lock()
-		rec.busy = false
-		s.paneMu.Unlock()
-	}()
+	defer func() { s.paneMu.Lock(); rec.busy = false; s.paneMu.Unlock() }()
 	if s.opener == nil {
-		return openResult{}, errOpenShuttingDown
+		return errOpenShuttingDown
 	}
-	// THE PANE'S CURRENT GEOMETRY GOES TO THE NEW SHELL, not the size the pane
-	// was first opened at: a person who made the window bigger before the
-	// connection dropped should not get the old grid back. It is read off the
-	// session that is about to be closed, which is the only record of the
-	// size actually committed (the original params are what the caller
-	// REPORTED, and the registry is what decides).
+	s.paneMu.Lock()
+	if s.paneRecords[paneID] != rec || ctx.Err() != nil || rec.ctx.Err() != nil {
+		s.paneMu.Unlock()
+		return context.Canceled
+	}
+	var replaced []session.Session
 	for _, sess := range s.registry.List() {
-		if sess.PaneID() != paneID {
-			continue
+		if sess.PaneID() == paneID {
+			replaced = append(replaced, sess)
 		}
-		if size := sess.EffectiveSize(); size.Valid() {
-			rec.params.Cols, rec.params.Rows = size.Cols, size.Rows
-			rec.params.XPixel, rec.params.YPixel = size.XPixel, size.YPixel
-		}
-		break
 	}
-
-	// THE OLD SESSION GOES FIRST, and its connection with it: the open that
-	// follows is told this is a reconnect, which closes the helper's side
-	// before anything dials.
-	s.closePaneSessions(paneID)
 	rec.state.mu.Lock()
-	for sid := range rec.state.sessions {
-		if sess, ok := rec.state.sessions[sid]; ok && sess.PaneID() == paneID {
-			delete(rec.state.sessions, sid)
-		}
+	for _, sess := range replaced {
+		delete(rec.state.sessions, sess.ID())
 	}
 	rec.state.mu.Unlock()
-
-	h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
-	if ack == nil {
-		ack = func(openResult) {}
+	s.paneMu.Unlock()
+	// Only the captured lifetime's sessions may end. A new pane with the same
+	// id can open while an external Close is waiting.
+	for _, sess := range replaced {
+		sid := sess.ID()
+		s.closeLane(sid)
+		s.markCloseRequested(sid)
+		if err := s.registry.EndSession(sid); err != nil {
+			s.log.Warn("closing the session a reconnect replaces", "session_id", string(sid), "error", err)
+		}
+		s.closeSession(sid, sess)
 	}
-	return h.openInto(ctx, rec.wconn, rec.state, rec.params, true, ack)
+	h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
+	openCtx, cancel := context.WithCancel(rec.ctx)
+	stop := context.AfterFunc(ctx, cancel)
+	defer func() { stop(); cancel() }()
+	_, err := h.openInto(openCtx, rec.wconn, rec.state, rec.params, func(openResult) {})
+	return err
+}
+
+// helperReconnectRegistrar registers the supervisor operation, not a shell.
+type helperReconnectRegistrar interface {
+	RegisterReconnect(context.Context, session.Config, uint64) error
+}
+
+func (o *sessionOpener) registerReconnect(ctx context.Context, params openParams, sequence uint64) error {
+	if _, err := o.workspaceForOpen(ctx, params.PaneID); err != nil {
+		return refuse(-32602, "Invalid params: "+fmt.Sprint(err))
+	}
+	cfg := session.Config{PaneID: params.PaneID, Kind: session.KindRemote}
+	spec := OpenSpec{PaneID: params.PaneID, Kind: params.Kind, ProfileID: params.ProfileID, Host: params.Host, User: params.User, DesiredMode: params.DesiredMode, Shell: params.Shell}
+	if err := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		return o.resolveRemote(ctx, svc, spec, &cfg)
+	}); err != nil {
+		return err
+	}
+	registrar, ok := o.helper.(helperReconnectRegistrar)
+	if !ok {
+		return refuse(-32603, "SSH reconnect is unavailable (no connection supervisor wired)")
+	}
+	return registrar.RegisterReconnect(ctx, cfg, sequence)
 }
 
 // paneReconnectHandlers answers `pane.reconnect`. It holds the connection's
@@ -207,58 +188,47 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
-	rec := h.machine.paneRecordOf(params.PaneID)
-	if rec == nil || rec.wconn != h.w {
-		// A pane this connection did not open has no offer it could be
-		// pressing: the notification that carried the button went somewhere
-		// else.
-		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown paneId"))
-		return
-	}
 	h.machine.paneMu.Lock()
-	lastEpoch, lastOffer := h.machine.paneEpochs[params.PaneID], rec.offer
+	rec := h.machine.paneRecords[params.PaneID]
+	var sequence uint64
+	var refusal string
+	switch {
+	case rec == nil || rec.wconn != h.w:
+		refusal = "unknown paneId"
+	case params.ConnectionEpoch != h.machine.paneEpochs[params.PaneID]:
+		refusal = "stale connectionEpoch"
+	case !rec.offer:
+		refusal = "no reconnect is offered for this pane"
+	case rec.busy:
+		refusal = "a reconnect is already running for this pane"
+	default:
+		rec.busy = true
+		rec.registering = make(chan struct{})
+		sequence = rec.connectionSequence
+	}
 	h.machine.paneMu.Unlock()
-	if params.ConnectionEpoch != lastEpoch {
-		// A press for an older observation is about a state the person is no
-		// longer looking at. Refusing it is what stops a queue of presses
-		// from opening a shell each.
-		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: stale connectionEpoch"))
+	if refusal != "" {
+		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: "+refusal))
 		return
 	}
-	if !lastOffer {
-		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: no reconnect is offered for this pane"))
+	defer func() {
+		h.machine.paneMu.Lock()
+		rec.busy = false
+		close(rec.registering)
+		rec.registering = nil
+		h.machine.paneMu.Unlock()
+	}()
+	if h.machine.opener == nil {
+		(openHandlers{}).answerOpenFailure(ctx, h.r, req, errOpenShuttingDown)
 		return
 	}
-
-	if seam := h.machine.paneConnectionPolicy; seam != nil {
-		seam.ReconnectStarted(params.PaneID)
-		defer seam.ReconnectFinished(params.PaneID)
-	}
-	acknowledged := false
-	responded := func(result openResult) {
-		acknowledged = true
-		raw, _ := json.Marshal(result)
-		_ = respond(h.r, newJSONRPCResult(req.ID, raw))
-	}
-	result, err := h.machine.reconnectPaneWithAck(ctx, params.PaneID, responded)
-	if err != nil {
-		switch {
-		case errors.Is(err, errPaneNotBound):
-			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown paneId"))
-			return
-		case errors.Is(err, errPaneReconnectBusy):
-			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: a reconnect is already running for this pane"))
-			return
-		}
-		// The reconnect failed before it could answer. The pane is not lost to
-		// the person: the failure is the next observation's to say, and the
-		// offer will stand again if it still should.
-		log.From(ctx).Warn("pane reconnect failed", "pane_id", params.PaneID, "error", err)
-		_ = respond(h.r, newJSONRPCError(req.ID, -32603, "Internal error: the reconnect did not open a shell"))
+	registerCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(rec.ctx, cancel)
+	defer func() { stop(); cancel() }()
+	if err := h.machine.opener.registerReconnect(registerCtx, rec.params, sequence); err != nil {
+		(openHandlers{}).answerOpenFailure(ctx, h.r, req, err)
 		return
 	}
-	if !acknowledged {
-		raw, _ := json.Marshal(result)
-		_ = respond(h.r, newJSONRPCResult(req.ID, raw))
-	}
+	raw, _ := json.Marshal(paneReconnectResult{params.PaneID, true})
+	_ = respond(h.r, newJSONRPCResult(req.ID, raw))
 }

@@ -329,12 +329,23 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 		return nil, err
 	}
 	lease, err := s.client.Acquire(ctx, ssh.PooledSpec{
-		Host:            ep.Host,
-		Port:            ep.Port,
-		User:            ep.User,
-		Identity:        identityKey(d.Identity),
-		Config:          cfg,
-		Route:           route,
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     ep.User,
+		Identity: identityKey(d.Identity),
+		Config:   cfg,
+		Route:    route,
+		Prepare: func(attemptCtx context.Context) (*gossh.ClientConfig, []ssh.PooledHop, error) {
+			fresh, configErr := s.clientConfig(attemptCtx, conn, ep, acceptOnTrust)
+			if configErr != nil {
+				return nil, nil, configErr
+			}
+			if fingerprint != "" {
+				fresh.HostKeyCallback = pinnedHostKey(fresh.HostKeyCallback, fingerprint)
+			}
+			hops, routeErr := s.routeOf(attemptCtx, conn, d, acceptOnTrust)
+			return fresh, hops, routeErr
+		},
 		HoldsPlainShell: holdsPlainShell,
 		ProbeInterval:   probeInterval,
 	})

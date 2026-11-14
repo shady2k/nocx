@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/pane.reconnect.schema.json",
+  "title": "PaneReconnect",
+  "description": "Acknowledges that the supervisor accepted reconnect. Dial and shell adoption continue on pane.connection; this RPC does not wait for them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "registered"],
+  "properties": {
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "registered": {
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

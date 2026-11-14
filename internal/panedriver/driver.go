@@ -28,9 +28,9 @@
 package panedriver
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -66,16 +66,6 @@ type Reconnect struct {
 	EndsShells int
 }
 
-// Reconnect policies, spelling settings.SSHReconnect's values. They are restated
-// here rather than imported because this package must not depend on the settings
-// store: the policy is a value the composition root reads, not a store this
-// package queries.
-const (
-	PolicyAuto  = "auto"
-	PolicyAsk   = "ask"
-	PolicyNever = "never"
-)
-
 // The refusals a press can meet, each a different sentence for the surface that
 // sent it (the transport maps them to wire refusals).
 var (
@@ -101,14 +91,15 @@ type Attempt struct {
 
 // Snapshot is one pane's observation, ready to be carried to the renderer.
 type Snapshot struct {
-	PaneID          string
-	ConnectionID    string
-	ConnectionEpoch uint64
-	InstanceID      string
-	SessionID       string
-	Transport       Transport
-	Quality         *Quality
-	Attempt         Attempt
+	PaneID             string
+	ConnectionID       string
+	ConnectionEpoch    uint64
+	ConnectionSequence uint64
+	InstanceID         string
+	SessionID          string
+	Transport          Transport
+	Quality            *Quality
+	Attempt            Attempt
 	// Reconnect is present exactly when the backend offers the person the
 	// action on this observation.
 	Reconnect  *Reconnect
@@ -137,27 +128,9 @@ type Driver struct {
 	// fence a replacement helper's observations would look stale until they
 	// exceeded the old helper's last sequence.
 	source string
-	// policy answers ssh.reconnect's value. Nil is never, the conservative
-	// answer: nothing reconnects by itself until the composition root says so.
-	policy func() string
-	// action carries a reconnect out. It is the transport's one path, and this
-	// package decides WHEN it is called — that is the whole split.
-	action func(paneID string, epoch uint64) error
-	// schedule runs fn after d, answering a cancel. It is injected so the
-	// fault harness's clock is the test's, never a sleep's.
-	schedule func(d time.Duration, fn func()) (cancel func())
-	// jitter perturbs a backoff, so a hundred panes dropped by one router
-	// restart do not all redial in the same millisecond.
-	jitter func(time.Duration) time.Duration
-	// inFlight is the panes a reconnect is being carried out for, whoever
-	// asked. The automatic retry must not start beside a person's press.
-	inFlight map[string]bool
-	// autos is the pending automatic retry of each pane, so a newer
-	// observation can cancel it, and autoSeq identifies the one that is live:
-	// a timer cancelled as it fired may still run, and only the newest may
-	// act.
-	autos   map[string]func()
-	autoSeq map[string]uint64
+	// action replaces shells after the connection supervisor restores transport.
+	action         func(context.Context, string, uint64) error
+	nextGeneration uint64
 }
 
 // binding is one pane's side: which connection it rides, how many observations
@@ -166,6 +139,10 @@ type binding struct {
 	connectionID string
 	epoch        uint64
 	sessionID    string
+	generation   uint64
+	lost         bool
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // connection is the newest observation of one connection, with the panes
@@ -178,22 +155,8 @@ type connection struct {
 	panes     map[string]struct{}
 }
 
-// Option configures a Driver.
-type Option func(*Driver)
-
-// WithPolicy is the value of ssh.reconnect, read per decision rather than
-// captured at construction: a person who changes it must change what happens
-// to the NEXT dropped pane.
-func WithPolicy(policy func() string) Option {
-	return func(d *Driver) {
-		if policy != nil {
-			d.policy = policy
-		}
-	}
-}
-
 // New builds the driver over one backend instance.
-func New(instanceID string, logger log.Logger, opts ...Option) *Driver {
+func New(instanceID string, logger log.Logger) *Driver {
 	if logger == nil {
 		logger = log.NewSlogAdapter(nil)
 	}
@@ -202,25 +165,15 @@ func New(instanceID string, logger log.Logger, opts ...Option) *Driver {
 		instance: instanceID,
 		panes:    make(map[string]*binding),
 		conns:    make(map[string]*connection),
-		schedule: func(delay time.Duration, fn func()) func() {
-			return afterFunc(delay, fn)
-		},
-		jitter:   jitterBy20Percent,
-		inFlight: make(map[string]bool),
-		autos:    make(map[string]func()),
-		autoSeq:  make(map[string]uint64),
-	}
-	for _, opt := range opts {
-		opt(d)
 	}
 	return d
 }
 
-// SetAction installs the one function that carries a reconnect out. It is a
-// setter because the transport is built after the opener that opens panes, the
-// same late-binding the publisher uses; until it is set, a reconnect is not
-// attempted by itself.
-func (d *Driver) SetAction(fn func(paneID string, epoch uint64) error) {
+// SetAction installs the shell replacement callback. It runs once per held
+// shell after a loss returns to connected. Its context ends when the pane
+// closes; the open path must check it
+// before registering the replacement shell. The supervisor owns retry policy.
+func (d *Driver) SetAction(fn func(context.Context, string, uint64) error) {
 	if d == nil {
 		return
 	}
@@ -229,25 +182,7 @@ func (d *Driver) SetAction(fn func(paneID string, epoch uint64) error) {
 	d.mu.Unlock()
 }
 
-// ReconnectStarted and ReconnectFinished bracket an action somebody else is
-// carrying out — the transport's answer to a person's press — so the automatic
-// retry does not start beside it.
-func (d *Driver) ReconnectStarted(paneID string) {
-	if d == nil || paneID == "" {
-		return
-	}
-	d.mu.Lock()
-	d.inFlight[paneID] = true
-	if cancel := d.autos[paneID]; cancel != nil {
-		cancel()
-		delete(d.autos, paneID)
-	}
-	d.mu.Unlock()
-}
-
-// Unbind forgets one pane. It is the close's half of Bind, and it drops the
-// automatic retry with the binding: an observation of a connection nobody's
-// pane rides any more has nobody to be about.
+// Unbind forgets one pane and cancels its shell replacement lifetime.
 func (d *Driver) Unbind(paneID string) {
 	if d == nil || paneID == "" {
 		return
@@ -255,32 +190,17 @@ func (d *Driver) Unbind(paneID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if b := d.panes[paneID]; b != nil {
+		b.cancel()
 		if c := d.conns[b.connectionID]; c != nil {
 			delete(c.panes, paneID)
 		}
 		delete(d.panes, paneID)
 	}
-	if cancel := d.autos[paneID]; cancel != nil {
-		cancel()
-		delete(d.autos, paneID)
-	}
-	delete(d.autoSeq, paneID)
-	delete(d.inFlight, paneID)
 }
 
 // PaneClosed is the transport's seam name for Unbind: a pane left the layout,
-// so its binding and any automatic retry go with it.
+// so its binding and replacement lifetime go with it.
 func (d *Driver) PaneClosed(paneID string) { d.Unbind(paneID) }
-
-// ReconnectFinished ends the interval ReconnectStarted opened.
-func (d *Driver) ReconnectFinished(paneID string) {
-	if d == nil || paneID == "" {
-		return
-	}
-	d.mu.Lock()
-	delete(d.inFlight, paneID)
-	d.mu.Unlock()
-}
 
 // SetPublisher installs the one function snapshots leave through. It is a
 // setter because the transport is built after the opener that opens panes, the
@@ -300,12 +220,13 @@ func (d *Driver) SetPublisher(fn func(Snapshot)) {
 // pane is owed right now: the connection's current state if it has one, or the
 // opening the pane was just bound for.
 //
-// binding again is ordinary — a pane that reopens gets a new connection — and
-// the pane's epoch keeps increasing, so the renderer refuses the older one even
-// if it is still in flight.
-func (d *Driver) Bind(paneID, connectionID string) {
+// Every bind clears the old session, including a reconnect to the same
+// connection. The returned generation belongs to this open and must accompany
+// adoption. It is unique across pane closes, so an older open cannot adopt into
+// a newly created pane with the same id.
+func (d *Driver) Bind(paneID, connectionID string) uint64 {
 	if d == nil || paneID == "" || connectionID == "" {
-		return
+		return 0
 	}
 	d.mu.Lock()
 	b := d.panes[paneID]
@@ -313,17 +234,18 @@ func (d *Driver) Bind(paneID, connectionID string) {
 		if old := d.conns[b.connectionID]; old != nil {
 			delete(old.panes, paneID)
 		}
-		// THE PREVIOUS CONNECTION'S SHELL IS NOT THIS ONE'S. A pane that moves
-		// to another connection has no session there until an adoption names
-		// one, and carrying the old id would publish a session on the wrong
-		// connection for as long as the new one takes to adopt.
-		b.sessionID = ""
 	}
 	if b == nil {
 		b = &binding{}
+		b.ctx, b.cancel = context.WithCancel(context.Background())
 		d.panes[paneID] = b
 	}
 	b.connectionID = connectionID
+	d.nextGeneration++
+	b.generation = d.nextGeneration
+	b.sessionID = ""
+	b.lost = false
+	generation := b.generation
 	c := d.conns[connectionID]
 	if c == nil {
 		c = &connection{panes: make(map[string]struct{})}
@@ -337,37 +259,24 @@ func (d *Driver) Bind(paneID, connectionID string) {
 	// zero-state notification is a shape the wire refuses anyway.
 	if c.transport.State == "" {
 		d.mu.Unlock()
-		return
+		return generation
 	}
 	snap := d.snapshotLocked(paneID, b, c)
-	d.autoLocked(paneID)
 	d.mu.Unlock()
 	d.emit(snap)
+	return generation
 }
 
-// AdoptSession records the session a pane's shell became, and publishes it
-// beside the connection's current state.
-//
-// It is a separate event rather than a field of every observation: the session
-// id exists once, when a shell is adopted, and repeating it on every later
-// observation would make a state that did not change look like one that had.
-// AdoptSession records the session a pane's shell became, FOR THE CONNECTION
-// the caller opened it on, and publishes it beside the connection's current
-// state.
-//
-// IT IS REFUSED WHEN THE PANE NO LONGER RIDES THAT CONNECTION, and that refusal
-// is the point: an adoption is the second half of an open that can be overtaken
-// — a pane rebound to another connection while the first open was still
-// adopting — and accepting the late half would overwrite the new binding with
-// the old shell under a freshly minted epoch, which nothing downstream could
-// tell from the truth.
-func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string) {
+// AdoptSession records a shell only if its open still owns the binding.
+// Connection identity alone is insufficient: overlapping opens and reconnects
+// can use the same connection id and complete in reverse order.
+func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string, generation uint64) {
 	if d == nil || paneID == "" || connectionID == "" || sessionID == "" {
 		return
 	}
 	d.mu.Lock()
 	b := d.panes[paneID]
-	if b == nil || b.connectionID != connectionID {
+	if b == nil || b.connectionID != connectionID || b.generation != generation {
 		// A pane that was never bound has no connection to name, and a pane
 		// that has moved on is not the pane this shell belongs to.
 		d.mu.Unlock()
@@ -387,7 +296,6 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 		return
 	}
 	snap := d.snapshotLocked(paneID, b, c)
-	d.autoLocked(paneID)
 	d.mu.Unlock()
 	d.emit(snap)
 }
@@ -418,21 +326,16 @@ func (d *Driver) SetSource(instance string) {
 		c.quality = nil
 		c.observed = time.Time{}
 	}
-	for paneID, cancel := range d.autos {
-		cancel()
-		delete(d.autos, paneID)
-	}
 }
 
-// Apply folds one connection observation into every pane bound to it.
+// ApplyFrom folds one connection observation into every pane bound to it.
 //
 // An observation that is not newer than the last applied for its connection is
 // REFUSED: it describes an older moment, whatever order it arrived in, and
 // applying it would move a pane's state backwards. That is the late-event rule
 // design §5.6 states as "a late one is refused", at the connection's boundary
 // rather than the pane's, because the sequence belongs to the connection.
-// ApplyFrom folds one connection observation into every pane bound to it, as
-// reported by one helper instance.
+// The observation belongs to the helper instance that reported it.
 //
 // An observation from a helper the driver has already replaced is REFUSED: its
 // sequence was taken against a supervisor that no longer exists, and applying
@@ -467,15 +370,40 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	c.seq = ev.Seq
 	c.transport, c.quality, c.observed = transport, quality, time.Now()
 	snaps := make([]Snapshot, 0, len(c.panes))
+	type replacement struct {
+		pane       string
+		epoch      uint64
+		binding    *binding
+		ctx        context.Context
+		generation uint64
+	}
+	var replacements []replacement
 	for paneID := range c.panes {
 		if b := d.panes[paneID]; b != nil {
 			snaps = append(snaps, d.snapshotLocked(paneID, b, c))
-			d.autoLocked(paneID)
+			if ev.State == proto.ConnectionReconnecting || ev.State == proto.ConnectionEnded || ev.State == proto.ConnectionFailed {
+				b.lost = b.lost || b.sessionID != ""
+			}
+			if ev.State == proto.ConnectionConnected && b.lost {
+				b.lost = false
+				replacements = append(replacements, replacement{paneID, b.epoch, b, b.ctx, b.generation})
+			}
 		}
 	}
+	action := d.action
 	d.mu.Unlock()
 	for _, snap := range snaps {
 		d.emit(snap)
+	}
+	if action != nil {
+		for _, r := range replacements {
+			d.mu.Lock()
+			live := d.panes[r.pane] == r.binding && r.binding.generation == r.generation && r.ctx.Err() == nil
+			d.mu.Unlock()
+			if live {
+				go func() { _ = action(r.ctx, r.pane, r.epoch) }()
+			}
+		}
 	}
 }
 
@@ -485,16 +413,17 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapshot {
 	b.epoch++
 	return Snapshot{
-		PaneID:          paneID,
-		ConnectionID:    b.connectionID,
-		ConnectionEpoch: b.epoch,
-		InstanceID:      d.instance,
-		SessionID:       b.sessionID,
-		Transport:       c.transport,
-		Quality:         c.quality,
-		Attempt:         Attempt{Shown: "none", Candidate: "none"},
-		Reconnect:       offerFor(c.transport),
-		ObservedAt:      time.Now(),
+		PaneID:             paneID,
+		ConnectionID:       b.connectionID,
+		ConnectionEpoch:    b.epoch,
+		ConnectionSequence: c.seq,
+		InstanceID:         d.instance,
+		SessionID:          b.sessionID,
+		Transport:          c.transport,
+		Quality:            c.quality,
+		Attempt:            Attempt{Shown: "none", Candidate: "none"},
+		Reconnect:          offerFor(c.transport),
+		ObservedAt:         time.Now(),
 	}
 }
 
@@ -538,132 +467,6 @@ func offerFor(t Transport) *Reconnect {
 		return &Reconnect{EndsShells: ends}
 	}
 	return nil
-}
-
-// The automatic retry's backoff (design §5.3): capped at fifteen seconds of
-// waiting between attempts, with no attempt limit — the cap replaced the old
-// three-attempt one.
-const (
-	autoBackoffBase = 500 * time.Millisecond
-	autoBackoffCap  = 15 * time.Second
-)
-
-// autoLocked cancels this pane's pending automatic retry and, when the state
-// still warrants one, schedules it. Called with the mutex held, after the
-// pane's observation was produced.
-func (d *Driver) autoLocked(paneID string) {
-	if cancel := d.autos[paneID]; cancel != nil {
-		cancel()
-		delete(d.autos, paneID)
-	}
-	if d.action == nil || d.policy == nil || d.policy() != PolicyAuto {
-		return
-	}
-	b := d.panes[paneID]
-	if b == nil || d.inFlight[paneID] {
-		return
-	}
-	c := d.conns[b.connectionID]
-	if c == nil || !retryable(c.transport) {
-		return
-	}
-	attempt := c.transport.Attempt
-	if attempt < 1 {
-		attempt = 1
-	}
-	d.autoSeq[paneID]++
-	seq := d.autoSeq[paneID]
-	d.autos[paneID] = d.schedule(d.backoff(attempt), func() {
-		d.mu.Lock()
-		live := d.autoSeq[paneID] == seq
-		if live {
-			delete(d.autos, paneID)
-		}
-		d.mu.Unlock()
-		if live {
-			d.runAuto(paneID)
-		}
-	})
-}
-
-// afterFunc is the production scheduler: one timer, cancellable.
-func afterFunc(delay time.Duration, fn func()) func() {
-	timer := time.AfterFunc(delay, fn)
-	return func() { timer.Stop() }
-}
-
-// jitterBy20Percent spreads a backoff by up to a fifth either way. A hundred
-// panes dropped by one router restart must not redial in the same millisecond,
-// and a retry storm is the one thing a reconnect policy can make worse.
-func jitterBy20Percent(delay time.Duration) time.Duration {
-	if delay <= 0 {
-		return delay
-	}
-	spread := int64(delay) / 5
-	if spread <= 0 {
-		return delay
-	}
-	//nolint:gosec // a retry delay is not a secret: predictability here only spreads one host's retries
-	return delay + time.Duration(rand.Int64N(2*spread+1)-spread)
-}
-
-// retryable says whether the backend may put this connection back by itself:
-// the transport ended under a held connection (network-class), and not a
-// refusal a retry cannot change, nor the policy's own silence close.
-func retryable(t Transport) bool {
-	return t.State == proto.ConnectionReconnecting && t.Cause == causeLostLink
-}
-
-// causeLostLink is hostconn.CauseLostLink's spelling on the wire; restated here
-// rather than imported for the same reason the state names are.
-const causeLostLink = "lost-link"
-
-// backoff is the wait before the next automatic attempt: exponential from half
-// a second, capped at fifteen seconds, then jittered.
-func (d *Driver) backoff(attempt int) time.Duration {
-	delay := autoBackoffBase
-	for i := 1; i < attempt && delay < autoBackoffCap; i++ {
-		delay *= 2
-	}
-	if delay > autoBackoffCap {
-		delay = autoBackoffCap
-	}
-	return d.jitter(delay)
-}
-
-// runAuto carries one automatic attempt out, if it is still warranted when the
-// timer fires. An observation that replaced the timer has advanced the pane's
-// sequence and that older closure never reaches here.
-func (d *Driver) runAuto(paneID string) {
-	d.mu.Lock()
-	if d.inFlight[paneID] || d.action == nil || d.policy == nil || d.policy() != PolicyAuto {
-		d.mu.Unlock()
-		return
-	}
-	b := d.panes[paneID]
-	if b == nil {
-		d.mu.Unlock()
-		return
-	}
-	c := d.conns[b.connectionID]
-	if c == nil || !retryable(c.transport) {
-		d.mu.Unlock()
-		return
-	}
-	// The epoch at the moment of the attempt is what a press would have
-	// carried; the transport does not re-check it on the automatic path.
-	epoch := b.epoch
-	d.inFlight[paneID] = true
-	action := d.action
-	d.mu.Unlock()
-
-	err := action(paneID, epoch)
-	if err != nil {
-		d.log.Debug("panedriver: the automatic reconnect did not open a shell", "pane", paneID, "error", err)
-	}
-	d.mu.Lock()
-	delete(d.inFlight, paneID)
-	d.mu.Unlock()
 }
 
 // fromEvent converts the helper protocol's event into this package's neutral
@@ -727,16 +530,22 @@ func fromEvent(ev proto.ConnectionStateEvent) (Transport, *Quality, error) {
 		if ev.Attempt < 1 {
 			return Transport{}, nil, fmt.Errorf("reconnecting with attempt %d", ev.Attempt)
 		}
-		if ev.Cause == "" {
-			return Transport{}, nil, fmt.Errorf("reconnecting with no cause")
+		if ev.Cause != "lost-link" && ev.Cause != "silence" {
+			return Transport{}, nil, fmt.Errorf("reconnecting with invalid cause %q", ev.Cause)
 		}
 		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person"}); err != nil {
 			return Transport{}, nil, err
 		}
 		ownCause = ev.Cause
 	case proto.ConnectionFailed, proto.ConnectionEnded:
-		if ev.Cause == "" {
-			return Transport{}, nil, fmt.Errorf("%s with no cause", ev.State)
+		valid := false
+		if ev.State == proto.ConnectionFailed {
+			valid = ev.Cause == "host-key-changed" || ev.Cause == "auth-rejected" || ev.Cause == "no-auth-method"
+		} else {
+			valid = ev.Cause == "lost-link" || ev.Cause == "released" || ev.Cause == "silence" || ev.Cause == "tainted"
+		}
+		if !valid {
+			return Transport{}, nil, fmt.Errorf("%s with invalid cause %q", ev.State, ev.Cause)
 		}
 		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person"}); err != nil {
 			return Transport{}, nil, err

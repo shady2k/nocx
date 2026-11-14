@@ -202,6 +202,7 @@ func (h *Host) Serve(ctx context.Context) error {
 	// would hold the process open for as long as it felt like running. So the
 	// cancellable half is abandoned first and only the refusing half is
 	// waited for. Deferred in this order because defers run last-first.
+	defer h.notifyConnectionClosed()
 	defer h.inflight.Wait()
 	defer h.abandonCancellable()
 
@@ -234,6 +235,17 @@ func (h *Host) Serve(ctx context.Context) error {
 				return nil
 			}
 			return err
+		}
+	}
+}
+
+func (h *Host) notifyConnectionClosed() {
+	h.mu.Lock()
+	services := append([]Service(nil), h.services...)
+	h.mu.Unlock()
+	for _, service := range services {
+		if observer, ok := service.(ConnectionObserver); ok {
+			observer.ConnectionClosed(h)
 		}
 	}
 }

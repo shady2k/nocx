@@ -96,11 +96,11 @@ type Client interface {
 	// shell exists (design §5.5, §5.6): the supervisor is the one party that
 	// knows, and a watcher holds no reference and closes nothing.
 	WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func()
-	// Disconnect closes the live connection for key, if there is one, and
-	// reports whether it closed one. It is the reconnect's first move (design
-	// §5.3): a stalled connection must be out of the pool before a new shell
-	// is asked for on the same destination, or that shell joins the dead flow.
+	// Disconnect implements the explicit wire disconnect operation. Pane
+	// reconnection uses RegisterReconnect to register the attempt atomically.
 	Disconnect(key connkey.Key) bool
+	RetainConnection(key connkey.Key, policy string) func()
+	RegisterReconnect(key connkey.Key, expectedSeq uint64) error
 }
 
 // ProbeTimeout bounds one probe's handshake. It is the same number the
@@ -166,6 +166,7 @@ type Service struct {
 	// and not one per pane: panes share a connection, and duplicates would be
 	// the same fact sent twice to one coordinator.
 	connectionWatches map[connectionWatchKey]*connectionWatch
+	paneHolds         map[paneHoldKey]paneHold
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -192,7 +193,7 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection, proto.OpDisconnect}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection, proto.OpDisconnect, proto.OpReconnect, proto.OpReleaseConnection}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
 	ops = append(ops, s.laneOps()...)
 	return append(ops, s.toolSocketOps()...)
 }
@@ -206,6 +207,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ProbeParams{})
 	case proto.OpConnection:
 		return host.SchemaFor(proto.ConnectionParams{})
+	case proto.OpReconnect:
+		return host.SchemaFor(proto.ReconnectParams{})
+	case proto.OpReleaseConnection:
+		return host.SchemaFor(proto.ReleaseConnectionParams{})
 	case proto.OpDisconnect:
 		return host.SchemaFor(proto.DisconnectParams{})
 	case proto.OpOpen:
@@ -285,6 +290,24 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.connection(ctx, p)
+	case proto.OpReconnect:
+		var p proto.ReconnectParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		if err := validateDestinationAddress(p.Destination); err != nil {
+			return nil, err
+		}
+		if err := s.client.RegisterReconnect(connectionKey(p.Destination), p.ExpectedSeq); err != nil {
+			return nil, err
+		}
+		return proto.ReconnectResult{Registered: true}, nil
+	case proto.OpReleaseConnection:
+		var p proto.ReleaseConnectionParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		return s.releaseConnection(ctx, p), nil
 	case proto.OpDisconnect:
 		var p proto.DisconnectParams
 		if len(params) > 0 {
@@ -882,6 +905,8 @@ func (s *Service) interactiveMethods(ctx context.Context, conn *host.Host, ep di
 // have the library answer the missing ones with empty strings, i.e. try an
 // empty password.
 func (s *Service) askInteractive(ctx context.Context, conn *host.Host, ep dialEndpoint, questions []string, echos []bool) ([]string, error) {
+	hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.NeedsPerson, Wait: hostconn.WaitPassword})
+	defer hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.PersonAnswered})
 	if len(questions) == 0 {
 		return nil, internalRefusal("the server asked a keyboard-interactive challenge with no questions")
 	}
@@ -927,6 +952,8 @@ func (s *Service) askInteractive(ctx context.Context, conn *host.Host, ep dialEn
 // keyboard-interactive questions, which carry no profile and no remember
 // concept at all.
 func (s *Service) askPassword(ctx context.Context, conn *host.Host, ep dialEndpoint) (string, error) {
+	hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.NeedsPerson, Wait: hostconn.WaitPassword})
+	defer hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.PersonAnswered})
 	var out proto.PasswordPromptResult
 	if err := conn.Ask(ctx, proto.ServiceSSH, proto.OpPasswordPrompt, proto.PasswordPromptParams{
 		Connection: ep.ConnectionName,
@@ -1106,6 +1133,8 @@ func (s *Service) verifyHostKey(ctx context.Context, conn *host.Host, acceptOnTr
 		// The write names the STORAGE identity, not the offered address: that
 		// is the line the next connection will look for, and writing the dial
 		// address instead would record a host nobody verifies against.
+		hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.NeedsPerson, Wait: hostconn.WaitHostKey})
+		defer hostconn.ReportAttempt(ctx, hostconn.Event{Kind: hostconn.PersonAnswered})
 		var trusted proto.TrustHostKeyResult
 		if terr := conn.Ask(ctx, proto.ServiceSSH, proto.OpTrustHostKey, proto.TrustHostKeyParams{
 			Host:      knownHostsAddr,

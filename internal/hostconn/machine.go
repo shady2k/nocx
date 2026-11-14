@@ -214,7 +214,7 @@ func Next(state State, event Event) State {
 		// Opening is included because the zero State IS an opening: the first
 		// attempt of a supervisor starts there, before any stage was reached.
 		case Failed, Ended, Reconnecting, WaitingPerson, Opening:
-			return State{Kind: Opening, Stage: StageResolve}
+			return State{Kind: Opening, Stage: StageResolve, Attempt: state.Attempt}
 		}
 		return state
 	}
@@ -230,7 +230,7 @@ func Next(state State, event Event) State {
 		case NeedsPerson:
 			return State{Kind: WaitingPerson, Stage: state.Stage, Wait: event.Wait, Attempt: state.Attempt}
 		case SignedIn:
-			return State{Kind: Connected, Attempt: state.Attempt}
+			return State{Kind: Connected}
 		case Lost:
 			return State{Kind: Reconnecting, Attempt: state.Attempt + 1, Cause: event.Cause}
 		case Refused:

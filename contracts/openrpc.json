@@ -13640,9 +13640,9 @@
           "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
-          "millis": 300000,
+          "millis": 10000,
           "basis": "read",
-          "note": "read: the reconnect closes a connection, dials, installs and launches a shell — the same work `open` declares and with no explicit bound today"
+          "note": "read: validates and registers the reconnect; supervisor attempts and pane adoption continue on pane.connection after the RPC answers"
         },
         "silence": {
           "kind": "none",
@@ -13685,7 +13685,7 @@
       "result": {
         "name": "pane.reconnectResult",
         "schema": {
-          "$ref": "https://nocx.local/contracts/open.schema.json"
+          "$ref": "https://nocx.local/contracts/pane.reconnect.schema.json"
         }
       }
     },
@@ -25800,6 +25800,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/pane.connection.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/pane.reconnect.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/panes.close.schema.json"

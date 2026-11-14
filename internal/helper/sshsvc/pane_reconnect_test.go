@@ -2,172 +2,224 @@
 
 package sshsvc_test
 
-// A pane's reconnect, at the fault harness's layer (design §5.3, §5.4;
-// nocx-oalo1.5.4): the offer the backend publishes, and the two mechanics it
-// names — the connection closed first, and a new shell at the same endpoint.
-//
-// The policy itself is asserted where it lives (internal/panedriver): whether
-// the backend retries by itself is that package's decision, and this file drives
-// its DECISION against the real helper's observations. What only this stand can
-// show is that the offer appears from real events within the clock's thirty
-// seconds, and that "close the socket first" really produces a fresh dial
-// instead of a shell parked behind the dead flow.
-
 import (
 	"context"
 	"encoding/json"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/monoclock"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/sshtest"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-// reconnectStand is the 5.3 stand plus the coordinator's policy driver, and the
-// pane's binding to the connection the helper named.
-type reconnectStand struct {
-	*stand
-	proxy   *sshtest.FaultProxy
-	clock   *hostconntest.Clock
-	driver  *panedriver.Driver
-	snapMu  sync.Mutex
-	snaps   []panedriver.Snapshot
-	actions atomic.Int32
+// reconnectClock records timer registration AFTER the timer is armed. A test
+// advances once from an observation, then waits for its result without moving
+// time again: a slow worker cannot consume the simulated policy budget.
+type reconnectClock struct {
+	*hostconntest.Clock
+	mu     sync.Mutex
+	timers []time.Duration
 }
 
-func newReconnectStand(t *testing.T, clock *hostconntest.Clock, policy string) *reconnectStand {
+func (c *reconnectClock) After(d time.Duration) <-chan monoclock.Nanos {
+	ch := c.Clock.After(d)
+	c.mu.Lock()
+	c.timers = append(c.timers, d)
+	c.mu.Unlock()
+	return ch
+}
+
+func (c *reconnectClock) timerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
+// retryTimers excludes the connection guard's 15-second cadence. Each initial
+// backoff is at most 1.2 seconds, including its jitter.
+func (c *reconnectClock) retryTimers() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, d := range c.timers {
+		if d > 0 && d <= 1200*time.Millisecond {
+			count++
+		}
+	}
+	return count
+}
+
+// This stand uses the real helper subscription, shell opener and supervisor
+// reconnect entry. There is no replacement action or synthetic loss event.
+type reconnectStand struct {
+	*stand
+	fixture      *fixture
+	proxy        *sshtest.FaultProxy
+	clock        *reconnectClock
+	destination  proto.SSHDestination
+	ctx          context.Context
+	driver       *panedriver.Driver
+	mu           sync.Mutex
+	snaps        []panedriver.Snapshot
+	seq          uint64
+	restored     chan *sshsvc.ShellChannel
+	reopenErrors chan error
+	generations  map[string]uint64
+	connectionID string
+}
+
+func newReconnectStand(t *testing.T, policy string, panes ...string) *reconnectStand {
 	t.Helper()
 	const password = "correct horse battery staple"
 	f := newFixture(t, password, newSigner(t))
 	proxy := sshtest.NewFaultProxy(t, f.addr)
-	stand := newStandOnClock(t, &coordinator{
-		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	clock := &reconnectClock{Clock: hostconntest.New()}
+	s := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted,
+		fingerprint: f.hostKeyFingerprint(),
 	}, discardLogger(), clock)
-	rs := &reconnectStand{stand: stand, proxy: proxy, clock: clock}
-	rs.driver = panedriver.New("instance-1", log.NewSlogAdapter(nil),
-		panedriver.WithPolicy(func() string { return policy }))
-	rs.driver.SetPublisher(func(s panedriver.Snapshot) {
-		rs.snapMu.Lock()
-		rs.snaps = append(rs.snaps, s)
-		rs.snapMu.Unlock()
-	})
-	rs.driver.SetAction(func(string, uint64) error {
-		rs.actions.Add(1)
+	r := &reconnectStand{
+		stand: s, fixture: f, proxy: proxy, clock: clock,
+		destination: destinationAt(t, proxy.Addr()), restored: make(chan *sshsvc.ShellChannel, 8), reopenErrors: make(chan error, 8), generations: make(map[string]uint64),
+	}
+	r.ctx = host.WithConnection(context.Background(), s.helper)
+	r.driver = panedriver.New(s.peerInstance, nil)
+	r.driver.SetAction(func(_ context.Context, _ string, _ uint64) error {
+		shell, err := r.service.OpenShell(r.ctx, sshsvc.ShellSpec{Destination: r.destination, Cols: 80, Rows: 24})
+		if err != nil {
+			r.reopenErrors <- err
+			return err
+		}
+		r.restored <- shell
 		return nil
 	})
-	return rs
-}
-
-// lastSnapshot answers the newest observation for a pane.
-func (r *reconnectStand) lastSnapshot(paneID string) (panedriver.Snapshot, bool) {
-	r.snapMu.Lock()
-	defer r.snapMu.Unlock()
-	for i := len(r.snaps) - 1; i >= 0; i-- {
-		if r.snaps[i].PaneID == paneID {
-			return r.snaps[i], true
+	t.Cleanup(func() {
+		for {
+			select {
+			case shell := <-r.restored:
+				_ = shell.Close()
+			default:
+				return
+			}
 		}
-	}
-	return panedriver.Snapshot{}, false
-}
-
-// findSnapshot answers the first observation matching a predicate.
-func (r *reconnectStand) findSnapshot(match func(panedriver.Snapshot) bool) (panedriver.Snapshot, bool) {
-	r.snapMu.Lock()
-	defer r.snapMu.Unlock()
-	for _, snap := range r.snaps {
-		if match(snap) {
-			return snap, true
-		}
-	}
-	return panedriver.Snapshot{}, false
-}
-
-// TestTheOfferNamesTheShellWithinThirtySecondsAndTheReconnectDialsAnew is the
-// task's first harness case, end to end at this layer: a silenced plain shell,
-// an offer naming one shell inside the injected clock's thirty seconds, and the
-// two moves the offer stands for — the connection closed, then a new shell at
-// the same endpoint.
-func TestTheOfferNamesTheShellWithinThirtySecondsAndTheReconnectDialsAnew(t *testing.T) {
-	clock := hostconntest.New()
-	rs := newReconnectStand(t, clock, panedriver.PolicyAsk)
-	destination := destinationAt(t, rs.proxy.Addr())
-	ctx := host.WithConnection(context.Background(), rs.helper)
-
-	connectionID, err := rs.client.ConnectionID(ctx, destination)
+	})
+	r.driver.SetPublisher(func(snap panedriver.Snapshot) {
+		r.mu.Lock()
+		r.snaps = append(r.snaps, snap)
+		r.mu.Unlock()
+	})
+	id, err := s.client.ConnectionID(r.ctx, r.destination)
 	if err != nil {
-		t.Fatalf("name the connection: %v", err)
+		t.Fatalf("subscribe to the pane's connection: %v", err)
 	}
-	rs.driver.Bind("pane-1", connectionID)
-
+	for _, pane := range panes {
+		bound, bindErr := r.client.BindConnection(r.ctx, r.destination, pane, policy)
+		if bindErr != nil {
+			t.Fatalf("retain pane connection through helper: %v", bindErr)
+		}
+		if bound != id {
+			t.Fatalf("binding names %q, subscription names %q", bound, id)
+		}
+		r.generations[pane] = r.driver.Bind(pane, id)
+		t.Cleanup(func() { _ = r.client.ReleaseConnection(r.ctx, pane) })
+	}
+	r.connectionID = id
 	go func() {
-		for ev := range rs.connEvents {
-			rs.driver.ApplyFrom(rs.peerInstance, ev)
+		for ev := range s.connEvents {
+			r.mu.Lock()
+			r.seq = ev.Seq
+			r.mu.Unlock()
+			r.driver.ApplyFrom(s.peerInstance, ev)
 		}
 	}()
+	return r
+}
 
-	shell := rs.openShell(t, destination)
-	waittest.WaitForDetail(t, "the connected observation",
-		func() string {
-			snap, _ := rs.lastSnapshot("pane-1")
-			return "last snapshot: " + snap.Transport.State
-		},
-		func() bool {
-			snap, ok := rs.lastSnapshot("pane-1")
-			return ok && snap.Transport.State == proto.ConnectionConnected
-		})
-	if snap, _ := rs.lastSnapshot("pane-1"); snap.Reconnect != nil {
-		t.Fatalf("a healthy pane offers %+v", snap.Reconnect)
-	}
+func (r *reconnectStand) sequence() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seq
+}
 
-	// The flow stops answering; new connections still pass. The offer must
-	// arrive inside the policy's thirty seconds, naming this person's shell.
-	rs.proxy.SilenceEstablished()
-	start := clock.Now()
-	waittest.WaitForDetail(t, "the offer",
-		func() string {
-			snap, _ := rs.lastSnapshot("pane-1")
-			return "last snapshot: " + snap.Transport.State
-		},
-		func() bool {
-			snap, ok := rs.findSnapshot(func(s panedriver.Snapshot) bool {
-				return s.PaneID == "pane-1" && s.Transport.State == proto.ConnectionStalled && s.Reconnect != nil
-			})
-			if ok && snap.Reconnect.EndsShells != 1 {
-				t.Fatalf("the offer names %d shell(s), want 1", snap.Reconnect.EndsShells)
-			}
-			if !ok {
-				// ONE SECOND AT A TIME: the reading the assertion above takes
-				// is the policy's, not the poll's.
-				clock.Advance(time.Second)
-			}
-			return ok
-		})
-	if elapsed := time.Duration(clock.Now() - start); elapsed > 30*time.Second {
-		t.Fatalf("the offer took %v of simulated time, want within 30s", elapsed)
+func (r *reconnectStand) awaitRestored(t *testing.T) *sshsvc.ShellChannel {
+	t.Helper()
+	select {
+	case shell := <-r.restored:
+		t.Cleanup(func() { _ = shell.Close() })
+		return shell
+	case err := <-r.reopenErrors:
+		t.Fatalf("reopen the pane's shell on return: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no fresh shell opened on connection return")
 	}
+	return nil
+}
 
-	// THE PRESS. The backend's first move closes the connection, and the second
-	// asks for a shell — which must DIAL, not join the stalled flow.
-	closed, err := rs.client.Disconnect(ctx, destination)
-	if err != nil {
-		t.Fatalf("close the connection: %v", err)
+func (r *reconnectStand) latest(pane string) panedriver.Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.snaps) - 1; i >= 0; i-- {
+		if r.snaps[i].PaneID == pane {
+			return r.snaps[i]
+		}
 	}
-	if !closed {
-		t.Fatal("the helper reported no connection to close for a live stalled connection")
+	return panedriver.Snapshot{}
+}
+
+func (r *reconnectStand) awaitState(t *testing.T, pane, state string) panedriver.Snapshot {
+	t.Helper()
+	waittest.WaitForDetail(t, state, func() string { return r.latest(pane).Transport.State },
+		func() bool { return r.latest(pane).Transport.State == state })
+	return r.latest(pane)
+}
+
+func (r *reconnectStand) open(t *testing.T, pane string) *sshsvc.ShellChannel {
+	t.Helper()
+	shell := r.openShell(t, r.destination)
+	r.driver.AdoptSession(pane, r.connectionID, "shell-"+pane, r.peerInstance, r.generations[pane])
+	return shell
+}
+
+func TestTheOfferNamesTheShellWithinThirtySecondsAndTheReconnectDialsAnew(t *testing.T) {
+	r := newReconnectStand(t, "ask", "pane-1")
+	shell := r.open(t, "pane-1")
+	healthy := r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	if healthy.Reconnect != nil {
+		t.Fatalf("healthy shell offers %+v", healthy.Reconnect)
 	}
-	// And it is idempotent: a second ask finds nothing to close.
-	if again, againErr := rs.client.Disconnect(ctx, destination); againErr != nil || again {
-		t.Fatalf("second disconnect = %v, %v; want false, nil", again, againErr)
+	if err := r.client.RegisterReconnect(r.ctx, r.destination, r.sequence()); err == nil {
+		t.Fatal("a healthy connection accepted reconnect without an offer")
 	}
-	waittest.WaitFor(t, "the old shell's transport to end", func() bool {
+	waittest.WaitFor(t, "the probe timer to be armed", func() bool { return r.clock.timerCount() > 0 })
+	r.proxy.SilenceEstablished()
+	start := r.clock.Now()
+	r.clock.Advance(hostconn.ProbeInterval + hostconn.ProbeDeadline)
+	stalled := r.awaitState(t, "pane-1", proto.ConnectionStalled)
+	if stalled.Reconnect == nil || stalled.Reconnect.EndsShells != 1 {
+		t.Fatalf("offer = %+v, want one shell", stalled.Reconnect)
+	}
+	if elapsed := time.Duration(r.clock.Now() - start); elapsed > 30*time.Second {
+		t.Fatalf("offer took %v, want at most 30s", elapsed)
+	}
+	// The look-only dial publishes another observation for this same stall.
+	// Wait for that evidence before taking the press's sequence, so the test
+	// does not race a valid newer offer with its earlier stalled snapshot.
+	waittest.WaitFor(t, "the stalled connection's look evidence", func() bool {
+		return r.latest("pane-1").Transport.HasLook
+	})
+	before := r.fixture.connections()
+	if err := r.client.RegisterReconnect(r.ctx, r.destination, r.sequence()); err != nil {
+		t.Fatalf("register reconnect through the helper: %v", err)
+	}
+	waittest.WaitFor(t, "old shell to end after socket close", func() bool {
 		select {
 		case <-shell.Done():
 			return true
@@ -175,68 +227,86 @@ func TestTheOfferNamesTheShellWithinThirtySecondsAndTheReconnectDialsAnew(t *tes
 			return false
 		}
 	})
-	rs.proxy.Pass()
-	fresh, err := rs.service.OpenShell(ctx, sshsvc.ShellSpec{
-		Destination: destination, Cols: 80, Rows: 24,
-	})
-	if err != nil {
-		t.Fatalf("open a shell after the reconnect: %v", err)
-	}
-	defer func() { _ = fresh.Close() }()
+	r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	fresh := r.awaitRestored(t)
 	if fresh == shell {
-		t.Fatal("the reconnect returned the same shell: it never dialed")
+		t.Fatal("reconnect returned the old shell")
 	}
-	// The new shell is usable: it is a real channel on a fresh connection.
-	waittest.WaitFor(t, "the new connection to reach connected", func() bool {
-		snap, ok := rs.lastSnapshot("pane-1")
-		return ok && snap.Transport.State == proto.ConnectionConnected
-	})
+	if got := r.fixture.connections(); got != before+1 {
+		t.Fatalf("dials = %d, want %d", got, before+1)
+	}
 }
 
-// TestUnderNeverADropOffersTheButtonAndNothingReconnectsByItself is DONE WHEN's
-// second case: the policy changes what the BACKEND does, not whether the person
-// may choose.
-func TestUnderNeverADropOffersTheButtonAndNothingReconnectsByItself(t *testing.T) {
-	clock := hostconntest.New()
-	rs := newReconnectStand(t, clock, panedriver.PolicyNever)
-	destination := destinationAt(t, rs.proxy.Addr())
-	ctx := host.WithConnection(context.Background(), rs.helper)
-
-	connectionID, err := rs.client.ConnectionID(ctx, destination)
-	if err != nil {
-		t.Fatalf("name the connection: %v", err)
-	}
-	rs.driver.Bind("pane-1", connectionID)
-	go func() {
-		for ev := range rs.connEvents {
-			rs.driver.ApplyFrom(rs.peerInstance, ev)
-		}
-	}()
-
-	shell := rs.openShell(t, destination)
-	waittest.WaitFor(t, "the connected observation", func() bool {
-		snap, ok := rs.lastSnapshot("pane-1")
-		return ok && snap.Transport.State == proto.ConnectionConnected
-	})
-
-	// The link is cut: the transport ended, and no retry may happen by itself.
-	rs.proxy.Cut()
-	waittest.WaitForDetail(t, "the dropped observation",
-		func() string {
-			snap, _ := rs.lastSnapshot("pane-1")
-			return "last snapshot: " + snap.Transport.State
-		},
-		func() bool {
-			_, ok := rs.findSnapshot(func(s panedriver.Snapshot) bool {
-				return s.PaneID == "pane-1" && s.Transport.State == proto.ConnectionReconnecting && s.Reconnect != nil &&
-					s.Transport.Cause == "lost-link"
-			})
-			return ok
+func TestAskAndNeverRestAtEndedWithoutRedialAfterSeveralBackoffSteps(t *testing.T) {
+	for _, policy := range []string{"ask", "never"} {
+		t.Run(policy, func(t *testing.T) {
+			r := newReconnectStand(t, policy, "pane-1")
+			r.open(t, "pane-1")
+			r.awaitState(t, "pane-1", proto.ConnectionConnected)
+			before := r.fixture.connections()
+			timers := r.clock.retryTimers()
+			r.proxy.Cut()
+			ended := r.awaitState(t, "pane-1", proto.ConnectionEnded)
+			if ended.Transport.Cause != "lost-link" || ended.Reconnect == nil {
+				t.Fatalf("ended pane = %+v, want lost-link with an offer", ended)
+			}
+			if got := r.clock.retryTimers(); got != timers {
+				t.Fatalf("%s armed a retry timer after ended", policy)
+			}
+			for range 4 {
+				r.clock.Advance(15 * time.Second)
+				if got := r.fixture.connections(); got != before {
+					t.Fatalf("%s redialed after ended: dials=%d, want %d", policy, got, before)
+				}
+			}
 		})
-	if got := rs.actions.Load(); got != 0 {
-		t.Fatalf("policy never ran %d reconnect(s) by itself", got)
 	}
-	_ = shell
+}
+
+func TestAutoReconnectDialsOnceForSiblingPanesAndOpensFreshShells(t *testing.T) {
+	r := newReconnectStand(t, "auto", "pane-1", "pane-2")
+	first, second := r.open(t, "pane-1"), r.open(t, "pane-2")
+	r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	r.awaitState(t, "pane-2", proto.ConnectionConnected)
+	before := r.fixture.connections()
+	timerCount := r.clock.retryTimers()
+	r.proxy.Cut()
+	r.awaitState(t, "pane-1", proto.ConnectionReconnecting)
+	waittest.WaitFor(t, "retry timer armed", func() bool { return r.clock.retryTimers() > timerCount })
+	r.clock.Advance(15 * time.Second)
+	r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	r.awaitState(t, "pane-2", proto.ConnectionConnected)
+	freshFirst, freshSecond := r.awaitRestored(t), r.awaitRestored(t)
+	if freshFirst == first || freshSecond == second {
+		t.Fatal("a pane reused its lost shell")
+	}
+	if got := r.fixture.connections(); got != before+1 {
+		t.Fatalf("two panes made %d extra dials, want one", got-before)
+	}
+}
+
+func TestAutoReconnectRetriesAfterAnUnsuccessfulDial(t *testing.T) {
+	r := newReconnectStand(t, "auto", "pane-1")
+	r.open(t, "pane-1")
+	r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	before := r.fixture.connections()
+	r.proxy.Cut()
+	r.proxy.Refuse()
+	r.awaitState(t, "pane-1", proto.ConnectionReconnecting)
+	waittest.WaitFor(t, "first retry timer", func() bool { return r.clock.retryTimers() >= 1 })
+	r.clock.Advance(time.Second)
+	waittest.WaitFor(t, "failed retry increases the attempt", func() bool {
+		s := r.latest("pane-1")
+		return s.Transport.State == proto.ConnectionReconnecting && s.Transport.Attempt >= 2
+	})
+	waittest.WaitFor(t, "next retry armed after failure", func() bool { return r.clock.retryTimers() >= 2 })
+	r.proxy.Pass()
+	r.clock.Advance(2 * time.Second)
+	r.awaitState(t, "pane-1", proto.ConnectionConnected)
+	r.awaitRestored(t)
+	if got := r.fixture.connections(); got != before+1 {
+		t.Fatalf("successful redials = %d, want one", got-before)
+	}
 }
 
 // TestTheDisconnectShapesConformToTheirFrozenContract pins the two shapes the

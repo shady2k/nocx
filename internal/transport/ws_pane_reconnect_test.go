@@ -11,7 +11,6 @@ package transport
 // pressed, and an unknown pane belongs to another window.
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -96,34 +95,26 @@ func TestPaneReconnectRefusesAStaleEpoch(t *testing.T) {
 	}
 }
 
-// TestPaneReconnectPassesTheGateAndRunsTheOneOpenPath: with the offer standing
-// at the epoch, the press is carried out by the SAME open path `open` uses, and
-// answers with the same result shape — a new session, not a second declaration
-// of one.
-func TestPaneReconnectPassesTheGateAndRunsTheOneOpenPath(t *testing.T) {
+// TestPaneReconnectPreservesTheOpenPathsActionableRefusal proves that a
+// registration refusal does not erase the offer or become a generic error.
+func TestPaneReconnectPreservesTheOpenPathsActionableRefusal(t *testing.T) {
 	ws, stop := newPaneConnectionServer(t)
 	defer stop()
 	conn := connectWS(t, ws)
 	wc := soleWSConn(t, ws)
 	bindTestPane(t, ws, wc, "pane-1")
 	publishTestConnection(ws, "pane-1", 1, "stalled", &PaneConnectionReconnect{EndsShells: 2})
-
-	resp := vaultCall(t, conn, "pane.reconnect", map[string]any{
-		"paneId": "pane-1", "connectionEpoch": 1,
-	}, 1)
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %+v", resp.Error)
-	}
-	// The result is `open`'s, over the real socket.
-	validateJSON(t, loadSchema(t, "open.schema.json"), resp.Result, "pane.reconnect result")
-	var result struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-	if result.SessionID == "" {
-		t.Fatal("the reconnect answered no session: the open path did not run")
+	for i := 1; i <= 2; i++ {
+		resp := vaultCall(t, conn, "pane.reconnect", map[string]any{"paneId": "pane-1", "connectionEpoch": 1}, i)
+		if resp.Error == nil {
+			t.Fatal("unwired SSH reconnect unexpectedly succeeded")
+		}
+		if resp.Error.Message == "Internal error: the reconnect did not open a shell" {
+			t.Fatalf("actionable refusal flattened: %+v", resp.Error)
+		}
+		if !ws.paneRecordOf("pane-1").offer {
+			t.Fatal("refusal withdrew standing offer")
+		}
 	}
 }
 

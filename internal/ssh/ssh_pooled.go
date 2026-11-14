@@ -75,6 +75,8 @@ type PooledSpec struct {
 	// that can answer the handshake's two questions (the helper asks the
 	// coordinator over the reverse channel and builds this from the answers).
 	Config *gossh.ClientConfig
+	// Prepare rebuilds request-bound callbacks for each supervisor-owned attempt.
+	Prepare func(context.Context) (*gossh.ClientConfig, []PooledHop, error)
 	// Route is the hosts this destination is reached THROUGH, in dial order:
 	// Route[0] is dialed from this machine, each next hop through the one
 	// before it, and this spec's own destination through the last. Empty for a

@@ -107,12 +107,8 @@ type hostedSpawn struct {
 	cursors lifecycleCursorStore
 	// stopping is the coordinator's stopping signal. Nil never stops.
 	stopping *atomic.Bool
-	// reconnect asks the helper to close the destination's existing connection
-	// before it opens the shell (design §5.3: "Reconnect closes the socket
-	// first"). It is this REQUEST's fact, never the session's: the same pane
-	// opened normally joins whatever connection exists.
-	reconnect bool
-	log       *slog.Logger
+
+	log *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -120,9 +116,10 @@ type hostedSpawn struct {
 // transport.HostedSessionOpen from these plus what only it knows — the host,
 // the account, the generation, the route back.
 type hostedSpawnResult struct {
-	Session       session.Session
-	Entry         helperclient.SessionEntry
-	LifecycleLane lifecycle.LaneID
+	BindingGeneration uint64
+	Session           session.Session
+	Entry             helperclient.SessionEntry
+	LifecycleLane     lifecycle.LaneID
 	// LifecycleTransport names the transport the lane rides, which is what a
 	// nested sudo/su's grant is composed against (nocx-u7uh.11). Carried
 	// beside the lane rather than derived from it because only the adapter

@@ -108,6 +108,7 @@ type sessionMachine interface {
 // dial: rings, the output pump, the exit monitor, stored-forward replay and
 // the discovery hooks. Same narrow-surface rule as sessionMachine.
 type openMachine interface {
+	closeSession(sid session.ID, sess session.Session)
 	getOrCreateRx(sid session.ID) *sessionRx
 	removeRx(sid session.ID) *sessionRx
 	pumpToRing(ctx context.Context, sess session.Session, ring *outputRing)
@@ -577,14 +578,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	} else {
 		state.add(sess)
 	}
-	if hosted != nil && hosted.LifecycleLane != "" {
-		if registrar, ok := h.sess.(interface {
-			RegisterLifecycleLane(lifecycle.LaneID, session.ID)
-		}); ok {
-			registrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
-		}
-	}
-
 	rx := h.sess.getOrCreateRx(sess.ID())
 	if rx == nil {
 		if hosted != nil && hosted.AbortLifecycle != nil {
@@ -594,6 +587,29 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		h.opener.close(ctx, sess.ID())
 		return openResult{}, errOpenShuttingDown
 	}
+
+	if hosted != nil && hosted.LifecycleLane != "" {
+		if registrar, ok := h.sess.(interface {
+			RegisterLifecycleLane(lifecycle.LaneID, session.ID)
+		}); ok {
+			registrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
+		}
+	}
+
+	// Until the exit monitor takes ownership, every failed open must tear
+	// down the transport state it registered, even if delivery cancels ctx.
+	monitored := false
+	defer func() {
+		if monitored {
+			return
+		}
+		if hosted != nil && hosted.AbortLifecycle != nil {
+			hosted.AbortLifecycle()
+		}
+		state.remove(sess.ID())
+		h.opener.close(cleanupCtx, sess.ID())
+		h.sess.closeSession(sess.ID(), sess)
+	}()
 
 	// Port discovery (nocx-wzc4.2): only now, once the session's ring
 	// exists, is the target "up" — a session that failed its ring setup
@@ -669,8 +685,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		machine.paneMu.Lock()
 		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
 			machine.paneMu.Unlock()
-			state.remove(sess.ID())
-			h.opener.close(cleanupCtx, sess.ID())
 			return openResult{}, context.Canceled
 		}
 		ack(result)
@@ -679,14 +693,8 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		ack(result)
 	}
 	if err := ctx.Err(); err != nil {
-		state.remove(sess.ID())
-		h.opener.close(cleanupCtx, sess.ID())
 		return openResult{}, err
 	}
-	if hosted != nil && hosted.StartLifecycle != nil {
-		hosted.StartLifecycle()
-	}
-
 	// Every session-scoped notification must follow the open result (AD-7).
 	// Install the subscriber only now: lifecycle can authenticate during the
 	// dial above, and publishing it to this shared WebSocket before the
@@ -702,14 +710,15 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			machine.paneMu.Lock()
 			if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
 				machine.paneMu.Unlock()
-				state.remove(sess.ID())
-				h.opener.close(cleanupCtx, sess.ID())
 				return openResult{}, context.Canceled
 			}
 			_, _ = rx.setSubscriber(wconn, state)
 			machine.paneMu.Unlock()
 		} else {
 			_, _ = rx.setSubscriber(wconn, state)
+		}
+		if hosted != nil && hosted.StartLifecycle != nil {
+			hosted.StartLifecycle()
 		}
 		h.sess.replayLifecycleFacts(sess.ID())
 		// The axis was already entered above, before the ack — only the
@@ -725,6 +734,9 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		// broadcast right after the open result was lost 4 runs in 300 under
 		// -race.
 		h.sess.replayToolSurface(sess.ID())
+	}
+	if wconn == nil && hosted != nil && hosted.StartLifecycle != nil {
+		hosted.StartLifecycle()
 	}
 	// The publish's own outcome, from the opener that attempted it
 	// (nocx-1kejz.4). After the ack and after the subscriber above, like every
@@ -772,6 +784,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	rx.monitorOnce.Do(func() {
 		go h.sess.monitorExit(rx, sess)
 	})
+	monitored = true
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
 	// The pump is session/connection-owned, not request-owned: the request

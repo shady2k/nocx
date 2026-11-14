@@ -28,23 +28,37 @@ const cancelCallMethod = "calls.cancel"
 // (nocx-tlaft, nocx-98qho).
 type requestCancels struct {
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	cancels map[string]*requestCancel
+}
+
+type requestCancel struct {
+	cancel context.CancelFunc
 }
 
 func newRequestCancels() *requestCancels {
-	return &requestCancels{cancels: make(map[string]context.CancelFunc)}
+	return &requestCancels{cancels: make(map[string]*requestCancel)}
 }
 
-func (c *requestCancels) add(id json.RawMessage, cancel context.CancelFunc) {
+// add returns an invocation-owned registration, or nil if the id is live.
+func (c *requestCancels) add(id json.RawMessage, cancel context.CancelFunc) *requestCancel {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cancels[requestKey(id)] = cancel
+	key := requestKey(id)
+	if c.cancels[key] != nil {
+		return nil
+	}
+	entry := &requestCancel{cancel: cancel}
+	c.cancels[key] = entry
+	return entry
 }
 
-func (c *requestCancels) remove(id json.RawMessage) {
+func (c *requestCancels) remove(id json.RawMessage, entry *requestCancel) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.cancels, requestKey(id))
+	key := requestKey(id)
+	if c.cancels[key] == entry {
+		delete(c.cancels, key)
+	}
 }
 
 // cancel ends the named request and reports whether this connection held it. A
@@ -53,12 +67,12 @@ func (c *requestCancels) remove(id json.RawMessage) {
 // and this arriving — and either way nobody is waiting.
 func (c *requestCancels) cancel(key string) bool {
 	c.mu.Lock()
-	cancel := c.cancels[key]
+	entry := c.cancels[key]
 	c.mu.Unlock()
-	if cancel == nil {
+	if entry == nil {
 		return false
 	}
-	cancel()
+	entry.cancel()
 	return true
 }
 

@@ -608,3 +608,19 @@ func TestPipeline_ACallTheTurnEndCaughtHandsNothingBack(t *testing.T) {
 		}
 	})
 }
+
+func TestPipeline_CancellationDuringScreenWithholdsResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pipeline, _ := pipelineForTest(t, AuthorityChain{Screens: []Screen{screenFunc(func(ctx context.Context, _ Call, _ Outbound) Verdict {
+		cancel()
+		<-ctx.Done()
+		return Pass{}
+	})}})
+	invocation := pipelineInvocationForTest()
+	invocation.Context = ctx
+	out, err := pipeline.Dispatch(invocation, 1, "screen-stopped")
+	if out != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("screen returned after cancellation: result=%q error=%v", out, err)
+	}
+}

@@ -524,6 +524,9 @@ func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID str
 			return dispatchOutcome{}, refusal
 		}
 	}
+	if refusal := cancelled(ctx, call, enteredCancelled, "while the result was screened"); refusal != nil {
+		return dispatchOutcome{}, refusal
+	}
 	// The result's own contract is checked AFTER the screens, and reported
 	// only when they passed: an invalid result is still bytes that would have
 	// left, and a screen that never saw it could not withhold material it

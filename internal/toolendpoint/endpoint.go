@@ -668,8 +668,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			continue
 		}
 
-		requests.Add(1)
-		inFlight.Add(1)
 		// THE CALL'S OWN CONTEXT IS MADE HERE, NOT IN THE GOROUTINE. The
 		// cancel notification is read by this loop, so the id it names must be
 		// in the set before the next line is read: made inside the goroutine,
@@ -677,7 +675,19 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		// call would run to completion, and the defect this exists to fix
 		// would come back as a scheduling window.
 		requestCtx, requestCancel := context.WithCancel(connectionCtx)
-		cancels.add(request.ID, requestCancel)
+		terminal := &assistant.CallTerminal{}
+		entry := cancels.add(request.ID, func() {
+			if terminal.Cancel(context.Canceled) {
+				requestCancel()
+			}
+		})
+		if entry == nil {
+			requestCancel()
+			e.writeError(conn, request.ID, rpcInvalidRequest, "invalid request", "request id is already in flight; use a distinct id")
+			continue
+		}
+		requests.Add(1)
+		inFlight.Add(1)
 		go func(request rpcRequest, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer requests.Done()
 			defer func() {
@@ -689,7 +699,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			// races the answer finds either a live call or nothing — never an
 			// entry whose cancel function is about to be called anyway.
 			defer requestCancel()
-			defer cancels.remove(request.ID)
+			defer cancels.remove(request.ID, entry)
 			// The caller's frame becomes this one's parent, and this request
 			// gets a span of its own under their trace. Everything below —
 			// the dispatch, the refusals, the answer — hangs off it, because
@@ -708,6 +718,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 				request.Method)
 			requestInvocation := invocation
 			requestInvocation.Context = requestCtx
+			requestInvocation.Terminal = terminal
 			requestInvocation.Method = request.Method
 			requestInvocation.RawParams = append(json.RawMessage(nil), request.Params...)
 			var result string
@@ -728,6 +739,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			} else {
 				result, dispatchErr = e.cfg.Dispatch.Dispatch(requestInvocation)
 			}
+			dispatchErr = terminal.Delivery(requestCtx, dispatchErr)
+			// Retire before publishing any answer: its recipient may reuse the id
+			// immediately, while this goroutine is still unwinding its defers.
+			cancels.remove(request.ID, entry)
 			if dispatchErr != nil {
 				code, message, reason := rpcErrorFor(dispatchErr)
 				if code == rpcInternalError {

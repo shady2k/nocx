@@ -26,6 +26,8 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // progressClock is the clock a long call's progress is sent on, in the test's
@@ -44,6 +46,7 @@ type progressClock struct {
 	stopped  chan struct{}
 	usedOnce sync.Once
 	stopOnce sync.Once
+	interval time.Duration
 }
 
 func newProgressClock() *progressClock {
@@ -57,8 +60,8 @@ func newProgressClock() *progressClock {
 func (c *progressClock) tick() { c.ticks <- time.Now() }
 
 // seam has the shape Server.progressTicks expects.
-func (c *progressClock) seam(time.Duration) (<-chan time.Time, func()) {
-	c.usedOnce.Do(func() { close(c.used) })
+func (c *progressClock) seam(interval time.Duration) (<-chan time.Time, func()) {
+	c.usedOnce.Do(func() { c.interval = interval; close(c.used) })
 	return c.ticks, func() { c.stopOnce.Do(func() { close(c.stopped) }) }
 }
 
@@ -92,7 +95,7 @@ func startStdioWithProgressClock(t *testing.T, socket string, clock *progressClo
 		t.Fatalf("New: %v", err)
 	}
 	server.progressTicks = clock.seam
-	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+	return startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
 		return server.Serve(context.Background(), input, output)
 	})
 }
@@ -132,7 +135,10 @@ func TestALongCallReportsProgressAtTheDeclaredInterval(t *testing.T) {
 
 	driver.send(2, "tools/call", `{"name":"alpha.hold","_meta":{"progressToken":"tok-1"}}`)
 	<-dispatcher.held
-
+	<-clock.used
+	if clock.interval != 20*time.Second {
+		t.Fatalf("progress interval %v, want 20s below client 60s timeout", clock.interval)
+	}
 	clock.tick()
 	if count := progressFrame(t, driver, "tok-1"); count != 1 {
 		t.Fatalf("the first interval reported progress %d, want 1", count)
@@ -223,38 +229,39 @@ func TestACancelledCallStopsProgressAtOnce(t *testing.T) {
 	}
 }
 
-// lifetimeDispatcher holds a call until the lifetime its catalogue entry
-// declares runs out, which is the rule the product applies to every tool's
-// declaration (`runDeclaredTool`, ADR-8eej3e66's non-renewable `max`). It is a
-// double because no shipped tool declares a lifetime short enough to watch.
+// lifetimeDispatcher observes the real operation catalogue's non-renewable
+// lifetime. Only its clock is replaced; no timeout is reimplemented here.
 type lifetimeDispatcher struct {
-	lifetime time.Duration
-	started  chan struct{}
-	armed    chan struct{}
+	clock    *notify.ManualClock
+	started  chan *catalog.Scope
+	advanced chan struct{}
 	ended    chan error
+}
+type lifetimeClock struct{ *notify.ManualClock }
+
+func (c lifetimeClock) AfterFunc(d time.Duration, fn func()) catalog.Timer {
+	return c.ManualClock.AfterFunc(d, fn)
 }
 
 func (d *lifetimeDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) {
 	if inv.Method != "alpha.lifetime" {
 		return `{"screen":true}`, nil
 	}
-	d.started <- struct{}{}
-	// The lifetime begins once the test has watched the progress it asserts,
-	// so "progress first, then the bound" is an order rather than a race. The
-	// context is the way out of a test that failed before arming it: the
-	// endpoint closes the connection, and this call must not hold the
-	// endpoint's own teardown open.
+	scope := catalog.BeginWithClock(inv.Context, catalog.OpInternalAgentRun, catalog.Invocation{}, lifetimeClock{d.clock})
+	defer scope.Close()
+	scope.StartWork()
+	d.started <- scope
 	select {
-	case <-d.armed:
+	case <-d.advanced:
 	case <-inv.Context.Done():
-		d.ended <- inv.Context.Err()
 		return "", inv.Context.Err()
 	}
-	ctx, cancel := context.WithTimeout(inv.Context, d.lifetime)
-	defer cancel()
-	<-ctx.Done()
-	d.ended <- ctx.Err()
-	return "", ctx.Err()
+	outcome, done := scope.Outcome()
+	if !done || outcome != catalog.OutcomeExpired {
+		return "", errors.New("operation did not expire at declared max")
+	}
+	d.ended <- context.DeadlineExceeded
+	return "", context.DeadlineExceeded
 }
 
 func (d *lifetimeDispatcher) Catalogue(content.Grant) []agenttools.Tool {
@@ -278,10 +285,8 @@ func (d *lifetimeDispatcher) Catalogue(content.Grant) []agenttools.Tool {
 // ending rather than a result, and nothing is written for the call afterwards.
 func TestACallEndingAtItsDeclaredLifetimeKeepsItsBoundUnderProgress(t *testing.T) {
 	dispatcher := &lifetimeDispatcher{
-		lifetime: 50 * time.Millisecond,
-		started:  make(chan struct{}, 1),
-		armed:    make(chan struct{}),
-		ended:    make(chan error, 1),
+		clock: notify.NewManualClock(), started: make(chan *catalog.Scope, 1),
+		advanced: make(chan struct{}), ended: make(chan error, 1),
 	}
 	endpoint := startRealEndpoint(t, &slotAuthorizer{}, dispatcher)
 	clock := newProgressClock()
@@ -289,19 +294,25 @@ func TestACallEndingAtItsDeclaredLifetimeKeepsItsBoundUnderProgress(t *testing.T
 	initialization(driver)
 
 	driver.send(2, "tools/call", `{"name":"alpha.lifetime","_meta":{"progressToken":7}}`)
-	<-dispatcher.started
+	scope := <-dispatcher.started
+	originalDeadline := scope.Deadline()
+	max := scope.Declaration().Max.Duration()
+	dispatcher.clock.Advance(max / 3)
 	clock.tick()
 	if count := progressFrame(t, driver, "7"); count != 1 {
 		t.Fatalf("the first interval reported progress %d, want 1", count)
 	}
+	dispatcher.clock.Advance(max / 3)
 	clock.tick()
 	if count := progressFrame(t, driver, "7"); count != 2 {
 		t.Fatalf("the second interval reported progress %d, want 2", count)
 	}
 
-	arm := sync.OnceFunc(func() { close(dispatcher.armed) })
-	t.Cleanup(arm)
-	arm()
+	if !scope.Deadline().Equal(originalDeadline) {
+		t.Fatal("progress renewed operation deadline")
+	}
+	dispatcher.clock.Advance(max - 2*(max/3))
+	close(dispatcher.advanced)
 	select {
 	case err := <-dispatcher.ended:
 		if !errors.Is(err, context.DeadlineExceeded) {

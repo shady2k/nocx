@@ -627,6 +627,87 @@ func runStateIn(frames []wireFrame, runID int64) (state string, at int) {
 	return state, at
 }
 
+// firstCancelledRunState anchors the observation window before any late state
+// can hide itself or the events preceding it.
+func firstCancelledRunState(frames []wireFrame, runID int64) int {
+	for i, frame := range frames {
+		if frame.method != "agent.runState" {
+			continue
+		}
+		var state agentRunState
+		if json.Unmarshal(frame.params, &state) == nil && state.RunID == runID && state.State == string(content.RunCancelled) {
+			return i
+		}
+	}
+	return -1
+}
+
+// cancelledRunFramesError checks every frame after the cancellation boundary.
+func cancelledRunFramesError(frames []wireFrame, runID int64) error {
+	cancelledAt := firstCancelledRunState(frames, runID)
+	if cancelledAt < 0 {
+		return fmt.Errorf("no cancelled agent.runState for run %d", runID)
+	}
+	for _, frame := range frames[cancelledAt+1:] {
+		if frame.method == "" {
+			continue // Responses are not run notifications.
+		}
+		// approvalService.wait defers retirement to remove the open question
+		// when its wait ends. Cancellation must not suppress that cleanup.
+		if frame.method == "agent.approvalRetired" {
+			continue
+		}
+		var envelope struct {
+			RunID json.RawMessage `json:"runId"`
+		}
+		if err := json.Unmarshal(frame.params, &envelope); err != nil {
+			return fmt.Errorf("decode %s notification: %w", frame.method, err)
+		}
+		id := string(envelope.RunID)
+		if len(id) > 0 && id[0] == '"' {
+			if err := json.Unmarshal(envelope.RunID, &id); err != nil {
+				return fmt.Errorf("decode %s runId: %w", frame.method, err)
+			}
+		}
+		if id == fmt.Sprint(runID) {
+			return fmt.Errorf("%s for the cancelled run %d arrived after its cancelled state", frame.method, runID)
+		}
+	}
+	return nil
+}
+
+func TestAgentCancel_ObservationRejectsEveryLaterRunFrame(t *testing.T) {
+	state := func(runID int64, value string) wireFrame {
+		return wireFrame{method: "agent.runState", params: json.RawMessage(fmt.Sprintf(`{"runId":%d,"state":%q}`, runID, value))}
+	}
+	cancelled := state(7, "cancelled")
+	lateEvent := wireFrame{method: "agent.runEvent", params: json.RawMessage(`{"runId":7}`)}
+	for _, tc := range []struct {
+		name      string
+		frames    []wireFrame
+		wantError bool
+	}{
+		{"no cancellation", []wireFrame{state(7, "completed")}, true},
+		{"duplicate cancellation", []wireFrame{cancelled, cancelled}, true},
+		{"contradictory completion", []wireFrame{cancelled, state(7, "completed")}, true},
+		{"event before duplicate cancellation", []wireFrame{cancelled, lateEvent, cancelled}, true},
+		{"event before contradictory completion", []wireFrame{cancelled, lateEvent, state(7, "completed")}, true},
+		{"event after cancellation", []wireFrame{cancelled, lateEvent}, true},
+		{"late approval question", []wireFrame{cancelled, {method: "agent.approvalRequested", params: json.RawMessage(`{"runId":"7"}`)}}, true},
+		{"late standing answer receipt", []wireFrame{cancelled, {method: "agent.standingAnswerSaved", params: json.RawMessage(`{"runId":"7"}`)}}, true},
+		{"retirement cleanup", []wireFrame{cancelled, {method: "agent.approvalRetired", params: json.RawMessage(`{"runId":"7"}`)}}, false},
+		{"other run approval question", []wireFrame{cancelled, {method: "agent.approvalRequested", params: json.RawMessage(`{"runId":"8"}`)}}, false},
+		{"other run and response", []wireFrame{state(7, "running"), cancelled, state(8, "completed"), {id: "22"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := cancelledRunFramesError(tc.frames, 7)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("cancelledRunFramesError = %v, want error: %t", err, tc.wantError)
+			}
+		})
+	}
+}
+
 // askRunIDIn is the run id the ask's own response minted.
 func askRunIDIn(frames []wireFrame, id string) (int64, bool) {
 	for _, frame := range frames {
@@ -676,8 +757,8 @@ func fetchActionAttempt(t *testing.T, led content.LedgerRepository) *content.Led
 // (nocx-a62cl.4.1): the person stops the turn while a tool call is running
 // inside its executor. The call's context ends within a second, the attempt
 // records the person's stop rather than a tool failure, nothing about the
-// call reaches the model afterwards, no agent.run* event follows the cancelled
-// state, and the next question in the same block works.
+// call reaches the model afterwards, no run-bound notification except approval
+// retirement cleanup follows cancellation, and the next question works.
 func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 	provider := &fetchCallingProvider{}
 	model := httptest.NewServer(provider)
@@ -727,12 +808,8 @@ func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 	}
 
 	first := readFrames(t, tap, "the cancelled run state", func(frames []wireFrame) bool {
-		state, _ := runStateIn(frames, res.RunID)
-		return answered(frames, "22") && state == string(content.RunCancelled)
+		return answered(frames, "22") && firstCancelledRunState(frames, res.RunID) >= 0
 	})
-	if _, at := runStateIn(first, res.RunID); at == 0 && first[0].method != "agent.runState" {
-		t.Fatalf("no cancelled agent.runState for run %d in %+v", res.RunID, first)
-	}
 
 	// THE ATTEMPT RECORDS THE PERSON'S STOP, not a failure of the tool: the
 	// call did not fail, it was stopped, and the ledger is the record.
@@ -776,21 +853,8 @@ func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 		return state == string(content.RunCompleted)
 	})
 	after := append(first, second...)
-	_, cancelledAt := runStateIn(after, res.RunID)
-	for i := cancelledAt + 1; i < len(after); i++ {
-		frame := after[i]
-		if frame.method == "" {
-			continue
-		}
-		if !strings.HasPrefix(frame.method, "agent.run") {
-			continue
-		}
-		var envelope struct {
-			RunID int64 `json:"runId"`
-		}
-		if json.Unmarshal(frame.params, &envelope) == nil && envelope.RunID == res.RunID {
-			t.Fatalf("%s for the cancelled run %d arrived after its cancelled state", frame.method, res.RunID)
-		}
+	if err := cancelledRunFramesError(after, res.RunID); err != nil {
+		t.Fatal(err)
 	}
 
 	// NOTHING OF THE CALL REACHED THE MODEL: the stopped call's result would be

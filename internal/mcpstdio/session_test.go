@@ -52,7 +52,7 @@ type stdioDriver struct {
 
 func startStdio(t *testing.T, socket string) *stdioDriver {
 	t.Helper()
-	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+	return startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
 		return Serve(context.Background(), input, output, socket, discardLogger)
 	})
 }
@@ -66,12 +66,12 @@ func startStdioDialing(t *testing.T, socket string, dialer Dialer) *stdioDriver 
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+	return startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
 		return server.Serve(context.Background(), input, output)
 	})
 }
 
-func startStdioServing(t *testing.T, serve func(io.Reader, io.Writer) error) *stdioDriver {
+func startStdioServing(t *testing.T, serve func(io.Reader, io.WriteCloser) error) *stdioDriver {
 	t.Helper()
 	input, inputWriter := io.Pipe()
 	output, outputWriter := io.Pipe()

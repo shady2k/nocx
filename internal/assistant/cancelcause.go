@@ -70,15 +70,18 @@ func TurnEndedReason(err error) (content.TerminationReason, bool) {
 // cancellation and the attempt records TermInterrupted. The run's row is what
 // says the person pressed Stop.
 //
-// ctx must be the CALL's context, never the detached one an attempt is written
-// under: detachedFinishContext deliberately drops the cancellation, so asking
-// it would always answer "not stopped".
+// ctx is the call's context when its outcome has not yet been decided (the
+// kernel). A frozen terminal verdict instead carries cancellation in cause;
+// that caller passes Background so a later cancellation cannot change it.
+// The detached ledger-write context is not a source of cancellation evidence.
 func stoppedEnding(ctx context.Context, cause error) (content.TerminationReason, content.EntryStatus, bool) {
 	if ctx.Err() == nil && !errors.Is(cause, context.Canceled) {
 		return "", "", false
 	}
 	ended := content.TermInterrupted
-	if stated, ok := TurnEndedReason(context.Cause(ctx)); ok {
+	if stated, ok := TurnEndedReason(cause); ok {
+		ended = stated
+	} else if stated, ok := TurnEndedReason(context.Cause(ctx)); ok {
 		ended = stated
 	}
 	return ended, content.EntryInterrupted, true

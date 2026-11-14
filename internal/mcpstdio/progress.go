@@ -37,6 +37,7 @@ func newProgressTicks(interval time.Duration) (<-chan time.Time, func()) {
 // client's cancellation — stop returns and no frame follows.
 type progressSender struct {
 	stopOnce sync.Once
+	cancel   context.CancelFunc
 	done     chan struct{}
 	stopped  chan struct{}
 }
@@ -50,7 +51,9 @@ type progressSender struct {
 // at one — because the count is a heartbeat rather than a measurement: what it
 // has to be is increasing, and the total is unknown until the call ends.
 func (s *Server) startProgress(ctx context.Context, writer *lineWriter, token json.RawMessage) *progressSender {
-	progress := &progressSender{done: make(chan struct{}), stopped: make(chan struct{})}
+	callCtx := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	progress := &progressSender{cancel: cancel, done: make(chan struct{}), stopped: make(chan struct{})}
 	if len(bytes.TrimSpace(token)) == 0 || bytes.Equal(bytes.TrimSpace(token), []byte("null")) {
 		close(progress.stopped)
 		return progress
@@ -75,7 +78,7 @@ func (s *Server) startProgress(ctx context.Context, writer *lineWriter, token js
 					return
 				}
 				reported++
-				if err := writer.progress(token, reported); err != nil {
+				if err := writer.progress(ctx, callCtx, token, reported); err != nil {
 					return
 				}
 			}
@@ -85,9 +88,11 @@ func (s *Server) startProgress(ctx context.Context, writer *lineWriter, token js
 }
 
 // stop ends the reporting and waits for it, so no frame can follow the call's
-// own answer on the session's output.
+// own answer on the session's output. Queued frames leave immediately; an
+// admitted frame drains under the shared one-second output watchdog. Actual
+// call cancellation interrupts an admitted progress write immediately.
 func (p *progressSender) stop() {
-	p.stopOnce.Do(func() { close(p.done) })
+	p.stopOnce.Do(func() { p.cancel(); close(p.done) })
 	<-p.stopped
 }
 
@@ -95,13 +100,18 @@ func (p *progressSender) stop() {
 // exactly as the client spelled it, which is why it is kept raw: MCP allows a
 // string or an integer, and rewriting either would name a request the client
 // never made.
-func (w *lineWriter) progress(token json.RawMessage, reported int64) error {
-	return w.write(map[string]any{
+func (w *lineWriter) progress(ctx context.Context, callCtx context.Context, token json.RawMessage, reported int64) error {
+	owner := w
+	if w.base != nil {
+		owner = w.base
+	}
+	scoped := &lineWriter{base: owner, ctx: ctx, flight: w.flight, interruptCtx: callCtx}
+	return scoped.writeFrame(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/progress",
 		"params": map[string]any{
 			"progressToken": token,
 			"progress":      reported,
 		},
-	})
+	}, false)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log/logtest"
 )
 
 // THE DEFECT THIS FILE EXISTS FOR (nocx-98qho). A call its caller has stopped
@@ -280,5 +281,116 @@ func TestACancelThatNamesNothingIsSwallowed(t *testing.T) {
 	}
 	if answer.Error != nil || string(answer.Result) != `{"screen":true}` {
 		t.Fatalf("the call after the cancels answered %+v, want the connection intact", answer)
+	}
+}
+
+func TestRequestCancelOldRemovalCannotEraseSuccessor(t *testing.T) {
+	cancels := newRequestCancels()
+	id := json.RawMessage(`7`)
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	oldEntry := cancels.add(id, oldCancel)
+	removeOld := func() { cancels.remove(id, oldEntry) }
+	removeOld()
+	newCtx, newCancel := context.WithCancel(context.Background())
+	defer newCancel()
+	cancels.add(id, newCancel)
+	removeOld()
+	if !cancels.cancel(requestKey(id)) || newCtx.Err() != context.Canceled {
+		t.Fatal("old invocation cleanup erased its successor's cancellation registration")
+	}
+	if oldCtx.Err() != nil {
+		t.Fatal("cancelling the successor reached the old invocation")
+	}
+}
+
+func TestDuplicateLiveRequestIDIsRefusedWithoutReplacingCancel(t *testing.T) {
+	dispatch := newCancellingDispatcher()
+	client := dialClient(t, startCancellingEndpoint(t, dispatch))
+	client.request(7, "alpha.first", `{}`)
+	startedCall(t, dispatch)
+	client.request(7, "alpha.screen", `{}`)
+	answer := client.response()
+	if answer.Error == nil || answer.Error.Code != rpcInvalidRequest {
+		t.Fatalf("duplicate live id answered %+v, want invalid request", answer)
+	}
+	client.notify("calls.cancel", `{"requestId":7}`)
+	if ended := endedCall(t, dispatch); ended.method != "alpha.first" || ended.cause != "cancelled" {
+		t.Fatalf("original invocation ended as %+v, want cancellation", ended)
+	}
+	client.response()
+}
+
+func TestSequentialRequestIDReuseRemainsCancellable(t *testing.T) {
+	dispatch := newCancellingDispatcher()
+	client := dialClient(t, startCancellingEndpoint(t, dispatch))
+	for range 20 {
+		client.request(7, "alpha.screen", `{}`)
+		if answer := client.response(); answer.Error != nil {
+			t.Fatalf("completed id could not be reused: %+v", answer)
+		}
+		client.request(7, "alpha.first", `{}`)
+		startedCall(t, dispatch)
+		client.notify("calls.cancel", `{"requestId":7}`)
+		if ended := endedCall(t, dispatch); ended.cause != "cancelled" {
+			t.Fatalf("reused id ended as %+v, want cancellation", ended)
+		}
+		if answer := client.response(); answer.Error == nil || answer.Error.Message != "call abandoned" {
+			t.Fatalf("reused id answered %+v, want call abandoned", answer)
+		}
+	}
+}
+
+type terminalDispatcher struct {
+	*cancellingDispatcher
+	finish func(assistant.ToolInvocation) (string, error)
+}
+
+func (d terminalDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) {
+	return d.finish(inv)
+}
+
+func TestEndpointKeepsErrorAfterDispatchCompletion(t *testing.T) {
+	dispatch := terminalDispatcher{finish: func(inv assistant.ToolInvocation) (string, error) {
+		if err := inv.Terminal.Complete(inv.Context, nil); err != nil {
+			t.Errorf("complete dispatch: %v", err)
+			return "", err
+		}
+		return `{"screen":true}`, errors.New("recording the completed call failed")
+	}}
+	endpoint := startEndpoint(t, Config{
+		Dir: t.TempDir(), Peers: testPeers{uid: 1000, pid: 1234},
+		Owner: testOwner{uid: 1000}, SelfUID: 1000, Auth: &testAuthorizer{},
+		Dispatch: dispatch, Logger: logtest.Slog(t),
+	})
+	client := dialClient(t, endpoint)
+	client.request(1, "alpha.screen", `{}`)
+	if answer := client.response(); answer.Error == nil || answer.Error.Code != rpcInternalError {
+		t.Fatalf("recording failure answered %+v, want internal error", answer)
+	}
+}
+
+func TestEndpointCancellationWinsEvenWhenDispatcherReturnsSuccess(t *testing.T) {
+	started := make(chan struct{})
+	dispatch := terminalDispatcher{finish: func(inv assistant.ToolInvocation) (string, error) {
+		close(started)
+		<-inv.Context.Done()
+		return `{"screen":true}`, nil
+	}}
+	endpoint := startEndpoint(t, Config{
+		Dir: t.TempDir(), Peers: testPeers{uid: 1000, pid: 1234},
+		Owner: testOwner{uid: 1000}, SelfUID: 1000, Auth: &testAuthorizer{},
+		Dispatch: dispatch, Logger: logtest.Slog(t),
+	})
+	client := dialClient(t, endpoint)
+	client.request(1, "alpha.screen", `{}`)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+	client.notify("calls.cancel", `{"requestId":1}`)
+	if answer := client.response(); answer.Error == nil || answer.Error.Message != "call abandoned" {
+		t.Fatalf("cancelled successful dispatch answered %+v, want call abandoned", answer)
 	}
 }

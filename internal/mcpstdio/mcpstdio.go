@@ -29,7 +29,7 @@ const (
 	// reads it and nothing answers it, so the only thing it protects is this
 	// process: a peer that stopped reading must not hold the goroutine that
 	// asked the backend to stop.
-	cancelWriteWindow = 5 * time.Second
+	cancelWriteWindow = time.Second
 )
 
 var supportedVersions = [...]string{
@@ -132,7 +132,7 @@ func New(cfg Config) (*Server, error) {
 // reason the bearer is read from it and nowhere else: the two values that reach
 // this process from outside travel by exactly one route each, and this is the
 // route for the diagnostics (nocx-50w7p.16).
-func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string, logger *slog.Logger) error {
+func Serve(ctx context.Context, input io.Reader, output io.WriteCloser, socket string, logger *slog.Logger) error {
 	// THE PANE'S BEARER, read from this process's own environment and from
 	// nowhere else (nocx-50w7p.16). The agent's MCP client passes it from the
 	// staged config, so it is this process alone that holds it — never a
@@ -144,8 +144,10 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string
 	return server.Serve(ctx, input, output)
 }
 
-// Serve runs the configured adapter over the supplied streams.
-func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
+// Serve runs the configured adapter over the supplied streams. Output must
+// implement Close by unblocking any current Write (as pipes and sockets do).
+// A stalled or cancelled in-flight output write retires this session stream.
+func (s *Server) Serve(ctx context.Context, input io.Reader, output io.WriteCloser) error {
 	if input == nil || output == nil {
 		return fmt.Errorf("%w: nil stream", ErrInvalidConfig)
 	}
@@ -153,9 +155,11 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		ctx = context.Background()
 	}
 
+	ctx, endSession := context.WithCancel(ctx)
+	defer endSession()
 	lines := make(chan readResult, 1)
 	go readMessages(input, lines)
-	writer := &lineWriter{output: output}
+	writer := &lineWriter{output: output, failed: endSession}
 	active := newCalls()
 	// THE SESSION'S TWO EDGES, logged and nothing else. What is worth a line
 	// here is that the bridge came up, whether it holds a bearer to present,
@@ -186,7 +190,10 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		// waiting before closing could park the last caller far enough into a
 		// full socket buffer to hold the session open.
 		active.cancelAll()
+		endSession()
+		_ = output.Close()
 		link.close()
+		active.sends.Wait()
 		requests.Wait()
 	}()
 	state := &sessionState{}
@@ -238,13 +245,17 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 			// way (nocx-98qho).
 			flight := &callFlight{}
 			callCtx = withCallFlight(callCtx, flight)
-			active.add(request.ID, cancel, flight)
+			owner := active.add(request.ID, cancel, flight)
+			if owner == nil {
+				cancel()
+				continue
+			}
 			requests.Add(1)
 			wait, leave := gate.enter(writesSessionState(request.Method))
 			go func(request requestMessage, callCtx context.Context, cancel context.CancelFunc, wait <-chan struct{}, leave func(bool)) {
 				defer cancel()
 				defer requests.Done()
-				defer active.remove(request.ID)
+				defer active.remove(request.ID, owner)
 				select {
 				case <-wait:
 				case <-callCtx.Done():
@@ -261,8 +272,10 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 					return
 				}
 				defer leave(true)
-				if err := s.handle(callCtx, writer, state, link, request); err != nil && callCtx.Err() == nil {
-					_ = writer.errorResponse(request.ID, -32603, "internal error", err.Error())
+				callWriter := writer.forCall(callCtx, flight)
+				if err := s.handle(callCtx, callWriter, state, link, request); err != nil && callCtx.Err() == nil {
+					reason := fmt.Sprint(err)
+					_ = callWriter.errorResponse(request.ID, -32603, "internal error", reason)
 				}
 			}(request, callCtx, cancel, wait, leave)
 		}
@@ -779,7 +792,9 @@ type callFlight struct {
 	// cancelled makes a repeated notification cost one frame rather than one
 	// goroutine each. A client that repeats its cancellation is asking for
 	// something already asked for.
-	cancelled bool
+	cancelled  bool
+	terminal   bool
+	cancelSent bool
 }
 
 func (f *callFlight) bind(conn *endpointConn, id int64) {
@@ -791,8 +806,9 @@ func (f *callFlight) bind(conn *endpointConn, id int64) {
 func (f *callFlight) cancel() {
 	f.mu.Lock()
 	conn, id := f.conn, f.id
-	repeat := f.cancelled
+	repeat := f.cancelSent || f.terminal
 	f.cancelled = true
+	f.cancelSent = true
 	f.mu.Unlock()
 	if conn == nil || repeat {
 		return
@@ -1034,15 +1050,8 @@ func (l *endpointLink) call(ctx context.Context, method string, params json.RawM
 			}
 			return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, conn.failure())
 		case <-ctx.Done():
-			// The endpoint keeps working on the call; this caller stops
-			// waiting for its answer. Nothing here touches the connection,
-			// because closing it is what used to cancel the siblings: on a
-			// shared connection one caller's cancellation is not another
-			// caller's failure (nocx-tlaft). The answer, if it arrives, is
-			// dropped — and the call goes on executing at the endpoint, which
-			// is nocx-98qho and deliberately not fixed here: the endpoint's
-			// request context belongs to the CONNECTION, so cancelling one
-			// call would take its siblings with it.
+			// Stop waiting here. The call's flight independently forwards targeted
+			// cancellation; only an unusable connection can disturb its siblings.
 			conn.forget(id)
 			return nil, nil, ctx.Err()
 		}
@@ -1082,7 +1091,7 @@ type endpointConn struct {
 	// endpointLink): no REQUEST waits here, the answers stay demultiplexed by
 	// id exactly as before, and what is serialised is one write at a time —
 	// which is what a socket already does to the bytes on it.
-	writeTurn sync.Mutex
+	writeTurn writeGate
 
 	mu      sync.Mutex
 	pending map[int64]chan endpointAnswer
@@ -1151,35 +1160,47 @@ func (c *endpointConn) failure() error {
 	return c.err
 }
 
-// cancelRequest tells the endpoint to stop the request with this id, on the
-// connection that carried it (nocx-98qho).
-//
-// IT IS BEST EFFORT, AND IT IS OWED TO NOBODY. The caller has already stopped
-// waiting, so no answer is read and no id is awaited; what it buys is the
-// BACKEND stopping the work instead of running it out to its own bound or its
-// own effect. It takes the connection's write turn for the same reason every
-// other frame does — two writers on one socket interleave halves of two
-// messages — and it is bounded by a write deadline of its own, because a peer
-// that stopped reading must not park the goroutine that asked.
-//
-// A write that fails is not reported: a connection that cannot take this frame
-// is one that is ending, and the endpoint cancels every call of a connection it
-// closes — which is the same outcome this message was asking for.
+// cancelRequest delivers cancellation within one bounded interval, including
+// waiting for a sibling's write turn. If delivery fails, retiring the socket
+// makes the endpoint cancel every request on the unusable connection.
 func (c *endpointConn) cancelRequest(id int64) {
-	envelope, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "calls.cancel",
-		"params":  map[string]any{"requestId": id},
+	envelope, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "calls.cancel",
+		"params": map[string]any{"requestId": id},
 	})
-	if err != nil {
+	frame := append(envelope, '\n')
+	expired := make(chan struct{})
+	timer := time.AfterFunc(cancelWriteWindow, func() {
+		c.fail(context.DeadlineExceeded)
+		close(expired)
+	})
+	defer func() {
+		if !timer.Stop() {
+			<-expired
+		}
+	}()
+	if !c.writeTurn.acquire(c.closed) {
 		return
 	}
-	frame := append(envelope, '\n')
-	c.writeTurn.Lock()
 	defer c.writeTurn.Unlock()
-	_ = c.conn.SetWriteDeadline(time.Now().Add(cancelWriteWindow))
-	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
-	_, _ = c.conn.Write(frame)
+	if c.gone() {
+		return
+	}
+	if err := c.conn.SetWriteDeadline(time.Now().Add(cancelWriteWindow)); err != nil {
+		c.fail(err)
+		return
+	}
+	n, err := c.conn.Write(frame)
+	if err == nil && n != len(frame) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		c.fail(err)
+		return
+	}
+	if err := c.conn.SetWriteDeadline(time.Time{}); err != nil {
+		c.fail(err)
+	}
 }
 
 // close ends the connection. Once, whatever else reports it end.
@@ -1342,7 +1363,9 @@ func (c *endpointConn) send(ctx context.Context, id int64, method string, params
 	// here to the clear below happens inside this turn, so no other writer on
 	// the connection can be undone by the interrupt this one arms
 	// (nocx-xn63t.6.14) — see writeTurn.
-	c.writeTurn.Lock()
+	if !c.writeTurn.acquire(ctx.Done()) {
+		return false, ctx.Err()
+	}
 	defer c.writeTurn.Unlock()
 	// A CALLER CANCELLED WHILE IT WAITED FOR THE TURN WRITES NOTHING. The
 	// interrupt below belongs to a write this caller no longer wants: arming it
@@ -1382,19 +1405,115 @@ func (c *endpointConn) send(ctx context.Context, id int64, method string, params
 	return written == len(frame), writeErr
 }
 
-type lineWriter struct {
-	mu     sync.Mutex
-	output io.Writer
+// writeGate serializes whole frames and lets queued writers leave on stop.
+type writeGate struct {
+	once sync.Once
+	turn chan struct{}
 }
 
-func (w *lineWriter) write(value any) error {
+func (g *writeGate) init() {
+	g.once.Do(func() { g.turn = make(chan struct{}, 1); g.turn <- struct{}{} })
+}
+
+func (g *writeGate) acquire(done <-chan struct{}) bool {
+	g.init()
+	select {
+	case <-done:
+		return false
+	case <-g.turn:
+		return true
+	}
+}
+func (g *writeGate) Lock()   { g.acquire(nil) }
+func (g *writeGate) Unlock() { g.turn <- struct{}{} }
+
+// outputWriteWindow bounds a frame once admitted to the output stream.
+const outputWriteWindow = time.Second
+
+// lineWriter owns frame admission and output interruption. Output.Close must
+// unblock Write; Serve requires that contract instead of abandoning goroutines.
+type lineWriter struct {
+	mu           writeGate
+	output       io.WriteCloser
+	failed       context.CancelFunc
+	base         *lineWriter
+	ctx          context.Context
+	interruptCtx context.Context
+	flight       *callFlight
+}
+
+func (w *lineWriter) forCall(ctx context.Context, flight *callFlight) *lineWriter {
+	return &lineWriter{base: w, ctx: ctx, flight: flight}
+}
+func (w *lineWriter) write(value any) error { return w.writeFrame(value, true) }
+func (w *lineWriter) writeFrame(value any, terminal bool) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_, err = w.output.Write(append(data, '\n'))
+	owner := w
+	if w.base != nil {
+		owner = w.base
+	}
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !owner.mu.acquire(ctx.Done()) {
+		return ctx.Err()
+	}
+	defer owner.mu.Unlock()
+	// Cancellation and every response branch share this admission decision.
+	// A response admitted first owns completion; a queued response owns nothing.
+	if w.flight != nil {
+		w.flight.mu.Lock()
+		if w.flight.cancelled || w.flight.terminal || ctx.Err() != nil {
+			w.flight.mu.Unlock()
+			return context.Canceled
+		}
+		if terminal {
+			w.flight.terminal = true
+		}
+		w.flight.mu.Unlock()
+	} else if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	frame := append(data, '\n')
+	finished := make(chan struct{})
+	interrupt := func() {
+		if owner.failed != nil {
+			owner.failed()
+		}
+		_ = owner.output.Close()
+		close(finished)
+	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), outputWriteWindow)
+	defer cancel()
+	// Progress has no terminal ownership: cancelling it interrupts a blocked
+	// output write by retiring the stream, not by leaving a sender behind.
+	stopCall := func() bool { return true }
+	if !terminal {
+		interruptCtx := w.interruptCtx
+		if interruptCtx == nil {
+			interruptCtx = ctx
+		}
+		stopCall = context.AfterFunc(interruptCtx, func() { cancel() })
+	}
+	stop := context.AfterFunc(writeCtx, interrupt)
+	n, err := owner.output.Write(frame)
+	stopCall()
+	if !stop() {
+		<-finished
+	}
+	if err == nil && n != len(frame) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		if owner.failed != nil {
+			owner.failed()
+		}
+		_ = owner.output.Close()
+	}
 	return err
 }
 
@@ -1450,23 +1569,33 @@ type activeCall struct {
 
 type activeCalls struct {
 	mu    sync.Mutex
-	calls map[string]activeCall
+	calls map[string]*activeCall
+	sends sync.WaitGroup
 }
 
 func newCalls() *activeCalls {
-	return &activeCalls{calls: make(map[string]activeCall)}
+	return &activeCalls{calls: make(map[string]*activeCall)}
 }
 
-func (c *activeCalls) add(id json.RawMessage, cancel context.CancelFunc, flight *callFlight) {
+func (c *activeCalls) add(id json.RawMessage, cancel context.CancelFunc, flight *callFlight) *activeCall {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls[string(bytes.TrimSpace(id))] = activeCall{cancel: cancel, flight: flight}
+	key := string(bytes.TrimSpace(id))
+	if c.calls[key] != nil {
+		return nil
+	}
+	call := &activeCall{cancel: cancel, flight: flight}
+	c.calls[key] = call
+	return call
 }
 
-func (c *activeCalls) remove(id json.RawMessage) {
+func (c *activeCalls) remove(id json.RawMessage, owner *activeCall) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.calls, string(bytes.TrimSpace(id)))
+	key := string(bytes.TrimSpace(id))
+	if c.calls[key] == owner {
+		delete(c.calls, key)
+	}
 }
 
 // cancel ends one call HERE and, when its frame is out, at the ENDPOINT. The
@@ -1482,8 +1611,17 @@ func (c *activeCalls) cancel(id string) {
 	c.mu.Lock()
 	call := c.calls[id]
 	c.mu.Unlock()
-	if call.cancel == nil {
+	if call == nil {
 		return
+	}
+	if call.flight != nil {
+		call.flight.mu.Lock()
+		if call.flight.terminal || call.flight.cancelled {
+			call.flight.mu.Unlock()
+			return
+		}
+		call.flight.cancelled = true
+		call.flight.mu.Unlock()
 	}
 	call.cancel()
 	if call.flight == nil {
@@ -1493,7 +1631,8 @@ func (c *activeCalls) cancel(id string) {
 	// connection's write turn, which a sibling's frame may hold, and the loop
 	// that read this notification has every other request of the session to
 	// serve.
-	go call.flight.cancel()
+	c.sends.Add(1)
+	go func() { defer c.sends.Done(); call.flight.cancel() }()
 }
 
 func (c *activeCalls) cancelAll() {
@@ -1502,7 +1641,7 @@ func (c *activeCalls) cancelAll() {
 	for _, call := range c.calls {
 		cancels = append(cancels, call.cancel)
 	}
-	c.calls = make(map[string]activeCall)
+	c.calls = make(map[string]*activeCall)
 	c.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()

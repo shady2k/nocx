@@ -51,6 +51,9 @@ func NewAttemptRecordingDispatcher(registry agenttools.Registry, inner ToolDispa
 }
 
 func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string, error) {
+	if invocation.Terminal == nil {
+		invocation.Terminal = &CallTerminal{}
+	}
 	decl := agenttools.Tool{Declaration: agenttools.Declaration{Name: invocation.Method}}
 	if found, ok := d.registry.Lookup(invocation.Method); ok {
 		decl = found
@@ -62,26 +65,22 @@ func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string
 	}
 
 	result, dispatchErr := d.inner.Dispatch(invocation)
+	dispatchErr = invocation.Terminal.Complete(contextOrBackground(invocation.Context), dispatchErr)
 
-	// By this point the inner dispatcher has already produced its terminal
-	// outcome — an answer, or its own typed failure. Recording that outcome
-	// must not depend on the caller still waiting for it (nocx-uhii1): a
-	// person can stop waiting on a call and interrupt the session that is
-	// holding it, which cancels the invocation's context, and that can land
-	// here well after Dispatch returned. finishCtx carries the invocation's
-	// values (so anything keyed off them still threads through) but not its
-	// cancellation, and is bounded by its own short timeout so a wedged
-	// ledger cannot hang the dispatcher in the caller's place.
+	// Completion and cancellation have now made one terminal decision. Neither
+	// recording nor delivery may inspect the caller's context again: a stop
+	// during bookkeeping must not contradict the verdict being written.
+	// Bookkeeping carries the call's values, but has its own bounded lifetime.
 	finishCtx, cancel := detachedFinishContext(invocation.Context)
 	defer cancel()
 	if dispatchErr != nil {
 		// The outcome is already a refusal/failure owned by the inner
 		// dispatcher. Preserve its typed error for the JSON-RPC mapper; a
 		// close failure on this path must not hide the original answer.
-		_ = finishAttempt(finishCtx, contextOrBackground(invocation.Context), d.ledger, execID, dispatchErr)
+		_ = finishAttempt(finishCtx, d.ledger, execID, dispatchErr)
 		return "", dispatchErr
 	}
-	if err := finishAttempt(finishCtx, contextOrBackground(invocation.Context), d.ledger, execID, nil); err != nil {
+	if err := finishAttempt(finishCtx, d.ledger, execID, nil); err != nil {
 		return "", fmt.Errorf("assistant dispatch: record outcome: %w", err)
 	}
 	return result, nil
@@ -246,18 +245,10 @@ func startAttemptExecution(ctx context.Context, ledger AttemptLedger, grant cont
 	return execID, nil
 }
 
-// finishAttempt closes the attempt of a call the endpoint dispatched. finishCtx
-// is the DETACHED context the record is written under (see
-// detachedFinishContext), and callCtx is the call's own — the two are separate
-// because the verdict and the write have opposite requirements: the verdict
-// must see that the call was cancelled, and the write must not be.
-//
-// A call the caller stopped is recorded as stopped, through the same predicate
-// the in-process kernel uses (stoppedEnding): a calls.cancel whose executor
-// returns its cancelled context is not a tool that broke, and "failed" would
-// tell a person to look for a fault that does not exist (nocx-a62cl.4.2,
-// closing nocx-a62cl.4.1's finding 2).
-func finishAttempt(finishCtx, callCtx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
+// finishAttempt writes a frozen verdict under a detached context. Cancellation
+// is encoded in dispatchErr by CallTerminal; consulting the live call context
+// again here could contradict the verdict delivered to the caller.
+func finishAttempt(finishCtx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
 	end := content.FinishExecution{
 		EndedAt: time.Now().UnixMilli(),
 	}
@@ -266,7 +257,7 @@ func finishAttempt(finishCtx, callCtx context.Context, ledger AttemptLedger, exe
 		end.TerminationReason = content.TermCompleted
 		end.Status = content.EntrySuccess
 	default:
-		if ended, status, stopped := stoppedEnding(callCtx, dispatchErr); stopped {
+		if ended, status, stopped := stoppedEnding(context.Background(), dispatchErr); stopped {
 			end.TerminationReason, end.Status = ended, status
 		} else {
 			end.TerminationReason = terminationReasonOf(dispatchErr)

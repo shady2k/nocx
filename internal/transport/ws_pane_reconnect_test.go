@@ -127,6 +127,31 @@ func TestPaneReconnectPassesTheGateAndRunsTheOneOpenPath(t *testing.T) {
 	}
 }
 
+// TestPaneReconnectRefusesASecondPressWhileOneRuns: two presses in one
+// reconnect's window would open two shells, so the second is refused rather
+// than queued.
+func TestPaneReconnectRefusesASecondPressWhileOneRuns(t *testing.T) {
+	ws, stop := newPaneConnectionServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	wc := soleWSConn(t, ws)
+	bindTestPane(t, ws, wc, "pane-1")
+	publishTestConnection(ws, "pane-1", 1, "stalled", &PaneConnectionReconnect{EndsShells: 1})
+	ws.paneMu.Lock()
+	ws.paneRecords["pane-1"].busy = true
+	ws.paneMu.Unlock()
+
+	resp := vaultCall(t, conn, "pane.reconnect", map[string]any{
+		"paneId": "pane-1", "connectionEpoch": 1,
+	}, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("answer = %+v, want -32602", resp)
+	}
+	if resp.Error.Message != "Invalid params: a reconnect is already running for this pane" {
+		t.Fatalf("message = %q", resp.Error.Message)
+	}
+}
+
 // TestPaneReconnectRefusesABadEpochShape is the params gate: both fields are
 // required and the epoch names an observation, so zero is not one.
 func TestPaneReconnectRefusesABadEpochShape(t *testing.T) {

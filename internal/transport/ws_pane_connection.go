@@ -109,6 +109,11 @@ type paneRecord struct {
 	// The RPC refuses unless an offer stands, and it is the SAME value the
 	// renderer was told, so the button and the call cannot disagree.
 	offer bool
+	// busy is a reconnect being carried out for this pane RIGHT NOW, whoever
+	// asked. It is the transport's own guard, because a second press arrives
+	// on another request and would otherwise open a second shell while the
+	// first is still dialing.
+	busy bool
 }
 
 // bindPane records that this connection is the one a pane's notifications go

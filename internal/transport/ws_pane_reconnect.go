@@ -62,8 +62,13 @@ func WithPaneReconnections(p PaneReconnections) WSServerOption {
 	return func(s *WSServer) { s.paneReconnections = p }
 }
 
-// erPaneNotBound is a reconnect for a pane this connection did not open.
-var errPaneNotBound = errors.New("transport: this pane has no open behind it")
+// The reconnect's refusals, each a different thing for a surface to do.
+var (
+	// errPaneNotBound is a reconnect for a pane this connection did not open.
+	errPaneNotBound = errors.New("transport: this pane has no open behind it")
+	// errPaneReconnectBusy is a second reconnect while one is still dialing.
+	errPaneReconnectBusy = errors.New("transport: a reconnect is already running for this pane")
+)
 
 // paneReconnectParams is the request, declared once
 // (contracts/pane.reconnect.params.schema.json) and pinned by the contract
@@ -110,13 +115,46 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) error {
 // it with the responder as its acknowledgement; the automatic retry passes
 // none, because the new session reaches it on pane.connection.
 func (s *WSServer) reconnectPaneWithAck(ctx context.Context, paneID string, ack func(openResult)) (openResult, error) {
-	rec := s.paneRecordOf(paneID)
+	// THE PANE IS CLAIMED UNDER THE SAME LOCK THE PRESSES READ IT THROUGH, so
+	// two of them cannot both decide it is idle. The guard is here and not in
+	// the handler because the automatic retry takes this path too.
+	s.paneMu.Lock()
+	rec := s.paneRecords[paneID]
 	if rec == nil {
+		s.paneMu.Unlock()
 		return openResult{}, errPaneNotBound
 	}
+	if rec.busy {
+		s.paneMu.Unlock()
+		return openResult{}, errPaneReconnectBusy
+	}
+	rec.busy = true
+	s.paneMu.Unlock()
+	defer func() {
+		s.paneMu.Lock()
+		rec.busy = false
+		s.paneMu.Unlock()
+	}()
 	if s.opener == nil {
 		return openResult{}, errOpenShuttingDown
 	}
+	// THE PANE'S CURRENT GEOMETRY GOES TO THE NEW SHELL, not the size the pane
+	// was first opened at: a person who made the window bigger before the
+	// connection dropped should not get the old grid back. It is read off the
+	// session that is about to be closed, which is the only record of the
+	// size actually committed (the original params are what the caller
+	// REPORTED, and the registry is what decides).
+	for _, sess := range s.registry.List() {
+		if sess.PaneID() != paneID {
+			continue
+		}
+		if size := sess.EffectiveSize(); size.Valid() {
+			rec.params.Cols, rec.params.Rows = size.Cols, size.Rows
+			rec.params.XPixel, rec.params.YPixel = size.XPixel, size.YPixel
+		}
+		break
+	}
+
 	// THE OLD SESSION GOES FIRST, and its connection with it: the open that
 	// follows is told this is a reconnect, which closes the helper's side
 	// before anything dials.
@@ -200,6 +238,14 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	}
 	result, err := h.machine.reconnectPaneWithAck(ctx, params.PaneID, responded)
 	if err != nil {
+		switch {
+		case errors.Is(err, errPaneNotBound):
+			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown paneId"))
+			return
+		case errors.Is(err, errPaneReconnectBusy):
+			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: a reconnect is already running for this pane"))
+			return
+		}
 		// The reconnect failed before it could answer. The pane is not lost to
 		// the person: the failure is the next observation's to say, and the
 		// offer will stand again if it still should.

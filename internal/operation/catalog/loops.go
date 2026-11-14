@@ -48,10 +48,6 @@ var loopTable = []Loop{
 		Stop: d(10000, BasisRead, "the sweep stops with the app's workers"),
 	},
 	{
-		ID: "loop.ssh.keepalive", Owner: OwnerServer, Iteration: "internal.ssh.keepalive",
-		Stop: d(10000, BasisRead, "keepalive exits when its connection closes"),
-	},
-	{
 		ID: "loop.vault.autoSeal", Owner: OwnerServer, Iteration: "internal.vault.autoSeal",
 		Stop: d(10000, BasisRead, "auto-seal stops with the app"),
 	},

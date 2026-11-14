@@ -126,7 +126,6 @@ var (
 	OpInternalSessionEndHold          = methodHandle("internal.session.endHold")
 	OpInternalSessionRecorder         = methodHandle("internal.session.recorder")
 	OpInternalSshDial                 = methodHandle("internal.ssh.dial")
-	OpInternalSshKeepalive            = methodHandle("internal.ssh.keepalive")
 	OpInternalSshScrollbackPush       = methodHandle("internal.ssh.scrollbackPush")
 	OpInternalTypedLineOwnership      = methodHandle("internal.typedLine.ownership")
 	OpInternalUpdateApply             = methodHandle("internal.update.apply")

@@ -7952,59 +7952,6 @@
       "preempts": []
     },
     {
-      "id": "internal.ssh.keepalive",
-      "kind": "internal",
-      "owner": "server",
-      "phases": [
-        {
-          "name": "run",
-          "resources": [],
-          "dependencies": [
-            "ssh",
-            "network"
-          ]
-        }
-      ],
-      "turn": {
-        "millis": 1000,
-        "basis": "read",
-        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
-      },
-      "max": {
-        "millis": 30000,
-        "basis": "read",
-        "note": "read: one keepalive round trip; no explicit bound today"
-      },
-      "silence": {
-        "kind": "deadline",
-        "millis": 10000,
-        "basis": "read",
-        "note": "declared keepalive interval progress bound"
-      },
-      "answer": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "recovery": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "merge": "none",
-      "waiting": "Keeping the connection alive",
-      "row": "never",
-      "expired": "outcome-unknown",
-      "resources": [],
-      "dependencies": [
-        "ssh",
-        "network"
-      ],
-      "preempts": []
-    },
-    {
       "id": "internal.ssh.scrollbackPush",
       "kind": "internal",
       "owner": "binding",

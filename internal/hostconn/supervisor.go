@@ -297,6 +297,19 @@ type live struct {
 	// ask asks the guard for one probe now, for a caller that needs the far
 	// side's own ordering (the pool's release barrier).
 	ask chan struct{}
+	// answerMu guards the answer to the probe now outstanding (answer), which
+	// is the ONLY place a probe's result is delivered — and the reason the
+	// deadline can be judged without a race: the goroutine that receives the
+	// far side's return records it under this lock before anything else, and
+	// the guard reads it under the same lock. "Outstanding" is then a fact
+	// about the call, not about which goroutine the scheduler ran.
+	answerMu sync.Mutex
+	answer   probeAnswer
+	// answerNo is the number of the last probe begun; guarded by answerMu.
+	answerNo uint64
+	// ready is poked whenever an answer is recorded, so the guard's select
+	// wakes for it without polling.
+	ready chan struct{}
 	// waiters are the callers waiting for the next probe's outcome.
 	waiters map[chan error]struct{}
 	// suspended is set by the guard when the machine is going to sleep and
@@ -327,6 +340,58 @@ type live struct {
 // stopGuard ends this connection's prober work.
 func (l *live) stopGuard() {
 	l.stopOnce.Do(func() { close(l.stop) })
+}
+
+// probeAnswer is the answer to one probe, as the transport recorded it.
+//
+// It carries the probe's SEQUENCE NUMBER because a probe's goroutine can return
+// after its connection has given up on it: an answer to probe 3 must never be
+// read as the answer to probe 4, which is the same rule the supervisor's
+// generation applies to everything else a stale goroutine reports.
+type probeAnswer struct {
+	seq       uint64
+	returned  bool
+	taken     bool
+	roundTrip time.Duration
+	err       error
+}
+
+// beginProbe records that a probe is outstanding, and answers its number.
+func (l *live) beginProbe() uint64 {
+	l.answerMu.Lock()
+	defer l.answerMu.Unlock()
+	l.answerNo++
+	l.answer = probeAnswer{seq: l.answerNo}
+	return l.answerNo
+}
+
+// recordAnswer is the far side's call returning. It runs BEFORE anything else
+// the probe's goroutine does, under the lock the guard judges the deadline
+// under.
+func (l *live) recordAnswer(seq uint64, roundTrip time.Duration, err error) {
+	l.answerMu.Lock()
+	if l.answer.seq == seq {
+		l.answer.returned = true
+		l.answer.roundTrip = roundTrip
+		l.answer.err = err
+	}
+	l.answerMu.Unlock()
+	select {
+	case l.ready <- struct{}{}:
+	default:
+	}
+}
+
+// takeAnswer answers one probe's recorded answer, once. The second result is
+// false when that probe has not returned — which is what silence means.
+func (l *live) takeAnswer(seq uint64) (probeOutcome, bool) {
+	l.answerMu.Lock()
+	defer l.answerMu.Unlock()
+	if l.answer.seq != seq || !l.answer.returned || l.answer.taken {
+		return probeOutcome{}, false
+	}
+	l.answer.taken = true
+	return probeOutcome{roundTrip: l.answer.roundTrip, err: l.answer.err}, true
 }
 
 // interval answers the cadence this connection is asked at: the tightest
@@ -522,6 +587,7 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			controlWake: make(chan struct{}, 1),
 			ask:         make(chan struct{}, 1),
 			waiters:     make(map[chan error]struct{}),
+			ready:       make(chan struct{}, 1),
 			observers:   make(map[*Lease]func(Observation)),
 		}
 		if plan.ProbeInterval > 0 {

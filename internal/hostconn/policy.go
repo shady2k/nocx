@@ -40,20 +40,6 @@ const (
 	// within 30 s of a cut (Q3), and the parked probe is what notices the far
 	// side the moment it answers.
 	ProbeDeadline = 15 * time.Second
-	// AnswerDeliveryGrace is how long a probe that has passed its deadline is
-	// given for an answer it has ALREADY produced to reach the guard, before
-	// that probe is read as silence.
-	//
-	// IT IS REAL TIME ON PURPOSE. The probe's answer is produced by a
-	// goroutine, and the guard judges the deadline on the injected clock: a
-	// test that advances ten minutes in one pass — and a machine resuming from
-	// a sleep — can put the guard at the deadline before the answer's own
-	// goroutine has run, and an answer that was given is not silence. The
-	// window is small enough to be nothing on a real link (a probe that
-	// answers takes milliseconds) and large enough for a goroutine to be
-	// scheduled; it changes no deadline, only the order in which two facts
-	// already true are read.
-	AnswerDeliveryGrace = 25 * time.Millisecond
 	// LookInterval is how often, while stalled, a look-only dial is made: TCP
 	// and the SSH version exchange on a new connection, no key exchange and no
 	// sign-in. The answer is evidence about the HOST, never a verdict on the
@@ -79,16 +65,24 @@ const (
 // guardState is one connection's prober state: what is in flight, what is due,
 // and whether the connection is proving itself after a wake.
 type guardState struct {
-	// probeOut is non-nil while a probe is outstanding. There is at most one: a
+	// probeSent says a probe is outstanding, and probeSeq is its number in the
+	// connection's answer record (live.beginProbe). There is at most one: a
 	// parked SendRequest holds the mux's send lock, so a second probe would
 	// queue behind it and measure nothing.
-	probeOut chan probeOutcome
+	probeSent bool
+	probeSeq  uint64
 	// probedAt is when the outstanding probe was SENT, and silentSince is the
 	// moment silence began (the send of the probe that did not come back). Zero
 	// silentSince means the connection is not stalled.
 	probedAt    monoclock.Nanos
 	silentSince monoclock.Nanos
-	nextProbe   monoclock.Nanos
+	// silentSeen is the clock reading at which this guard FIRST judged the
+	// connection silent, and the close budget is spent from it — never from
+	// probedAt. A clock that jumps puts the guard at the deadline and at the
+	// end of a five-minute budget in the same pass, and no close may rest on
+	// one reading taken after a jump.
+	silentSeen monoclock.Nanos
+	nextProbe  monoclock.Nanos
 	// lookOut is non-nil while a look-only dial is in flight.
 	lookOut      chan error
 	nextLook     monoclock.Nanos
@@ -190,8 +184,10 @@ func (g *prober) run() {
 		case <-g.live.controlWake:
 			// The edges themselves are read by drainControl at the top of the
 			// loop, coalesced per kind.
-		case outcome := <-g.st.probeOut:
-			if g.probeResult(outcome) {
+		case <-g.live.ready:
+			// The far side's call returned and the answer was recorded under
+			// the connection's answer lock; the record is the delivery.
+			if g.consumeAnswer() {
 				return
 			}
 		case err := <-g.st.lookOut:
@@ -232,11 +228,9 @@ func (g *prober) applyControl(edge controlEdge) {
 // result that is in hand is never turned into silence by a deadline the loop
 // reached in the same instant.
 func (g *prober) drainReady() bool {
-	if g.st.probeOut != nil {
-		select {
-		case outcome := <-g.st.probeOut:
-			return g.probeResult(outcome)
-		default:
+	if g.st.probeSent {
+		if g.consumeAnswer() {
+			return true
 		}
 	}
 	if g.st.lookOut != nil {
@@ -259,7 +253,7 @@ func (g *prober) next(now monoclock.Nanos) monoclock.Nanos {
 		return now + span(SilenceCloseBudget)
 	}
 	switch {
-	case st.probeOut != nil && st.silentSince == 0:
+	case st.probeSent && st.silentSince == 0:
 		if st.wokeAt != 0 {
 			return st.wokeAt + span(WakeProbeDeadline)
 		}
@@ -309,23 +303,27 @@ func (g *prober) due(at monoclock.Nanos) bool {
 	}
 	now := g.clock.Now()
 	switch {
-	case st.probeOut == nil && st.silentSince == 0:
+	case !st.probeSent && st.silentSince == 0:
 		g.startProbe(at)
 		return false
 	case st.silentSince == 0:
-		// The probe passed its deadline — but only a probe that is still
-		// OUTSTANDING is silence, and the answer may already exist.
-		if outcome, answered := g.awaitAnswer(); answered {
+		// ONLY A PROBE THE FAR SIDE HAS NOT ANSWERED IS SILENCE (design §5.3).
+		// The answer is recorded by the goroutine that received it, under the
+		// lock this read takes, so "outstanding" is an ORDERING fact and never
+		// a race against a clock: if the call has returned, the answer is here
+		// and the deadline is not a verdict.
+		if outcome, answered := g.live.takeAnswer(st.probeSeq); answered {
 			return g.probeResult(outcome)
 		}
-		// Silence is now the state, and the probe stays parked: it is the
-		// evidence that will notice the answer.
+		// The call has not returned. Silence is now the state — and it is a
+		// REPORT: it closes nothing by itself, and the recorded answer clears
+		// it the moment it exists.
 		st.silentSince = st.probedAt
+		st.silentSeen = now
 		st.nextLook = st.probedAt + span(LookInterval)
 		// The moment the deadline expired, not the moment the guard got here:
-		// the grace above may have delayed the reading, and a state that
-		// claimed more silence than the deadline is a measurement of the
-		// scheduler.
+		// a state that claimed more silence than the deadline would be a
+		// measurement of the scheduler rather than of the host.
 		g.sup.silent(g.live, g.gen, time.Duration(at-st.probedAt))
 		g.sup.observe(g.live, Observation{Answered: false})
 		return false
@@ -349,37 +347,35 @@ func (g *prober) due(at monoclock.Nanos) bool {
 	if st.lookAnswered && now >= st.lookAt+span(LookGrace) {
 		return g.sup.endForSilence(g.live, g.gen, "the host answers new connections and this one has been silent past the grace")
 	}
-	if now >= st.silentSince+span(SilenceCloseBudget) {
+	// THE BUDGET IS SPENT FROM THE JUDGEMENT, NOT FROM THE SEND (nocx-oalo1.4.3).
+	// A clock that jumps puts the guard at the deadline and at the end of this
+	// budget in the same pass, and a close taken there would rest on one
+	// reading: the answer may be recorded a microsecond later. Spending the
+	// budget from the moment this guard FIRST judged the connection silent
+	// makes the close need a later pass — one in which a recorded answer is
+	// read and clears the stall, which is what a healthy link always has.
+	if st.silentSeen != 0 && now >= st.silentSeen+span(SilenceCloseBudget) {
 		return g.sup.endForSilence(g.live, g.gen, "silent past the close budget")
 	}
 	return false
 }
 
-// awaitAnswer gives an outstanding probe one real-time moment to deliver an
-// answer it has already produced, and reports whether one arrived.
+// consumeAnswer applies the recorded answer to the probe the guard is waiting
+// for, if it has arrived, and reports whether the guard should end.
 //
-// THE DEADLINE IS NOT A VERDICT (design §5.3, and the defect measured on a
-// thirty-second cadence): silence is a property of a probe that is SENT AND
-// UNANSWERED, never of a clock that passed the deadline first. The answer and
-// the deadline are two facts from two clocks — the injected one moves the
-// deadline, the answer is produced by a goroutine — so a guard that wakes to
-// find both true must read the answer. A guard that judged on the clock alone
-// reported a healthy link stalled and, on a connection with no plain shell,
-// closed it for silence: the flap this window removes.
-func (g *prober) awaitAnswer() (probeOutcome, bool) {
-	if g.st.probeOut == nil {
-		return probeOutcome{}, false
+// It is the ONE way an answer becomes an outcome. The goroutine that receives
+// the far side's call records it on the connection (live.recordAnswer) and
+// pokes live.ready; nothing is delivered through a channel of its own, so there
+// is no second copy of an answer that a deadline could overtake.
+func (g *prober) consumeAnswer() bool {
+	if !g.st.probeSent {
+		return false
 	}
-	timer := time.NewTimer(AnswerDeliveryGrace)
-	defer timer.Stop()
-	select {
-	case outcome := <-g.st.probeOut:
-		return outcome, true
-	case <-timer.C:
-		return probeOutcome{}, false
-	case <-g.live.stop:
-		return probeOutcome{}, false
+	outcome, answered := g.live.takeAnswer(g.st.probeSeq)
+	if !answered {
+		return false
 	}
+	return g.probeResult(outcome)
 }
 
 // probeOutcome is one probe's answer: how long the far side took, measured by
@@ -391,8 +387,9 @@ type probeOutcome struct {
 
 // startProbe asks the connection to answer, as of `at`.
 func (g *prober) startProbe(at monoclock.Nanos) {
-	out := make(chan probeOutcome, 1)
-	g.st.probeOut = out
+	seq := g.live.beginProbe()
+	g.st.probeSeq = seq
+	g.st.probeSent = true
 	g.st.probedAt = at
 	g.st.nextProbe = at + span(g.live.interval())
 	go func() {
@@ -401,7 +398,10 @@ func (g *prober) startProbe(at monoclock.Nanos) {
 		// own state (design §5.3: "the parked probe"), and it is why the
 		// deadline is the supervisor's and not the call's.
 		roundTrip, err := g.prober.Probe(context.Background())
-		out <- probeOutcome{roundTrip: roundTrip, err: err}
+		// THE ANSWER IS RECORDED BEFORE ANYTHING ELSE, under the lock the
+		// deadline is read under: from here on, "the far side has answered" is
+		// an ordering fact and no clock can call it silence.
+		g.live.recordAnswer(seq, roundTrip, err)
 	}()
 }
 
@@ -435,7 +435,7 @@ func (g *prober) woke(at monoclock.Nanos) {
 	g.st.suspendedAt = 0
 	g.live.suspended.Store(false)
 	g.st.wokeAt = at
-	if g.st.probeOut == nil {
+	if !g.st.probeSent {
 		// The probe a wake sends is due at the signal: the loop's next pass
 		// sees nextProbe == at and starts it there.
 		g.st.nextProbe = at
@@ -448,7 +448,7 @@ func (g *prober) woke(at monoclock.Nanos) {
 // probeResult applies one probe's answer or failure; it reports whether the
 // guard should end.
 func (g *prober) probeResult(outcome probeOutcome) bool {
-	g.st.probeOut = nil
+	g.st.probeSent = false
 	// THE BARRIER'S WAITERS ARE PART OF THIS ANSWER (review finding 1): the
 	// pool's release barrier asked this connection to produce one, and the
 	// same outcome is what it needs — no second keepalive, no second closer.
@@ -477,7 +477,7 @@ func (g *prober) probeResult(outcome probeOutcome) bool {
 		g.st.suspendedAt = 0
 		g.live.suspended.Store(false)
 	}
-	g.st.silentSince, g.st.lookAnswered, g.st.nudged = 0, false, false
+	g.st.silentSince, g.st.silentSeen, g.st.lookAnswered, g.st.nudged = 0, 0, false, false
 	g.st.lookOut, g.st.lookAt, g.st.lookSent, g.st.wokeAt = nil, 0, 0, 0
 	return false
 }

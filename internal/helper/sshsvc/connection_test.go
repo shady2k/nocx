@@ -1149,14 +1149,13 @@ func TestAProfilesIntervalReachesTheProberWhicheverHolderDialsFirst(t *testing.T
 
 	proxy.SilenceEstablished()
 	start := clock.Now()
-	// Ten-millisecond steps: the guard reads a deadline with a small real-time
-	// grace for an answer already produced (hostconn.AnswerDeliveryGrace), so a
-	// step larger than that grace would let the clock run on while the guard is
-	// deciding and measure the step, not the policy.
+	// Small steps, and a bound that allows ONE of them: the guard acts at the
+	// moment a deadline is due, and a step that straddles it observes the
+	// transition at the step's end.
 	advanceUntil(t, clock, 10*time.Millisecond, "the connection to read stalled on the profile's cadence", func() bool {
 		return lastState(holder.States()).Kind == hostconn.Stalled
 	})
-	if took := time.Duration(clock.Now() - start); took > 2*time.Second+hostconn.AnswerDeliveryGrace {
+	if took := time.Duration(clock.Now() - start); took > 2*time.Second+10*time.Millisecond {
 		t.Fatalf("silence was reported after %v of clock, want within 2s: a 1s cadence and a 1s deadline", took)
 	}
 	if got := lastState(holder.States()).Silent; got != time.Second {

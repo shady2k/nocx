@@ -938,3 +938,155 @@ func TestASleepIsNotSilenceAndTheWakeProvesTheConnection(t *testing.T) {
 		t.Fatalf("stalled reports %v of silence, want %v", got, hostconn.WakeProbeDeadline)
 	}
 }
+
+// ─── the round trip a pane reads (nocx-oalo1.4.4) ──────────────────────────
+
+// TestAPaneIsToldSlowAndThenToldFine is the reachability axis' other half: a
+// host that answers late is a host that ANSWERS, and the pane is told how long
+// it took — and told it is well again when the link improves.
+//
+// The two findings are the same probe's two outcomes, and the grade between
+// them is the coordinator's (session.liveness): this test asserts what the
+// helper puts on the wire for it, which is the measurement and nothing else.
+// A latency fault is the only way to produce a round trip a person would call
+// slow on a loopback server, so the proxy states it.
+func TestAPaneIsToldSlowAndThenToldFine(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	stand := newStand(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	})
+	destination := destinationAt(t, proxy.Addr())
+
+	// A cadence a test can wait for, stated through the profile's own knob:
+	// the shipped default is 15 s and this test is about the finding, not the
+	// cadence.
+	reports := make(chan ssh.Reachability, 16)
+	ctx := host.WithConnection(context.Background(), stand.helper)
+	shell, err := stand.service.OpenShell(ctx, sshsvc.ShellSpec{
+		Destination:   destination,
+		Cols:          80,
+		Rows:          24,
+		ProbeInterval: 100 * time.Millisecond,
+		OnLiveness: func(r ssh.Reachability) {
+			select {
+			case reports <- r:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("open a shell: %v", err)
+	}
+	t.Cleanup(func() { _ = shell.Close() })
+
+	// 400 ms each way: about 800 ms of round trip, past the 500 ms the
+	// coordinator grades as slow and well inside the probe's own deadline.
+	proxy.Slow(400 * time.Millisecond)
+	waittest.WaitFor(t, "the pane to be told the host answers late", func() bool {
+		select {
+		case r := <-reports:
+			if !r.Responsive {
+				t.Fatalf("a late-but-answering host was reported unresponsive: %+v", r)
+			}
+			return r.RoundTrip >= 500*time.Millisecond
+		default:
+			return false
+		}
+	})
+
+	// The link improves, and the next answered probe says so — a finding that
+	// only ever said "slow" would leave the mark on a healthy connection.
+	proxy.Pass()
+	waittest.WaitFor(t, "the pane to be told the host answers again", func() bool {
+		select {
+		case r := <-reports:
+			if !r.Responsive {
+				t.Fatalf("a recovered host was reported unresponsive: %+v", r)
+			}
+			return r.RoundTrip > 0 && r.RoundTrip < 500*time.Millisecond
+		default:
+			return false
+		}
+	})
+}
+
+// ─── a connection's end, as the session layer reads it (nocx-oalo1.4.3) ────
+
+// TestACutConnectionEndsItsShellAsALossAndNotAsAnExit is the fact the pane's
+// tab hangs on. A shell channel whose stream stops because the CONNECTION
+// stopped is a loss: the far command may be running still, and a status of -1
+// is not something the host said. The coordinator's ExitOutcome turns a named
+// cause into `interrupted`, which is what keeps the tab, its scrollback and
+// the offer to open a new shell; the same end with no cause reads as an
+// authoritative `exited -1`, and the pane closes the tab as though the shell
+// had finished.
+//
+// THE VERDICT USED TO BELONG TO A KEEPALIVE PROBER OF THIS SHELL, and the
+// prober's verdict now belongs to the connection supervisor (design §5.3), so
+// the cause has to be named by the party that holds the connection — this
+// layer, reading the pooled reference the shell rides.
+func TestACutConnectionEndsItsShellAsALossAndNotAsAnExit(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	stand := newStand(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	})
+	destination := destinationAt(t, proxy.Addr())
+
+	shell := stand.openShell(t, destination)
+	proxy.Cut()
+
+	select {
+	case <-shell.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cut connection did not end its shell")
+	}
+	err, recorded := shell.WaitErr()
+	if !recorded || err == nil {
+		t.Fatalf("a shell whose connection was cut recorded (%v, %v), want the transport's error", err, recorded)
+	}
+	var causer interface{ ExitCause() string }
+	if !errors.As(err, &causer) {
+		t.Fatalf("a shell whose connection was cut carries no cause (%v): the coordinator cannot tell this loss from an exit", err)
+	}
+	if got, want := causer.ExitCause(), string(proto.ExitCauseLinkLost); got != want {
+		t.Fatalf("exit cause = %q, want %q", got, want)
+	}
+}
+
+// TestAPaneThatClosesItsOwnShellReportsNoLoss is the paired fact: when THIS
+// side ends the channel — a pane closing, a stop — nothing was lost, and a
+// cause naming a lost link would mark a tab the person is closing. The
+// discriminator cannot be "the transport has ended", because the pool marks a
+// connection dead whoever closed it, and the shell here is the connection's
+// last reference: closing it closes the connection too.
+func TestAPaneThatClosesItsOwnShellReportsNoLoss(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	stand := newStand(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	})
+	destination := destinationAt(t, proxy.Addr())
+
+	shell := stand.openShell(t, destination)
+	if err := shell.Close(); err != nil {
+		t.Fatalf("close the pane's shell: %v", err)
+	}
+	select {
+	case <-shell.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("closing the shell did not end its channel")
+	}
+	err, recorded := shell.WaitErr()
+	if !recorded {
+		t.Fatal("the shell's end was never recorded")
+	}
+	var causer interface{ ExitCause() string }
+	if errors.As(err, &causer) {
+		t.Fatalf("a shell this side closed carries the cause %q; nothing was lost", causer.ExitCause())
+	}
+}

@@ -1540,15 +1540,19 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 	// termination keeps the existing -1 status semantics.
 	var helperStatus interface{ ExitCode() int }
 	if errors.As(waitErr, &helperStatus) {
-		// A keepalive giving up is connection loss, not an authoritative
-		// exit (nocx-y6fh7 item 6, round 3): the helper names the cause on
-		// its ExitStatus DTO, read here through the SAME kind of optional
-		// interface probe as ExitCode itself, so this mapping stays free of
-		// any dependency on the helper's own wire types. Anything else —
-		// including the far side hanging up with no status at all, which
-		// carries no cause — is unchanged: an authoritative exit.
+		// A CONNECTION THAT ENDED UNDER THE SHELL is connection loss, not an
+		// authoritative exit: the helper names the cause on its ExitStatus
+		// DTO, read here through the SAME kind of optional interface probe as
+		// ExitCode itself, so this mapping stays free of any dependency on the
+		// helper's own wire types. The cause used to be a shell's own
+		// keepalive prober giving up; since stage 2 it is the connection's
+		// supervisor (design §5.3, nocx-oalo1.4.3), and the fact named is the
+		// same one either way — the link is gone and the far command may still
+		// be running. Anything else — including the far side hanging up with
+		// no status at all, which carries no cause — is unchanged: an
+		// authoritative exit.
 		var causer interface{ ExitCause() string }
-		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseKeepaliveLost) {
+		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseLinkLost) {
 			return ExitInterrupted, helperStatus.ExitCode()
 		}
 		return ExitExited, helperStatus.ExitCode()

@@ -436,3 +436,30 @@ func TestExecuteRun_FailedOutcomeSurfaces(t *testing.T) {
 		t.Fatalf("error = %v, want the renderer's failure sentence", err)
 	}
 }
+
+// TestKernel_ACallCancelledOutsideTheTurnIsRecordedAsInterrupted is the
+// InRenderer half of nocx-a62cl.4.1's record. session.run's call is stopped by
+// its run lease withdrawing the request, and the ladder must name the process
+// group BEFORE the withdrawal (nocx-uvac6.11) — so the turn's own context is
+// still live when the attempt closes and the cancellation reaches the kernel as
+// the call's error. The attempt records that the call was interrupted, never
+// that the tool failed.
+func TestKernel_ACallCancelledOutsideTheTurnIsRecordedAsInterrupted(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{err: context.Canceled}
+	led := &fakeLedger{}
+	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
+
+	// The turn's context is ALIVE: the ending came through the call's own
+	// request, which is the order the lease guarantees.
+	if _, err := wrappedEndpointContext(mw, context.Background(), "session.run", "call-stopped", `{"command":"sleep 60"}`); err == nil {
+		t.Fatal("a cancelled call was answered as a result")
+	}
+	calls := strings.Join(led.calls(), ",")
+	if !strings.Contains(calls, "finish:interrupted") {
+		t.Fatalf("ledger calls = %q, want the attempt closed as interrupted", calls)
+	}
+	if strings.Contains(calls, "finish:failure") {
+		t.Fatalf("ledger calls = %q, want no failure recorded for a stopped call", calls)
+	}
+}

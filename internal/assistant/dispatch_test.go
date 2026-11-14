@@ -288,13 +288,9 @@ func (d succeedingToolDispatcher) Catalogue(content.Grant) []agenttools.Tool {
 	return nil
 }
 
-// A completed call must survive a caller who has already stopped waiting for
-// it (nocx-uhii1): a person can interrupt the session holding a call, which
-// cancels the invocation's context, after the inner dispatcher already
-// produced its answer. Recording that outcome is bookkeeping, not the
-// caller's business, and must not be able to turn the completed call into a
-// reported failure.
-func TestAttemptRecordingDispatcherSuccessSurvivesAnAbandonedInvocationContext(t *testing.T) {
+// An already-cancelled call has not won completion. Its stopped outcome is
+// still recorded under a detached context, with a separate bookkeeping bound.
+func TestAttemptRecordingDispatcherCancellationBeforeCompletionWithholdsSuccess(t *testing.T) {
 	reg, err := agenttools.Assemble(toolsDirFS(t))
 	if err != nil {
 		t.Fatalf("assemble tools: %v", err)
@@ -315,16 +311,13 @@ func TestAttemptRecordingDispatcherSuccessSurvivesAnAbandonedInvocationContext(t
 	invocation.Context = ctx
 
 	result, err := dispatcher.Dispatch(invocation)
-	if err != nil {
-		t.Fatalf("dispatch error = %v, want the completed call's own result, not an error manufactured by the caller having stopped waiting for it", err)
-	}
-	if result != "the answer" {
-		t.Fatalf("result = %q, want the completed call's own result", result)
+	if !errors.Is(err, context.Canceled) || result != "" {
+		t.Fatalf("cancelled call delivered result=%q error=%v", result, err)
 	}
 
 	calls := ledger.calls()
-	if len(calls) == 0 || calls[len(calls)-1] != "finish:success" {
-		t.Fatalf("ledger calls = %v, want the outcome recorded as a success", calls)
+	if len(calls) == 0 || calls[len(calls)-1] != "finish:interrupted" {
+		t.Fatalf("ledger calls = %v, want the cancelled outcome recorded", calls)
 	}
 
 	records := ledger.finishCallRecords()
@@ -339,9 +332,9 @@ func TestAttemptRecordingDispatcherSuccessSurvivesAnAbandonedInvocationContext(t
 	}
 }
 
-// The failure twin of the test above: the inner dispatcher's own failure must
-// still be recorded (not silently dropped) when the invocation context is
-// already cancelled, and the original error must reach the caller unchanged.
+// A failure returned after cancellation loses to the same terminal stop as a
+// success. Its interrupted outcome must still be written under the detached,
+// bounded bookkeeping context.
 func TestAttemptRecordingDispatcherFailureRecordedWithAnAbandonedInvocationContext(t *testing.T) {
 	reg, err := agenttools.Assemble(toolsDirFS(t))
 	if err != nil {
@@ -364,13 +357,13 @@ func TestAttemptRecordingDispatcherFailureRecordedWithAnAbandonedInvocationConte
 	invocation.Context = ctx
 
 	_, err = dispatcher.Dispatch(invocation)
-	if !errors.Is(err, innerErr) {
-		t.Fatalf("dispatch error = %v, want the inner dispatcher's own error preserved", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatch error = %v, want cancellation that preceded completion", err)
 	}
 
 	calls := ledger.calls()
-	if len(calls) == 0 || calls[len(calls)-1] != "finish:failure" {
-		t.Fatalf("ledger calls = %v, want the failure outcome recorded despite the abandoned context", calls)
+	if len(calls) == 0 || calls[len(calls)-1] != "finish:interrupted" {
+		t.Fatalf("ledger calls = %v, want the ending recorded despite the abandoned context", calls)
 	}
 	records := ledger.finishCallRecords()
 	if len(records) != 1 || records[0].errAtCall != nil {

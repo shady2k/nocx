@@ -310,6 +310,8 @@ type recordingWriter struct {
 	written chan struct{}
 }
 
+func (w *recordingWriter) Close() error { return nil }
+
 func (w *recordingWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

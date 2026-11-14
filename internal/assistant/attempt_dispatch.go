@@ -51,6 +51,9 @@ func NewAttemptRecordingDispatcher(registry agenttools.Registry, inner ToolDispa
 }
 
 func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string, error) {
+	if invocation.Terminal == nil {
+		invocation.Terminal = &CallTerminal{}
+	}
 	decl := agenttools.Tool{Declaration: agenttools.Declaration{Name: invocation.Method}}
 	if found, ok := d.registry.Lookup(invocation.Method); ok {
 		decl = found
@@ -62,16 +65,12 @@ func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string
 	}
 
 	result, dispatchErr := d.inner.Dispatch(invocation)
+	dispatchErr = invocation.Terminal.Complete(contextOrBackground(invocation.Context), dispatchErr)
 
-	// By this point the inner dispatcher has already produced its terminal
-	// outcome — an answer, or its own typed failure. Recording that outcome
-	// must not depend on the caller still waiting for it (nocx-uhii1): a
-	// person can stop waiting on a call and interrupt the session that is
-	// holding it, which cancels the invocation's context, and that can land
-	// here well after Dispatch returned. finishCtx carries the invocation's
-	// values (so anything keyed off them still threads through) but not its
-	// cancellation, and is bounded by its own short timeout so a wedged
-	// ledger cannot hang the dispatcher in the caller's place.
+	// Completion and cancellation have now made one terminal decision. Neither
+	// recording nor delivery may inspect the caller's context again: a stop
+	// during bookkeeping must not contradict the verdict being written.
+	// Bookkeeping carries the call's values, but has its own bounded lifetime.
 	finishCtx, cancel := detachedFinishContext(invocation.Context)
 	defer cancel()
 	if dispatchErr != nil {
@@ -246,18 +245,26 @@ func startAttemptExecution(ctx context.Context, ledger AttemptLedger, grant cont
 	return execID, nil
 }
 
-func finishAttempt(ctx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
+// finishAttempt writes a frozen verdict under a detached context. Cancellation
+// is encoded in dispatchErr by CallTerminal; consulting the live call context
+// again here could contradict the verdict delivered to the caller.
+func finishAttempt(finishCtx context.Context, ledger AttemptLedger, execID int64, dispatchErr error) error {
 	end := content.FinishExecution{
 		EndedAt: time.Now().UnixMilli(),
 	}
-	if dispatchErr == nil {
+	switch {
+	case dispatchErr == nil:
 		end.TerminationReason = content.TermCompleted
 		end.Status = content.EntrySuccess
-	} else {
-		end.TerminationReason = terminationReasonOf(dispatchErr)
-		end.Status = content.EntryFailure
+	default:
+		if ended, status, stopped := stoppedEnding(context.Background(), dispatchErr); stopped {
+			end.TerminationReason, end.Status = ended, status
+		} else {
+			end.TerminationReason = terminationReasonOf(dispatchErr)
+			end.Status = content.EntryFailure
+		}
 	}
-	return ledger.FinishExecution(ctx, execID, end)
+	return ledger.FinishExecution(finishCtx, execID, end)
 }
 
 var (

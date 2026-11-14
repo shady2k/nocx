@@ -52,7 +52,7 @@ type stdioDriver struct {
 
 func startStdio(t *testing.T, socket string) *stdioDriver {
 	t.Helper()
-	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+	return startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
 		return Serve(context.Background(), input, output, socket, discardLogger)
 	})
 }
@@ -66,12 +66,12 @@ func startStdioDialing(t *testing.T, socket string, dialer Dialer) *stdioDriver 
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return startStdioServing(t, func(input io.Reader, output io.Writer) error {
+	return startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
 		return server.Serve(context.Background(), input, output)
 	})
 }
 
-func startStdioServing(t *testing.T, serve func(io.Reader, io.Writer) error) *stdioDriver {
+func startStdioServing(t *testing.T, serve func(io.Reader, io.WriteCloser) error) *stdioDriver {
 	t.Helper()
 	input, inputWriter := io.Pipe()
 	output, outputWriter := io.Pipe()
@@ -292,6 +292,77 @@ func (e *scriptedEndpoint) serve(conn net.Conn) {
 			defer answers.Done()
 			e.answer(conn, request)
 		}()
+	}
+}
+
+// THE CANCEL HAS TO NAME THE ENDPOINT'S REQUEST, NOT THE CLIENT'S. MCP's
+// notifications/cancelled carries the client's id, and the endpoint numbers the
+// requests it is given itself; a cancel that forwarded the client's id would
+// name a request the endpoint never saw, and the call would go on running while
+// every test that only watched the adapter stayed green. So the assertion is on
+// the id the endpoint was actually holding (nocx-98qho).
+func TestTheCancelNotificationNamesTheEndpointRequest(t *testing.T) {
+	held := make(chan json.RawMessage, 1)
+	cancels := make(chan rpcEnvelope, 1)
+	stop := make(chan struct{})
+	// The held call is released whatever the assertions below decide, because
+	// the scripted endpoint's cleanup waits for its callbacks and a failed
+	// test must not hang there instead of reporting.
+	defer close(stop)
+	endpoint := startScriptedEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
+		if answerInstructions(t, conn, request) {
+			return
+		}
+		switch request.Method {
+		case "tools.catalogue":
+			writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(twoTools)})
+		case "alpha.second":
+			writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"second":true}`)})
+		case "alpha.first":
+			held <- request.ID
+			<-stop
+		case "calls.cancel":
+			cancels <- request
+		}
+	})
+	driver := startStdio(t, endpoint.socket())
+	initialization(driver)
+
+	// A CALL BEFORE THE HELD ONE, so the two id spaces cannot agree by
+	// accident: the endpoint's id for the held call is its own counter, and
+	// the client's id for it is 3.
+	driver.send(2, "tools/call", `{"name":"alpha.second"}`)
+	driver.nextID(2)
+
+	driver.send(3, "tools/call", `{"name":"alpha.first"}`)
+	var heldID json.RawMessage
+	select {
+	case heldID = <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held call never reached the endpoint")
+	}
+	driver.notify("notifications/cancelled", `{"requestId":3,"reason":"no longer needed"}`)
+
+	var cancel rpcEnvelope
+	select {
+	case cancel = <-cancels:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancellation never reached the endpoint")
+	}
+	if cancel.Method != "calls.cancel" {
+		t.Fatalf("the endpoint was told %q, want the cancel message", cancel.Method)
+	}
+	var params struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if err := json.Unmarshal(cancel.Params, &params); err != nil {
+		t.Fatalf("decode cancel params %s: %v", cancel.Params, err)
+	}
+	if string(heldID) == "3" {
+		t.Fatalf("the endpoint's id for the held call is 3, the client's id too: this test cannot tell them apart")
+	}
+	if string(params.RequestID) != string(heldID) {
+		t.Fatalf("the cancel named request %s, want the endpoint's own id %s (the client's was 3)", params.RequestID, heldID)
 	}
 }
 

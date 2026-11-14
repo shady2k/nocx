@@ -1763,6 +1763,18 @@ func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason co
 	})
 }
 
+// closeFailedAttempt closes the attempt of a call that did not succeed, and it
+// separates ONE fact from failure: the call was STOPPED (nocx-a62cl.4.1). The
+// tool did not break — the person stopped the answer, or took back the answer
+// the call ran under — and "failed" would say it did. What a stop is, and the
+// reason it records, is stoppedEnding's answer and nobody else's.
+func (m *effectKernel) closeFailedAttempt(ctx context.Context, execID int64, reason content.TerminationReason, cause error) error {
+	if ended, status, stopped := stoppedEnding(ctx, cause); stopped {
+		return m.closeAttempt(ctx, execID, ended, status)
+	}
+	return m.closeAttempt(ctx, execID, reason, content.EntryFailure)
+}
+
 // terminationReasonOf maps a tool call's terminal error to the reason the
 // attempt records. A run the LEASE terminalized (ADR-0020 decision 2) is
 // the one case where the generic "failed" is the wrong fact: the ledger
@@ -1957,7 +1969,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, dispatchErr
 		}
 		if state.execID != 0 {
-			_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
+			_ = k.closeFailedAttempt(ctx, state.execID, content.TermFailed, dispatchErr)
 		}
 		if errors.Is(dispatchErr, ErrInvalidResult) && outcome.prepared != nil {
 			decl := outcome.prepared.decl
@@ -2097,7 +2109,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			}
 			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
 		}
-		_ = k.closeAttempt(ctx, state.execID, terminationReasonOf(runErr), content.EntryFailure)
+		_ = k.closeFailedAttempt(ctx, state.execID, terminationReasonOf(runErr), runErr)
 		// A CALL THAT CHANGED NOTHING IS A RESULT, NOT THE END OF THE TURN
 		// (nocx-y0h3h). Two arms above already draw this line for the two
 		// cases session.run happens to produce; the line itself is not about

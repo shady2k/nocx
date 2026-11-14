@@ -132,3 +132,44 @@ either: both are tool-endpoint methods, whose wire documents live under
 [`tools/`](tools/) when the method is a tool. The MCP `initialize` result is a
 client-protocol shape, not a renderer one, so it is declared by the MCP
 specification rather than in this directory.
+
+## `calls.cancel` — stop ONE call on a connection its siblings share
+
+A connection is the endpoint's admission interval and one stdio session holds
+one for its whole life (ADR-0058, `nocx-tlaft`), so closing it to stop a call
+would take every sibling with it. A caller that stops waiting therefore says so
+on the connection instead:
+
+```json
+{ "jsonrpc": "2.0", "method": "calls.cancel", "params": { "requestId": 7 } }
+```
+
+`requestId` is **the caller's own id for the request it sent**, spelled as it
+sent it. The endpoint gives each request a context of its own, derived from the
+connection's, and this message cancels exactly that one; the siblings, the
+connection and the session's admission all go on. The cancelled call's executor
+sees its context end, so a long poll releases what it held instead of waiting
+for its own bound, and a mutation stops instead of producing its effects
+(`nocx-98qho`).
+
+**It is a notification, not a request, and it is never answered.** The caller
+has already stopped waiting, so there is no answer to read; and an error written
+without an id on this socket means the CONNECTION was refused to the adapter, so
+answering a malformed cancel would end the session rather than one call. A
+cancel that names a request which already finished, or one this connection never
+carried, is read and dropped — the race between an answer and a cancellation is
+ordinary, and neither party is wrong.
+
+**The endpoint still answers the cancelled request** with the `call abandoned`
+refusal, because every request it read gets an answer. MCP carries no response
+for a cancelled request, so the adapter drops it; the answer is what a caller
+that speaks this socket directly reads instead of a silent end.
+
+`internal/mcpstdio` translates MCP's `notifications/cancelled` into this
+message. MCP carries the CLIENT's request id and the endpoint numbers its own,
+so the adapter binds its id to the endpoint's when the frame is about to leave
+and names that one; the translation is asserted by
+`internal/mcpstdio/session_test.go`'s `TestTheCancelNotificationNamesTheEndpointRequest`.
+
+There is no JSON Schema file for this method for `tools.catalogue`'s reason: it
+is not a tool, and its shape is three fields the paragraph above states.

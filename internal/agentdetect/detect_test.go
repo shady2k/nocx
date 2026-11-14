@@ -349,9 +349,11 @@ type gatedShell struct {
 	entered chan struct{}
 	release chan struct{}
 	calls   atomic.Int32
+	value   any
 }
 
-func (s *gatedShell) Environment(context.Context) ([]string, string, error) {
+func (s *gatedShell) Environment(ctx context.Context) ([]string, string, error) {
+	s.value = ctx.Value(detectionContextKey{})
 	if s.calls.Add(1) == 1 {
 		close(s.entered)
 		<-s.release
@@ -406,3 +408,88 @@ func TestConcurrentRefreshJoinsAndWaitIsCancellable(t *testing.T) {
 		t.Fatalf("concurrent refresh ran %d login shells", got)
 	}
 }
+
+func TestExitedProbeStopsPipeHoldingDescendant(t *testing.T) {
+	for _, capture := range []bool{true, false} {
+		t.Run(fmt.Sprint("capture=", capture), func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "pid")
+			blocker := filepath.Join(dir, "blocker")
+			if err := syscall.Mkfifo(blocker, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := filepath.Join(dir, "probe")
+			writeExecutable(t, command, "#!/bin/sh\n(trap '' INT TERM; read line < \"$2\") &\nprintf '%s' \"$!\" > \"$1\"\nexit 0\n")
+			d := New(fakeShell{})
+			d.probeTimeout = 100 * time.Millisecond
+			done := make(chan struct{})
+			go func() {
+				_, _, _ = d.run(context.Background(), command, []string{pidFile, blocker}, nil, "", capture)
+				close(done)
+			}()
+			var pid int
+			waittest.WaitFor(t, "background child recorded", func() bool {
+				data, err := os.ReadFile(pidFile) //nolint:gosec // private fixture
+				if err != nil {
+					return false
+				}
+				pid, err = strconv.Atoi(string(data))
+				return err == nil
+			})
+			defer func() {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				<-done
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("probe hung after wrapper exited")
+			}
+			waittest.WaitFor(t, "background child stopped", func() bool {
+				data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+				if err == nil && strings.Contains(string(data), ") Z ") {
+					return true
+				}
+				return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+			})
+		})
+	}
+}
+
+func TestLeaderCancellationDoesNotCancelSharedPass(t *testing.T) {
+	shell := &gatedShell{entered: make(chan struct{}), release: make(chan struct{})}
+	d := New(shell)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), detectionContextKey{}, "kept"))
+	defer cancel()
+	leader := make(chan error, 1)
+	go func() { _, err := d.Detect(ctx, true); leader <- err }()
+	<-shell.entered
+	waiter := &joiningContext{Context: context.Background(), observed: make(chan struct{})}
+	joined := make(chan error, 1)
+	go func() {
+		rows, err := d.Detect(waiter, true)
+		if err == nil && len(rows) != len(agentrecord.SupportedAgents()) {
+			err = fmt.Errorf("rows = %d", len(rows))
+		}
+		joined <- err
+	}()
+	<-waiter.observed
+	cancel()
+	select {
+	case err := <-leader:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("leader = %v, want cancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("leader did not return its cancellation")
+	}
+	close(shell.release)
+	if err := <-joined; err != nil {
+		t.Fatalf("live joiner failed: %v", err)
+	}
+	if shell.value != "kept" {
+		t.Fatalf("pass context lost value: %v", shell.value)
+	}
+}
+
+type detectionContextKey struct{}

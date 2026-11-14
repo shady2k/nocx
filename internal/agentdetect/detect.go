@@ -131,33 +131,37 @@ func (d *Detector) Detect(ctx context.Context, refresh bool) ([]agentrecord.Dete
 		return nil, err
 	}
 	d.mu.Lock()
-	if pass := d.flight; pass != nil {
-		d.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-pass.done:
-			return append([]agentrecord.Detection(nil), pass.rows...), pass.err
+	pass := d.flight
+	if pass == nil {
+		if d.cached != nil && !refresh {
+			rows := append([]agentrecord.Detection(nil), d.cached...)
+			d.mu.Unlock()
+			return rows, nil
 		}
+		pass = &detectionPass{done: make(chan struct{})}
+		d.flight = pass
+		go d.completePass(context.WithoutCancel(ctx), pass)
 	}
-	if d.cached != nil && !refresh {
-		rows := append([]agentrecord.Detection(nil), d.cached...)
-		d.mu.Unlock()
-		return rows, nil
-	}
-	pass := &detectionPass{done: make(chan struct{})}
-	d.flight = pass
 	d.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-pass.done:
+		return append([]agentrecord.Detection(nil), pass.rows...), pass.err
+	}
+}
+
+// completePass owns the bounded shared work, independently of any one waiter.
+func (d *Detector) completePass(ctx context.Context, pass *detectionPass) {
 	rows, err := d.detect(ctx)
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	pass.rows, pass.err = rows, err
 	if err == nil {
 		d.cached = rows
 	}
 	d.flight = nil
 	close(pass.done)
-	d.mu.Unlock()
-	return append([]agentrecord.Detection(nil), rows...), err
 }
 
 func (d *Detector) detect(ctx context.Context) ([]agentrecord.Detection, error) {
@@ -257,7 +261,12 @@ func (d *Detector) run(ctx context.Context, executable string, args []string, en
 	}
 	proc.InOwnGroup(cmd)
 	cmd.Cancel = func() error { return proc.KillGroupImmediately(cmd) }
+	// A wrapper may exit while a descendant retains its output pipes. WaitDelay
+	// also starts at leader exit, when CommandContext no longer calls Cancel.
+	cmd.WaitDelay = d.probeTimeout
 	err := cmd.Run()
+	// Discovery owns the whole group, including children of an exited wrapper.
+	_ = proc.KillGroupImmediately(cmd)
 	if ctx.Err() != nil {
 		return "", -1, ctx.Err()
 	}

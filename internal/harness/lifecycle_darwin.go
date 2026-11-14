@@ -9,12 +9,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// observeExit reports that the agent's leader exited without reaping it, so
+// the session keeps the process identity until its group signals finish
+// (ADR-sr71cdyt).
 func observeExit(pid int) error {
 	fd, err := unix.Kqueue()
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	change := unix.Kevent_t{Ident: uint64(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}
 	events := make([]unix.Kevent_t, 1)
 	for {

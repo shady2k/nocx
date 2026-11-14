@@ -12,6 +12,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// observeExit reports that the agent's leader exited without reaping it, so
+// the session keeps the process identity until its group signals finish
+// (ADR-sr71cdyt).
 func observeExit(pid int) error {
 	var info unix.Siginfo
 	for {

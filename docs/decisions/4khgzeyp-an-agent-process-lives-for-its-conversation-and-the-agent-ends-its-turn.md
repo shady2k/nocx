@@ -61,7 +61,8 @@ the session is idle for an hour (idle: no turn running or cancelling, no accepte
 approval pending), or when the session is restarted after a failure. A session is owned by one
 actor: a single goroutine that holds the session's state, writes every command to the agent, reads
 every line from it, and is the only party that moves the session or a turn from one state to
-another. Its pipe reads and writes and its deliveries to the consumer are interruptible, so the
+another. Exit is observed without reaping, so the session keeps the process identity until its group
+signals finish (ADR-sr71cdyt). Its pipe reads and writes and its deliveries to the consumer are interruptible, so the
 actor can always act on a cancel, a kill or a deadline. Connectors keep no lifecycle state: they are
 a protocol — how to start the agent, how to encode a prompt, an abort and any setup command, and how
 to decode a line into events and command responses. The actor gives every command it writes an id

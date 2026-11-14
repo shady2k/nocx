@@ -44,6 +44,22 @@ func main() {
 		os.Exit(2)
 	}
 
+	// An explicit test-only cleanup byte stops a failed fixture without sending
+	// signals to a numeric PID after its parent has disappeared.
+	if script.CleanupGate != "" {
+		go func() {
+			gate, err := os.Open(script.CleanupGate)
+			if err != nil {
+				return
+			}
+			defer func() { _ = gate.Close() }()
+			var b [1]byte
+			if n, _ := gate.Read(b[:]); n == 1 {
+				os.Exit(1)
+			}
+		}()
+	}
+
 	// The parent's death closes this process's stdin, and that is how the
 	// conformance suite proves no agent outlives the backend. A program
 	// blocked in a tool call cannot notice the pipe by reading its own
@@ -60,6 +76,11 @@ func main() {
 	}
 	if script.PIDFile != "" {
 		_ = os.WriteFile(script.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	}
+
+	if script.EnvironmentFile != "" {
+		raw, _ := json.Marshal(os.Environ())
+		_ = os.WriteFile(script.EnvironmentFile, raw, 0o600)
 	}
 
 	bridge := prompt.Tools

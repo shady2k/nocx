@@ -20,11 +20,11 @@ func resolveExecutable(command string, env []string, dir string) (string, error)
 		}
 	}
 	path, _ := shellenv.Path(env)
-	executable, err := agentapproval.IdentityForExecutableInPath(command, path, dir)
+	executable, err := agentapproval.LookupExecutableInPath(command, path, dir)
 	if err != nil {
 		return "", fmt.Errorf("harness: resolve agent executable: %w", err)
 	}
-	return executable.Path, nil
+	return executable, nil
 }
 
 // mergeEnvironment gives both executable lookup and exec the same last-value

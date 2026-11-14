@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -271,6 +272,117 @@ func TestBaseCleanupFailureIsBounded(t *testing.T) {
 	}
 	if ev := <-p.Events(); ev.Kind != EventFailure {
 		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestBaseCancelDuringFinishWithFullQueue(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	turn, err := (Base{}).Start(context.Background(), Launch{
+		Argv:          []string{"/bin/sh", "-c", "i=0; while [ $i -lt 64 ]; do echo delta; i=$((i+1)); done; exit 7"},
+		Decode:        func([]byte) ([]Event, error) { return []Event{{Kind: EventAnswerDelta, Text: "x"}}, nil },
+		FailureReason: func(string, error) string { close(entered); <-release; return "failed" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered // EOF and process exit have reached final failure translation.
+	if len(turn.events) != cap(turn.events) {
+		t.Fatal("queue is not full")
+	}
+	if err := turn.Cancel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
+		// Free the blocked finalizer even when testing the broken implementation.
+		for range turn.Events() {
+		}
+		t.Fatalf("Wait = %v", err)
+	}
+	var last Event
+	for ev := range turn.Events() {
+		last = ev
+	}
+	if last.Kind != EventFailure {
+		t.Fatalf("last event = %+v", last)
+	}
+}
+
+// A private reaper dependency lets failures be exercised without changing global
+// process state or relying on descriptor exhaustion on the developer's machine.
+func reaperTestProcess(t *testing.T, script string) (*Process, *os.File) {
+	t.Helper()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin, cmd.Stdout = stdinR, stdoutW
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdinR.Close()
+	p := &Process{
+		cmd: cmd, stdin: stdinW, stdout: stdoutR, decode: endDecoder,
+		maxLine: DefaultMaxLineBytes, events: make(chan Event, 64), done: make(chan struct{}),
+		procDone: make(chan struct{}), stopped: make(chan struct{}), shutdownTimeout: time.Second,
+	}
+	t.Cleanup(func() {
+		_ = stdoutW.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		// The test owns cmd until procDone; rescue failed implementations without
+		// signalling a released process identity.
+		select {
+		case <-p.procDone:
+		default:
+			_ = cmd.Process.Kill()
+			<-p.procDone
+		}
+	})
+	return p, stdoutW
+}
+
+func TestBaseObservationFailureStopsOwnedProcess(t *testing.T) {
+	p, writer := reaperTestProcess(t, "exec cat")
+	_ = writer.Close()
+	sentinel := errors.New("observer unavailable")
+	go p.reapWith(func(int) error { return sentinel }, awaitGroupGone)
+	go p.pump(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.Wait(ctx); err == nil || !strings.Contains(err.Error(), sentinel.Error()) {
+		t.Fatalf("Wait = %v", err)
+	}
+	if live, err := groupRunning(p.cmd.Process.Pid); err != nil || live {
+		t.Fatalf("group running=%v error=%v", live, err)
+	}
+}
+
+func TestBaseCleanupErrorClosesHeldStdout(t *testing.T) {
+	p, _ := reaperTestProcess(t, "echo end") // Test retains a writer after the leader exits.
+	sentinel := errors.New("group inspection failed")
+	go p.reapWith(observeExit, func(pid int) error {
+		if err := awaitGroupGone(pid); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	go p.pump(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.Wait(ctx); err == nil || !strings.Contains(err.Error(), sentinel.Error()) {
+		t.Fatalf("Wait = %v", err)
+	}
+	if _, err := p.stdout.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("stdout remains open: %v", err)
 	}
 }
 

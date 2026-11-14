@@ -39,3 +39,27 @@ func TestEnvironmentOverridesMatchExecutableLookup(t *testing.T) {
 		t.Fatalf("environment = %v", env)
 	}
 }
+
+func TestExecutableLookupAcceptsExecuteOnlyFirstCandidate(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	program := filepath.Join(first, "agent")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0o111); err != nil { //nolint:gosec // execute-only fixture
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "agent"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // executable fixture
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(program); err == nil { //nolint:gosec // test TempDir executable fixture
+		t.Skip("requires a user without read access to execute-only files")
+	}
+	for _, command := range []string{"agent", program, "./agent"} {
+		got, err := resolveExecutable(command, []string{"PATH=" + first + string(os.PathListSeparator) + second}, first)
+		want := program
+		if command == "./agent" {
+			want = first + "/./agent"
+		}
+		if err != nil || got != want {
+			t.Fatalf("command %q resolved %q, %v; want execute-only %q", command, got, err, want)
+		}
+	}
+}

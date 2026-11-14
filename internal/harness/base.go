@@ -286,18 +286,27 @@ func (p *Process) Wait(ctx context.Context) (Outcome, error) {
 // finish under mu before Wait can release that identity. Cancel uses the same
 // lock and never signals once reaped is set.
 func (p *Process) reap() {
-	observeErr := observeExit(p.cmd.Process.Pid)
+	p.reapWith(observeExit, awaitGroupGone)
+}
+
+func (p *Process) reapWith(observe func(int) error, cleanup func(int) error) {
+	observeErr := observe(p.cmd.Process.Pid)
 	p.mu.Lock()
 	var signalErr error
-	if observeErr == nil {
+	// Observation infrastructure failure does not release our child. Stop it
+	// before Wait can reap it, while Cancel is excluded by the same lock.
+	// ECHILD alone means ownership is lost and the numeric identity is unsafe.
+	if !errors.Is(observeErr, syscall.ECHILD) {
 		signalErr = p.killLocked()
 	}
-	// Failed observation does not prove we still own this identity. In
-	// particular ECHILD can mean another reaper already released it.
 	p.reaped = true
 	p.mu.Unlock()
 	p.waitErr = p.cmd.Wait()
-	p.cleanupErr = errors.Join(observeErr, signalErr, awaitGroupGone(p.cmd.Process.Pid))
+	p.cleanupErr = errors.Join(observeErr, signalErr, cleanup(p.cmd.Process.Pid))
+	if p.cleanupErr != nil {
+		// A surviving writer must not hide the bounded cleanup failure from Wait.
+		_ = p.stdout.Close()
+	}
 	close(p.procDone)
 }
 
@@ -375,7 +384,6 @@ func (p *Process) finish(terminal *Event, protocolErr string) {
 	p.mu.Lock()
 	cancelled := p.cancelled
 	shutdownErr := p.shutdownErr
-	p.finished = true
 	p.mu.Unlock()
 
 	switch {
@@ -419,8 +427,15 @@ func (p *Process) finish(terminal *Event, protocolErr string) {
 	case terminal.Kind == EventEnd:
 		p.outcome = Outcome{Model: terminal.End.Model, Usage: terminal.End.Usage}
 	}
+	p.mu.Lock()
+	if p.cancelled && p.cleanupErr == nil {
+		p.outcome = Outcome{}
+		p.err = ErrCancelled
+	}
+	p.finished = true
 	close(p.events)
 	close(p.done)
+	p.mu.Unlock()
 }
 
 func exitReason(err error) string {

@@ -17,6 +17,7 @@ import "context"
 // Harness runs one agent. It is the whole of what the core and the renderer
 // see; a connector implements it for one agent family.
 type Harness interface {
+	ConnectorFacts
 	// Readiness reports whether this agent can run a turn now, and what to
 	// tell a person when it cannot.
 	Readiness(ctx context.Context) Readiness
@@ -58,7 +59,7 @@ type Cataloguer interface {
 }
 
 // ConnectorFacts states facts the product must show independently of optional
-// operations. Every supported connector implements this alongside Harness.
+// operations. Harness requires these facts for every supported connector.
 type ConnectorFacts interface {
 	Facts() Facts
 }

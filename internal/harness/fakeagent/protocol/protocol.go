@@ -10,11 +10,13 @@ import "github.com/shady2k/nocx/internal/harness"
 // FAKEAGENT_SCRIPT environment variable as JSON.
 type Script struct {
 	// CompleteOnEOF models an RPC agent that waits for stdin closure after End.
-	CompleteOnEOF bool   `json:"completeOnEOF,omitempty"`
-	PromptFile    string `json:"promptFile,omitempty"`
-	HangFile      string `json:"hangFile,omitempty"`
-	Gate          string `json:"gate,omitempty"`
-	Steps         []Step `json:"steps"`
+	CompleteOnEOF   bool   `json:"completeOnEOF,omitempty"`
+	PromptFile      string `json:"promptFile,omitempty"`
+	EnvironmentFile string `json:"environmentFile,omitempty"`
+	CleanupGate     string `json:"cleanupGate,omitempty"`
+	HangFile        string `json:"hangFile,omitempty"`
+	Gate            string `json:"gate,omitempty"`
+	Steps           []Step `json:"steps"`
 	// PIDFile, when set, receives the fake agent's own process id.
 	PIDFile string `json:"pidFile,omitempty"`
 	// ChildPIDFile, when set, receives the pid of a child a StepChild left

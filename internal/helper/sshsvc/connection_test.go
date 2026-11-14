@@ -959,16 +959,18 @@ func TestAPaneIsToldSlowAndThenToldFine(t *testing.T) {
 	})
 	destination := destinationAt(t, proxy.Addr())
 
-	// A cadence a test can wait for, stated through the profile's own knob:
-	// the shipped default is 15 s and this test is about the finding, not the
-	// cadence.
+	// A cadence a test can wait for, stated through the profile's own knob —
+	// and WIDER THAN THE LATENCY IT MEASURES. The soft deadline equals the
+	// cadence when the cadence is under the design's 15 s, so a 100 ms cadence
+	// would declare this 800 ms answer silence before it arrived; 2 s gives
+	// the probe its answer and still keeps the test short.
 	reports := make(chan ssh.Reachability, 16)
 	ctx := host.WithConnection(context.Background(), stand.helper)
 	shell, err := stand.service.OpenShell(ctx, sshsvc.ShellSpec{
 		Destination:   destination,
 		Cols:          80,
 		Rows:          24,
-		ProbeInterval: 100 * time.Millisecond,
+		ProbeInterval: 2 * time.Second,
 		OnLiveness: func(r ssh.Reachability) {
 			select {
 			case reports <- r:
@@ -1088,5 +1090,72 @@ func TestAPaneThatClosesItsOwnShellReportsNoLoss(t *testing.T) {
 	var causer interface{ ExitCause() string }
 	if errors.As(err, &causer) {
 		t.Fatalf("a shell this side closed carries the cause %q; nothing was lost", causer.ExitCause())
+	}
+}
+
+// ─── the cadence a person states (nocx-oalo1.4.3) ──────────────────────────
+
+// openShellEvery is openShell with the profile's cadence stated, which is the
+// number spawn-ssh carries from the connection's profile.
+func (s *stand) openShellEvery(t *testing.T, destination proto.SSHDestination, every time.Duration) *sshsvc.ShellChannel {
+	t.Helper()
+	ctx := host.WithConnection(context.Background(), s.helper)
+	shell, err := s.service.OpenShell(ctx, sshsvc.ShellSpec{
+		Destination: destination, Cols: 80, Rows: 24, ProbeInterval: every,
+	})
+	if err != nil {
+		t.Fatalf("open a shell: %v", err)
+	}
+	t.Cleanup(func() { _ = shell.Close() })
+	return shell
+}
+
+// TestAProfilesIntervalReachesTheProberWhicheverHolderDialsFirst is design
+// §5.3's "a profile's keepalive settings still apply and map onto these",
+// through the shipped seam. The shell-integration publish dials this
+// connection FIRST and states no cadence (every holder but a shell passes
+// zero); the shell states a second a moment later. The connection has ONE
+// prober, so the profile's interval has to reach it from whichever holder
+// dialled second — otherwise a person who asked for a probe a second gets the
+// fifteen-second default and waits thirty seconds to be told their host went
+// quiet, which is what e2e/ssh-reconnect.spec.ts measured on 2026-11-14.
+//
+// The deadline is asserted with the cadence: a probe must be given its answer
+// before the next one is due, so a one-second cadence means a one-second soft
+// deadline. Two seconds of the test's clock, and none of it waited.
+func TestAProfilesIntervalReachesTheProberWhicheverHolderDialsFirst(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+	if got := f.connections(); got != 1 {
+		t.Fatalf("the first holder made %d connections, want 1", got)
+	}
+
+	stand.openShellEvery(t, destination, time.Second)
+	if got := f.connections(); got != 1 {
+		t.Fatalf("the shell joined %d connections, want the holder's one", got)
+	}
+
+	proxy.SilenceEstablished()
+	start := clock.Now()
+	advanceUntil(t, clock, 100*time.Millisecond, "the connection to read stalled on the profile's cadence", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+	if took := time.Duration(clock.Now() - start); took > 2*time.Second {
+		t.Fatalf("silence was reported after %v of clock, want within 2s: a 1s cadence and a 1s deadline", took)
+	}
+	if got := lastState(holder.States()).Silent; got != time.Second {
+		t.Fatalf("stalled reports %v of silence, want 1s: the deadline equals an interval shorter than 15s", got)
 	}
 }

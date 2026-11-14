@@ -249,7 +249,7 @@ func (g *prober) next(now monoclock.Nanos) monoclock.Nanos {
 		if st.wokeAt != 0 {
 			return st.wokeAt + span(WakeProbeDeadline)
 		}
-		return st.probedAt + span(ProbeDeadline)
+		return st.probedAt + span(g.live.deadline())
 	case st.silentSince != 0:
 		return g.nextStalled(now)
 	}
@@ -344,7 +344,7 @@ func (g *prober) startProbe(at monoclock.Nanos) {
 	out := make(chan probeOutcome, 1)
 	g.st.probeOut = out
 	g.st.probedAt = at
-	g.st.nextProbe = at + span(g.live.probeInterval)
+	g.st.nextProbe = at + span(g.live.interval())
 	go func() {
 		// Probe takes no context: a call that does not come back stays parked
 		// inside the library, holding the mux's send lock. That is the design's
@@ -419,7 +419,7 @@ func (g *prober) probeResult(outcome probeOutcome) bool {
 	// The cadence is measured from the probe's SEND, not from the moment this
 	// loop got to the answer: a host that answers late must not also be asked
 	// late.
-	g.st.nextProbe = g.st.probedAt + span(g.live.probeInterval)
+	g.st.nextProbe = g.st.probedAt + span(g.live.interval())
 	// AN ANSWER DOES NOT CLEAR A LATER SLEEP: a probe sent before the sleep
 	// edge answered about a machine that was already going away. The guard
 	// asks nothing more until the wake.

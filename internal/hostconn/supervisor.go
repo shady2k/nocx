@@ -53,15 +53,22 @@ type Plan struct {
 	// connection, and the package that knows what a shell is imports the one
 	// that dials (design §5.1.1's trap 2).
 	Holds Holds
-	// ProbeInterval is how often this connection should be asked to answer, or
-	// zero for the default. The profile's setting reaches here and the policy
-	// uses it; the deadline, the look cadence and the grace are the design's
-	// numbers and not a profile's to change.
+	// ProbeInterval is how often this connection should be asked to answer, as
+	// the holder's profile states it — zero for "no opinion", which the
+	// connection answers with the design's default. The profile's setting
+	// reaches here and the policy uses it; the look cadence, the grace and the
+	// close budgets are the design's numbers and not a profile's to change.
 	//
-	// The FIRST holder to dial sets it, and a later holder's request is not
-	// applied: one connection has one prober, and a cadence that changed with
-	// whoever acquired last would be two answers to "how often" (nocx-oalo1.4.4
-	// is where the holders' requests are unified).
+	// WHICHEVER HOLDER DIALS FIRST, the cadence is the profile's when a holder
+	// states one: one connection has one prober, and in the shipped open order
+	// the shell-integration publish dials before the shell that carries the
+	// profile. The rule is therefore "the smallest STATED interval wins" — a
+	// stated interval beats the default, and among stated ones the tightest is
+	// the answer to "how often", because a holder that needs a faster answer
+	// is the one whose evidence is used (design §5.3's "a profile's keepalive
+	// settings still apply and map onto these"). A connection's cadence only
+	// ever tightens, so a holder that leaves cannot slow the prober down under
+	// another one that asked for speed.
 	ProbeInterval time.Duration
 	// Route is the hops this connection is dialled through, in dial order.
 	// A connection that carries a plain shell makes every one of them carry
@@ -300,10 +307,19 @@ type live struct {
 	// initialWokeAt carries a wake that arrived while this connection was
 	// being dialled — the guard starts with it, so the five-second proof is
 	// not lost between a successful dial and its publication.
-	nextProbe     monoclock.Nanos
-	initialWoke   monoclock.Nanos
-	initialSleep  monoclock.Nanos
-	probeInterval time.Duration
+	nextProbe    monoclock.Nanos
+	initialWoke  monoclock.Nanos
+	initialSleep monoclock.Nanos
+	// probeEvery is the cadence a holder STATED, in nanoseconds, or zero when
+	// no holder has stated one. It is atomic because the guard reads it on
+	// every pass while Acquire writes it under the supervisor mutex: the guard
+	// is the loop that must not wait for a lock a dial holds.
+	//
+	// Zero means "nobody asked", and the effective cadence is then the
+	// design's default — which is why a stored value of zero and an unstated
+	// one can share this field: the default is not a stated value and must not
+	// win over one.
+	probeEvery atomic.Int64
 	// observers are the holders that asked to be told what a probe finds.
 	observers map[*Lease]func(Observation)
 }
@@ -311,6 +327,59 @@ type live struct {
 // stopGuard ends this connection's prober work.
 func (l *live) stopGuard() {
 	l.stopOnce.Do(func() { close(l.stop) })
+}
+
+// interval answers the cadence this connection is asked at: the tightest
+// interval a holder stated, or the design's default when none has.
+func (l *live) interval() time.Duration {
+	if stated := l.probeEvery.Load(); stated > 0 {
+		return time.Duration(stated)
+	}
+	return ProbeInterval
+}
+
+// deadline answers the soft deadline for a probe sent now: the design's 15 s,
+// or the interval itself when that is shorter. A probe must have been given
+// its answer before the next one is due, so a one-second cadence means a
+// one-second deadline — otherwise a person who asked to be told quickly would
+// be told a quarter of a minute later at the earliest.
+func (l *live) deadline() time.Duration {
+	if every := l.interval(); every < ProbeDeadline {
+		return every
+	}
+	return ProbeDeadline
+}
+
+// adoptInterval answers a holder's stated cadence, and reports whether it
+// changed anything. The rule is Plan.ProbeInterval's: the smallest STATED
+// interval wins, a stated one beats the default, and a connection's cadence
+// only ever tightens.
+//
+// A CHANGE ASKS FOR ONE PROBE AT ONCE. A connection dialled against the
+// fifteen-second default has its first probe due fifteen seconds later, and a
+// shell that joins in the same open order asking for a second must not wait
+// that long to be answered: that answer is also what fixes the cadence from
+// then on (probeResult measures the next probe from the send). The signal is
+// the pool barrier's own — "ask now" — so this adds no second mechanism.
+func (l *live) adoptInterval(stated time.Duration) bool {
+	if stated <= 0 {
+		return false
+	}
+	for {
+		cur := l.probeEvery.Load()
+		if cur > 0 && cur <= int64(stated) {
+			return false
+		}
+		if l.probeEvery.CompareAndSwap(cur, int64(stated)) {
+			if !l.suspended.Load() {
+				select {
+				case l.ask <- struct{}{}:
+				default:
+				}
+			}
+			return true
+		}
+	}
 }
 
 const maxSteps = 32
@@ -379,6 +448,12 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 					// or the caller's deadline.
 					changed = s.changed
 				} else {
+					// A HOLDER THAT STATES A CADENCE REACHES THE ONE PROBER
+					// (design §5.3). The shipped open order dials through the
+					// shell-integration publish before the shell exists, so the
+					// profile's number arrives second — and it is the shell's,
+					// the one a person set.
+					l.adoptInterval(plan.ProbeInterval)
 					l.holders++
 					if plan.Holds&HoldsPlainShell != 0 {
 						l.plainShells++
@@ -440,21 +515,22 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			s.mu.Unlock()
 			return nil, err
 		}
-		probeInterval := plan.ProbeInterval
-		if probeInterval <= 0 {
-			probeInterval = ProbeInterval
-		}
 		live := &live{
 			link: link, holders: 1, route: plan.Route, rideHops: plan.Route,
-			probeInterval: probeInterval,
-			nextProbe:     s.clock.Now() + span(probeInterval),
-			stop:          make(chan struct{}),
-			closed:        make(chan struct{}),
-			controlWake:   make(chan struct{}, 1),
-			ask:           make(chan struct{}, 1),
-			waiters:       make(map[chan error]struct{}),
-			observers:     make(map[*Lease]func(Observation)),
+			stop:        make(chan struct{}),
+			closed:      make(chan struct{}),
+			controlWake: make(chan struct{}, 1),
+			ask:         make(chan struct{}, 1),
+			waiters:     make(map[chan error]struct{}),
+			observers:   make(map[*Lease]func(Observation)),
 		}
+		if plan.ProbeInterval > 0 {
+			// The dialling holder's own cadence, recorded as STATED: a later
+			// holder's request is measured against a stated one, never against
+			// the default.
+			live.probeEvery.Store(int64(plan.ProbeInterval))
+		}
+		live.nextProbe = s.clock.Now() + span(live.interval())
 		if plan.Holds&HoldsPlainShell != 0 {
 			live.plainShells = 1
 		}

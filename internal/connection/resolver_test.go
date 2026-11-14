@@ -778,13 +778,16 @@ func (*recordingRemoteInstaller) UninstallRemote(context.Context, *gossh.Client)
 	return nil, nil, nil
 }
 
-// TestResolver_KeepaliveDefaultsWhenTheProfileNamesNone pins the mechanism
-// that is now the only thing able to end a session whose transport died in
-// silence (nocx-o2le). A write into such a connection never returns and never
-// errors; the session's write queue can report that it is stuck but cannot
-// close it. If a profile that sets no keepalive resolves to no keepalive, that
-// tab hangs until the user kills it.
-func TestResolver_KeepaliveDefaultsWhenTheProfileNamesNone(t *testing.T) {
+// TestResolver_KeepaliveIsUnsetWhenTheProfileNamesNone pins the handover of
+// the default. A profile with no interval states NO OPINION — zero — and the
+// connection manager's prober answers with its own default (15 s, design
+// §5.3). A number substituted here would be a second default that the helper
+// could not tell from a person's, and it would silently outrank the policy's.
+//
+// What the test still guards is the defect it was written for (nocx-o2le): a
+// profile that sets no keepalive must not resolve to "never probe". Zero
+// means the manager's default, and the manager never reads zero as "off".
+func TestResolver_KeepaliveIsUnsetWhenTheProfileNamesNone(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
@@ -802,12 +805,9 @@ func TestResolver_KeepaliveDefaultsWhenTheProfileNamesNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if cfg.KeepaliveInterval != defaultKeepaliveInterval {
-		t.Errorf("KeepaliveInterval = %v, want %v — a profile with no keepalive would never notice a dead transport",
-			cfg.KeepaliveInterval, defaultKeepaliveInterval)
-	}
-	if cfg.KeepaliveCountMax != defaultKeepaliveCountMax {
-		t.Errorf("KeepaliveCountMax = %d, want %d", cfg.KeepaliveCountMax, defaultKeepaliveCountMax)
+	if cfg.KeepaliveInterval != 0 {
+		t.Errorf("KeepaliveInterval = %v, want 0 (no opinion) — the connection manager's default is the only one",
+			cfg.KeepaliveInterval)
 	}
 }
 
@@ -824,7 +824,6 @@ func TestResolver_KeepaliveFromTheProfileWins(t *testing.T) {
 			Port:              profile.Ptr(22),
 			User:              profile.Ptr("admin"),
 			KeepaliveInterval: profile.Ptr(5000),
-			KeepaliveCountMax: profile.Ptr(9),
 		},
 	})
 
@@ -835,8 +834,5 @@ func TestResolver_KeepaliveFromTheProfileWins(t *testing.T) {
 	}
 	if cfg.KeepaliveInterval != 5*time.Second {
 		t.Errorf("KeepaliveInterval = %v, want 5s (the profile's 5000ms)", cfg.KeepaliveInterval)
-	}
-	if cfg.KeepaliveCountMax != 9 {
-		t.Errorf("KeepaliveCountMax = %d, want 9", cfg.KeepaliveCountMax)
 	}
 }

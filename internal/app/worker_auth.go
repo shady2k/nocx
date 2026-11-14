@@ -619,20 +619,28 @@ func (a *toolAuthorizer) admitTurn(token string, publish func(session string, ep
 	if !live {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
 	}
-	release, acquired := a.turnSlots.acquire(session.ID(turn.Tools.RunContext().RunID))
-	if !acquired {
-		return assistant.ToolInvocation{}, nil, toolendpoint.ErrSessionCallerActive
+	ctx, done, live := turn.StartAdmission(context.Background())
+	if !live {
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
 	}
-	invocation, err := turn.Tools.Admit()
+	releaseSlot, acquired := a.turnSlots.acquire(session.ID(turn.Tools.RunContext().RunID))
+	if !acquired {
+		return assistant.ToolInvocation{}, done, toolendpoint.ErrSessionCallerActive
+	}
+	// The endpoint owns this cleanup even on refusal: the unpublished socket
+	// must close before turn settlement can report that admission has ended.
+	release := func() {
+		releaseSlot()
+		done()
+	}
+	invocation, err := turn.Tools.Admit(ctx)
 	if err != nil {
-		release()
-		return assistant.ToolInvocation{}, nil, err
+		return assistant.ToolInvocation{}, release, err
 	}
 	if !turn.Publish(func() bool {
 		return publish(toolendpoint.TurnScope(turn.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
 	}) {
-		release()
-		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
+		return assistant.ToolInvocation{}, release, toolendpoint.ErrTurnBearerRefused
 	}
 	return invocation, release, nil
 }

@@ -51,7 +51,7 @@ type testTurnTools struct {
 }
 
 func (t *testTurnTools) RunContext() agenttools.RunContext { return t.ctx }
-func (t *testTurnTools) Admit() (assistant.ToolInvocation, error) {
+func (t *testTurnTools) Admit(context.Context) (assistant.ToolInvocation, error) {
 	t.admissions++
 	return assistant.ToolInvocation{RunContext: t.ctx, Grant: t.grant, Dispatcher: t.dispatcher}, nil
 }
@@ -110,6 +110,7 @@ func (d *turnDispatcher) recorded() []assistant.ToolInvocation {
 // session this process is the backend-owned root of — the facts the pane arm
 // needs, so the same stand can prove a pane's caller is admitted beside a turn.
 type turnStand struct {
+	auth       *toolAuthorizer
 	endpoint   *toolendpoint.Endpoint
 	minter     *turnbearer.Minter
 	dispatcher *turnDispatcher
@@ -152,7 +153,7 @@ func newTurnStand(t *testing.T, dispatcher *turnDispatcher) *turnStand {
 		t.Fatalf("start turn endpoint: %v", err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
-	return &turnStand{endpoint: endpoint, minter: minter, dispatcher: dispatcher, sess: sess, logger: logger}
+	return &turnStand{auth: auth, endpoint: endpoint, minter: minter, dispatcher: dispatcher, sess: sess, logger: logger}
 }
 
 // turnGrantForTest is an authority nothing else in this stand mints: a grant

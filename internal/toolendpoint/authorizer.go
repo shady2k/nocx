@@ -80,7 +80,9 @@ const TurnEpoch AdmissionEpoch = 1
 // use. The endpoint supplies Method and RawParams for each request; the
 // authorizer owns Context, RunContext, Grant and the session they imply. The
 // release function closes exactly the admission interval opened by this call;
-// it is nil when admission is refused and is idempotent when returned.
+// it may also be returned on refusal to clean up unpublished work, and is
+// idempotent when returned. The endpoint calls it after closing and untracking
+// the connection.
 //
 // Enrollment and the human approval are separate admission acts. Enrollment
 // binds this call to a live process tree; the composition root checks the

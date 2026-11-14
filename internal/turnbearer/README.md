@@ -6,8 +6,9 @@ process restart; never reuse the old session's bridge environment.
 
 The actor calls `Mint(session)` once, then `BeginTurn(session, Authority{Tools:
 runTools})` before sending each prompt. `EndTurn(session)` closes admission,
-cancels remaining calls, closes connections and blocks until accepted calls and
-caller-slot releases finish. Only then may the actor publish the terminal and
+cancels admissions in progress and remaining calls, closes connections and blocks
+until admission cleanup, accepted calls and caller-slot releases finish. Only
+then may the actor publish the terminal and
 start another turn. `Pending(session)` includes accepted calls waiting for an
 approval, but not idle connections. These are the endpoint settlement and idle
 signals for the session actor introduced by nocx-a62cl.14.5.
@@ -18,8 +19,15 @@ a cancelled turn ends its session; do not call `BeginTurn` again on that bearer.
 The actor owns this distinction. The bearer registry does not decide whether a
 turn ended normally or was cancelled.
 
-Connections capture authority once at admission. A lookup in progress at the
-end of a turn may still finish building its invocation, but cannot publish it.
+Connections capture authority once at admission. Before building an invocation,
+the authorizer calls `Authority.StartAdmission(ctx)` and uses its returned context
+for admission. Turn closure cancels that context and joins the returned cleanup
+function, which must run after connection cleanup, including refused admissions.
+Admission must honor cancellation. Its synchronous `FreshGrant` owner is a
+bounded local snapshot and must return promptly, not wait on external work.
+A lookup in progress at the end of a turn cannot publish its invocation.
+Retiring sessions remain visible to `Pending` and concurrent `EndTurn` calls until
+settlement finishes, but cannot admit connections, new turns or a replacement bearer.
 A connection admitted with no running turn is refused. Run IDs remain unique
 endpoint scopes, as on the original assistant admission path.
 

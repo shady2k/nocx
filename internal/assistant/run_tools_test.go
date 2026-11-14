@@ -34,11 +34,11 @@ func TestRunTools_AdmissionBindsCompleteContextAndFreshAuthority(t *testing.T) {
 	if calls != 0 {
 		t.Fatal("minted before admission")
 	}
-	first, err := tools.Admit()
+	first, err := tools.Admit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := tools.Admit()
+	second, err := tools.Admit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestRunTools_FrozenAttachmentReadsKeepTheirMarkedWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := tools.Admit()
+	invocation, err := tools.Admit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestRunTools_PolicyRefusalIsATypedEndpointRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := tools.Admit()
+	invocation, err := tools.Admit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestRunTools_DispatchUsesApprovalAndEgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := tools.Admit()
+	invocation, err := tools.Admit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,5 +146,26 @@ func TestRunTools_DispatchUsesApprovalAndEgress(t *testing.T) {
 		Catalogue(content.Grant) []agenttools.Tool
 	}); !ok {
 		t.Fatal("missing catalogue")
+	}
+}
+
+func TestRunTools_CancelledAdmissionDoesNotMintAuthority(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mints := 0
+	tools, err := BindRunTools(cl, AskParams{Grant: &grant, KnownMaterial: &fakeKnownMaterial{}, FreshGrant: func() *content.Grant { mints++; return &grant }}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := tools.Admit(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("admission error = %v, want cancellation", err)
+	}
+	if mints != 0 {
+		t.Fatalf("cancelled admission minted authority %d times", mints)
 	}
 }

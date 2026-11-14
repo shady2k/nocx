@@ -10,6 +10,7 @@
 package turnbearer
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -30,8 +31,39 @@ type Authority struct {
 }
 
 type turnLifetime struct {
-	mu   sync.Mutex
-	live bool
+	mu         sync.Mutex
+	live       bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	admissions sync.WaitGroup
+}
+
+// StartAdmission tracks admission cleanup until done is called. The returned
+// context keeps the caller's values and deadline, and
+// is also canceled when this turn ends. Call done after cleanup, including on
+// failure; it is safe to call more than once.
+func (a Authority) StartAdmission(ctx context.Context) (context.Context, func(), bool) {
+	lifetime := a.lifetime
+	if lifetime == nil {
+		return nil, nil, false
+	}
+	lifetime.mu.Lock()
+	defer lifetime.mu.Unlock()
+	if !lifetime.live {
+		return nil, nil, false
+	}
+	lifetime.admissions.Add(1)
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(lifetime.ctx, cancel)
+	var once sync.Once
+	done := func() {
+		once.Do(func() {
+			stop()
+			cancel()
+			lifetime.admissions.Done()
+		})
+	}
+	return ctx, done, true
 }
 
 // Publish serializes admission publication with the end of this authority.
@@ -86,8 +118,8 @@ func NewMinter(endpoint Endpoint, helper string) *Minter {
 }
 
 // Mint registers a session without admitting tools until BeginTurn. Retire
-// removes its bearer, closes publication, and waits for accepted calls to
-// settle. The returned retirement function is idempotent.
+// invalidates its bearer, closes publication, and waits for admissions and calls
+// to settle before removing the session. The returned function is idempotent.
 func (m *Minter) Mint(id string) (TurnBridge, func(), error) {
 	switch {
 	case m == nil || m.endpoint == nil:
@@ -118,10 +150,12 @@ func (m *Minter) Mint(id string) (TurnBridge, func(), error) {
 		once.Do(func() {
 			m.mu.Lock()
 			s.retired = true
-			delete(m.sessions, id)
 			s.token = ""
 			m.mu.Unlock()
 			m.endTurn(s)
+			m.mu.Lock()
+			delete(m.sessions, id)
+			m.mu.Unlock()
 		})
 	}
 	return bridge, retire, nil
@@ -147,14 +181,15 @@ func (m *Minter) BeginTurn(id string, authority Authority) error {
 	if s.authority.lifetime != nil {
 		return errors.New("turnbearer: session already has a turn")
 	}
-	authority.lifetime = &turnLifetime{live: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	authority.lifetime = &turnLifetime{live: true, ctx: ctx, cancel: cancel}
 	s.authority = authority
 	return nil
 }
 
-// EndTurn refuses new admissions, closes turn connections and waits until all
-// accepted calls have settled. The session bearer remains available for the
-// next BeginTurn. Ending an idle or unknown session is a no-op.
+// EndTurn refuses new admissions, cancels admissions in progress, closes turn
+// connections and waits until admission cleanup and accepted calls have settled.
+// The session bearer remains available for the next BeginTurn. Ending an idle or unknown session is a no-op.
 func (m *Minter) EndTurn(id string) {
 	m.mu.Lock()
 	s := m.sessions[id]
@@ -182,8 +217,10 @@ func (m *Minter) endTurn(s *session) {
 	m.mu.Unlock()
 	authority.lifetime.mu.Lock()
 	authority.lifetime.live = false
+	authority.lifetime.cancel()
 	authority.lifetime.mu.Unlock()
 	m.endpoint.SettleAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+	authority.lifetime.admissions.Wait()
 	m.mu.Lock()
 	s.authority = Authority{}
 	s.settling = nil
@@ -219,7 +256,7 @@ func (m *Minter) Lookup(token string) (Authority, bool) {
 	var found Authority
 	matched := false
 	for _, s := range m.sessions {
-		if subtle.ConstantTimeCompare([]byte(s.token), []byte(token)) == 1 && s.authority.lifetime != nil && s.settling == nil {
+		if subtle.ConstantTimeCompare([]byte(s.token), []byte(token)) == 1 && !s.retired && s.authority.lifetime != nil && s.settling == nil {
 			found = s.authority
 			matched = true
 		}

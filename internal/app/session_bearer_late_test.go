@@ -27,10 +27,14 @@ type lateAdmissionTools struct {
 	resume  chan struct{}
 }
 
-func (t *lateAdmissionTools) Admit() (assistant.ToolInvocation, error) {
+func (t *lateAdmissionTools) Admit(ctx context.Context) (assistant.ToolInvocation, error) {
 	close(t.entered)
-	<-t.resume
-	return t.testTurnTools.Admit()
+	select {
+	case <-t.resume:
+	case <-ctx.Done():
+		return assistant.ToolInvocation{}, ctx.Err()
+	}
+	return t.testTurnTools.Admit(ctx)
 }
 
 func TestSessionBearerLateAdmissionCannotPublishUnderNextTurn(t *testing.T) {
@@ -176,12 +180,32 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 	if writeErr := os.WriteFile(path, []byte(payload), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
+	policy := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}
+	type grantOwner struct {
+		grant content.Grant
+		mints int
+	}
+	oldOwner := &grantOwner{grant: policy.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: path}})}
+	nextOwner := &grantOwner{grant: policy.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})}
+	var mintMu sync.Mutex
+	assertMints := func(oldWant, nextWant int) {
+		t.Helper()
+		mintMu.Lock()
+		defer mintMu.Unlock()
+		if oldOwner.mints != oldWant || nextOwner.mints != nextWant {
+			t.Fatalf("grant refresh owners: N minted %d, N+1 minted %d; want %d, %d", oldOwner.mints, nextOwner.mints, oldWant, nextWant)
+		}
+	}
 	store := assistant.NewApprovalStore()
-	bind := func(run string, person *turnPerson) assistant.TurnTools {
+	bind := func(run string, person *turnPerson, owner *grantOwner) assistant.TurnTools {
 		t.Helper()
 		tools, bindErr := assistant.BindRunTools(client, assistant.AskParams{
-			Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
+			Grant: &owner.grant, FreshGrant: func() *content.Grant {
+				mintMu.Lock()
+				defer mintMu.Unlock()
+				owner.mints++
+				return &owner.grant
+			},
 			RunID: run, SessionID: string(stand.sess.ID()), Attempt: 1,
 			AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: "not-present-in-the-file"}, Approvals: store, Questioner: person,
 		}, nil)
@@ -194,13 +218,14 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 		return &turnPerson{store: store, asked: make(chan *assistant.ApprovalRequest, 1), answer: make(chan struct{}), egress: make(chan struct{})}
 	}
 	oldPerson, nextPerson := person(), person()
-	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{Tools: bind("approval-N", oldPerson)})
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{Tools: bind("approval-N", oldPerson, oldOwner)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	bridgeClient := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), envToken(t, bridge.Env))
 	oldResult := bridgeClient.startCall(t, "files.read", map[string]any{"path": path})
 	oldRequest := awaitLateApproval(t, oldPerson.asked)
+	assertMints(1, 0)
 	if !stand.minter.Pending("approval-N") {
 		t.Fatal("approval waiter did not keep its turn pending")
 	}
@@ -208,11 +233,12 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 	if resp := s14Await(t, oldResult); resp.failed == "" && strings.Contains(string(resp.result), payload) {
 		t.Fatal("cancelled approval released file contents")
 	}
-	if err := stand.minter.BeginTurn("approval-N", turnbearer.Authority{Tools: bind("approval-N+1", nextPerson)}); err != nil {
+	if err := stand.minter.BeginTurn("approval-N", turnbearer.Authority{Tools: bind("approval-N+1", nextPerson, nextOwner)}); err != nil {
 		t.Fatal(err)
 	}
 	nextResult := bridgeClient.startCall(t, "files.read", map[string]any{"path": path})
 	nextRequest := awaitLateApproval(t, nextPerson.asked)
+	assertMints(1, 1)
 	if oldRequest.RunID != "approval-N" || nextRequest.RunID != "approval-N+1" {
 		t.Fatalf("approval owners crossed: %q, %q", oldRequest.RunID, nextRequest.RunID)
 	}
@@ -230,11 +256,15 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 		t.Fatalf("N's approval answered N+1's call: %s", response.raw)
 	default:
 	}
+	// The stale answer must not refresh either owner. N+1's own answer
+	// must refresh only N+1, even though both proposals read the same file.
+	assertMints(1, 1)
 	close(nextPerson.answer)
 	resp := s14Await(t, nextResult)
 	if resp.failed != "" || !strings.Contains(string(resp.result), payload) {
 		t.Fatalf("N+1's own approval did not release its file: %+v", resp)
 	}
+	assertMints(1, 2)
 	stand.minter.EndTurn("approval-N")
 	if len(stand.dispatcher.recorded()) != 0 {
 		t.Fatal("approval calls bypassed the real assistant chain")

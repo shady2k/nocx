@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"context"
 	"errors"
 
 	"github.com/google/uuid"
@@ -10,9 +11,10 @@ import (
 )
 
 // TurnTools is the bound authority of one assistant turn, independent of its carrier.
+// Admit must return promptly when its context ends; turn settlement waits for it.
 type TurnTools interface {
 	RunContext() agenttools.RunContext
-	Admit() (ToolInvocation, error)
+	Admit(ctx context.Context) (ToolInvocation, error)
 }
 
 // RunTools exposes the existing assistant kernel to the tool endpoint.
@@ -40,8 +42,14 @@ func BindRunTools(c Client, p AskParams, onCall func(ToolCall) error) (*RunTools
 func (r *RunTools) RunContext() agenttools.RunContext { return r.kernel.runCtx }
 
 // Admit mints authority from the run's existing refresh owner, including its floor.
-func (r *RunTools) Admit() (ToolInvocation, error) {
+func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolInvocation{}, err
+	}
 	grant, ok := r.kernel.mintGrantAfterAnswer()
+	if err := ctx.Err(); err != nil {
+		return ToolInvocation{}, err
+	}
 	if !ok {
 		return ToolInvocation{}, errors.New("assistant tools: admission grant unavailable")
 	}

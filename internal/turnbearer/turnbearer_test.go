@@ -1,9 +1,12 @@
 package turnbearer
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -34,7 +37,9 @@ func (r testRunTools) RunContext() agenttools.RunContext {
 	return agenttools.RunContext{RunID: string(r), Session: "pane"}
 }
 
-func (testRunTools) Admit() (assistant.ToolInvocation, error) { return assistant.ToolInvocation{}, nil }
+func (testRunTools) Admit(context.Context) (assistant.ToolInvocation, error) {
+	return assistant.ToolInvocation{}, nil
+}
 
 func mint(t *testing.T, m *Minter, session string) (string, func()) {
 	t.Helper()
@@ -215,6 +220,109 @@ func TestRetireWaitsForAcceptedCallsAndRemovesBearerImmediately(t *testing.T) {
 	close(e.release)
 	<-done
 	retire()
+}
+
+func TestRetiringSessionKeepsSettlementVisible(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := &testEndpoint{pending: true, entered: make(chan string, 1), release: make(chan struct{})}
+		m := NewMinter(e, "helper")
+		token, retire := mint(t, m, "session")
+		begin(t, m, "session", "run")
+		retired := make(chan struct{})
+		go func() { retire(); close(retired) }()
+		<-e.entered
+		if _, ok := m.Lookup(token); ok {
+			t.Fatal("retiring bearer admitted")
+		}
+		if !m.Pending("session") {
+			t.Error("retirement hid unsettled calls")
+		}
+		if err := m.BeginTurn("session", Authority{Tools: testRunTools("next")}); err == nil {
+			t.Error("retiring session admitted turn")
+		}
+		if _, _, err := m.Mint("session"); err == nil {
+			t.Error("retiring session replaced before settlement")
+		}
+		ended := make(chan struct{})
+		go func() { m.EndTurn("session"); close(ended) }()
+		synctest.Wait()
+		select {
+		case <-ended:
+			t.Error("EndTurn did not join retirement settlement")
+		default:
+		}
+		close(e.release)
+		<-ended
+		<-retired
+		if m.Pending("session") {
+			t.Error("retired session pending after settlement")
+		}
+		_, nextRetire := mint(t, m, "session")
+		nextRetire()
+	})
+}
+
+func TestTurnClosureCancelsAndJoinsUnpublishedAdmissions(t *testing.T) {
+	for _, retiring := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retire=%v", retiring), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e := &testEndpoint{entered: make(chan string, 1)}
+				m := NewMinter(e, "helper")
+				token, retire := mint(t, m, "session")
+				defer retire()
+				begin(t, m, "session", "run")
+				a, _ := m.Lookup(token)
+				ctx, done, ok := a.StartAdmission(context.Background())
+				if !ok {
+					t.Fatal("live admission refused")
+				}
+				ended := make(chan struct{})
+				go func() {
+					if retiring {
+						retire()
+					} else {
+						m.EndTurn("session")
+					}
+					close(ended)
+				}()
+				<-ctx.Done()
+				synctest.Wait()
+				select {
+				case <-ended:
+					t.Error("turn ended before unpublished admission cleanup")
+				default:
+				}
+				if _, _, ok := a.StartAdmission(context.Background()); ok {
+					t.Error("ended authority accepted admission")
+				}
+				if a.Publish(func() bool { return true }) {
+					t.Error("canceled admission published")
+				}
+				done()
+				done()
+				<-ended
+				if scope := <-e.entered; scope != toolendpoint.TurnScope("run") {
+					t.Fatal(scope)
+				}
+			})
+		})
+	}
+}
+
+func TestAdmissionPreservesParentCancellation(t *testing.T) {
+	m := NewMinter(&testEndpoint{}, "helper")
+	token, retire := mint(t, m, "session")
+	defer retire()
+	begin(t, m, "session", "run")
+	a, _ := m.Lookup(token)
+	parent, cancel := context.WithCancel(context.Background())
+	ctx, done, ok := a.StartAdmission(parent)
+	if !ok {
+		t.Fatal("live admission refused")
+	}
+	defer done()
+	cancel()
+	<-ctx.Done()
 }
 
 func TestRetireClearsAuthorityAndSecret(t *testing.T) {

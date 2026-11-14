@@ -629,8 +629,21 @@ func (e *Endpoint) readPresentedToken(conn *net.UnixConn, reader *bufio.Reader) 
 }
 
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
-	defer e.untrack(conn)
-	defer func() { _ = conn.Close() }()
+	var release func()
+	published := false
+	publishedSession := ""
+	// Settlement observes completion only after requests, socket tracking and
+	// the authorizer's slot have all ended, including on admission refusal.
+	defer func() {
+		_ = conn.Close()
+		e.untrack(conn)
+		if release != nil {
+			release()
+		}
+		if published {
+			e.forgetSession(publishedSession, conn)
+		}
+	}()
 
 	// THE PANE RECORD, and it is read FIRST: before the decision, before any
 	// request byte, and only on the lane. A far agent's connection is the
@@ -655,8 +668,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// it did not publish: an authorizer that returns a grant without publishing
 	// has produced a connection the interval cannot close, which is refused
 	// rather than served.
-	published := false
-	publishedSession := ""
 	admit := func() (assistant.ToolInvocation, func(), error) {
 		return e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
 			if !e.publishAdmission(session, epoch, conn) {
@@ -667,7 +678,9 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			return true
 		})
 	}
-	invocation, release, err := admit()
+	var invocation assistant.ToolInvocation
+	var err error
+	invocation, release, err = admit()
 	if !onLane {
 		if admitter, ok := e.cfg.Auth.(TurnBearerAdmitter); ok && admitter.AdmitsTurnBearer() {
 			reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
@@ -707,12 +720,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		// never starts, so nothing else would remove it, and the endpoint would
 		// report a session as admitted with no connection behind it until some
 		// later retirement closed an interval that has nothing to close.
-		if release != nil {
-			release()
-		}
-		if published {
-			e.forgetSession(publishedSession, conn)
-		}
 		code, message, reason := rpcErrorFor(err)
 		e.observePeerRefusal(peer, reason)
 		e.writeError(conn, nil, code, message, reason)
@@ -722,11 +729,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	if base == nil {
 		base = context.Background()
 	}
-	// The book is keyed by what the endpoint RECORDED and not by what the
-	// invocation says: a connection is forgotten from exactly where it was
-	// admitted, so an authorizer whose two answers disagree cannot leave an
-	// entry nothing removes.
-	defer e.forgetSession(publishedSession, conn)
 	e.observe(Observation{
 		SessionID: invocation.RunContext.Session,
 		Kind:      ObservationAdmitted,
@@ -740,9 +742,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	defer func() {
 		cancel()
 		requests.Wait()
-		if release != nil {
-			release()
-		}
 	}()
 	// THE CALLS IN FLIGHT ON THIS CONNECTION, by the id the caller gave each.
 	// A cancel notification is read by the loop below, so a call has to be in

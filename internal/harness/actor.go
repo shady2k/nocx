@@ -163,7 +163,12 @@ type child struct {
 	stderr        *diagnostics
 }
 
-func spawn(ctx context.Context, b Base, l Launch) (*child, error) {
+func spawn(ctx context.Context, b Base, l Launch) (_ *child, spawnErr error) {
+	defer func() {
+		if spawnErr != nil && l.Cleanup != nil {
+			spawnErr = errors.Join(spawnErr, l.Cleanup())
+		}
+	}()
 	if len(l.Argv) == 0 {
 		return nil, errors.New("harness: empty command")
 	}
@@ -236,8 +241,11 @@ func spawn(ctx context.Context, b Base, l Launch) (*child, error) {
 	go func() {
 		c.observed <- observeExit(cmd.Process.Pid)
 		<-c.reap
-		err := cmd.Wait()
-		c.gone <- errors.Join(err, awaitGroupGone(cmd.Process.Pid))
+		err := errors.Join(cmd.Wait(), awaitGroupGone(cmd.Process.Pid))
+		if l.Cleanup != nil {
+			err = errors.Join(err, l.Cleanup())
+		}
+		c.gone <- err
 	}()
 	return c, nil
 }

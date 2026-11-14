@@ -28,12 +28,13 @@ type Connector struct {
 	cachedModels  []harness.Model
 	cachedDefault string
 	catalogUntil  time.Time
+	manager       *harness.SessionManager
 }
 
 // New keeps pi's own provider configuration. env supplies process overrides,
 // including PI_CODING_AGENT_DIR for isolated installations and tests.
 func New(dataDir string, env []string) *Connector {
-	return &Connector{dataDir: dataDir, env: append([]string(nil), env...), catalogGate: make(chan struct{}, 1)}
+	return NewWithBase(dataDir, env, harness.Base{})
 }
 
 func (*Connector) Facts() harness.Facts {
@@ -136,12 +137,13 @@ func (w *authOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// Run is unavailable until the pi session protocol is implemented (nocx-a62cl.14.7).
-func (*Connector) Run(ctx context.Context, _ harness.TurnSpec) (harness.Turn, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return nil, errors.New("pi session protocol is unimplemented (nocx-a62cl.14.7)")
+// Run submits a turn to its conversation's session actor.
+func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
+	return c.manager.Run(ctx, spec)
+}
+func (c *Connector) Close(ctx context.Context) error { return c.manager.Close(ctx) }
+func (c *Connector) CloseConversation(ctx context.Context, id string) error {
+	return c.manager.CloseConversation(ctx, id)
 }
 
 // Models asks pi for the models its configured providers can run.

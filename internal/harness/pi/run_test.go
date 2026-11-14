@@ -2,20 +2,30 @@ package pi
 
 import (
 	"context"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/harness"
+	fakemodel "github.com/shady2k/nocx/internal/harness/fakemodeltest"
 )
 
-func TestRunReportsSessionProtocolUnimplemented(t *testing.T) {
-	c := New(t.TempDir(), nil)
-	turn, err := c.Run(context.Background(), harness.TurnSpec{ConversationID: "conversation", Text: "question", Dir: t.TempDir()})
-	if turn != nil {
-		_ = turn.Cancel(context.Background())
-		_, _ = turn.Wait(context.Background())
+func TestRunAnswersThroughSession(t *testing.T) {
+	c, _ := configuredPi(t, fakemodel.Response{Text: []string{"answer"}})
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	turn, err := c.Run(ctx, harness.TurnSpec{ConversationID: "conversation", Text: "question", Model: "nocx-test/test-model", SystemPrompt: "nocx instructions", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if turn != nil || err == nil || !strings.Contains(err.Error(), "unimplemented") {
-		t.Fatalf("Run = %v, %v; want explicit unimplemented error and no turn", turn, err)
+	var answer string
+	for ev := range turn.Events() {
+		if ev.Kind == harness.EventAnswerDelta {
+			answer += ev.Text
+		}
+	}
+	outcome, err := turn.Wait(ctx)
+	if err != nil || answer != "answer" || outcome.Model != "nocx-test/test-model" {
+		t.Fatalf("answer=%q outcome=%+v err=%v", answer, outcome, err)
 	}
 }

@@ -241,9 +241,9 @@ func Run(t *testing.T, driver Driver) {
 			} else if !alive(agentPID) {
 				t.Fatal("normal turn ended session")
 			}
-			if scenario == Tool || scenario == CancelTool {
+			if scenario == CancelTool {
 				bridgePID := readPID(t, filepath.Join(dir, "server.pid"))
-				waittest.WaitFor(t, "turn bridge exits", func() bool { return !alive(bridgePID) })
+				waittest.WaitFor(t, "cancelled session bridge exits", func() bool { return !alive(bridgePID) })
 			}
 		})
 	}

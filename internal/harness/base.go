@@ -76,6 +76,9 @@ type Launch struct {
 	Argv []string
 	Env  []string
 	Dir  string
+	// Cleanup releases launch resources after spawn failure or process teardown.
+	// The actor calls it once; it must tolerate resources already consumed by the child.
+	Cleanup func() error
 }
 type Base struct {
 	// Tools creates a tool endpoint owned by one process incarnation.

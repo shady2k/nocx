@@ -621,14 +621,14 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 			status.Signal = sig.Signal()
 		}
 		// WHY this process ended, when code/signal alone read identically for
-		// two different facts (nocx-y6fh7 item 6, round 3): a keepalive
-		// prober giving up on an ssh session's own connection wraps its
-		// WaitErr in a type naming the cause (sshsvc.keepaliveLostError),
-		// probed here the SAME optional-interface way as ExitCode/Signal —
-		// this file has no build tag and must never import the ssh-tagged
-		// package that defines it. Everything else, including a local
-		// process's ordinary end and the far side hanging up with no
-		// status at all, answers no cause and Cause stays empty.
+		// two different facts: a shell whose streaming channel ended because
+		// the CONNECTION under it ended wraps its WaitErr in a type naming the
+		// cause (sshsvc.linkLostError), probed here the SAME
+		// optional-interface way as ExitCode/Signal — this file has no build
+		// tag and must never import the ssh-tagged package that defines it.
+		// Everything else, including a local process's ordinary end and the
+		// far side hanging up with no status at all, answers no cause and
+		// Cause stays empty.
 		var causer interface{ ExitCause() string }
 		if errors.As(err, &causer) {
 			status.Cause = proto.SessionExitCause(causer.ExitCause())

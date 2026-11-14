@@ -174,13 +174,13 @@ func TestExitOutcome_NoWaitErrSeamIsInterrupted(t *testing.T) {
 	}
 }
 
-// A helper-hosted ssh session whose OWN keepalive prober gave up is
-// CONNECTION LOSS, not a clean exit (nocx-y6fh7 item 6, round 3): the two
-// read identically on Code/Signal alone (-1, no signal) and only the named
-// cause tells them apart from an ordinary "no status" loss.
-func TestExitOutcome_HelperKeepaliveLostCauseIsInterrupted(t *testing.T) {
+// A helper-hosted ssh session whose CONNECTION ended under it is CONNECTION
+// LOSS, not a clean exit (design §5.3, nocx-oalo1.4.3): the two read
+// identically on Code/Signal alone (-1, no signal) and only the named cause
+// tells them apart from an ordinary "no status" loss.
+func TestExitOutcome_HelperLinkLostCauseIsInterrupted(t *testing.T) {
 	s := sessionWithChannel(&waitErrChannel{
-		done: make(chan struct{}), waitErr: &fakeHelperExit{code: -1, cause: "keepalive-lost"}, waitSet: true,
+		done: make(chan struct{}), waitErr: &fakeHelperExit{code: -1, cause: "link-lost"}, waitSet: true,
 	})
 	cause, status := s.ExitOutcome()
 	if cause != ExitInterrupted {

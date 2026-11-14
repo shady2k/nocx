@@ -1126,23 +1126,30 @@ type WindowSpan struct {
 // completion or that closed with no cause this helper can name.
 //
 // It exists because "Code == -1, Signal == 0" is one shape with two
-// different meanings (nocx-y6fh7 item 6, round 3): the far side hanging up
-// mid-session with no status to report (TestAChannelLostMidSessionEndsThe
-// SessionWithAStatus, which stays exactly as it is), and THIS helper's own
-// keepalive prober giving up and closing the connection itself. Both leave
-// no process status to collect, so only the helper — the party running the
-// prober since ADR-0057 — can tell them apart, and it does so by naming the
-// cause rather than by the coordinator guessing from a code that is
-// identical either way.
+// different meanings: the far side hanging up mid-session with no status to
+// report (TestAChannelLostMidSessionEndsTheSessionWithAStatus, which stays
+// exactly as it is), and a CONNECTION that ended under the session it
+// carried. Both leave no process status to collect, so only the helper — the
+// party holding the connection since ADR-0057 — can tell them apart, and it
+// does so by naming the cause rather than by the coordinator guessing from a
+// code that is identical either way.
 type SessionExitCause string
 
 const (
-	// ExitCauseKeepaliveLost is a connection this helper's OWN prober gave
-	// up on: it stopped believing the far end was there and closed the
-	// transport itself. This is CONNECTION LOSS, not a clean process exit —
-	// the coordinator's ExitOutcome maps it to Interrupted so the pane is
-	// offered the way back, the same offer any other channel loss gets.
-	ExitCauseKeepaliveLost SessionExitCause = "keepalive-lost"
+	// ExitCauseLinkLost is a session whose stream ended because the
+	// CONNECTION under it ended — a transport error, or the closing policy
+	// giving up on it. This is CONNECTION LOSS, not a clean process exit: the
+	// far command may well be running still, and a code of -1 is not a status
+	// the host ever said. The coordinator's ExitOutcome maps it to
+	// Interrupted, which is what keeps the tab, its scrollback and the offer
+	// to open a new shell.
+	//
+	// IT USED TO BE ExitCauseKeepaliveLost: the verdict belonged to a
+	// keepalive prober this helper armed for each shell. Since stage 2 the
+	// prober belongs to the connection's supervisor (design §5.3), so the
+	// cause is named for the fact the policy decides — the link is gone — and
+	// not for the mechanism that noticed (nocx-oalo1.4.3).
+	ExitCauseLinkLost SessionExitCause = "link-lost"
 )
 
 // SessionExitStatus is how a session's process ended.

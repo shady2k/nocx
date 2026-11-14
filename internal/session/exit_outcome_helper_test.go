@@ -174,14 +174,14 @@ func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	}
 }
 
-// TestHelperExitOutcomeWithKeepaliveLostCauseIsInterrupted is the same real
+// TestHelperExitOutcomeWithLinkLostCauseIsInterrupted is the same real
 // wire path — a real proto.SessionExit notification decoded by the real
-// client — but with the cause a keepalive give-up names (nocx-y6fh7 item 6,
-// round 3). It proves the field round-trips through the actual JSON decoder
+// client — but with the cause a connection ending under its shell names
+// (design §5.3, nocx-oalo1.4.3). It proves the field round-trips through the actual JSON decoder
 // and not merely through a value a test built in memory (contracts/README's
 // own distinction between an over-the-wire check and one that is not).
-func TestHelperExitOutcomeWithKeepaliveLostCauseIsInterrupted(t *testing.T) {
-	conn := newHelperExitConnWithCause(-1, proto.ExitCauseKeepaliveLost)
+func TestHelperExitOutcomeWithLinkLostCauseIsInterrupted(t *testing.T) {
+	conn := newHelperExitConnWithCause(-1, proto.ExitCauseLinkLost)
 	defer func() { _ = conn.Close() }()
 	attached, err := client.Dial(context.Background(), client.Config{
 		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash",

@@ -39,6 +39,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -139,6 +140,11 @@ type ShellChannel struct {
 	exitSet  bool
 	done     chan struct{}
 	closeOne sync.Once
+	// closedByUs records that THIS side ended the channel (a pane closing, a
+	// stop), which is what tells a deliberate end from a connection that died
+	// under it: the pool marks a connection dead whoever closed it, so
+	// "the transport has ended" alone cannot answer which of the two happened.
+	closedByUs atomic.Bool
 }
 
 // ErrDetachedWriterCap is why a sibling channel's session ended when the
@@ -448,6 +454,22 @@ func (c *ShellChannel) wait() {
 			err = fmt.Errorf("%w: the connection closed clean but under the cap", ErrDetachedWriterCap)
 		}
 	}
+	// A CHANNEL THAT ENDED BECAUSE ITS CONNECTION ENDED IS A LOSS, NOT AN EXIT
+	// (design §5.3; nocx-oalo1.4.3). The far command may be running still, and
+	// a code of -1 is not a status the host said — the coordinator's
+	// ExitOutcome reads a named cause as Interrupted, which is what keeps the
+	// tab, its scrollback and the offer to open a new shell. Without the name
+	// the same end reads as an authoritative `exited -1` and the pane closes
+	// the tab as though the shell had finished.
+	//
+	// THE VERDICT USED TO BE THE SHELL'S OWN KEEPALIVE PROBER'S. The prober
+	// belongs to the connection's supervisor now, so the cause is named here —
+	// this layer holds the pooled reference the shell rides, and it is the
+	// only place that knows both that the channel ended and that this side did
+	// not end it.
+	if err != nil && !c.closedByUs.Load() && c.pool.Lost() {
+		err = &linkLostError{err: err}
+	}
 	c.exitMu.Lock()
 	c.exitErr = shellExit(err)
 	c.exitSet = true
@@ -462,11 +484,35 @@ func (c *ShellChannel) wait() {
 func (c *ShellChannel) Close() error {
 	var err error
 	c.closeOne.Do(func() {
+		// BEFORE the channel closes: the wait this releases reads the flag to
+		// tell a pane's own close from a connection that died under it.
+		c.closedByUs.Store(true)
 		err = c.sess.Close()
 		_ = c.pool.Close()
 	})
 	return err
 }
+
+// linkLostError names a channel's end as CONNECTION LOSS rather than as the
+// process's own end: the stream stopped because the transport under it
+// stopped, and the far command may be running still.
+//
+// It carries no status of its own — ExitCode is the shell's, and stays -1 —
+// and names the cause through the SAME optional-interface probe the helper's
+// exit mapping already uses for ExitCode and Signal, so that untagged package
+// never links this ssh-tagged one (internal/helper/session's watchExit).
+type linkLostError struct{ err error }
+
+func (e *linkLostError) Error() string {
+	if e.err == nil {
+		return "ssh: the connection this shell rode ended"
+	}
+	return "ssh: the connection this shell rode ended: " + e.err.Error()
+}
+
+func (e *linkLostError) Unwrap() error { return e.err }
+
+func (e *linkLostError) ExitCause() string { return string(proto.ExitCauseLinkLost) }
 
 // ShellExit is what a shell channel's wait returned, in the vocabulary the
 // session layer already consumes: an error carrying an exit CODE.

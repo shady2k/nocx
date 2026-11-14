@@ -1080,7 +1080,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	// added to ConnectConfig and not to this list now fails a test rather
 	// than waiting to be noticed.
 	if cfg.KeepaliveInterval > 0 {
-		opts = append(opts, ssh.WithKeepalive(cfg.KeepaliveInterval, cfg.KeepaliveCountMax))
+		opts = append(opts, ssh.WithKeepalive(cfg.KeepaliveInterval))
 	}
 	if cfg.ReadyTimeout > 0 {
 		opts = append(opts, ssh.WithTimeout(cfg.ReadyTimeout))

@@ -377,7 +377,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.fieldPort': 'Порт',
   'connections.group.fieldJumpServer': 'Jump-сервер',
   'connections.group.fieldKeepaliveInterval': 'Интервал keepalive (мс)',
-  'connections.group.fieldKeepaliveCountMax': 'Максимум keepalive-проверок',
   'connections.group.fieldReadyTimeout': 'Тайм-аут готовности (мс)',
   'connections.group.fieldAgentForward': 'Проброс агента',
   'connections.group.fieldPortDiscovery': 'Определение порта',
@@ -421,7 +420,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.impact.fieldAuth': 'режим аутентификации',
   'connections.impact.fieldJumpServer': 'jump-сервер',
   'connections.impact.fieldKeepaliveInterval': 'интервал keepalive',
-  'connections.impact.fieldKeepaliveCountMax': 'максимум keepalive-проверок',
   'connections.impact.fieldReadyTimeout': 'тайм-аут готовности',
   'connections.impact.fieldAgentForwarding': 'проброс агента',
   'connections.impact.fieldPortDiscovery': 'определение порта',
@@ -452,12 +450,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.portRequired': 'Укажите порт',
   'connections.editor.keepaliveInvalid':
     'Интервал keepalive должен быть неотрицательным целым числом',
-  'connections.editor.keepaliveCountInvalid':
-    'Максимум keepalive-проверок должен быть неотрицательным целым числом',
   'connections.editor.readyTimeoutInvalid':
     'Тайм-аут готовности должен быть неотрицательным целым числом',
   'connections.editor.fieldKeepaliveInterval': 'Интервал keepalive (мс)',
-  'connections.editor.fieldKeepaliveCountMax': 'Максимум keepalive-проверок',
   'connections.editor.fieldReadyTimeout': 'Тайм-аут готовности (мс)',
   'connections.editor.fieldJumpServer': 'Jump-сервер',
   'connections.editor.none': '&mdash; Нет &mdash;',

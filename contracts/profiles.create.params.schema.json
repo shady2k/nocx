@@ -75,10 +75,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "keepaliveCountMax": {
-          "type": "integer",
-          "minimum": 0
-        },
         "readyTimeout": {
           "type": "integer",
           "minimum": 0

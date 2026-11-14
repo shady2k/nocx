@@ -336,7 +336,6 @@ func diffResolvedOptions(oldEff, newEff profile.EffectiveProfile, oldErr, newErr
 	addDiff("auth", oldOpts.Auth, newOpts.Auth)
 	addDiff("jumpHost", oldOpts.JumpHost, newOpts.JumpHost)
 	addDiff("keepaliveInterval", oldOpts.KeepaliveInterval, newOpts.KeepaliveInterval)
-	addDiff("keepaliveCountMax", oldOpts.KeepaliveCountMax, newOpts.KeepaliveCountMax)
 	addDiff("readyTimeout", oldOpts.ReadyTimeout, newOpts.ReadyTimeout)
 	addDiff("agentForward", oldOpts.AgentForward, newOpts.AgentForward)
 	return diffs

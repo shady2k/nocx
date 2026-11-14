@@ -370,7 +370,6 @@ func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
 		"user":                 field("dev", profile.EffectiveSourceDefault),
 		"auth":                 field("", profile.EffectiveSourceDefault),
 		"keepaliveInterval":    field(0, profile.EffectiveSourceDefault),
-		"keepaliveCountMax":    field(0, profile.EffectiveSourceDefault),
 		"readyTimeout":         field(0, profile.EffectiveSourceDefault),
 		"jumpHost":             field("", profile.EffectiveSourceDefault),
 		"agentForward":         field(false, profile.EffectiveSourceDefault),

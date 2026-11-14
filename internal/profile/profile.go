@@ -274,7 +274,6 @@ type SSHProfileOptions struct {
 	User              string            `json:"user,omitempty"`
 	Auth              AuthMode          `json:"auth,omitempty"`
 	KeepaliveInterval int               `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax int               `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout      int               `json:"readyTimeout,omitempty"`
 	JumpHost          string            `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
 	AgentForward      bool              `json:"agentForward,omitempty"`
@@ -308,7 +307,6 @@ type StoredSSHProfileOptions struct {
 	User                 *string               `json:"user,omitempty"`
 	Auth                 *AuthMode             `json:"auth,omitempty"`
 	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
 	KeyPath              *string               `json:"keyPath,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
@@ -349,9 +347,6 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	}
 	if s.KeepaliveInterval != nil {
 		o.KeepaliveInterval = *s.KeepaliveInterval
-	}
-	if s.KeepaliveCountMax != nil {
-		o.KeepaliveCountMax = *s.KeepaliveCountMax
 	}
 	if s.ReadyTimeout != nil {
 		o.ReadyTimeout = *s.ReadyTimeout
@@ -415,10 +410,6 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 		v := o.KeepaliveInterval
 		s.KeepaliveInterval = &v
 	}
-	if o.KeepaliveCountMax != 0 {
-		v := o.KeepaliveCountMax
-		s.KeepaliveCountMax = &v
-	}
 	if o.ReadyTimeout != 0 {
 		v := o.ReadyTimeout
 		s.ReadyTimeout = &v
@@ -480,7 +471,6 @@ func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s.Auth = o.Auth
 	s.JumpHost = o.JumpHost
 	s.KeepaliveInterval = o.KeepaliveInterval
-	s.KeepaliveCountMax = o.KeepaliveCountMax
 	s.ReadyTimeout = o.ReadyTimeout
 	s.AgentForward = o.AgentForward
 	s.DesiredMode = o.DesiredMode
@@ -525,7 +515,6 @@ type SparseSSHOptions struct {
 	Auth                 *AuthMode             `json:"auth,omitempty"`
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	KeepaliveInterval    *int                  `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax    *int                  `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout         *int                  `json:"readyTimeout,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
 	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
@@ -547,14 +536,20 @@ type ProfileDefaults struct {
 // allowedDefaultKeys returns the set of JSON field names ProfileDefaults
 // accepts. Used in custom unmarshaling and DecodeDefaults.
 var allowedFields = map[string]bool{
-	"passwordSecret":       true,
-	"keySecret":            true,
-	"keyPassphraseSecret":  true,
-	"port":                 true,
-	"user":                 true,
-	"keyPath":              true,
-	"jumpHost":             true,
-	"keepaliveInterval":    true,
+	"passwordSecret":      true,
+	"keySecret":           true,
+	"keyPassphraseSecret": true,
+	"port":                true,
+	"user":                true,
+	"keyPath":             true,
+	"jumpHost":            true,
+	"keepaliveInterval":   true,
+	// keepaliveCountMax was a field until stage 2 and is RETIRED: design §5.3
+	// replaced "N missed intervals" with a fixed soft deadline, so nothing
+	// reads it. It stays ACCEPTED here because this map is what decides
+	// whether a stored group default is refused — and refusing a document a
+	// person already saved would take their connections down on upgrade. It is
+	// ignored, and dropped the next time the group is written.
 	"keepaliveCountMax":    true,
 	"readyTimeout":         true,
 	"agentForward":         true,
@@ -943,10 +938,6 @@ func applySparseLayer(acc *SparseSSHOptions, source *map[string]FieldSource, src
 		acc.KeepaliveInterval = src.KeepaliveInterval
 		setSource(source, "keepaliveInterval", layer)
 	}
-	if src.KeepaliveCountMax != nil {
-		acc.KeepaliveCountMax = src.KeepaliveCountMax
-		setSource(source, "keepaliveCountMax", layer)
-	}
 	if src.ReadyTimeout != nil {
 		acc.ReadyTimeout = src.ReadyTimeout
 		setSource(source, "readyTimeout", layer)
@@ -1008,9 +999,6 @@ func sparseToOptions(s SparseSSHOptions) SSHProfileOptions {
 	}
 	if s.KeepaliveInterval != nil {
 		o.KeepaliveInterval = *s.KeepaliveInterval
-	}
-	if s.KeepaliveCountMax != nil {
-		o.KeepaliveCountMax = *s.KeepaliveCountMax
 	}
 	if s.ReadyTimeout != nil {
 		o.ReadyTimeout = *s.ReadyTimeout
@@ -1315,7 +1303,6 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) Eff
 	addField("user", p.User, eff.Source["user"])
 	addField("auth", string(p.Auth), eff.Source["auth"])
 	addField("keepaliveInterval", p.KeepaliveInterval, eff.Source["keepaliveInterval"])
-	addField("keepaliveCountMax", p.KeepaliveCountMax, eff.Source["keepaliveCountMax"])
 	addField("readyTimeout", p.ReadyTimeout, eff.Source["readyTimeout"])
 	addField("jumpHost", p.JumpHost, eff.Source["jumpHost"])
 	addField("agentForward", p.AgentForward, eff.Source["agentForward"])
@@ -1375,7 +1362,6 @@ const (
 	patchKeySecret            patchPath = "options.keySecret" //nolint:gosec // a JSON patch path naming the key-secret field, not a credential
 	patchKeyPassphraseSecret  patchPath = "options.keyPassphraseSecret"
 	patchKeepaliveInterval    patchPath = "options.keepaliveInterval"
-	patchKeepaliveCountMax    patchPath = "options.keepaliveCountMax"
 	patchReadyTimeout         patchPath = "options.readyTimeout"
 	patchJumpHost             patchPath = "options.jumpHost"
 	patchAgentForward         patchPath = "options.agentForward"
@@ -1406,7 +1392,6 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchKeySecret:            true,
 		patchKeyPassphraseSecret:  true,
 		patchKeepaliveInterval:    true,
-		patchKeepaliveCountMax:    true,
 		patchReadyTimeout:         true,
 		patchJumpHost:             true,
 		patchAgentForward:         true,
@@ -1447,9 +1432,6 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 	case patchKeepaliveInterval:
 		v := toInt(value)
 		opts.KeepaliveInterval = &v
-	case patchKeepaliveCountMax:
-		v := toInt(value)
-		opts.KeepaliveCountMax = &v
 	case patchReadyTimeout:
 		v := toInt(value)
 		opts.ReadyTimeout = &v
@@ -1509,8 +1491,6 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.KeyPassphraseSecret = ""
 	case patchKeepaliveInterval:
 		opts.KeepaliveInterval = nil
-	case patchKeepaliveCountMax:
-		opts.KeepaliveCountMax = nil
 	case patchReadyTimeout:
 		opts.ReadyTimeout = nil
 	case patchJumpHost:

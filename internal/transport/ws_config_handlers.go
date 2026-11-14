@@ -281,7 +281,6 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 		v     *int
 	}{
 		{"options.keepaliveInterval", o.KeepaliveInterval},
-		{"options.keepaliveCountMax", o.KeepaliveCountMax},
 		{"options.readyTimeout", o.ReadyTimeout},
 	} {
 		if f.v != nil && *f.v < 0 {
@@ -520,7 +519,6 @@ func validateSparseDefaults(d *profile.ProfileDefaults) string {
 		v     *int
 	}{
 		{"defaults.keepaliveInterval", o.KeepaliveInterval},
-		{"defaults.keepaliveCountMax", o.KeepaliveCountMax},
 		{"defaults.readyTimeout", o.ReadyTimeout},
 	} {
 		if f.v != nil && *f.v < 0 {

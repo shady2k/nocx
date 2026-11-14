@@ -162,7 +162,6 @@ type BackupSSHOptions struct {
 	Auth              profile.AuthMode          `json:"auth,omitempty"`
 	KeyPath           string                    `json:"keyPath,omitempty"`
 	KeepaliveInterval int                       `json:"keepaliveInterval,omitempty"`
-	KeepaliveCountMax int                       `json:"keepaliveCountMax,omitempty"`
 	ReadyTimeout      int                       `json:"readyTimeout,omitempty"`
 	JumpHost          string                    `json:"jumpHost,omitempty"`
 	AgentForward      bool                      `json:"agentForward,omitempty"`

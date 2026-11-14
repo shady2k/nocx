@@ -192,7 +192,9 @@ package proto
 // hello in both directions, which is what makes the number the whole of the
 // compatibility story.
 // This is 15 rather than 14 because the wire grew keepalive: `session
-// .spawn-ssh.params` gained `keepaliveIntervalMs` and `keepaliveCountMax`,
+// .spawn-ssh.params` gained `keepaliveIntervalMs` and `keepaliveCountMax`
+// (the count max has since been retired with design §5.3, which replaced "N
+// missed intervals" with a fixed soft deadline; the interval stayed),
 // and the `session` service gained the `liveness` event (nocx-y6fh7 item 6).
 // The helper is the party holding the ssh connection since ADR-0057, so it
 // is the only party that can arm a prober against it at all — greenfield, so

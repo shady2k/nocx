@@ -72,6 +72,10 @@
     {
       "test": "e2e:e2e/block-right-click.spec.ts › a running block offers its own menu — Stop — and the program is sent no paste",
       "bead": "nocx-agwul"
+    },
+    {
+      "test": "go:TestBashAgentWrapperCancelsTheLaunchOnCtrlC",
+      "bead": "nocx-xvxoa"
     }
   ]
 }

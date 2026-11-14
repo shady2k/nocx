@@ -36,6 +36,7 @@ import type { PolicyClient } from './policy-client'
 import { AgentAccessSection } from './agent-access-section'
 import type { AgentAccessClient } from './agent-access-client'
 import { AgentRecordsSection } from './agent-records-section'
+import { AgentInstalledSection } from './agent-installed-section'
 import type { AgentRecordsClient } from './agent-records-client'
 import { AgentEmittingSection } from './agent-emitting-section'
 import { AgentCalibrationSection } from './agent-calibration-section'
@@ -793,6 +794,36 @@ export function SettingsComponent(props: SettingsComponentProps) {
       ),
     }
 
+    // WHICH AGENTS ARE ON THIS COMPUTER (nocx-a62cl.12.2), directly after the
+    // launch records: that page says how nocx starts an agent and what it
+    // resumes under, this one says whether the agent is here at all, and a
+    // person repairing "it is not installed" is reading the two together. It
+    // is a page of its own rather than a block on the records page because 4b
+    // makes it the assistant's entry — the place a person is sent when no
+    // agent can answer (ADR-anntnxdj decision 6).
+    const agentInstalledPage: SettingsPage = {
+      kind: 'component',
+      id: 'agent-installed',
+      title: t('settings.fallback.installed.title', 'Agents on this computer'),
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.agentRecordsClient}
+          fallback={
+            <PageSection title={t('settings.fallback.installed.title', 'Agents on this computer')}>
+              {t(
+                'settings.fallback.installed.body',
+                'Which agents are on this computer is not available in this window.',
+              )}
+            </PageSection>
+          }
+        >
+          <AgentInstalledSection client={props.agentRecordsClient!} />
+        </Show>
+      ),
+    }
+
     const emittingPage: SettingsPage = {
       kind: 'component',
       id: 'emitting',
@@ -946,6 +977,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // person brought (nocx-6jbad).
       agentAccessPage,
       agentRecordsPage,
+      agentInstalledPage,
       emittingPage,
       rulesPage,
       calibrationPage,

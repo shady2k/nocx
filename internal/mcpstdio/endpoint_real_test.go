@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -50,6 +51,9 @@ func (testUIDOwner) OwnerUID(string) (uint32, error) { return testUID, nil }
 type slotAuthorizer struct {
 	mu   sync.Mutex
 	held bool
+	// admissions counts the connections this session admitted, which is how a
+	// test reads "the cancellation did not take the connection with it".
+	admissions int
 }
 
 func (a *slotAuthorizer) Admit(_ toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
@@ -59,6 +63,7 @@ func (a *slotAuthorizer) Admit(_ toolendpoint.Peer, publish func(session string,
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrSessionCallerActive
 	}
 	a.held = true
+	a.admissions++
 	a.mu.Unlock()
 
 	var once sync.Once
@@ -79,12 +84,23 @@ func (a *slotAuthorizer) Admit(_ toolendpoint.Peer, publish func(session string,
 	}, release, nil
 }
 
+func (a *slotAuthorizer) admitted() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.admissions
+}
+
 // heldDispatcher is the tool surface on the far side: one call that does not
 // answer until the test lets it, and one that answers at once.
 type heldDispatcher struct {
 	held     chan struct{}
 	release  chan struct{}
 	holdOnce sync.Once
+	// stopped reports that a held call's CONTEXT ended, which is the fact a
+	// cancellation asserts and a released call cannot stand in for: both end
+	// the call, and only one of them is the backend having been told.
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func (d *heldDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) {
@@ -96,6 +112,9 @@ func (d *heldDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) 
 	case <-d.release:
 		return `{"held":true}`, nil
 	case <-inv.Context.Done():
+		if d.stopped != nil {
+			d.stopOnce.Do(func() { close(d.stopped) })
+		}
 		return "", inv.Context.Err()
 	}
 }
@@ -188,6 +207,70 @@ func TestASecondCallCrossesTheRealEndpointWhileTheFirstIsHeld(t *testing.T) {
 	close(dispatcher.release)
 	if text := toolText(t, driver.nextID(2)); text != `{"held":true}` {
 		t.Fatalf("the held call answered %s", text)
+	}
+}
+
+// A CANCELLED CALL STOPS IN THE BACKEND, AND ITS SIBLING IS NOT DISTURBED.
+//
+// The adapter's job is the translation: MCP's notifications/cancelled names the
+// CLIENT's request, the endpoint numbers its own, and only the adapter knows
+// which of its requests is which. What is asserted is therefore the backend's
+// own report — the executor saw its context end — and the sibling's answer on
+// the same connection (nocx-98qho).
+//
+// The second case is the control: the same two calls, nothing cancelled, both
+// answer. Without it the first case would pass on a session where every call
+// dies.
+func TestACancelledCallStopsAtTheEndpointAndItsSiblingIsAnswered(t *testing.T) {
+	for _, cancelled := range []bool{true, false} {
+		name := "left alone"
+		if cancelled {
+			name = "cancelled"
+		}
+		t.Run(name, func(t *testing.T) {
+			dispatcher := &heldDispatcher{
+				held:    make(chan struct{}),
+				release: make(chan struct{}),
+				stopped: make(chan struct{}),
+			}
+			auth := &slotAuthorizer{}
+			endpoint := startRealEndpoint(t, auth, dispatcher)
+			driver := startStdio(t, endpoint.SocketPath())
+			initialization(driver)
+
+			driver.send(2, "tools/call", `{"name":"alpha.hold"}`)
+			<-dispatcher.held
+			driver.send(3, "tools/call", `{"name":"alpha.screen"}`)
+			if text := toolText(t, driver.nextID(3)); text != `{"screen":true}` {
+				t.Fatalf("the call beside the held one answered %s", text)
+			}
+
+			if !cancelled {
+				close(dispatcher.release)
+				if text := toolText(t, driver.nextID(2)); text != `{"held":true}` {
+					t.Fatalf("the held call answered %s", text)
+				}
+				return
+			}
+
+			driver.notify("notifications/cancelled", `{"requestId":2,"reason":"no longer needed"}`)
+			select {
+			case <-dispatcher.stopped:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the cancelled call's executor was never told: the backend is still running it")
+			}
+
+			// A CALL THE ENDPOINT ANSWERS ITSELF IS THE FENCE. Its answer can
+			// only follow the cancellation, so reading it proves that no
+			// response for the cancelled call came first — MCP carries none.
+			driver.send(4, "tools/call", `{"name":"alpha.screen"}`)
+			if text := toolText(t, driver.nextID(4)); text != `{"screen":true}` {
+				t.Fatalf("the session answered %s after a cancellation", text)
+			}
+			if got := auth.admitted(); got != 1 {
+				t.Fatalf("endpoint connections = %d, want the session's one: the cancellation took the connection with it", got)
+			}
+		})
 	}
 }
 

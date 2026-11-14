@@ -25,6 +25,11 @@ import (
 const (
 	maxMessageBytes = 256 << 10
 	latestVersion   = "2025-11-25"
+	// cancelWriteWindow bounds the one frame a cancellation writes. Nothing
+	// reads it and nothing answers it, so the only thing it protects is this
+	// process: a peer that stopped reading must not hold the goroutine that
+	// asked the backend to stop.
+	cancelWriteWindow = 5 * time.Second
 )
 
 var supportedVersions = [...]string{
@@ -220,7 +225,13 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 			}
 
 			callCtx, cancel := context.WithCancel(ctx)
-			active.add(request.ID, cancel)
+			// THE CALL'S FLIGHT, carried by the context so every request this
+			// call makes on the shared connection can be named by a cancel —
+			// including the catalogue and instructions loads it makes on the
+			// way (nocx-98qho).
+			flight := &callFlight{}
+			callCtx = withCallFlight(callCtx, flight)
+			active.add(request.ID, cancel, flight)
 			requests.Add(1)
 			wait, leave := gate.enter(writesSessionState(request.Method))
 			go func(request requestMessage, callCtx context.Context, cancel context.CancelFunc, wait <-chan struct{}, leave func(bool)) {
@@ -727,6 +738,59 @@ func (e *upstreamError) refusal() bool {
 	return e.Code == -32000 || e.Code == -32001
 }
 
+// callFlight is the endpoint request one bridge call is waiting on, and the way
+// that call's cancellation reaches the backend (nocx-98qho).
+//
+// The bridge's ids are its CLIENT's and the endpoint's are its own; a cancel
+// has to name the id the endpoint is holding, so the id is bound where it is
+// chosen — at the moment the frame is about to leave — and the cancel reads it
+// from here.
+//
+// IT IS NEVER CLEARED, deliberately. A cancel that lands after the answer is a
+// no-op at the endpoint, which has already forgotten the id; clearing on return
+// would instead race the cancellation this exists to deliver. The binding is
+// only written before a send, so a cancel that finds none has found a call
+// whose context was already cancelled and whose frame therefore never left
+// (see endpointLink.call).
+type callFlight struct {
+	mu   sync.Mutex
+	conn *endpointConn
+	id   int64
+	// cancelled makes a repeated notification cost one frame rather than one
+	// goroutine each. A client that repeats its cancellation is asking for
+	// something already asked for.
+	cancelled bool
+}
+
+func (f *callFlight) bind(conn *endpointConn, id int64) {
+	f.mu.Lock()
+	f.conn, f.id = conn, id
+	f.mu.Unlock()
+}
+
+func (f *callFlight) cancel() {
+	f.mu.Lock()
+	conn, id := f.conn, f.id
+	repeat := f.cancelled
+	f.cancelled = true
+	f.mu.Unlock()
+	if conn == nil || repeat {
+		return
+	}
+	conn.cancelRequest(id)
+}
+
+type callFlightContextKey struct{}
+
+func withCallFlight(ctx context.Context, flight *callFlight) context.Context {
+	return context.WithValue(ctx, callFlightContextKey{}, flight)
+}
+
+func callFlightFrom(ctx context.Context) *callFlight {
+	flight, _ := ctx.Value(callFlightContextKey{}).(*callFlight)
+	return flight
+}
+
 // endpointLink is the adapter's ONE connection to the local tool endpoint,
 // multiplexed for the life of a stdio session.
 //
@@ -846,6 +910,13 @@ func (l *endpointLink) call(ctx context.Context, method string, params json.RawM
 			return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, err)
 		}
 		reply := conn.expect(id)
+		// BOUND BEFORE THE FRAME IS WRITTEN. A cancel that sees no binding has
+		// therefore found a context already cancelled, and the send below
+		// refuses to write it; the other order would leave a window in which
+		// the frame is out and the cancel names nothing (nocx-98qho).
+		if flight := callFlightFrom(ctx); flight != nil {
+			flight.bind(conn, id)
+		}
 		arrived, writeErr := conn.send(ctx, id, method, params)
 		if writeErr != nil {
 			conn.forget(id)
@@ -1058,6 +1129,37 @@ func (c *endpointConn) failure() error {
 		return errors.New("endpoint closed the connection")
 	}
 	return c.err
+}
+
+// cancelRequest tells the endpoint to stop the request with this id, on the
+// connection that carried it (nocx-98qho).
+//
+// IT IS BEST EFFORT, AND IT IS OWED TO NOBODY. The caller has already stopped
+// waiting, so no answer is read and no id is awaited; what it buys is the
+// BACKEND stopping the work instead of running it out to its own bound or its
+// own effect. It takes the connection's write turn for the same reason every
+// other frame does — two writers on one socket interleave halves of two
+// messages — and it is bounded by a write deadline of its own, because a peer
+// that stopped reading must not park the goroutine that asked.
+//
+// A write that fails is not reported: a connection that cannot take this frame
+// is one that is ending, and the endpoint cancels every call of a connection it
+// closes — which is the same outcome this message was asking for.
+func (c *endpointConn) cancelRequest(id int64) {
+	envelope, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "calls.cancel",
+		"params":  map[string]any{"requestId": id},
+	})
+	if err != nil {
+		return
+	}
+	frame := append(envelope, '\n')
+	c.writeTurn.Lock()
+	defer c.writeTurn.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(cancelWriteWindow))
+	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
+	_, _ = c.conn.Write(frame)
 }
 
 // close ends the connection. Once, whatever else reports it end.
@@ -1319,46 +1421,68 @@ func (w *lineWriter) toolResult(id json.RawMessage, result json.RawMessage, stru
 	return w.write(value)
 }
 
+// activeCall is one request this session is serving: the way to end it here,
+// and the endpoint request it is waiting on, so a cancellation reaches both.
+type activeCall struct {
+	cancel context.CancelFunc
+	flight *callFlight
+}
+
 type activeCalls struct {
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	mu    sync.Mutex
+	calls map[string]activeCall
 }
 
 func newCalls() *activeCalls {
-	return &activeCalls{cancels: make(map[string]context.CancelFunc)}
+	return &activeCalls{calls: make(map[string]activeCall)}
 }
 
-func (c *activeCalls) add(id json.RawMessage, cancel context.CancelFunc) {
+func (c *activeCalls) add(id json.RawMessage, cancel context.CancelFunc, flight *callFlight) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cancels[string(bytes.TrimSpace(id))] = cancel
+	c.calls[string(bytes.TrimSpace(id))] = activeCall{cancel: cancel, flight: flight}
 }
 
 func (c *activeCalls) remove(id json.RawMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.cancels, string(bytes.TrimSpace(id)))
+	delete(c.calls, string(bytes.TrimSpace(id)))
 }
 
+// cancel ends one call HERE and, when its frame is out, at the ENDPOINT. The
+// context is what stops this process waiting for an answer; the message is what
+// stops the backend running the call, which used to go on to its own bound or
+// its own effect (nocx-98qho). Cancelling the context comes first, and the
+// ordering is load-bearing: a flight that is not bound yet means the frame has
+// not been written, and a write checks that context before it sends.
 func (c *activeCalls) cancel(id string) {
 	if id == "" {
 		return
 	}
 	c.mu.Lock()
-	cancel := c.cancels[id]
+	call := c.calls[id]
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if call.cancel == nil {
+		return
 	}
+	call.cancel()
+	if call.flight == nil {
+		return
+	}
+	// THE READ LOOP DOES NOT WAIT FOR THE WRITE. The cancel takes the
+	// connection's write turn, which a sibling's frame may hold, and the loop
+	// that read this notification has every other request of the session to
+	// serve.
+	go call.flight.cancel()
 }
 
 func (c *activeCalls) cancelAll() {
 	c.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(c.cancels))
-	for _, cancel := range c.cancels {
-		cancels = append(cancels, cancel)
+	cancels := make([]context.CancelFunc, 0, len(c.calls))
+	for _, call := range c.calls {
+		cancels = append(cancels, call.cancel)
 	}
-	c.cancels = make(map[string]context.CancelFunc)
+	c.calls = make(map[string]activeCall)
 	c.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()

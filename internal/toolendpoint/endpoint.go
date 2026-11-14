@@ -618,6 +618,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			release()
 		}
 	}()
+	// THE CALLS IN FLIGHT ON THIS CONNECTION, by the id the caller gave each.
+	// A cancel notification is read by the loop below, so a call has to be in
+	// this set before the loop reads the next line — see where it is added.
+	cancels := newRequestCancels()
 	var inFlight atomic.Int32
 	for {
 		if inFlight.Load() == 0 {
@@ -649,6 +653,13 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			continue
 		}
 		if requestNotification(request) {
+			// A CALLER MAY STOP ONE OF ITS OWN CALLS without ending the
+			// connection its siblings share (nocx-98qho). The one message
+			// that says so is consumed here; everything else is still a
+			// notification this endpoint does not know.
+			if e.cancelRequest(request, cancels) {
+				continue
+			}
 			e.writeError(conn, request.ID, rpcInvalidRequest, "invalid request", "worker notifications are not supported")
 			continue
 		}
@@ -659,15 +670,26 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 
 		requests.Add(1)
 		inFlight.Add(1)
-		go func(request rpcRequest) {
+		// THE CALL'S OWN CONTEXT IS MADE HERE, NOT IN THE GOROUTINE. The
+		// cancel notification is read by this loop, so the id it names must be
+		// in the set before the next line is read: made inside the goroutine,
+		// a cancel that follows its call immediately would find nothing, the
+		// call would run to completion, and the defect this exists to fix
+		// would come back as a scheduling window.
+		requestCtx, requestCancel := context.WithCancel(connectionCtx)
+		cancels.add(request.ID, requestCancel)
+		go func(request rpcRequest, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer requests.Done()
 			defer func() {
 				if inFlight.Add(-1) == 0 {
 					_ = conn.SetReadDeadline(time.Now().Add(requestReadWindow))
 				}
 			}()
-			requestCtx, requestCancel := context.WithCancel(connectionCtx)
+			// THE SET IS CLEANED BEFORE THE CONTEXT IS ENDED, so a cancel that
+			// races the answer finds either a live call or nothing — never an
+			// entry whose cancel function is about to be called anyway.
 			defer requestCancel()
+			defer cancels.remove(request.ID)
 			// The caller's frame becomes this one's parent, and this request
 			// gets a span of its own under their trace. Everything below —
 			// the dispatch, the refusals, the answer — hangs off it, because
@@ -748,7 +770,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 				})
 			}
 			e.writeResult(conn, request.ID, json.RawMessage(result))
-		}(request)
+		}(request, requestCtx, requestCancel)
 
 	}
 }

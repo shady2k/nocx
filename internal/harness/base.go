@@ -6,173 +6,57 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
-	"github.com/shady2k/nocx/internal/proc"
 	"github.com/shady2k/nocx/internal/shellenv"
 )
 
-// DefaultMaxLineBytes bounds one line of an agent's stdout. It is generous
-// because a tool result may be large; it exists so a program that never sends
-// a newline cannot exhaust the backend's memory.
 const DefaultMaxLineBytes = 4 << 20
 
-// ErrCancelled is Wait's error for a turn stopped by Cancel.
 var ErrCancelled = errors.New("the turn was cancelled")
 
-// TurnError is a turn that failed. Reason is the sentence the block shows.
-type TurnError struct {
-	Reason string
-}
+type TurnError struct{ Reason string }
 
 func (e *TurnError) Error() string { return e.Reason }
 
-// Decoder turns one line of the agent's stdout into the events it states. An
-// error means the connector cannot read the agent's protocol; the turn fails
-// and the process is stopped rather than left running.
-type Decoder func(line []byte) ([]Event, error)
-
-// Launch is one agent process, as a connector describes it.
+// Protocol describes wire commands, never process or turn state.
+type Protocol interface {
+	Start(context.Context, TurnSpec) (Launch, error)
+	Commands(TurnSpec) []Command
+	Cancel() []Command
+	Encode(id string, command Command) ([]byte, error)
+	Decode(line []byte) (Decoded, error)
+}
+type Command struct {
+	Name    string
+	Payload any
+}
+type Response struct {
+	ID    string
+	Error string
+}
+type Decoded struct {
+	Events   []Event
+	Response *Response
+}
 type Launch struct {
-	// Argv is the program and its arguments. It is executed directly, with
-	// no shell between nocx and the agent.
 	Argv []string
-	// Env is added to the login shell's environment. It carries only what
-	// belongs to the agent; the turn's tool bridge environment is added to
-	// the bridge child alone.
-	Env []string
-	// ExtraFiles are inherited by the agent at descriptors 3 and above. The
-	// connector retains ownership of the parent descriptors.
-	ExtraFiles []*os.File
-	// Dir is the agent's working directory; empty inherits the backend's.
-	Dir string
-	// Decode reads the agent's own protocol off stdout.
-	Decode Decoder
-	// CompleteOnEnd closes stdin after a terminal protocol response. RPC agents
-	// that exit on stdin EOF use this; other connectors call CloseStdin themselves.
-	CompleteOnEnd bool
-	// FailureReason translates bounded stderr after an unsuccessful exit. An empty
-	// result keeps the shared exit reason. It is never called on successful exit.
-	FailureReason func(stderr string, exitErr error) string
+	Env  []string
+	Dir  string
 }
-
-// Base is the shared process ownership every connector uses: the agent runs in
-// its own process group with stdin and stdout pipes and the login shell's
-// environment, and the turn's lifetime is this type's.
 type Base struct {
-	// MaxLineBytes bounds one stdout line; zero means DefaultMaxLineBytes.
-	MaxLineBytes int
-	// MaxStderrBytes bounds captured diagnostics; zero uses 64 KiB.
+	MaxLineBytes   int
 	MaxStderrBytes int
-	// ShutdownTimeout bounds graceful shutdown after stdin closes. Zero uses one second.
+	// ShutdownTimeout overrides the ten-second cancel/shutdown bound for tests.
 	ShutdownTimeout time.Duration
+	// IdleTimeout overrides the one-hour idle bound for tests.
+	IdleTimeout time.Duration
 }
 
-// Start runs one agent process and returns its turn.
-func (b Base) Start(ctx context.Context, launch Launch) (*Process, error) {
-	if len(launch.Argv) == 0 {
-		return nil, errors.New("harness: the agent command is empty")
-	}
-	if launch.Decode == nil {
-		return nil, errors.New("harness: the agent has no line decoder")
-	}
-	env, err := loginEnvironment(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	env = mergeEnvironment(env, launch.Env)
-	executable, err := resolveExecutable(launch.Argv[0], env, launch.Dir)
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.Command(executable, launch.Argv[1:]...) //nolint:gosec // the connector states the agent's argv
-	cmd.Env = env
-	cmd.ExtraFiles = launch.ExtraFiles
-	cmd.WaitDelay = time.Second
-	cmd.Dir = launch.Dir
-	// The agent leads its own group, so Cancel and a leftover child are one
-	// signal away and neither reaches nocx.
-	proc.InOwnGroup(cmd)
-
-	stdinR, stdinW, err := os.Pipe()
-	if err != nil {
-		return nil, fmt.Errorf("harness: the agent's stdin pipe: %w", err)
-	}
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		_ = stdinR.Close()
-		_ = stdinW.Close()
-		return nil, fmt.Errorf("harness: the agent's stdout pipe: %w", err)
-	}
-	cmd.Stdin = stdinR
-	cmd.Stdout = stdoutW
-	maxStderr := b.MaxStderrBytes
-	if maxStderr <= 0 {
-		maxStderr = 64 << 10
-	}
-	stderr := &diagnostics{max: maxStderr}
-	cmd.Stderr = stderr
-
-	if err := cmd.Start(); err != nil {
-		_ = stdinR.Close()
-		_ = stdinW.Close()
-		_ = stdoutR.Close()
-		_ = stdoutW.Close()
-		return nil, fmt.Errorf("harness: the agent %s could not be started: %w", launch.Argv[0], err)
-	}
-	// The child holds the other ends now. Keeping ours would mean the agent
-	// never sees EOF on stdin when this process dies, and the pipes would
-	// never report the agent's own end.
-	_ = stdinR.Close()
-	_ = stdoutW.Close()
-
-	maxLine := b.MaxLineBytes
-	if maxLine <= 0 {
-		maxLine = DefaultMaxLineBytes
-	}
-	shutdownTimeout := b.ShutdownTimeout
-	if shutdownTimeout <= 0 {
-		shutdownTimeout = time.Second
-	}
-	p := &Process{
-		cmd:             cmd,
-		stdin:           stdinW,
-		stdout:          stdoutR,
-		decode:          launch.Decode,
-		maxLine:         maxLine,
-		events:          make(chan Event, 64),
-		done:            make(chan struct{}),
-		procDone:        make(chan struct{}),
-		stopped:         make(chan struct{}),
-		completeOnEnd:   launch.CompleteOnEnd,
-		failureReason:   launch.FailureReason,
-		stderr:          stderr,
-		shutdownTimeout: shutdownTimeout,
-	}
-	go p.reap()
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = p.Cancel(context.Background())
-		case <-p.done:
-		}
-	}()
-	go p.pump(ctx)
-	return p, nil
-}
-
-// loginEnvironment is the environment a child of the person's login shell
-// receives. It is the shared reader's job, not this package's: the login
-// shell's rc files decide what a program launched from the desktop can find,
-// and nocx's own environment is not a person's.
 func loginEnvironment(ctx context.Context) ([]string, error) {
 	shell := loginshell.New().Resolve()
 	env, err := shellenv.Env(ctx, shellenv.Spec{
@@ -186,276 +70,6 @@ func loginEnvironment(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("harness: the login shell's environment: %w", err)
 	}
 	return env, nil
-}
-
-// Process is the shared base's turn. It is concrete because a connector also
-// needs the agent's stdin to speak its own protocol; the core holds only the
-// Turn interface.
-type Process struct {
-	cmd     *exec.Cmd
-	stdin   *os.File
-	stdout  *os.File
-	decode  Decoder
-	maxLine int
-
-	events          chan Event
-	done            chan struct{}
-	procDone        chan struct{}
-	waitErr         error
-	cleanupErr      error
-	stopped         chan struct{}
-	completeOnEnd   bool
-	failureReason   func(string, error) string
-	stderr          *diagnostics
-	reaped          bool
-	shutdownTimeout time.Duration
-	shutdownOnce    sync.Once
-	shutdownErr     error
-
-	mu        sync.Mutex
-	finished  bool
-	cancelled bool
-
-	terminalPublished bool // Owned by pump, including forward and finish.
-
-	cancelOnce sync.Once
-	outcome    Outcome
-	err        error
-}
-
-func (p *Process) Events() <-chan Event { return p.events }
-
-// Stdin is the agent's stdin. A connector writes its agent's own protocol
-// here; the shared base owns when the pipe is closed.
-func (p *Process) Stdin() io.Writer { return p.stdin }
-
-// CloseStdin requests graceful protocol shutdown, without cancelling the turn.
-func (p *Process) CloseStdin() error {
-	err := p.stdin.Close()
-	p.shutdownOnce.Do(func() {
-		go func() {
-			timer := time.NewTimer(p.shutdownTimeout)
-			defer timer.Stop()
-			select {
-			case <-p.procDone:
-				return
-			case <-timer.C:
-			}
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			if !p.reaped {
-				p.shutdownErr = errors.New("the agent did not exit after stdin closed")
-				_ = p.killLocked()
-				_ = p.stdout.Close()
-			}
-		}()
-	})
-	return err
-}
-
-func (p *Process) Cancel(_ context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.finished {
-		return nil
-	}
-	p.cancelled = true
-	p.cancelOnce.Do(func() { close(p.stopped) })
-	_ = p.stdin.Close()
-	_ = p.stdout.Close()
-	if p.reaped {
-		return nil
-	}
-	return p.killLocked()
-}
-
-// killLocked is only called while the leader is still owned and unreaped.
-func (p *Process) killLocked() error {
-	if err := proc.KillGroupImmediately(p.cmd); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("harness: the agent's process group could not be stopped: %w", err)
-	}
-	return nil
-}
-
-// Wait's context belongs to this observer, not the running turn. Only the
-// context passed to Start or Cancel stops the agent.
-func (p *Process) Wait(ctx context.Context) (Outcome, error) {
-	select {
-	case <-p.done:
-		return p.outcome, p.err
-	case <-ctx.Done():
-		return Outcome{}, ctx.Err()
-	}
-}
-
-// reap observes exit without releasing the leader's PID. All group signals
-// finish under mu before Wait can release that identity. Cancel uses the same
-// lock and never signals once reaped is set.
-func (p *Process) reap() {
-	p.reapWith(observeExit, awaitGroupGone)
-}
-
-func (p *Process) reapWith(observe func(int) error, cleanup func(int) error) {
-	observeErr := observe(p.cmd.Process.Pid)
-	p.mu.Lock()
-	var signalErr error
-	// Observation infrastructure failure does not release our child. Stop it
-	// before Wait can reap it, while Cancel is excluded by the same lock.
-	// ECHILD alone means ownership is lost and the numeric identity is unsafe.
-	if !errors.Is(observeErr, syscall.ECHILD) {
-		signalErr = p.killLocked()
-	}
-	p.reaped = true
-	p.mu.Unlock()
-	p.waitErr = p.cmd.Wait()
-	p.cleanupErr = errors.Join(observeErr, signalErr, cleanup(p.cmd.Process.Pid))
-	if p.cleanupErr != nil {
-		// A surviving writer must not hide the bounded cleanup failure from Wait.
-		_ = p.stdout.Close()
-	}
-	close(p.procDone)
-}
-
-// pump reads the agent's stdout until it closes, then finalizes the turn. The
-// terminal event is the last one forwarded: a stream that closes exactly once
-// is the contract, and an event after the terminal one would be a second end.
-func (p *Process) pump(ctx context.Context) {
-	defer func() { _ = p.stdout.Close() }()
-	var terminal *Event
-	var protocolErr string
-
-	reader := bufio.NewReaderSize(p.stdout, 64<<10)
-readLoop:
-	for {
-		line, err := readBoundedLine(reader, p.maxLine)
-		if err != nil {
-			if errors.Is(err, errLineTooLong) {
-				protocolErr = fmt.Sprintf("the agent wrote a line longer than %d bytes", p.maxLine)
-			} else if !errors.Is(err, io.EOF) {
-				protocolErr = fmt.Sprintf("the agent's stdout could not be read: %v", err)
-			}
-			break
-		}
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		events, err := p.decode(line)
-		if err != nil {
-			protocolErr = fmt.Sprintf("the agent sent a line this connector cannot read: %v", err)
-			break
-		}
-		for _, ev := range events {
-			if terminal != nil {
-				log.From(ctx).Warn("agent event after the terminal one was dropped", "kind", ev.Kind)
-				continue
-			}
-			if ev.Kind == EventEnd || ev.Kind == EventFailure {
-				if p.completeOnEnd {
-					_ = p.CloseStdin()
-				}
-				// End is provisional until exit and cleanup succeed. A provider
-				// failure can be reported immediately and remains authoritative.
-				if ev.Kind == EventFailure && !p.forward(ev) {
-					break readLoop
-				}
-				done := ev
-				terminal = &done
-			} else if !p.forward(ev) {
-				break readLoop
-			}
-		}
-	}
-
-	_ = p.CloseStdin()
-	// A line this side could not read is a turn this side must stop. A
-	// stream that simply ended is not: the process is expected to exit, and
-	// the reaper kills whatever it left once it has. Killing here would race
-	// a normally exiting agent and turn its clean exit into a signal.
-	if protocolErr != "" {
-		p.mu.Lock()
-		if !p.reaped {
-			_ = p.killLocked()
-		}
-		p.mu.Unlock()
-	}
-	<-p.procDone
-	_ = p.stdout.Close()
-	p.finish(terminal, protocolErr)
-}
-
-// forward checks cancellation before publication. A send and cancellation that
-// race while waiting for queue space are arbitrated by the select below.
-func (p *Process) forward(ev Event) bool {
-	p.mu.Lock()
-	if p.cancelled {
-		p.mu.Unlock()
-		return false
-	}
-	select {
-	case p.events <- ev:
-		p.terminalPublished = ev.Kind == EventEnd || ev.Kind == EventFailure
-		p.mu.Unlock()
-		return true
-	default:
-		p.mu.Unlock()
-	}
-	select {
-	case p.events <- ev:
-		p.mu.Lock()
-		p.terminalPublished = ev.Kind == EventEnd || ev.Kind == EventFailure
-		p.mu.Unlock()
-		return true
-	case <-p.stopped:
-		return false
-	}
-}
-
-// finish publishes End only after successful exit and cleanup. Once a terminal
-// event is published, neither cancellation nor cleanup can rewrite its result.
-func (p *Process) finish(terminal *Event, protocolErr string) {
-	if !p.terminalPublished {
-		p.mu.Lock()
-		shutdownErr := p.shutdownErr
-		p.mu.Unlock()
-		var reason string
-		switch {
-		case p.cleanupErr != nil:
-			reason = "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()
-		case shutdownErr != nil:
-			reason = fmt.Sprint(shutdownErr)
-		case protocolErr != "":
-			reason = protocolErr
-		case p.waitErr != nil:
-			reason = exitReason(p.waitErr)
-			if p.failureReason != nil {
-				if diagnostic := p.failureReason(p.stderr.String(), p.waitErr); diagnostic != "" {
-					reason = diagnostic
-				}
-			}
-		case terminal == nil:
-			reason = "the agent ended without an end event"
-		}
-		if reason != "" {
-			ev := p.sendFailure(reason)
-			terminal = &ev
-		} else if !p.forward(*terminal) {
-			ev := p.sendFailure("cancelled")
-			terminal = &ev
-		}
-	}
-	if terminal.Kind == EventEnd {
-		p.outcome = Outcome{Model: terminal.End.Model, Usage: terminal.End.Usage}
-	} else if terminal.Failure.Reason == "cancelled" {
-		p.err = ErrCancelled
-	} else {
-		p.err = &TurnError{Reason: terminal.Failure.Reason}
-	}
-	p.mu.Lock()
-	p.finished = true
-	close(p.events)
-	close(p.done)
-	p.mu.Unlock()
 }
 
 func exitReason(err error) string {
@@ -491,36 +105,6 @@ func readBoundedLine(r *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
-// sendFailure returns the failure actually published, so a cancellation racing
-// publication cannot give Wait a different reason from the event stream.
-func (p *Process) sendFailure(reason string) Event {
-	p.mu.Lock()
-	if p.cancelled {
-		reason = "cancelled"
-	}
-	ev := Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
-	select {
-	case p.events <- ev:
-		p.mu.Unlock()
-		return ev
-	default:
-		p.mu.Unlock()
-	}
-	select {
-	case <-p.stopped:
-		ev.Failure.Reason = "cancelled"
-		// The disconnected consumer cannot free space. Discard one queued delta,
-		// retaining the sole terminal failure as the final event.
-		select {
-		case <-p.events:
-		default:
-		}
-		p.events <- ev
-	case p.events <- ev:
-	}
-	return ev
-}
-
 type diagnostics struct {
 	mu   sync.Mutex
 	data []byte
@@ -537,7 +121,7 @@ func (d *diagnostics) Write(raw []byte) (int, error) {
 func (d *diagnostics) String() string { d.mu.Lock(); defer d.mu.Unlock(); return string(d.data) }
 
 // Zombie descendants have already terminated and cannot hold resources or run.
-// Their parent's reaping policy is outside this per-turn process owner.
+// Their parent's reaping policy is outside this session process owner.
 func awaitGroupGone(pgid int) error {
 	return awaitGroupGoneWith(pgid, time.Second, groupRunning)
 }

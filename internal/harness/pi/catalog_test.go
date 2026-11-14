@@ -2,78 +2,15 @@ package pi
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/harness"
-	fakemodel "github.com/shady2k/nocx/internal/harness/fakemodeltest"
 )
-
-func agentConfigDir(c *Connector) string {
-	for _, entry := range c.env {
-		if strings.HasPrefix(entry, "PI_CODING_AGENT_DIR=") {
-			return strings.TrimPrefix(entry, "PI_CODING_AGENT_DIR=")
-		}
-	}
-	return ""
-}
-
-func TestRunRefusesRemovedOrSimilarlyNamedModel(t *testing.T) {
-	c, fake := configuredPi(t, fakemodel.Response{Text: []string{"wrong model"}})
-	if _, err := c.Models(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(agentConfigDir(c), "models.json")
-	raw, err := os.ReadFile(path) //nolint:gosec // private test configuration
-	if err != nil {
-		t.Fatal(err)
-	}
-	var config struct {
-		Providers map[string]map[string]json.RawMessage `json:"providers"`
-	}
-	if err = json.Unmarshal(raw, &config); err != nil {
-		t.Fatal(err)
-	}
-	provider := config.Providers["nocx-test"]
-	var models []map[string]json.RawMessage
-	if err = json.Unmarshal(provider["models"], &models); err != nil {
-		t.Fatal(err)
-	}
-	models[0]["id"] = json.RawMessage(`"test-model-replacement"`)
-	provider["models"], err = json.Marshal(models)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err = json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	turn, err := c.Run(context.Background(), harness.TurnSpec{ConversationID: "removed", Text: "question", Model: "nocx-test/test-model", Dir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reason string
-	for event := range turn.Events() {
-		if event.Kind == harness.EventFailure {
-			reason = event.Failure.Reason
-		}
-	}
-	if _, err = turn.Wait(context.Background()); err == nil {
-		t.Fatal("removed model succeeded")
-	}
-	if !strings.Contains(reason, "not in pi's catalogue") {
-		t.Fatalf("failure = %q", reason)
-	}
-	if len(fake.Requests()) != 0 {
-		t.Fatal("removed model reached provider")
-	}
-}
 
 func TestReadinessAndModelsShareCatalogue(t *testing.T) {
 	dir := t.TempDir()
@@ -122,4 +59,40 @@ func TestCatalogueCacheWaitHonorsDeadline(t *testing.T) {
 		t.Fatalf("catalog = %v", err)
 	}
 	<-c.catalogGate
+}
+
+func TestCatalogueRejectsFailedAndIncompleteRPC(t *testing.T) {
+	for _, tc := range []struct{ name, script, want string }{
+		{"failure", `read request; printf '%s\n' '{"type":"response","command":"get_available_models","success":false,"error":"provider unavailable"}'`, "provider unavailable"},
+		{"incomplete", `read request; printf '%s\n' '{"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}'`, "incomplete catalogue"},
+		{"malformed", `read request; printf '%s\n' 'not json'`, "invalid character"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "pi"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
+				t.Fatal(err)
+			}
+			c := New(t.TempDir(), []string{"PATH=" + dir})
+			if _, err := c.Models(context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Models error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCatalogueCancellationReturnsContextError(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+read request
+while :; do :; done
+`
+	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
+		t.Fatal(err)
+	}
+	c := New(t.TempDir(), []string{"PATH=" + dir})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := c.Models(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Models = %v, want deadline exceeded", err)
+	}
 }

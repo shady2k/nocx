@@ -2,13 +2,12 @@
 package pi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -21,29 +20,20 @@ import (
 	"github.com/shady2k/nocx/internal/shellenv"
 )
 
-//go:embed extension.ts
-var extension []byte
-
-// Connector runs one pi process per turn; dataDir owns extensions and sessions.
+// Connector exposes pi catalogue and readiness checks.
 type Connector struct {
 	dataDir       string
 	env           []string
-	base          harness.Base
 	catalogGate   chan struct{}
 	cachedModels  []harness.Model
 	cachedDefault string
 	catalogUntil  time.Time
-	stateErr      error
 }
 
 // New keeps pi's own provider configuration. env supplies process overrides,
 // including PI_CODING_AGENT_DIR for isolated installations and tests.
 func New(dataDir string, env []string) *Connector {
-	c := &Connector{dataDir: dataDir, env: append([]string(nil), env...), catalogGate: make(chan struct{}, 1)}
-	if dataDir != "" {
-		c.stateErr = c.sweepTurnFiles()
-	}
-	return c
+	return &Connector{dataDir: dataDir, env: append([]string(nil), env...), catalogGate: make(chan struct{}, 1)}
 }
 
 func (*Connector) Facts() harness.Facts {
@@ -146,48 +136,12 @@ func (w *authOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
+// Run is unavailable until the pi session protocol is implemented (nocx-a62cl.14.7).
+func (*Connector) Run(ctx context.Context, _ harness.TurnSpec) (harness.Turn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if c.stateErr != nil {
-		return nil, c.stateErr
-	}
-	files, err := c.prepareTurn(spec)
-	if err != nil {
-		return nil, err
-	}
-	cleanup := files.cleanup
-	argv := []string{"pi", "--mode", "rpc", "--session-dir", files.sessionDir, "--session-id", spec.ConversationID, "--no-builtin-tools", "--tools", "mcp__nocx__*"}
-	if spec.Model != "" {
-		argv = append(argv, "--model", spec.Model)
-	}
-	argv = append(argv, "-e", files.extensionPath)
-	state := &cancelState{}
-	decode := newDecoder(state)
-	var selection *modelSelection
-	if spec.Model != "" {
-		selection = newModelSelection(spec.Model, decode)
-		decode = selection.Decode
-	}
-	p, err := c.base.Start(context.WithoutCancel(ctx), harness.Launch{Argv: argv, Env: append(append([]string(nil), c.env...), "NOCX_PI_TURN_FILE="+files.configPath), Dir: files.dir, Decode: decode, ExtraFiles: []*os.File{files.lock}, CompleteOnEnd: true, FailureReason: failureReason})
-	if err != nil {
-		return nil, errors.Join(err, cleanup())
-	}
-	turn := newTurn(ctx, p, cleanup, state)
-	if selection != nil {
-		go selection.prompt(turn, spec.Text)
-	} else {
-		turn.startPrompt(spec.Text)
-	}
-	return turn, nil
-}
-
-func failureReason(stderr string, exitErr error) string {
-	if text := strings.TrimSpace(stderr); text != "" {
-		return "pi failed: " + text
-	}
-	return fmt.Sprint("pi failed: ", exitErr)
+	return nil, errors.New("pi session protocol is unimplemented (nocx-a62cl.14.7)")
 }
 
 // Models asks pi for the models its configured providers can run.
@@ -233,7 +187,7 @@ func (c *Connector) queryCatalog(ctx context.Context) ([]harness.Model, string, 
 		Name     string `json:"name"`
 		Provider string `json:"provider"`
 	}
-	decode := func(line []byte) ([]harness.Event, error) {
+	decode := func(line []byte) error {
 		var r struct {
 			Type    string `json:"type"`
 			Command string `json:"command"`
@@ -245,13 +199,13 @@ func (c *Connector) queryCatalog(ctx context.Context) ([]harness.Model, string, 
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(line, &r); err != nil {
-			return nil, err
+			return err
 		}
 		if r.Type != "response" || (r.Command != "get_available_models" && r.Command != "get_state") {
-			return nil, nil
+			return nil
 		}
 		if !r.Success {
-			return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: r.Error}}}, nil
+			return fmt.Errorf("pi catalogue: %s", r.Error)
 		}
 		if r.Command == "get_available_models" {
 			gotModels = true
@@ -264,27 +218,66 @@ func (c *Connector) queryCatalog(ctx context.Context) ([]harness.Model, string, 
 				selected = m.Provider + "/" + m.ID
 			}
 		}
-		if gotModels && gotState {
-			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{}}}, nil
-		}
-		return nil, nil
+		return nil
 	}
-	p, err := c.base.Start(ctx, harness.Launch{Argv: []string{"pi", "--mode", "rpc", "--no-session"}, Env: c.env, Decode: decode, CompleteOnEnd: true, FailureReason: failureReason})
+	ctx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
+	env, dir, err := (environment{overrides: c.env}).Environment(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	encoder := json.NewEncoder(p.Stdin())
+	path, _ := shellenv.Path(env)
+	executable, err := agentapproval.LookupExecutableInPath("pi", path, dir)
+	if err != nil {
+		return nil, "", err
+	}
+	cmd := exec.CommandContext(ctx, executable, "--mode", "rpc", "--no-session") //nolint:gosec // resolved pi executable, direct argv
+	cmd.Env, cmd.Dir = env, dir
+	proc.InOwnGroup(cmd)
+	cmd.Cancel = func() error { return proc.KillGroupImmediately(cmd) }
+	cmd.WaitDelay = time.Second
+	var stderr authOutput
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = stdin.Close() }()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, "", err
+	}
+	if err = cmd.Start(); err != nil {
+		return nil, "", err
+	}
+	encoder := json.NewEncoder(stdin)
 	for _, command := range []string{"get_available_models", "get_state"} {
 		if err = encoder.Encode(map[string]string{"type": command}); err != nil {
-			_ = p.Cancel(context.Background())
 			break
 		}
 	}
-	for range p.Events() {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4096), 4<<20)
+	for err == nil && !(gotModels && gotState) && scanner.Scan() {
+		err = decode(scanner.Bytes())
 	}
-	_, waitErr := p.Wait(context.Background())
-	if err = errors.Join(err, waitErr); err != nil {
+	if err == nil {
+		err = scanner.Err()
+	}
+	complete := gotModels && gotState && err == nil
+	// Discovery owns no conversation. End its process group even if an extension
+	// keeps a pipe open or pi does not exit on stdin EOF.
+	_ = stdin.Close()
+	_ = proc.KillGroupImmediately(cmd)
+	waitErr := cmd.Wait()
+	if err != nil {
 		return nil, "", err
+	}
+	if !complete {
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		return nil, "", fmt.Errorf("pi catalogue ended before both responses: %w (%s)", errors.Join(waitErr, errors.New("incomplete catalogue")), strings.TrimSpace(stderr.String()))
 	}
 	return models, selected, nil
 }

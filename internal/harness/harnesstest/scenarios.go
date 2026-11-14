@@ -68,6 +68,17 @@ type Fixture struct {
 // Run applies the same behavioral assertions to every connector driver.
 func Run(t *testing.T, driver Driver) {
 	t.Helper()
+	original := driver
+	driver = func(t *testing.T, setup DriverSetup) Fixture {
+		fixture := original(t, setup)
+		t.Cleanup(func() {
+			if c, ok := fixture.Harness.(closer); ok {
+				_ = c.Close(context.Background())
+			}
+		})
+		return fixture
+	}
+
 	if os.Getenv("HARNESS_SCENARIO_HOST") == "1" {
 		setup := DriverSetup{Scenario: Scenario(os.Getenv("SCENARIO_KIND")), Dir: os.Getenv("SCENARIO_DIR"), AgentPath: os.Getenv("SCENARIO_AGENT"), ToolServerPath: os.Getenv("SCENARIO_SERVER"), HostConfig: os.Getenv("SCENARIO_CONFIG")}
 		for _, key := range []string{"HARNESS_SCENARIO_HOST", "SCENARIO_KIND", "SCENARIO_DIR", "SCENARIO_AGENT", "SCENARIO_SERVER", "SCENARIO_CONFIG"} {
@@ -105,6 +116,11 @@ func Run(t *testing.T, driver Driver) {
 			}
 			setup := DriverSetup{scenario, dir, agent, server, ""}
 			f := driver(t, setup)
+			t.Cleanup(func() {
+				if c, ok := f.Harness.(closer); ok {
+					_ = c.Close(context.Background())
+				}
+			})
 			facts := f.Harness.Facts()
 			if facts.ToolBoundary != harness.NocxToolsOnly && facts.ToolBoundary != harness.NocxToolsByInstruction {
 				t.Fatalf("unsupported tool boundary: %q", facts.ToolBoundary)
@@ -220,9 +236,14 @@ func Run(t *testing.T, driver Driver) {
 			if agentPID <= 0 {
 				t.Fatalf("invalid observed agent PID %d", agentPID)
 			}
-			assertGone(t, agentPID, "agent")
+			if scenario == CancelStream || scenario == CancelTool {
+				waittest.WaitFor(t, "cancelled agent exits", func() bool { return !alive(agentPID) })
+			} else if !alive(agentPID) {
+				t.Fatal("normal turn ended session")
+			}
 			if scenario == Tool || scenario == CancelTool {
-				assertGone(t, readPID(t, filepath.Join(dir, "server.pid")), "bridge")
+				bridgePID := readPID(t, filepath.Join(dir, "server.pid"))
+				waittest.WaitFor(t, "turn bridge exits", func() bool { return !alive(bridgePID) })
 			}
 		})
 	}

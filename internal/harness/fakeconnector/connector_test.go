@@ -1,6 +1,7 @@
 package fakeconnector_test
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ func TestConformance(t *testing.T) { harnesstest.Run(t, fakeDriver) }
 
 func TestFakeProcessChecks(t *testing.T) {
 	harnesstest.RunFakeProcessChecks(t, func(t *testing.T, s harnesstest.Setup) harness.Harness {
-		return fakeconnector.New(fakeconnector.Config{AgentPath: s.AgentPath, Script: s.Script})
+		return fakeconnector.New(fakeconnector.Config{AgentPath: s.AgentPath, Script: s.Script, Base: s.Base})
 	})
 }
 
@@ -111,4 +112,31 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 			return pid
 		},
 	}
+}
+
+func TestProtocolCommandsAndResponse(t *testing.T) {
+	c := fakeconnector.New(fakeconnector.Config{})
+	commands := c.Commands(harness.TurnSpec{Text: "hello", ConversationID: "conversation"})
+	if len(commands) != 1 || commands[0].Name != "prompt" {
+		t.Fatalf("commands: %+v", commands)
+	}
+	raw, err := c.Encode("command-1", commands[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var command protocol.Command
+	if err = json.Unmarshal(raw, &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.ID != "command-1" || command.Prompt.Text != "hello" {
+		t.Fatalf("wire: %+v", command)
+	}
+	decoded, err := c.Decode([]byte(`{"kind":"response","id":"command-1"}`))
+	if err != nil || decoded.Response == nil || decoded.Response.ID != "command-1" {
+		t.Fatalf("decode: %+v, %v", decoded, err)
+	}
+	if got := c.Cancel(); len(got) != 1 || got[0].Name != "abort" {
+		t.Fatalf("cancel: %+v", got)
+	}
+	_ = c.Close(context.Background())
 }

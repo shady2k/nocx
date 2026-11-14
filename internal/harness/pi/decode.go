@@ -24,7 +24,7 @@ type message struct {
 	} `json:"usage"`
 }
 
-func newDecoder(cancellation ...*cancelState) harness.Decoder {
+func newDecoder() func([]byte) ([]harness.Event, error) {
 	var last message
 	var usage *harness.Usage
 	return func(line []byte) ([]harness.Event, error) {
@@ -49,15 +49,6 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 			return nil, err
 		}
 		failure := func(reason string) ([]harness.Event, error) {
-			if len(cancellation) != 0 {
-				cancelled, first := cancellation[0].terminal()
-				if !first {
-					return nil, nil
-				}
-				if cancelled {
-					reason = "cancelled"
-				}
-			}
 			return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: reason}}}, nil
 		}
 		switch record.Type {
@@ -71,9 +62,6 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 		case "extension_error":
 			return failure(record.Error)
 		case "message_update":
-			if len(cancellation) != 0 && cancellation[0].cancelled() {
-				return nil, nil
-			}
 			switch record.Update.Type {
 			case "text_delta":
 				return []harness.Event{{Kind: harness.EventAnswerDelta, Text: record.Update.Delta}}, nil
@@ -81,9 +69,6 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 				return []harness.Event{{Kind: harness.EventReasoningDelta, Text: record.Update.Delta}}, nil
 			}
 		case "tool_execution_start", "tool_execution_end":
-			if len(cancellation) != 0 && cancellation[0].cancelled() {
-				return nil, nil
-			}
 			kind := harness.EventToolStarted
 			if record.Type == "tool_execution_end" {
 				kind = harness.EventToolFinished
@@ -111,9 +96,6 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 				}
 			}
 		case "agent_settled":
-			if len(cancellation) != 0 && cancellation[0].cancelled() {
-				return failure("cancelled")
-			}
 			if record.Aborted {
 				return failure("pi aborted the turn")
 			}
@@ -135,15 +117,6 @@ func newDecoder(cancellation ...*cancelState) harness.Decoder {
 			model := last.Model
 			if last.Provider != "" {
 				model = last.Provider + "/" + model
-			}
-			if len(cancellation) != 0 {
-				cancelled, first := cancellation[0].terminal()
-				if !first {
-					return nil, nil
-				}
-				if cancelled {
-					return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: "cancelled"}}}, nil
-				}
 			}
 			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: model, Usage: usage}}}, nil
 		}

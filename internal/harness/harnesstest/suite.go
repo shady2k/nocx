@@ -33,32 +33,249 @@ type Setup struct {
 	AgentPath      string
 	ToolServerPath string
 	Script         protocol.Script
+	Base           harness.Base
 }
 
 // Factory builds the connector under test. It is called once per check, so a
-// check's script is the agent's whole behaviour for that check.
+// check's script describes each prompt in its persistent session.
 type Factory func(t *testing.T, setup Setup) harness.Harness
 
-// RunFakeProcessChecks exercises synthetic EOF, exit-status and orphan faults.
+// RunFakeProcessChecks checks persistent process ownership through the public API.
 func RunFakeProcessChecks(t *testing.T, factory Factory) {
 	t.Helper()
 	bin := t.TempDir()
-	agentPath := build(t, bin, "fakeagent", fakeAgentPackage)
-	serverPath := build(t, bin, "mcpserver", mcpServerPackage)
-	t.Run("successful RPC completion closes stdin", func(t *testing.T) {
-		script := protocol.Script{CompleteOnEOF: true, Steps: []protocol.Step{
-			{Kind: protocol.StepEnd, Model: "fake-model"}, {Kind: protocol.StepHang},
-		}}
-		turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{Dir: t.TempDir()})
-		collect(t, turn)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if _, err := turn.Wait(ctx); err != nil {
+	agent := build(t, bin, "fakeagent", fakeAgentPackage)
+	server := build(t, bin, "mcpserver", mcpServerPackage)
+	t.Run("turns reuse process and window close stops it", func(t *testing.T) {
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "agent.pid")
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Script: protocol.Script{PIDFile: pidFile, Steps: []protocol.Step{{Kind: protocol.StepEnd, Model: "fake-model"}}}})
+		first := runSuccessful(t, h, dir)
+		waitFile(t, pidFile)
+		pid := readPID(t, pidFile)
+		if !alive(pid) {
+			t.Fatal("successful turn ended its session")
+		}
+		second := runSuccessful(t, h, dir)
+		if first.Model != second.Model || readPID(t, pidFile) != pid {
+			t.Fatal("second turn did not reuse the session")
+		}
+		owner := sessionCloser(t, h)
+		if err := owner.CloseConversation(context.Background(), "conversation-1"); err != nil {
 			t.Fatal(err)
 		}
+		waittest.WaitFor(t, "window closes agent", func() bool { return !alive(pid) })
 	})
-	t.Run("synthetic failures", func(t *testing.T) { testFailures(t, factory, agentPath, serverPath) })
-	t.Run("Wait leaves no orphan child", func(t *testing.T) { testNoProcessAfterWait(t, factory, agentPath, serverPath) })
+	t.Run("cancel retires session and stale cancel cannot affect next turn", func(t *testing.T) {
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "agent.pid")
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Script: protocol.Script{PIDFile: pidFile, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "ready"}, {Kind: protocol.StepHang}}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		spec := harness.TurnSpec{ConversationID: "conversation-1", Dir: dir}
+		turn, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, turn.Events(), 5*time.Second)
+		waitFile(t, pidFile)
+		pid := readPID(t, pidFile)
+		if cancelErr := turn.Cancel(context.Background()); cancelErr != nil {
+			t.Fatal(cancelErr)
+		}
+		events := collect(t, turn)
+		assertCancelledTerminal(t, turn, events)
+		waittest.WaitFor(t, "cancel ends session", func() bool { return !alive(pid) })
+		next, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, next.Events(), 5*time.Second)
+		if readPID(t, pidFile) == pid {
+			t.Fatal("cancelled session was reused")
+		}
+		oldActivity, ok := turn.(harness.TurnActivity)
+		if !ok {
+			t.Fatal("missing turn activity")
+		}
+		if release, lateErr := oldActivity.AcceptCall(context.Background()); lateErr == nil {
+			release()
+			t.Fatal("stale turn admitted call")
+		}
+
+		if cancelErr := turn.Cancel(context.Background()); cancelErr != nil {
+			t.Fatal(cancelErr)
+		}
+		if err := next.Cancel(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		assertCancelledTerminal(t, next, collect(t, next))
+	})
+	t.Run("ignoring abort is bounded", func(t *testing.T) {
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "agent.pid")
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{ShutdownTimeout: 50 * time.Millisecond}, Script: protocol.Script{PIDFile: pidFile, IgnoreAbort: true, IgnoreStdinEOF: true, Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "ready"}, {Kind: protocol.StepHang}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		turn, err := h.Run(context.Background(), harness.TurnSpec{ConversationID: "conversation-1", Dir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, turn.Events(), 5*time.Second)
+		waitFile(t, pidFile)
+		pid := readPID(t, pidFile)
+		started := time.Now()
+		if cancelErr := turn.Cancel(context.Background()); cancelErr != nil {
+			t.Fatal(cancelErr)
+		}
+		events := collectWithin(t, turn.Events(), time.Second)
+		assertCancelledTerminal(t, turn, events)
+		if time.Since(started) > time.Second {
+			t.Fatal("injected shutdown bound was not honored")
+		}
+		waittest.WaitFor(t, "ignoring agent killed", func() bool { return !alive(pid) })
+	})
+	t.Run("idle expiry starts a new process", func(t *testing.T) {
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "agent.pid")
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{IdleTimeout: 50 * time.Millisecond}, Script: protocol.Script{PIDFile: pidFile, Steps: []protocol.Step{{Kind: protocol.StepEnd, Model: "fake-model"}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		runSuccessful(t, h, dir)
+		waitFile(t, pidFile)
+		pid := readPID(t, pidFile)
+		waittest.WaitFor(t, "idle agent exits", func() bool { return !alive(pid) })
+		runSuccessful(t, h, dir)
+		if readPID(t, pidFile) == pid {
+			t.Fatal("idle session reused dead process")
+		}
+	})
+	t.Run("turn admission is serialized", func(t *testing.T) {
+		dir := t.TempDir()
+		gate := filepath.Join(dir, "gate")
+		if err := syscall.Mkfifo(gate, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Script: protocol.Script{Gate: gate, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "first"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}, {{Kind: protocol.StepAnswer, Text: "second"}, {Kind: protocol.StepEnd, Model: "fake-model"}}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		spec := harness.TurnSpec{ConversationID: "conversation-1", Dir: dir}
+		first, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, first.Events(), 5*time.Second)
+		second, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case ev := <-second.Events():
+			t.Fatalf("second turn produced output before first settled: %+v", ev)
+		default:
+		}
+		ReleaseGate(t, gate)
+		collect(t, first)
+		if _, err := first.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		events := collect(t, second)
+		if len(events) != 2 || events[0].Text != "second" {
+			t.Fatalf("second turn: %+v", events)
+		}
+	})
+
+	t.Run("accepted calls delay terminal and queued turn", func(t *testing.T) {
+		dir := t.TempDir()
+		gate := filepath.Join(dir, "gate")
+		if err := syscall.Mkfifo(gate, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{IdleTimeout: 20 * time.Millisecond}, Script: protocol.Script{Gate: gate, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "ready"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}, {{Kind: protocol.StepEnd, Model: "fake-model"}}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		spec := harness.TurnSpec{ConversationID: "conversation-1", Dir: dir}
+		turn, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextEvent(t, turn.Events(), 5*time.Second)
+		activity, ok := turn.(harness.TurnActivity)
+		if !ok {
+			t.Fatal("turn lacks endpoint activity")
+		}
+		settle, err := activity.AcceptCall(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		approval, err := activity.Approval(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := h.Run(context.Background(), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ReleaseGate(t, gate)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = turn.Wait(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminal published before calls settled: %v", err)
+		}
+		settle()
+		select {
+		case ev := <-next.Events():
+			t.Fatalf("next turn ran while approval pending: %+v", ev)
+		default:
+		}
+		approval()
+		events := collect(t, turn)
+		if len(events) != 1 || events[0].Kind != harness.EventEnd {
+			t.Fatalf("terminal: %+v", events)
+		}
+		events = collect(t, next)
+		if len(events) != 1 || events[0].Kind != harness.EventEnd {
+			t.Fatalf("queued turn: %+v", events)
+		}
+	})
+	t.Run("synthetic failures", func(t *testing.T) { testFailures(t, factory, agent, server) })
+}
+
+type closer interface {
+	Close(context.Context) error
+	CloseConversation(context.Context, string) error
+}
+
+func sessionCloser(t *testing.T, h harness.Harness) closer {
+	t.Helper()
+	c, ok := h.(closer)
+	if !ok {
+		t.Fatal("connector has no session close API")
+	}
+	return c
+}
+
+func runSuccessful(t *testing.T, h harness.Harness, dir string) harness.Outcome {
+	t.Helper()
+	turn, err := h.Run(context.Background(), harness.TurnSpec{ConversationID: "conversation-1", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collect(t, turn)
+	if len(events) == 0 || events[len(events)-1].Kind != harness.EventEnd {
+		t.Fatalf("successful events: %+v", events)
+	}
+	result, err := turn.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func assertCancelledTerminal(t *testing.T, turn harness.Turn, events []harness.Event) {
+	t.Helper()
+	if len(events) != 1 || events[0].Kind != harness.EventFailure || events[0].Failure == nil || events[0].Failure.Reason != "cancelled" {
+		t.Fatalf("cancel events: %+v", events)
+	}
+	if _, err := turn.Wait(context.Background()); !errors.Is(err, harness.ErrCancelled) {
+		t.Fatalf("Wait: %v", err)
+	}
 }
 
 // ReleaseGate lets a fixture continue only after the shared suite saw a delta.
@@ -151,70 +368,6 @@ func testFailures(t *testing.T, factory Factory, agentPath, serverPath string) {
 			t.Fatalf("Wait error = %v, want the exit status", err)
 		}
 	})
-
-	t.Run("the process exits non-zero after an end event", func(t *testing.T) {
-		script := protocol.Script{Steps: []protocol.Step{
-			{Kind: protocol.StepEnd, Model: "fake-model"},
-			{Kind: protocol.StepExit, Code: 1},
-		}}
-		turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-			ConversationID: "conversation-1", Text: "end then die", Dir: t.TempDir(),
-		})
-		events := collect(t, turn)
-		if len(events) != 1 || events[0].Kind != harness.EventFailure || !strings.Contains(events[0].Failure.Reason, "status 1") {
-			t.Fatalf("events = %+v, want only the exit failure", events)
-		}
-		outcome, err := turn.Wait(context.Background())
-		if err == nil || !strings.Contains(fmt.Sprint(err), "status 1") || outcome.Model != "" {
-			t.Fatalf("Wait outcome=%+v error=%v, want the exit failure", outcome, err)
-		}
-	})
-
-	t.Run("the process ends without an end event", func(t *testing.T) {
-		script := protocol.Script{Steps: []protocol.Step{
-			{Kind: protocol.StepAnswer, Text: "partial"},
-		}}
-		turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-			ConversationID: "conversation-1", Text: "silent end", Dir: t.TempDir(),
-		})
-		events := collect(t, turn)
-		last := events[len(events)-1]
-		if last.Kind != harness.EventFailure || last.Failure == nil || !strings.Contains(last.Failure.Reason, "without an end event") {
-			t.Fatalf("last event = %+v", last)
-		}
-		_, err := turn.Wait(context.Background())
-		if err == nil || !strings.Contains(fmt.Sprint(err), "without an end event") {
-			t.Fatalf("Wait error = %v", err)
-		}
-	})
-}
-
-func testNoProcessAfterWait(t *testing.T, factory Factory, agentPath, serverPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	agentPIDFile := filepath.Join(dir, "agent.pid")
-	childPIDFile := filepath.Join(dir, "child.pid")
-	script := protocol.Script{
-		PIDFile:      agentPIDFile,
-		ChildPIDFile: childPIDFile,
-		Steps: []protocol.Step{
-			{Kind: protocol.StepChild},
-			{Kind: protocol.StepExit, Code: 0},
-		},
-	}
-	turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "leave a child", Dir: dir,
-	})
-	waitFile(t, agentPIDFile)
-	waitFile(t, childPIDFile)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := turn.Wait(ctx); err == nil || !strings.Contains(fmt.Sprint(err), "without an end event") {
-		t.Fatalf("Wait error = %v, want the missing end", err)
-	}
-	assertGone(t, readPID(t, agentPIDFile), "the agent")
-	assertGone(t, readPID(t, childPIDFile), "the child the agent left")
-	collect(t, turn)
 }
 
 func start(t *testing.T, factory Factory, agentPath, serverPath string, script protocol.Script, tools harness.ToolBridge, spec harness.TurnSpec) harness.Turn {
@@ -316,13 +469,6 @@ func waitFile(t *testing.T, path string) {
 		raw, err := os.ReadFile(path) //nolint:gosec // test TempDir
 		return err == nil && len(raw) > 0
 	})
-}
-
-func assertGone(t *testing.T, pid int, what string) {
-	t.Helper()
-	if alive(pid) {
-		t.Fatalf("%s (pid %d) remains immediately after Wait", what, pid)
-	}
 }
 
 func alive(pid int) bool {

@@ -6,12 +6,9 @@
 // process and its pipes, the turn's lifetime, and the event vocabulary the
 // product reads. Nothing outside a connector names an agent.
 //
-// One agent process per turn. The turn is the unit of the process, its MCP
-// bridge, its bearer and its lifetime, so a turn ending closes all of it. A
-// decoded end is published only after successful exit and process cleanup.
-// A published terminal event determines Wait's result and cannot be rewritten
-// by later cancellation. A stream without a terminal event receives a failure
-// from the shared base.
+// One process serves a conversation's sequential turns. The session actor owns
+// protocol I/O and lifecycle. The agent's terminal ends a turn; process death
+// fails it. Wait derives from exactly the terminal published on Events.
 package harness
 
 import "context"
@@ -24,11 +21,11 @@ type Harness interface {
 	// tell a person when it cannot.
 	Readiness(ctx context.Context) Readiness
 	// Run starts one turn. Cancelling ctx ends the turn just as Cancel does.
-	// The returned Turn owns the agent process; it is the caller's to wait for.
+	// The returned Turn belongs to the conversation session.
 	Run(ctx context.Context, spec TurnSpec) (Turn, error)
 }
 
-// Turn is one agent process and its ordered event stream.
+// Turn is one question and its ordered event stream.
 type Turn interface {
 	// Events is the turn's stream. It is ordered, closes exactly once, and
 	// carries one terminal event (an end or a failure) before it closes. The
@@ -39,14 +36,9 @@ type Turn interface {
 	// Cancel stops the turn and everything it started. It is safe to call
 	// after the turn ended.
 	Cancel(ctx context.Context) error
-	// Wait returns once the process and anything it started have terminated,
-	// or reports a cleanup failure. Terminated orphan zombies belong to their
-	// OS reaper, not to the turn. Cancelling this observer's ctx stops only
-	// this wait, never the turn; cancel Run's ctx or call Cancel to stop it.
-	// End is published only after successful exit and cleanup, and returns
-	// its model and usage. A published failure returns its reason; a cancelled
-	// failure returns ErrCancelled. Cancellation before publication produces
-	// a cancelled failure; cancellation after publication cannot change it.
+	// Wait returns the published terminal's model/usage or failure. It does not
+	// wait for session exit. Its context cancels only this observer. A cancel
+	// taken before the agent terminal wins; later cancellation cannot rewrite it.
 	Wait(ctx context.Context) (Outcome, error)
 }
 

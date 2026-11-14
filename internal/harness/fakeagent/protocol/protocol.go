@@ -6,18 +6,19 @@ package protocol
 
 import "github.com/shady2k/nocx/internal/harness"
 
-// Script is what the fake agent does in one turn. It arrives in the
+// Script is what the fake agent does on each prompt. It arrives in the
 // FAKEAGENT_SCRIPT environment variable as JSON.
 type Script struct {
-	// CompleteOnEOF models an RPC agent that waits for stdin closure after End.
-	CompleteOnEOF    bool   `json:"completeOnEOF,omitempty"`
-	DefaultModelFile string `json:"defaultModelFile,omitempty"`
-	PromptFile       string `json:"promptFile,omitempty"`
-	EnvironmentFile  string `json:"environmentFile,omitempty"`
-	CleanupGate      string `json:"cleanupGate,omitempty"`
-	HangFile         string `json:"hangFile,omitempty"`
-	Gate             string `json:"gate,omitempty"`
-	Steps            []Step `json:"steps"`
+	// IgnoreAbort makes the actor exercise its shutdown bound.
+	IgnoreAbort      bool     `json:"ignoreAbort,omitempty"`
+	Turns            [][]Step `json:"turns,omitempty"`
+	DefaultModelFile string   `json:"defaultModelFile,omitempty"`
+	PromptFile       string   `json:"promptFile,omitempty"`
+	EnvironmentFile  string   `json:"environmentFile,omitempty"`
+	CleanupGate      string   `json:"cleanupGate,omitempty"`
+	HangFile         string   `json:"hangFile,omitempty"`
+	Gate             string   `json:"gate,omitempty"`
+	Steps            []Step   `json:"steps"`
 	// PIDFile, when set, receives the fake agent's own process id.
 	PIDFile string `json:"pidFile,omitempty"`
 	// ChildPIDFile, when set, receives the pid of a child a StepChild left
@@ -95,7 +96,7 @@ type Usage struct {
 	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
 }
 
-// Prompt is the one line a connector writes to the fake agent's stdin. It is
+// Prompt is the input carried by a prompt command. It is
 // the turn's input and bridge configuration; only the non-secret fixture
 // script arrives through the environment.
 type Prompt struct {
@@ -105,4 +106,11 @@ type Prompt struct {
 	Text           string             `json:"text,omitempty"`
 	Model          string             `json:"model,omitempty"`
 	SystemPrompt   string             `json:"systemPrompt,omitempty"`
+}
+
+// Command carries a session command and the actor's correlation id.
+type Command struct {
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	Prompt *Prompt `json:"prompt,omitempty"`
 }

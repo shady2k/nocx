@@ -25,11 +25,16 @@ type Config struct {
 
 // Connector implements harness.Harness on the fake agent.
 type Connector struct {
-	cfg Config
+	cfg     Config
+	manager *harness.SessionManager
 }
 
 // New builds the fake connector.
-func New(cfg Config) *Connector { return &Connector{cfg: cfg} }
+func New(cfg Config) *Connector {
+	c := &Connector{cfg: cfg}
+	c.manager = harness.NewSessionManager(cfg.Base, c)
+	return c
+}
 
 // Readiness reports the fake agent as installed when its program exists.
 func (c *Connector) Readiness(ctx context.Context) harness.Readiness {
@@ -48,39 +53,53 @@ func (c *Connector) Facts() harness.Facts {
 	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ReportsAnsweringModel: true}
 }
 
-// Run starts one scripted turn.
-func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
+// Start describes the process without creating or owning it.
+func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.Launch, error) {
 	script, err := json.Marshal(c.cfg.Script)
 	if err != nil {
-		return nil, fmt.Errorf("fakeconnector: script: %w", err)
+		return harness.Launch{}, err
 	}
-	env := []string{
-		"FAKEAGENT_SCRIPT=" + string(script),
+	return harness.Launch{Argv: []string{c.cfg.AgentPath}, Env: []string{"FAKEAGENT_SCRIPT=" + string(script)}, Dir: spec.Dir}, nil
+}
+
+// Commands supplies the input for one turn.
+func (c *Connector) Commands(spec harness.TurnSpec) []harness.Command {
+	return []harness.Command{{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}}
+}
+
+func (c *Connector) Cancel() []harness.Command { return []harness.Command{{Name: "abort"}} }
+
+func (c *Connector) Encode(id string, command harness.Command) ([]byte, error) {
+	wire := protocol.Command{ID: id, Name: command.Name}
+	if command.Name == "prompt" {
+		prompt, ok := command.Payload.(protocol.Prompt)
+		if !ok {
+			return nil, fmt.Errorf("fakeconnector: invalid prompt payload")
+		}
+		wire.Prompt = &prompt
 	}
-	process, err := c.cfg.Base.Start(ctx, harness.Launch{
-		Argv:          []string{c.cfg.AgentPath},
-		Env:           env,
-		Dir:           spec.Dir,
-		Decode:        decode,
-		CompleteOnEnd: c.cfg.Script.CompleteOnEOF,
-	})
-	if err != nil {
-		return nil, err
+	raw, err := json.Marshal(wire)
+	return append(raw, '\n'), err
+}
+
+func (c *Connector) Decode(line []byte) (harness.Decoded, error) {
+	var wire protocol.Line
+	if err := json.Unmarshal(line, &wire); err != nil {
+		return harness.Decoded{}, err
 	}
-	// The turn's input goes over the agent's own stdin, the way a real
-	// connector speaks its agent's protocol.
-	if err := json.NewEncoder(process.Stdin()).Encode(protocol.Prompt{
-		ConversationID: spec.ConversationID,
-		Text:           spec.Text,
-		Model:          spec.Model,
-		SystemPrompt:   spec.SystemPrompt,
-		Tools:          spec.Tools,
-	}); err != nil {
-		_ = process.Cancel(ctx)
-		_, _ = process.Wait(ctx)
-		return nil, fmt.Errorf("fakeconnector: the prompt: %w", err)
+	if wire.Kind == "response" {
+		return harness.Decoded{Response: &harness.Response{ID: wire.ID, Error: wire.Reason}}, nil
 	}
-	return process, nil
+	events, err := decode(line)
+	return harness.Decoded{Events: events}, err
+}
+
+func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
+	return c.manager.Run(ctx, spec)
+}
+func (c *Connector) Close(ctx context.Context) error { return c.manager.Close(ctx) }
+func (c *Connector) CloseConversation(ctx context.Context, id string) error {
+	return c.manager.CloseConversation(ctx, id)
 }
 
 // decode reads the fake agent's one event per line.

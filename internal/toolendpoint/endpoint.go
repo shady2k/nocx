@@ -174,6 +174,7 @@ type admission struct {
 	pending  int
 	stopping bool
 	done     chan struct{}
+	cancels  *requestCancels
 }
 
 // New validates the endpoint configuration and computes its socket path. It
@@ -303,25 +304,40 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 	return len(connections)
 }
 
-// SettleAdmissions closes connections at or before epoch and waits for their
-// accepted calls and authorizer releases. The authority owner must prevent new
+// SettleAdmissions cancels calls at or before epoch, writes their answers,
+// then closes connections and waits for authorizer releases. The authority owner must prevent new
 // publications for this interval before calling it, as with RetireAdmissions.
 func (e *Endpoint) SettleAdmissions(scope string, epoch AdmissionEpoch) {
 	_ = e.SettleAdmissionsContext(context.Background(), scope, epoch)
 }
 
-// SettleAdmissionsContext closes admission connections and waits for accepted
-// work. A caller deadline does not reopen admissions or forget pending work.
+// SettleAdmissionsContext cancels accepted work through the per-call path,
+// drains its answers, then closes admission connections. A caller deadline does not reopen admissions or forget pending work.
 func (e *Endpoint) SettleAdmissionsContext(ctx context.Context, scope string, epoch AdmissionEpoch) error {
-	e.RetireAdmissions(scope, epoch)
 	e.mu.Lock()
+	if !strings.HasPrefix(scope, TurnScope("")) && epoch > e.retired[scope] {
+		e.retired[scope] = epoch
+	}
 	var waiting []<-chan struct{}
-	for _, a := range e.admitted[scope] {
+	type stoppingAdmission struct {
+		conn    *net.UnixConn
+		cancels *requestCancels
+	}
+	var stopping []stoppingAdmission
+	for conn, a := range e.admitted[scope] {
 		if a.epoch <= epoch {
+			a.stopping = true
 			waiting = append(waiting, a.done)
+			stopping = append(stopping, stoppingAdmission{conn, a.cancels})
 		}
 	}
 	e.mu.Unlock()
+	for _, a := range stopping {
+		a.cancels.cancelAll()
+		// End the read loop without closing the write side. Its deferred wait
+		// keeps the socket alive until every accepted call has written its answer.
+		_ = a.conn.CloseRead()
+	}
 	for _, done := range waiting {
 		select {
 		case <-done:
@@ -551,7 +567,7 @@ func (e *Endpoint) publishAdmission(session string, epoch AdmissionEpoch, conn *
 	if e.admitted[session] == nil {
 		e.admitted[session] = make(map[*net.UnixConn]*admission)
 	}
-	e.admitted[session][conn] = &admission{epoch: epoch, done: make(chan struct{})}
+	e.admitted[session][conn] = &admission{epoch: epoch, done: make(chan struct{}), cancels: newRequestCancels()}
 	return true
 }
 
@@ -757,7 +773,9 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// THE CALLS IN FLIGHT ON THIS CONNECTION, by the id the caller gave each.
 	// A cancel notification is read by the loop below, so a call has to be in
 	// this set before the loop reads the next line — see where it is added.
-	cancels := newRequestCancels()
+	e.mu.Lock()
+	cancels := e.admitted[publishedSession][conn].cancels
+	e.mu.Unlock()
 	var inFlight atomic.Int32
 	for {
 		if inFlight.Load() == 0 {
@@ -813,7 +831,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		requestCtx, requestCancel := context.WithCancel(connectionCtx)
 		terminal := &assistant.CallTerminal{}
 		entry := cancels.add(request.ID, func() {
-			if terminal.Cancel(context.Canceled) {
+			if terminal.Cancel(ErrPersonCancelled) {
 				requestCancel()
 			}
 		})
@@ -1276,6 +1294,8 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// loud rather than reporting as a fault inside nocx.
 		return rpcInvalidParams, "invalid params",
 			"this report is not one a worker's tool can send — the kind must be done, question or progress, and estimate and artifact belong to a progress checkpoint only. Correct it and call again; the tool's schema in tools.catalogue says what each one accepts."
+	case errors.Is(err, ErrPersonCancelled):
+		return rpcDomainError, "call abandoned", "The person cancelled this call before it finished. Do not repeat it unless they ask."
 	case errors.Is(err, context.Canceled):
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
 		// what a dispatch reports when its own context ends before it

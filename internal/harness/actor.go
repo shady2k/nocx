@@ -362,6 +362,8 @@ func (s *session) loop() {
 	var terminal *Event
 	var plan []Step
 	var cancelCommands []Command
+	var cancelPrepared bool
+	var pendingTools map[string]struct{}
 	var pending *pendingStep
 	var frame []byte
 	var frameWritten int
@@ -500,6 +502,7 @@ func (s *session) loop() {
 			return
 		}
 		cancelling = true
+		cancelPrepared = false
 		deadline = time.Now().Add(bound)
 		observe("cancel", nil)
 		delivery = nil
@@ -518,10 +521,12 @@ func (s *session) loop() {
 			retire(false)
 			return
 		}
-		cancelCommands = codec.CancelSequence()
+		// The agent must receive tool cancellation results before abort can
+		// abandon its MCP waiters. The existing deadline still bounds settlement.
 	}
 	begin := func(t *actorTurn) {
 		current = t
+		pendingTools = make(map[string]struct{})
 		cancelling = false
 		promptWritten = false
 		barrierPassed = false
@@ -548,6 +553,12 @@ func (s *session) loop() {
 		}
 	}
 	for {
+		// Endpoint settlement confirms response delivery, not that the agent has
+		// consumed it. Wait for its tool-finished events before abandoning waiters.
+		if cancelling && settlementDone && len(pendingTools) == 0 && !cancelPrepared && terminal == nil && codec != nil {
+			cancelPrepared = true
+			cancelCommands = codec.CancelSequence()
+		}
 		// Publication is the only point at which Wait and Events become terminal.
 		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 {
 			observe("terminal", nil)
@@ -645,6 +656,14 @@ func (s *session) loop() {
 				if terminal != nil {
 					fail("agent output after the turn terminal")
 					return
+				}
+				if ev.Tool != nil {
+					switch ev.Kind {
+					case EventToolStarted:
+						pendingTools[ev.Tool.ID] = struct{}{}
+					case EventToolFinished:
+						delete(pendingTools, ev.Tool.ID)
+					}
 				}
 				if ev.Kind == EventEnd || ev.Kind == EventFailure {
 					choose(ev)
@@ -824,6 +843,7 @@ func (s *session) loop() {
 					retired = false
 					retirementErr = nil
 					current = t
+					pendingTools = make(map[string]struct{})
 					cancelling = false
 					promptWritten = false
 					settling = false

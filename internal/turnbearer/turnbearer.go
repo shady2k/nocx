@@ -54,13 +54,13 @@ func (a Authority) StartAdmission(ctx context.Context) (context.Context, func(),
 		return nil, nil, false
 	}
 	lifetime.admissions++
-	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(lifetime.ctx, cancel)
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(lifetime.ctx, func() { cancel(toolendpoint.ErrPersonCancelled) })
 	var once sync.Once
 	done := func() {
 		once.Do(func() {
 			stop()
-			cancel()
+			cancel(context.Canceled)
 			lifetime.mu.Lock()
 			lifetime.admissions--
 			if !lifetime.live && lifetime.admissions == 0 {
@@ -221,8 +221,9 @@ func (m *Minter) BeginTurn(id string, authority Authority) error {
 	return nil
 }
 
-// EndTurn refuses new admissions, cancels admissions in progress, closes turn
-// connections and waits until admission cleanup and accepted calls have settled.
+// EndTurn refuses new admissions and cancels admissions in progress. It settles
+// accepted calls and their answers before closing turn connections, then waits
+// until admission cleanup has completed.
 // The session bearer remains available for the next BeginTurn. Ending an idle or unknown session is a no-op.
 func (m *Minter) EndTurn(id string) {
 	_ = m.EndTurnContext(context.Background(), id)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -57,8 +58,22 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	waitFile := func(name string) {
 		waittest.WaitFor(t, "fixture "+name, func() bool { raw, err := os.ReadFile(path(name)); return err == nil && len(raw) > 0 })
 	}
+	var base harness.Base
+	if setup.Scenario == harnesstest.CancelTool {
+		gate := path("cancel-tool")
+		if err := syscall.Mkfifo(gate, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		base.Tools = func(context.Context, harness.SessionInfo) (harness.ToolSession, harness.ToolBridge, error) {
+			bridge := harness.ToolBridge{Command: []string{setup.ToolServerPath}, Env: []string{
+				"MCP_BLOCK=1", "MCP_BLOCKEDFILE=" + path("blocked"), "MCP_CANCEL_GATE=" + gate,
+				"MCP_PIDFILE=" + path("server.pid"), "NOCX_TEST_SECRET=bridge-only-secret",
+			}}
+			return &cancelToolSession{gate: gate}, bridge, nil
+		}
+	}
 	return harnesstest.Fixture{
-		Harness: fakeconnectortest.New(fakeconnectortest.Config{AgentPath: setup.AgentPath, Script: script}), Model: "fake-model", ToolName: "probe",
+		Harness: fakeconnectortest.New(fakeconnectortest.Config{AgentPath: setup.AgentPath, Script: script, Base: base}), Model: "fake-model", ToolName: "probe",
 		ChangeDefaultModel: func() string {
 			if err := os.WriteFile(script.DefaultModelFile, []byte("changed-model"), 0o600); err != nil {
 				t.Fatal(err)
@@ -113,6 +128,22 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 		},
 	}
 }
+
+// cancelToolSession supplies the fixture endpoint's cancellation boundary.
+// Its server returns a cancelled result before the agent reports tool_finished.
+type cancelToolSession struct {
+	gate string
+	once sync.Once
+	err  error
+}
+
+func (*cancelToolSession) BeginTurn(harness.TurnAuthority) error { return nil }
+func (s *cancelToolSession) EndTurn(context.Context) error {
+	s.once.Do(func() { s.err = os.WriteFile(s.gate, []byte("cancel"), 0o600) })
+	return s.err
+}
+func (*cancelToolSession) Pending() bool                { return false }
+func (*cancelToolSession) Retire(context.Context) error { return nil }
 
 func TestProtocolCommandsAndResponse(t *testing.T) {
 	c := fakeconnectortest.New(fakeconnectortest.Config{})

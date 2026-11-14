@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 )
 
@@ -21,14 +22,18 @@ import (
 // call.
 const cancelCallMethod = "calls.cancel"
 
+// ErrPersonCancelled identifies cancellation requested by the person, not a lost transport.
+var ErrPersonCancelled = fmt.Errorf("person cancelled call: %w", context.Canceled)
+
 // requestCancels is the set of calls in flight on ONE connection, keyed by the
 // id the caller gave each. It is what makes a cancel name a CALL rather than a
 // connection: the connection's context is the parent of every request, and
 // ending it would take the siblings a stdio session shares the connection with
 // (nocx-tlaft, nocx-98qho).
 type requestCancels struct {
-	mu      sync.Mutex
-	cancels map[string]*requestCancel
+	mu       sync.Mutex
+	cancels  map[string]*requestCancel
+	stopping bool
 }
 
 type requestCancel struct {
@@ -49,6 +54,9 @@ func (c *requestCancels) add(id json.RawMessage, cancel context.CancelFunc) *req
 	}
 	entry := &requestCancel{cancel: cancel}
 	c.cancels[key] = entry
+	if c.stopping {
+		cancel()
+	}
 	return entry
 }
 
@@ -74,6 +82,17 @@ func (c *requestCancels) cancel(key string) bool {
 	}
 	entry.cancel()
 	return true
+}
+
+// cancelAll uses the same terminal election as a targeted cancellation. Calls
+// registering concurrently are cancelled before they can enter dispatch.
+func (c *requestCancels) cancelAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopping = true
+	for _, entry := range c.cancels {
+		entry.cancel()
+	}
 }
 
 // requestKey is a request id as the caller spelled it. JSON-RPC allows a string

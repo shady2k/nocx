@@ -652,3 +652,154 @@ func TestCancelClosesStdinBeforeDeadlineKill(t *testing.T) {
 		})
 	}
 }
+
+type settlementCancelProtocol struct {
+	closeCancelProtocol
+	tools           *pendingToolSession
+	pendingAtCancel chan bool
+}
+
+func (p settlementCancelProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p settlementCancelProtocol) CancelSequence() []Command {
+	p.pendingAtCancel <- p.tools.Pending()
+	return p.closeCancelProtocol.CancelSequence()
+}
+
+func TestCancelProtocolWaitsForToolResponses(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	tools := &pendingToolSession{began: make(chan struct{}), ending: make(chan struct{}, 4), release: make(chan struct{})}
+	observed := make(chan bool, 1)
+	trace := &wireTrace{changed: make(chan struct{}, 1)}
+	factory := func(context.Context, SessionInfo) (ToolSession, ToolBridge, error) { return tools, ToolBridge{}, nil }
+	protocol := settlementCancelProtocol{tools: tools, pendingAtCancel: observed}
+	manager := NewSessionManager(Base{Tools: factory, Observe: trace.observe}, protocol)
+	defer func() { _ = manager.Close(ctx) }()
+	turn, err := manager.Run(ctx, TurnSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trace.await(ctx, "prompt-written") {
+		t.Fatal("prompt not written")
+	}
+	if err := turn.Cancel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-tools.ending
+	close(tools.release)
+	select {
+	case pending := <-observed:
+		if pending {
+			t.Error("agent abort requested before tool cancellation responses settled")
+		}
+	case <-ctx.Done():
+		t.Fatal("cancel sequence not requested")
+	}
+	if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("Wait=%v", err)
+	}
+}
+
+type receivedToolProtocol struct {
+	closeCancelProtocol
+	gate         string
+	cancelCalled chan struct{}
+}
+
+func (p receivedToolProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p receivedToolProtocol) Start(ctx context.Context, spec TurnSpec) (Launch, error) {
+	if p.gate == "" {
+		return p.closeCancelProtocol.Start(ctx, spec)
+	}
+	return Launch{Argv: []string{"/bin/sh", "-c", `while read -r id name; do
+case "$name" in
+barrier) echo "response $id";;
+prompt) echo delta; read result < "$1"; echo tool-finished;;
+abort) echo end;;
+esac
+done`, "agent", p.gate}}, nil
+}
+
+func (p receivedToolProtocol) Decode(line []byte) (Decoded, error) {
+	switch string(line) {
+	case "delta":
+		return Decoded{Events: []Event{{Kind: EventToolStarted, Tool: &ToolCall{ID: "call"}}}}, nil
+	case "tool-finished":
+		return Decoded{Events: []Event{{Kind: EventToolFinished, Tool: &ToolCall{ID: "call"}}}}, nil
+	}
+	return p.closeCancelProtocol.Decode(line)
+}
+
+func (p receivedToolProtocol) CancelSequence() []Command {
+	p.cancelCalled <- struct{}{}
+	return p.closeCancelProtocol.CancelSequence()
+}
+
+func TestCancelWaitsForAgentToolResultConsumption(t *testing.T) {
+	for _, consumed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("consumed=%t", consumed), func(t *testing.T) {
+			ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer stop()
+			trace := &wireTrace{changed: make(chan struct{}, 1)}
+			protocol := receivedToolProtocol{cancelCalled: make(chan struct{}, 2)}
+			if consumed {
+				protocol.gate = t.TempDir() + "/result"
+				if err := syscall.Mkfifo(protocol.gate, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manager := NewSessionManager(Base{Observe: trace.observe, ShutdownTimeout: 100 * time.Millisecond}, protocol)
+			defer func() { _ = manager.Close(ctx) }()
+			turn, err := manager.Run(ctx, TurnSpec{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case ev := <-turn.Events():
+				if ev.Kind != EventToolStarted {
+					t.Fatal(ev)
+				}
+			case <-ctx.Done():
+				t.Fatal("no tool start")
+			}
+			if err := turn.Cancel(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if !trace.await(ctx, "settled") {
+				t.Fatal("tool endpoint did not settle")
+			}
+			select {
+			case <-protocol.cancelCalled:
+				t.Fatal("abort before tool result consumed")
+			default:
+			}
+			if consumed {
+				if err := os.WriteFile(protocol.gate, []byte("cancelled\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
+				t.Fatalf("Wait=%v", err)
+			}
+			select {
+			case <-protocol.cancelCalled:
+				if !consumed {
+					t.Fatal("abort without a consumed tool result")
+				}
+			default:
+				if consumed {
+					t.Fatal("no abort after tool result consumed")
+				}
+			}
+			killed := false
+			for _, tr := range trace.snapshot() {
+				if tr.Kind == "kill" {
+					killed = true
+				}
+			}
+			if killed == consumed {
+				t.Fatalf("killed=%t consumed=%t", killed, consumed)
+			}
+		})
+	}
+}

@@ -1,73 +1,9 @@
 /**
- * e2e: ask the assistant about a frozen block, end to end (nocx-x8s2.2).
- *
- * The feature, stated as behaviour only: with an AI endpoint configured, a
- * person selects a FINISHED (frozen) block in the terminal scrollback, types
- * a question, and an answer streams into the flow beneath it and finishes.
- *
- * This spec is the check that decides whether nocx-x8s2.2 is done, written
- * from the acceptance criteria in the bead — not from the implementation
- * (AGENTS.md testing rule 4). The feature and the surface are MERGED (this
- * tree is 250e464f), so every assertion here is meant to run green; a red
- * assertion is a defect report, never a weakened test.
- *
- * The seam under test, as the binding documents AND the shipped surface
- * decided it:
- *
- * - The gesture on a frozen command block is its ASK CONTROL — the
- *   `Ask about this block` button (`.cmd-ask-btn`) every finished command
- *   block carries (scrollback/blocks.ts createCommandBlock; answer blocks
- *   carry none). It raises the ask chip, anchors the block visually, and
- *   activates the agent input target (terminal-content.ts activateAsk).
- * - What a selection LEAVES BEHIND is an OFFER, and pressing it leaves one
- *   whole-block GRANT (nocx-wcswn, nocx-a7mw7.4): the block is marked where
- *   it stands (`data-granted`) and the input line's chip counts the marks.
- *   Selecting alone marks nothing — reading output is not asking about it. The chip is a count and never a second
- *   list of command names; the names live in its popover, and the block
- *   itself is where a person reads them. The per-block Ask control, and the
- *   receipt that used to carry a chip inside the block, are both gone.
- * - The question is typed in the ORDINARY editor (design §3.1: no second
- *   input surface) and routed by InputTargetRegistry.active()
- *   (terminal-content.ts submit: `const active = inputTargets.active()`;
- *   the agent target declares routesToShell=false, so no shell
- *   orchestration runs for a question).
- * - The answer renders as an ANSWER BLOCK in the flow: a `.cmd-block` whose
- *   header is the QUESTION, whose `.cmd-output[data-answer-body]` streams
- *   the deltas, and which carries `data-outcome="success"` — silently, the
- *   way a successful block always does (spec 2026-09-14 §3.1) — when the
- *   run terminalizes.
- * - The model receives the marked block as metadata naming its `session.read`
- *   id; only the tool result carries the block's output, and no unmarked
- *   block's output can reach the answer (bead acceptance 2).
- * - agent.status drives the no-endpoint sentence on BOTH surfaces: the
- *   Endpoints readiness line (the page was renamed from AI Endpoints) and
- *   the composer's own readiness line (agent-status-line.ts, one
- *   derivation).
- *
- * FRESH-STATE PATH (nocx-4egm): a fresh dev home has NO vault, and creating
- * an endpoint WITH a key mints the key into the vault (design §4.5.3) — so
- * the first save fails the mint, and the endpoints surface answers with the
- * vault SETUP SHEET (the operation-first wrapper nocx-8rwj added,
- * saveSecretWithVault) and retries the same save once the vault exists —
- * the key typed before the vault existed still lands. This was not always
- * true: the endpoints.* handlers used to drop the vault reason from their
- * RPC errors, so the wrapper could not tell "the vault needs setup" from a
- * disk error and the save died in a toast. The first test drives the
- * save-first path — the owner's exact repro, a fresh home with no vault and
- * a key typed into the form — and the endpoint must then actually answer,
- * which is the only proof the key landed.
- * The connections path asks at the moment a secret is created (nocx-v64o);
- * the endpoints path now does the same.
- * The fake model endpoint (e2e/fake-openai.ts) is scripted and held open by
- * explicit release — every "wait" here is a poll on a state change, never a
- * sleep (AGENTS.md: "a test may not depend on timing").
- *
- * The backend is THIS FILE'S OWN nocx-server on a disposable home
- * (VaultBackend), so the endpoint it configures never leaks into the shard's
- * shared stand, and the "no endpoint configured" state is real for this
- * file's first test (AGENTS.md: "Your dev profile is not the installed
- * app's" — a dev stand starts with no endpoint and the check must create
- * what it needs through the surface a user uses).
+ * e2e: ask about a frozen block through real pi in a disposable home.
+ * A marked block grants its whole output; the scripted model reads the
+ * announced item through session.read and answers from that result.
+ * Endpoint-only journeys remain in a separate describe for removal with
+ * endpoints/eino; they do not supply prerequisites for the pi journeys.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
@@ -181,10 +117,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-x8s2-e2e-'))
-  // `true` = no Secret Service for this backend, regardless of the session
-  // the suite runs in: the container has no keychain to ask, and the derived
-  // content key makes the vault available without user setup — the same
-  // arrangement history-persistence.spec.ts relies on.
+  // This backend and real pi share the disposable home.
   backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
@@ -603,9 +536,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     page,
   }) => {
     await openApp(page)
-    // This case's own prerequisites, not the endpoint case's: under --grep
-    // that case does not run, and without these the ask is refused for a
-    // reason this test does not measure (nocx-atpw5.1.11).
+    // Set this journey's read permission independently of the other tests.
     await ensureAskingPrerequisites(page)
     await backToTerminal(page)
 

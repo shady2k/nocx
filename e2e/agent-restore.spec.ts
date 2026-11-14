@@ -94,9 +94,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-4em1z-e2e-'))
-  // `true` = no Secret Service for this backend: the container has no
-  // keychain to ask, and the derived content key makes the vault available
-  // without user setup — the arrangement the other agent specs use.
+  // This backend and real pi share the disposable home.
   backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })

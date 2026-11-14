@@ -61,9 +61,7 @@ import {
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  openControlPlane,
   promptReady,
-  readVaultState,
   settingsReady,
   VaultBackend,
 } from './harness'
@@ -114,8 +112,6 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-dc2fr-e2e-'))
-  // `true` = no Secret Service: the container has no keychain to ask, and
-  // the derived content key makes the vault available without user setup.
   backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
@@ -245,18 +241,6 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
-}
-
-async function unsealVaultIfSealed(page: Page): Promise<void> {
-  if ((await readVaultState(endpoint)) !== 'sealed') return
-
-  const wire = await openControlPlane(endpoint.port, endpoint.token)
-  try {
-    await wire.call('vault.unseal', { means: 'passphrase', secret: `vault-pass-${nonce}` })
-  } finally {
-    wire.close()
-  }
-  await expect(page.getByRole('dialog', { name: 'Unlock the vault' })).toHaveCount(0)
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -511,7 +495,6 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     chmodSync(command, 0o700)
 
     await openApp(page)
-    await unsealVaultIfSealed(page)
     await openSettings(page, SETTINGS_AGENTS_NAV)
     await page.getByLabel('Agent ID').fill(runID)
     await page.getByLabel('Display name').last().fill(`Configured ${runID}`)

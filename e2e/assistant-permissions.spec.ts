@@ -165,8 +165,7 @@ const DF_OUTPUT_MARKER = 'Filesystem'
 
 const test = base
 
-/** One nonce per file, so this file's endpoint name and every question in it
- *  are unique in the whole run. Blocks are addressed by their text, so two
+/** One nonce per file, so every question is unique in the whole run. Blocks are addressed by their text, so two
  *  questions reading alike would make one locator resolve to two elements and
  *  fail for the other question's reason (nocx-3xjou). */
 const nonce = Date.now().toString(36)
@@ -179,9 +178,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-0dzqq-e2e-'))
-  // `true` = no Secret Service for this backend: the container has no keychain
-  // to ask, and the derived content key makes the vault available without user
-  // setup — the arrangement agent-ask.spec.ts uses.
+  // This backend and real pi share the disposable home.
   backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
   // So that the absence of this file MEANS something later. It is outside the
@@ -272,8 +269,7 @@ function approvalPrompt(page: Page): Locator {
   return page.getByRole('dialog', { name: APPROVAL_TITLE })
 }
 
-/** Chat-completion requests after `from`. The endpoint's model-discovery GET
- *  has no messages and must not count as a round. */
+/** Model chat-completion rounds after `from`. */
 function chatRequests(from: number): FakeRequest[] {
   return fake
     .requests()
@@ -342,10 +338,8 @@ async function activePaneId(page: Page): Promise<string> {
   return id
 }
 
-/** Create the endpoint and give its model the answering role, through the
- *  surfaces a person uses. A fresh home has no vault, so the first save stops
- *  on the setup sheet and is retried once the vault exists; createAiEndpoint
- *  reads which of the two happened rather than assuming. */
+/** Open Settings before the journey returns to its original pane.
+ * Real pi is configured before backend startup. */
 async function configureAssistant(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)

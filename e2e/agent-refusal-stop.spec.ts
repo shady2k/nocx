@@ -65,8 +65,6 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-uvac6-7-e2e-'))
-  // No Secret Service in the container: the derived content key makes the
-  // vault available without an interactive setup prompt.
   backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })

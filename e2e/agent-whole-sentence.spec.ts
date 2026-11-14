@@ -193,9 +193,8 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(input).toBeFocused({ timeout: 10_000 })
 }
 
-/** The assistant, configured entirely through the surfaces a person uses: the
- *  Endpoints form (which mints the key into a vault that does not exist yet and
- *  is created by the same save), the Roles default, and the policy matrix. */
+/** Allow this journey's effects through the person's policy matrix.
+ * Real pi is configured in the disposable home before backend startup. */
 async function configureAssistant(page: Page): Promise<void> {
   await openSettings(page, SETTINGS_POLICY_NAV)
   for (const effect of ALLOWED_EFFECTS) {

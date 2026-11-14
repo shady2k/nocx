@@ -99,6 +99,8 @@ test('scripted nocx tools use the name advertised by pi in both response shapes'
       const body = await response.text()
       assert.match(body, /"name":"mcp__nocx__session_read"/)
       assert.ok(body.includes('block'))
+      const recorded = JSON.parse(fake.requests().at(-1).body)
+      assert.equal(recorded.tools[0].function.name, 'mcp__nocx__session_read')
     }
   } finally {
     await fake.stop()

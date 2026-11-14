@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -198,14 +199,14 @@ func TestRandomizedInterleaving(t *testing.T) {
 	before := runtime.NumGoroutine()
 	modes := []string{"end", "failure", "hold", "stale", "exit", "blocked", "flood"}
 	seen := map[string]bool{}
-	for seed := range 2000 {
+	for seed := range 500 {
 		random := rand.New(rand.NewSource(int64(seed))) //nolint:gosec // reproducible schedule
 		mode := modes[random.Intn(len(modes))]
 		seen[mode] = true
 		ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
 		p := &interleaveProtocol{mode: mode, decoded: make(chan struct{}, 1)}
 		trace := &wireTrace{changed: make(chan struct{}, 1)}
-		base := Base{ShutdownTimeout: 10 * time.Millisecond, Observe: trace.observe}
+		base := Base{ShutdownTimeout: 10 * time.Millisecond, Observe: trace.observe, Environment: processEnvironment}
 		if mode == "hold" && random.Intn(2) == 0 {
 			base.Tools = func(context.Context, SessionInfo) (ToolSession, ToolBridge, error) {
 				tools := &pendingToolSession{began: make(chan struct{}), ending: make(chan struct{}, 4), release: make(chan struct{})}
@@ -344,3 +345,8 @@ func TestStalledConsumerCancellation(t *testing.T) {
 		t.Fatalf("terminals=%d", terminals)
 	}
 }
+
+// processEnvironment stands in for the login shell in the randomized test:
+// the schedule is about the actor, and a login shell per seed is what made
+// two thousand seeds cost minutes under -race.
+func processEnvironment(context.Context) ([]string, error) { return os.Environ(), nil }

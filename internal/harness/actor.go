@@ -172,7 +172,11 @@ func spawn(ctx context.Context, b Base, l Launch) (_ *child, spawnErr error) {
 	if len(l.Argv) == 0 {
 		return nil, errors.New("harness: empty command")
 	}
-	env, err := loginEnvironment(ctx)
+	environment := b.Environment
+	if environment == nil {
+		environment = loginEnvironment
+	}
+	env, err := environment(ctx)
 	if err != nil {
 		return nil, err
 	}

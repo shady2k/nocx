@@ -91,6 +91,10 @@ type Base struct {
 	ShutdownTimeout time.Duration
 	// IdleTimeout overrides the one-hour idle bound for tests.
 	IdleTimeout time.Duration
+	// Environment resolves the environment an agent starts in. Empty means the
+	// person's login shell, read on every start (the agent sees what their
+	// terminal sees); tests that start thousands of agents supply their own.
+	Environment func(context.Context) ([]string, error)
 }
 
 func loginEnvironment(ctx context.Context) ([]string, error) {

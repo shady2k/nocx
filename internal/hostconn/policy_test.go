@@ -175,7 +175,9 @@ func TestAHelperOwnedConnectionClosesAtTheSilenceBudget(t *testing.T) {
 	waittest.WaitFor(t, "the connection to read stalled", func() bool {
 		return sup.Current().Kind == hostconn.Stalled
 	})
-	// The budget counts from the unanswered probe, which was sent at 15 s.
+	// The budget counts from the moment this guard JUDGED the connection
+	// silent (30 s here), never from the probe's send: a close may not rest on
+	// one reading taken after a clock jump (see due's close branch).
 	clock.Advance(hostconn.SilenceCloseBudget)
 	waittest.WaitFor(t, "the connection to be closed at the budget", func() bool {
 		return sup.Current().Kind == hostconn.Reconnecting

@@ -573,12 +573,12 @@ func TestAHoldersStatedCadenceReachesTheOneProber(t *testing.T) {
 // every thirty seconds, the deadline is fifteen, and a healthy link answers
 // each probe at once — so the deadline must never fire on an answer that was
 // given. Silence is a property of a probe that is OUTSTANDING (sent and
-// unanswered); it is never measured from the last answer, and nothing may
-// report a stall the host did not cause.
+// unanswered), and the answer is recorded under the lock the guard judges
+// under, so the two facts are ordered rather than raced.
 //
 // Ten minutes of the injected clock, one second at a time, on a thirty-second
-// cadence: twenty probes, every one answered, and the supervisor's own path
-// must contain no stalled state at all.
+// cadence: twenty probes, every one answered before the next second passes, and
+// the supervisor's own path must contain no stalled state at all.
 func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
 	var probes atomic.Int32
 	link := newMemoryLink()
@@ -598,12 +598,32 @@ func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
 	}
 	t.Cleanup(lease.Release)
 
-	for elapsed := time.Duration(0); elapsed < 10*time.Minute; elapsed += time.Second {
+	for elapsed := time.Second; elapsed <= 10*time.Minute; elapsed += time.Second {
 		clock.Advance(time.Second)
+		// WAIT ON THE ANSWER EACH SECOND MADE DUE, not on a duration: this
+		// test is about a link that answers, and a clock that outruns the
+		// answer's own goroutine is the jump case the next test owns.
+		//
+		// The guard reads the clock and then registers its wake for the due
+		// moment; a step that lands inside that window is noticed one step
+		// later, so one more second is offered before the answer is insisted
+		// on. It is the clock's arithmetic, not the policy's.
+		due := int(elapsed / (30 * time.Second))
+		if due == 0 {
+			continue
+		}
+		if int(probes.Load()) < due {
+			clock.Advance(time.Second)
+			elapsed += time.Second
+		}
+		waittest.WaitFor(t, "the probe due by now to be answered", func() bool {
+			return int(probes.Load()) >= due
+		})
 	}
 
-	// Every probe was answered, and the path says so.
-	waittest.WaitFor(t, "the ten minutes' probes to be counted", func() bool { return probes.Load() >= 19 })
+	if got := probes.Load(); got < 19 {
+		t.Fatalf("ten minutes on a 30s cadence sent %d probe(s), want 20", got)
+	}
 	for _, state := range sup.States() {
 		if state.Kind == hostconn.Stalled {
 			t.Fatalf("a healthy link on a 30s cadence read %v after %d probe(s): silence was measured from something that answered",
@@ -612,5 +632,50 @@ func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
 	}
 	if got := sup.Current().Kind; got != hostconn.Connected {
 		t.Fatalf("a healthy connection reads %v after ten minutes, want connected", got)
+	}
+}
+
+// TestAClockJumpOnAHealthyConnectionStallsItAtMostAndClosesNothing is the other
+// half of the same rule, and the one a laptop resuming from sleep meets: the
+// clock moves ten minutes in ONE step while a probe is outstanding, and the
+// answer arrives normally afterwards. The guard may read the silence for a
+// moment — that is the honest report of a call that had not returned when it
+// looked — but no close may rest on a reading taken after a jump, so the
+// connection must come back and must never be ended for it.
+func TestAClockJumpOnAHealthyConnectionStallsItAtMostAndClosesNothing(t *testing.T) {
+	var probes atomic.Int32
+	link := newMemoryLink()
+	link.probe = func() (time.Duration, error) {
+		probes.Add(1)
+		return time.Millisecond, nil
+	}
+	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
+	clock := hostconntest.New()
+	m, sup := managerOn(t, carrier, clock)
+
+	// A helper-owned connection: no plain shell, so the closing policy MAY end
+	// it — which is exactly what must not happen on this evidence.
+	lease, err := m.Acquire(context.Background(), plan())
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	t.Cleanup(lease.Release)
+
+	// One step, ten minutes: the probe that was due inside them is still
+	// outstanding when the guard looks, and its answer arrives in real time.
+	clock.Advance(10 * time.Minute)
+
+	waittest.WaitFor(t, "the answer to arrive", func() bool { return probes.Load() >= 1 })
+	waittest.WaitFor(t, "the connection to be connected again", func() bool {
+		return sup.Current().Kind == hostconn.Connected
+	})
+
+	if lease.Lost() {
+		t.Fatal("a clock jump closed a healthy connection")
+	}
+	for _, state := range sup.States() {
+		if state.Kind == hostconn.Reconnecting || state.Kind == hostconn.Ended {
+			t.Fatalf("a clock jump ended a healthy connection: path %v", sup.States())
+		}
 	}
 }

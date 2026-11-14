@@ -1,4 +1,16 @@
 // Package pi connects the harness to pi's documented RPC mode.
+//
+// A private resume record checkpoints the native JSONL session, not nocx's
+// ledger or a second copy of conversation history. It stores the session path,
+// byte length and SHA-256 of its persisted prefix, including entry identities.
+// It is atomically replaced after each persisted model/tool cycle and at turn
+// settlement (success, failure or cancellation). Thus even a failed first turn
+// that persisted messages is protected. A crash may leave later appended entries;
+// these are allowed, but the next incarnation's get_state barrier requires the
+// recorded prefix to remain intact. A stale, invalid or missing record for a
+// nonempty native session reports the session as lost, never silently resumed.
+// A missing record with no native messages is a new conversation. Recovery does
+// not reconstruct history from the ledger or erase an invalid record.
 package pi
 
 import (

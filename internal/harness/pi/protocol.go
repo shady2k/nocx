@@ -19,6 +19,7 @@ var extension []byte
 
 // NewWithBase allows composition to supply the session endpoint and bounds.
 func NewWithBase(dataDir string, env []string, base harness.Base) *Connector {
+	sweepOrphanConfigs(context.Background(), dataDir)
 	c := &Connector{dataDir: dataDir, env: append([]string(nil), env...), catalogGate: make(chan struct{}, 1)}
 	c.manager = harness.NewSessionManager(base, c)
 	return c
@@ -41,7 +42,7 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 	}
 	// A private file belongs to this incarnation, never to a turn. A delayed
 	// starting child must not read another incarnation's bridge credentials.
-	config, err := os.CreateTemp(configs, "session-*.json")
+	config, err := os.CreateTemp(configs, sessionConfigPattern())
 	if err != nil {
 		return harness.Launch{}, err
 	}
@@ -119,8 +120,9 @@ func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
 }
 
 type resumeMarker struct {
-	SessionFile     string `json:"sessionFile"`
-	MinimumMessages int    `json:"minimumMessages"`
+	SessionFile string `json:"sessionFile"`
+	Bytes       int64  `json:"bytes"`
+	SHA256      string `json:"sha256"`
 }
 
 type codec struct {
@@ -172,8 +174,15 @@ func (c *codec) readState(payload any) error {
 	}
 	sessionFile, _ := state["sessionFile"].(string)
 	count, _ := state["messageCount"].(float64)
-	if c.expected.SessionFile != "" && (sessionFile != c.expected.SessionFile || int(count) < c.expected.MinimumMessages) {
-		return errors.New("pi conversation session was lost: persisted history could not be resumed")
+	if c.expected.SessionFile != "" {
+		if sessionFile != c.expected.SessionFile {
+			return errors.New("pi conversation session was lost: persisted history could not be resumed")
+		}
+		if err := c.expected.validate(); err != nil {
+			return fmt.Errorf("pi conversation session was lost: %w", err)
+		}
+	} else if count > 0 {
+		return errors.New("pi conversation session was lost: persisted history has no resume record")
 	}
 	c.sessionFile = sessionFile
 	c.model = ""
@@ -228,26 +237,10 @@ func (c *codec) Decode(line []byte) (harness.Decoded, error) {
 		c.decode = newDecoder()
 	}
 	events, err := c.decode(line)
-	if err == nil && c.markerPath != "" {
-		for _, event := range events {
-			if event.Kind == harness.EventEnd {
-				marker := resumeMarker{SessionFile: c.sessionFile, MinimumMessages: 1}
-				if marker.SessionFile == "" {
-					return harness.Decoded{}, errors.New("pi conversation session was lost: agent supplied no session file")
-				}
-				raw, marshalErr := json.Marshal(marker)
-				if marshalErr != nil {
-					return harness.Decoded{}, marshalErr
-				}
-				if mkdirErr := os.MkdirAll(filepath.Dir(c.markerPath), 0o700); mkdirErr != nil {
-					return harness.Decoded{}, mkdirErr
-				}
-				if writeErr := os.WriteFile(c.markerPath, raw, 0o600); writeErr != nil {
-					return harness.Decoded{}, writeErr
-				}
-				c.expected = marker
-			}
-		}
+	// turn_end follows persistence of a completed model call and its tool
+	// results. agent_settled also covers first-turn failures and cancellation.
+	if err == nil && (wire.Type == "turn_end" || wire.Type == "agent_settled") {
+		err = c.checkpoint()
 	}
 	return harness.Decoded{Events: events}, err
 }

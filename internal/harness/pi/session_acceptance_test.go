@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -76,6 +77,16 @@ func TestRealPiSessionReuseAndRestartInputs(t *testing.T) {
 			original, fake := configuredPi(t, responses...)
 			observations := t.TempDir()
 			installPiObserver(t, original, observations)
+			// Keep a real native tool declaration in every captured input so
+			// tool-prefix equality cannot pass over an empty tool list.
+			toolExtension := `export default function(pi) {
+ pi.registerTool({name:'mcp__nocx__prefix_probe', label:'Prefix probe', description:'Stable acceptance tool',
+ parameters:{type:'object',properties:{note:{type:'string'}},required:['note']},
+ async execute() { return {content:[{type:'text',text:'ok'}]}; }});
+}`
+			if err := os.WriteFile(filepath.Join(piAgentDir(original.env), "extensions", "prefix-tool.ts"), []byte(toolExtension), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			base := harness.Base{}
 			if restart == "idle" {
 				base.IdleTimeout = 100 * time.Millisecond
@@ -129,8 +140,21 @@ func TestRealPiSessionReuseAndRestartInputs(t *testing.T) {
 			if before.SystemPrompt != after.SystemPrompt || strings.Count(after.SystemPrompt, spec.SystemPrompt) != 1 {
 				t.Fatalf("system prompt changed or duplicated across %s restart", restart)
 			}
-			if !strings.Contains(after.History, "first question") || !strings.Contains(after.History, "first answer") || !strings.Contains(after.History, "second question") || !strings.Contains(after.History, "second answer") {
-				t.Fatalf("history lost on %s: %s", restart, after.History)
+			requests := fake.Requests()
+			// Include the completed response absent from the preceding request.
+			// Prefix-only comparison otherwise permits dropping the latest answer.
+			expected := requests[1]
+			expected.Messages = append(append([]json.RawMessage(nil), expected.Messages...), json.RawMessage(`{"role":"assistant","content":"second answer"}`))
+			if !piInputPrefixPreserved(expected, requests[len(requests)-1]) {
+				t.Fatalf("completed second answer changed or lost across %s restart: %s", restart, requests[len(requests)-1].Body)
+			}
+			if len(requests[0].Tools) == 0 {
+				t.Fatal("acceptance input has no tool declarations")
+			}
+			for i := 1; i < len(requests); i++ {
+				if !piInputPrefixPreserved(requests[i-1], requests[i]) {
+					t.Fatalf("model input prefix changed on %s request %d:\nbefore=%s\nafter=%s", restart, i, requests[i-1].Body, requests[i].Body)
+				}
 			}
 			if after.Model != before.Model {
 				t.Fatalf("model changed: %s -> %s", before.Model, after.Model)

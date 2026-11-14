@@ -152,7 +152,7 @@ func realPiDriver(t *testing.T, s harnesstest.DriverSetup) harnesstest.Fixture {
 	case harnesstest.ParentStream:
 		script = []fakemodel.Response{{Deltas: []fakemodel.Delta{{Text: "Hel"}}, ToolCalls: []fakemodel.ToolCall{{ID: "probe-1", Name: "mcp__nocx__probe", Arguments: `{"note":"hello"}`}}}}
 	case harnesstest.Tool, harnesstest.CancelTool, harnesstest.ParentTool:
-		script = []fakemodel.Response{{ToolCalls: []fakemodel.ToolCall{{ID: "probe-1", Name: "mcp__nocx__probe", Arguments: `{"note":"hello","agent_environment":{}}`}}}, end}
+		script = []fakemodel.Response{{ToolCalls: []fakemodel.ToolCall{{ID: "probe-1", Name: "mcp__nocx__probe", Arguments: `{"note":"hello"}`}}}, end}
 	case harnesstest.ParentIdle:
 		script = []fakemodel.Response{{Block: gate}}
 	case harnesstest.Failure:

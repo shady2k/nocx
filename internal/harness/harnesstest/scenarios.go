@@ -189,11 +189,9 @@ func Run(t *testing.T, driver Driver) {
 					t.Fatalf("bridge environment missing: %s", result)
 				}
 
-				_, environment, ok := strings.Cut(result, ";agent_environment=")
-				if !ok {
-					t.Fatalf("missing agent environment observation: %s", result)
-				}
-				if strings.Contains(f.AgentEnvironment(), "bridge-only-secret") || strings.Contains(environment, "bridge-only-secret") {
+				// Read the native agent process observation. Tool arguments are
+				// model-controlled input, not evidence of the agent environment.
+				if strings.Contains(f.AgentEnvironment(), "bridge-only-secret") {
 					t.Fatal("bridge secret leaked into agent environment")
 				}
 

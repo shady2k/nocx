@@ -782,16 +782,30 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default
       // resolves so the write always proceeds (fail-open).
-      call: vi.fn<WSClient['call']>().mockResolvedValue({
-        id: 'att-0',
-        domain: 'd1',
-        state: 'open',
-        command: '',
-        cwd: '',
-        host: '',
-        origin: 'app',
-        startedAt: '2026-08-08T12:00:00Z',
-      }),
+      call: vi.fn<WSClient['call']>().mockImplementation((method) =>
+        Promise.resolve(
+          method === 'agent.status'
+            ? {
+                message: null,
+                answering: {
+                  ready: true,
+                  reason: null,
+                  agentId: 'fixture-agent',
+                  model: 'fixture-model',
+                },
+              }
+            : {
+                id: 'att-0',
+                domain: 'd1',
+                state: 'open',
+                command: '',
+                cwd: '',
+                host: '',
+                origin: 'app',
+                startedAt: '2026-08-08T12:00:00Z',
+              },
+        ),
+      ),
     },
     // What the backend answers when no content store is wired: a JSON-RPC
     // -32601, not a transport failure — a reader that tells "the store

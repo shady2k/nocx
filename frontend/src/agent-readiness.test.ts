@@ -4,7 +4,7 @@
 // the store is a stored fact with a refresh, not a function called at
 // refusal time — the shape terminal-content.ts had, which cannot repaint
 // anything. The second is the ordering rule: two refreshes racing is the
-// ORDINARY case (add an endpoint, then immediately choose a model is one
+// ORDINARY case (configure an agent, then immediately choose a model is one
 // gesture apart), so a reply that resolves late must never repaint over a
 // newer one.
 import { describe, it, expect, vi } from 'vitest'
@@ -87,7 +87,7 @@ describe('AgentReadiness — the one owner of the readiness fact (AD-8)', () => 
     const seen: Array<AgentStatusResult | null> = []
     readiness.subscribe((st) => seen.push(st))
 
-    // Two asks in flight: the first carries the OLD facts (no endpoint),
+    // Two asks in flight: the first carries the OLD facts (no agent ready),
     // the second the new ones. The second answers first.
     const first = readiness.refresh()
     const second = readiness.refresh()
@@ -163,4 +163,41 @@ it('shows Agent default as ready when the harness does not name an explicit mode
       status({ answering: { ready: true, reason: null, agentId: 'pi', model: null } }),
     ),
   ).toEqual({ kind: 'ready', agentId: 'pi', model: 'Agent default' })
+})
+
+describe('AgentReadiness invocation gate', () => {
+  it.each([
+    ['not-installed', 'Install pi to use the assistant.'],
+    ['not-configured', 'Configure a provider in pi.'],
+    ['not-configured', 'The provider credentials are invalid.'],
+    ['model-gone', 'The chosen model is no longer available.'],
+  ] as const)(
+    'opens agent settings with the %s reason before invoking',
+    async (reason, message) => {
+      const readiness = new AgentReadiness({
+        status: () =>
+          Promise.resolve(
+            status({
+              answering: { ready: false, reason, agentId: 'pi', model: null },
+              message,
+            }),
+          ),
+      })
+      const repair = vi.fn()
+      expect(await readiness.ensureReady(repair)).toBe(false)
+      expect(repair).toHaveBeenCalledExactlyOnceWith(message)
+      expect(modelChipState(readiness.status)).toEqual({
+        kind: 'action',
+        text: message,
+        page: 'agent-installed',
+      })
+    },
+  )
+
+  it('allows a ready agent without opening settings', async () => {
+    const readiness = new AgentReadiness({ status: () => Promise.resolve(READY) })
+    const repair = vi.fn()
+    expect(await readiness.ensureReady(repair)).toBe(true)
+    expect(repair).not.toHaveBeenCalled()
+  })
 })

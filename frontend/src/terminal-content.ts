@@ -3897,7 +3897,7 @@ export class TerminalContent extends BasePaneContent {
             },
           }
         },
-        // The no-endpoint refusal is visible in the product, never only in
+        // An unavailable-agent refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
         onRefusal: (message) => {
@@ -3907,17 +3907,9 @@ export class TerminalContent extends BasePaneContent {
         onTurnEnd: () => {
           if (!this._summoned) this.clearAutomaticFrozenFrame()
         },
-        // The typed readiness fact behind a refusal (agent.status), so the
-        // target never has to read the reason out of the message text.
-        // Through the store, not around it: a refusal is exactly when the
-        // facts are freshest and the chip most needs to catch up, and a
-        // second caller of agent.status would be a second owner of the
-        // answer (AD-8).
-        status: () => readiness.refresh(),
-        // No endpoint: the toast says what is wrong and this opens where it
-        // is fixed. A refusal with nowhere to go is how a person concludes
-        // the feature is broken rather than unconfigured.
-        onNoEndpoint: () => this.hooks.onOpenAgentSettings?.(),
+        // Both preflight and a raced backend refusal use the same readiness
+        // owner, so the reason, chip and Settings destination stay together.
+        ensureReady: () => this.ensureAgentReady(),
         // Where a standing answer is managed, for the receipt the turn
         // draws when one is saved (nocx-2019q).
         openPermissions: () => this.hooks.onManagePermissions?.(),
@@ -8830,6 +8822,14 @@ export class TerminalContent extends BasePaneContent {
     return grant === null ? null : { ...grant, state: 'running', automatic: true }
   }
 
+  private async ensureAgentReady(): Promise<boolean> {
+    if (!this.readiness) return false
+    return this.readiness.ensureReady((message) => {
+      showToast({ level: 'warning', message })
+      this.hooks.onOpenAgentSettings?.()
+    })
+  }
+
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
    *  The accepted backend frame is the one owner of the visible grid. Capture
@@ -8854,6 +8854,7 @@ export class TerminalContent extends BasePaneContent {
     // The accepted frame carries the viewport's absolute base row. Alternate
     // buffers begin at zero; normal-buffer captures keep their shared row anchor.
     try {
+      if (!(await this.ensureAgentReady())) return false
       const frame = await this.captureLiveFrame()
       // The command may have finished, the tab may have closed, or another
       // path may have shown the editor while capture was in flight. All are

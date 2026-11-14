@@ -90,7 +90,7 @@ func TestHarnessStatusChosenAndRemovedModelOverTheWire(t *testing.T) {
 		if !removed && (!got.Answering.Ready || got.Answering.Model == nil || *got.Answering.Model != "chosen") {
 			t.Fatalf("chosen: %s", raw)
 		}
-		if removed && (got.Answering.Ready || got.Answering.Reason == nil || *got.Answering.Reason != "model-gone" || got.Message == nil) {
+		if removed && (got.Answering.Model == nil || *got.Answering.Model != "chosen" || got.Answering.Ready || got.Answering.Reason == nil || *got.Answering.Reason != "model-gone" || got.Message == nil) {
 			t.Fatalf("removed: %s", raw)
 		}
 	}

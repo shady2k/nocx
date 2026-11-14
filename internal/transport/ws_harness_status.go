@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/capability"
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/profile"
 )
@@ -34,8 +35,30 @@ func (h agentHandlers) handleHarnessStatus(ctx context.Context, req jsonrpcReque
 			reason := "unavailable"
 			if errors.Is(err, profile.ErrRoleModelGone) {
 				reason = "model-gone"
+				// Keep the removed choice visible rather than showing the agent's default.
+				_ = h.configOp.Run(ctx, func(_ context.Context, svc capability.ConfigService) error {
+					assignments, loadErr := svc.ListRoleAssignments()
+					for _, assignment := range assignments {
+						if assignment.Role == profile.RoleAnswering && assignment.AgentID == h.harnessID {
+							result.Answering.Model = &assignment.Model
+							break
+						}
+					}
+					return loadErr
+				})
+				refuse(reason, fmt.Sprint(err))
+			} else {
+				// Catalogue discovery can fail because the agent is absent or not
+				// configured. Keep its actionable readiness diagnostic in that case.
+				switch ready := h.harness.Readiness(ctx); ready.State {
+				case agentharness.NotInstalled:
+					refuse("not-installed", ready.Message)
+				case agentharness.NotConfigured:
+					refuse("not-configured", ready.Message)
+				default:
+					refuse(reason, fmt.Sprint(err))
+				}
 			}
-			refuse(reason, fmt.Sprint(err))
 		} else {
 			if model != "" {
 				result.Answering.Model = &model

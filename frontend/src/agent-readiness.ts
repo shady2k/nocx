@@ -53,6 +53,16 @@ export class AgentReadiness {
 
   constructor(private readonly source: AgentStatusSource) {}
 
+  /** Refresh before an AI gesture changes the pane. A refusal shares the chip's
+   * sentence and repair destination, rather than allocating a failed answer. */
+  async ensureReady(openAgentSettings: (reason: string) => void): Promise<boolean> {
+    const status = await this.refresh()
+    if (status.answering.ready) return true
+    const line = agentStatusLine(status)
+    if (line) openAgentSettings(line.text)
+    return false
+  }
+
   get status(): AgentStatusResult | null {
     return this._status
   }

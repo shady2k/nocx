@@ -247,16 +247,16 @@ export class CommandEditor {
    *  reachable by keyboard, and `recoveryChip` above is the precedent.
    *  Hidden until setModelChip is called with a state, so the row's height
    *  never moves (nocx-6c546). */
-  private modelEndpointChip: HTMLButtonElement
+  private modelAgentChip: HTMLButtonElement
   private modelChip: HTMLButtonElement
   /** Where each chip goes when clicked. STORED rather than captured in a
    *  closure: the chips' meaning changes with every state while the
    *  listeners are permanent. Re-adding a listener per state change is how
    *  one click ends up firing three times. */
   private _modelChipTargets: {
-    endpoint: 'agent-installed' | null
+    agent: 'agent-installed' | null
     model: 'agent-installed' | null
-  } = { endpoint: null, model: null }
+  } = { agent: null, model: null }
   private _onModelChipClick: ((page: 'agent-installed') => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
@@ -424,19 +424,19 @@ export class CommandEditor {
     // Hidden until setModelChip is called with a state, so the row never
     // grows on its own; the row's height is fixed regardless (nocx-6c546,
     // nocx-i4h04).
-    this.modelEndpointChip = createButton({
+    this.modelAgentChip = createButton({
       label: '',
       variant: 'ghost',
       size: 'sm',
       truncate: true,
       mono: true,
       onClick: () => {
-        const page = this._modelChipTargets.endpoint
+        const page = this._modelChipTargets.agent
         if (page) this._onModelChipClick?.(page)
       },
     })
-    this.modelEndpointChip.dataset.control = 'model-endpoint'
-    this.modelEndpointChip.style.display = 'none'
+    this.modelAgentChip.dataset.control = 'model-agent'
+    this.modelAgentChip.style.display = 'none'
 
     this.modelChip = createButton({
       label: '',
@@ -465,7 +465,7 @@ export class CommandEditor {
     this.grantChip.dataset.control = 'grant'
     this.grantChip.style.display = 'none'
 
-    this.controls.append(this.recoveryChip, this.modelEndpointChip, this.modelChip, this.grantChip)
+    this.controls.append(this.recoveryChip, this.modelAgentChip, this.modelChip, this.grantChip)
     this.chrome.append(this.context, this.controls)
 
     // The kit card + field (ui/composer-frame.ts, spec §4): the outer inset
@@ -710,19 +710,19 @@ export class CommandEditor {
    * owner that rule removed.
    */
   setModelChip(state: ModelChipState | null): void {
-    this._modelChipTargets = { endpoint: null, model: null }
+    this._modelChipTargets = { agent: null, model: null }
     if (state === null) {
-      this.modelEndpointChip.style.display = 'none'
+      this.modelAgentChip.style.display = 'none'
       this.modelChip.style.display = 'none'
       return
     }
     if (state.kind === 'ready') {
-      this._modelChipTargets = { endpoint: 'agent-installed', model: 'agent-installed' }
-      this.modelEndpointChip.disabled = false
-      this.modelEndpointChip.style.display = ''
-      this.modelEndpointChip.textContent = state.agentId
-      this.modelEndpointChip.title = state.agentId
-      this.modelEndpointChip.setAttribute(
+      this._modelChipTargets = { agent: 'agent-installed', model: 'agent-installed' }
+      this.modelAgentChip.disabled = false
+      this.modelAgentChip.style.display = ''
+      this.modelAgentChip.textContent = state.agentId
+      this.modelAgentChip.title = state.agentId
+      this.modelAgentChip.setAttribute(
         'aria-label',
         t('editor.chip.agent', 'Answers with {agent}. Open agent settings.', {
           agent: state.agentId,
@@ -750,8 +750,8 @@ export class CommandEditor {
     // being unreadable. `disabled` is reset on the way OUT of that state
     // too (the ready branch above) — a chip that stayed dead after the
     // store came back would be the same defect with a longer fuse.
-    this._modelChipTargets = { endpoint: null, model: state.page }
-    this.modelEndpointChip.style.display = 'none'
+    this._modelChipTargets = { agent: null, model: state.page }
+    this.modelAgentChip.style.display = 'none'
     this.modelChip.disabled = state.page === null
     this.modelChip.style.display = ''
     this.modelChip.textContent = state.text

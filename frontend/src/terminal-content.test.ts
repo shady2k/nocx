@@ -14700,21 +14700,23 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('with no endpoint configured, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
+  it('with no answering agent installed, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
     const client = makeClient()
+    const openSettings = vi.fn()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []
     client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
       dispatcherCalls.push({ method, params })
-      if (method === 'agent.ask') {
-        const err = new Error('no endpoint configured') as Error & { code?: number }
-        err.code = -32603
-        return Promise.reject(err)
+      if (method === 'agent.status') {
+        return Promise.resolve({
+          answering: { ready: false, reason: 'not-installed', agentId: null, model: null },
+          message: 'Install an answering agent first',
+        })
       }
       return Promise.resolve({ frameId: 'frame-1' })
     })
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
-      { attachToDocument: true },
+      { attachToDocument: true, hooks: { onOpenAgentSettings: openSettings } },
       client,
     )
     try {
@@ -14733,12 +14735,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       typeAndAsk(ed, content, 'why did it fail?')
 
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
-      })
+      await vi.waitFor(() => expect(openSettings).toHaveBeenCalledOnce())
+      expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(false)
       await vi.waitFor(() => {
         expect(showToast).toHaveBeenCalledWith(
-          expect.objectContaining({ level: 'warning', message: 'no endpoint configured' }),
+          expect.objectContaining({
+            level: 'warning',
+            message: 'Install an answering agent first',
+          }),
         )
       })
       expect(marked.dataset.granted).toBe('true')
@@ -17676,10 +17680,11 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   /** ⌘/Ctrl+Enter, dispatched where a person's keystroke lands while the
    *  grid owns input: on the live grid, so it travels the same path. */
-  async function summonChord(content: TerminalContent): Promise<void> {
+  async function summonChord(content: TerminalContent, waitForCapture = false): Promise<void> {
     if (!Object.prototype.hasOwnProperty.call(content, 'captureLiveFrame')) {
       content.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
     }
+    const capture = vi.spyOn(content, 'captureLiveFrame')
     gridOf(content).dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -17688,7 +17693,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         cancelable: true,
       }),
     )
-    await Promise.resolve()
+    await vi.waitFor(() => {
+      if (waitForCapture) expect(capture).toHaveBeenCalledOnce()
+      else expect(editorOf(content).isVisible).toBe(true)
+    })
   }
 
   function escapeOn(el: HTMLElement): void {
@@ -18161,6 +18169,65 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('refuses an unready summon before capturing or changing the live pane', async () => {
+    const client = makeClient()
+    const fallback = client.dispatcher.call.getMockImplementation()!
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'agent.status')
+        return Promise.resolve({
+          answering: { ready: false, reason: 'not-installed', agentId: null, model: null },
+          message: 'Install an answering agent first',
+        })
+      return fallback(method, params)
+    })
+    const openSettings = vi.fn()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onOpenAgentSettings: openSettings },
+      },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const capture = vi.fn().mockResolvedValue(defaultPinnedFrame())
+      content.captureLiveFrame = capture
+      const session = sessionOf(content)
+      session.sendResize.mockClear()
+      vi.mocked(showToast).mockClear()
+      gridOf(content).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await vi.waitFor(() => expect(openSettings).toHaveBeenCalledOnce())
+      expect(showToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warning',
+          message: 'Install an answering agent first',
+        }),
+      )
+      expect(capture).not.toHaveBeenCalled()
+      expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+        false,
+      )
+      expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(paneOf(content).querySelector('.nocx-summon-stack')).toBeNull()
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   it('waits for the pinned frame before showing the editor or marker', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
@@ -18180,7 +18247,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           }),
       )
 
-      await summonChord(content)
+      await summonChord(content, true)
       expect(ed.isVisible).toBe(false)
       expect(content.pinnedFrame()).toBeNull()
       expect(ed.root.querySelector('[role="status"]')).toBeNull()
@@ -18207,7 +18274,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       startCommand(client)
       content.captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
 
-      await summonChord(content)
+      await summonChord(content, true)
       expect(ed.isVisible).toBe(false)
       expect(ed.root.dataset.placement).toBe('inline')
       expect(content.pinnedFrame()).toBeNull()
@@ -19040,7 +19107,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         expect(document.activeElement).toBe(document.body)
 
         chordOn(document.body)
-        await Promise.resolve()
+        await vi.waitFor(() => expect(ed.isVisible).toBe(true))
 
         expect(ed.isVisible).toBe(true)
         expect(targetNamed(ed)).toBe('agent')
@@ -21565,6 +21632,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const handler = startCommand(client)
       const editorRoot = ed.root
       await summon(content)
+      await vi.waitFor(() => expect(sessionOf(content).sendResize).toHaveBeenCalled())
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
       const session = sessionOf(content)
       session.send.mockClear()
@@ -22626,6 +22694,26 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const attached = (ask?.[1] as { attachedContent: Record<string, unknown>[] }).attachedContent
       expect(attached).toHaveLength(1)
       expect(attached[0]).toMatchObject({ start: 1, count: 2, automatic: true })
+
+      // Finish the answer before returning to the composer's grant control.
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+
+      // A successful ask consumed its marks. Mark the band again for the next question.
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button'),
+        ).not.toBeNull(),
+      )
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      await vi.waitFor(() => expect(chip?.textContent).toContain('· 1'))
 
       // And dismissing the row mark leaves the whole screen attached: the
       // person took back the narrowing, not the attachment.

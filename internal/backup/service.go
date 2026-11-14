@@ -690,7 +690,6 @@ func profileToBackup(p profile.SSHProfile) BackupProfile {
 		Auth:              authVal(p.Options.Auth),
 		KeyPath:           strVal(p.Options.KeyPath),
 		KeepaliveInterval: intVal(p.Options.KeepaliveInterval),
-		KeepaliveCountMax: intVal(p.Options.KeepaliveCountMax),
 		ReadyTimeout:      intVal(p.Options.ReadyTimeout),
 		JumpHost:          strVal(p.Options.JumpHost),
 		AgentForward:      boolVal(p.Options.AgentForward),
@@ -885,7 +884,6 @@ func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
 			User:              strVal(d.User),
 			Auth:              authVal(d.Auth),
 			KeepaliveInterval: intVal(d.KeepaliveInterval),
-			KeepaliveCountMax: intVal(d.KeepaliveCountMax),
 			ReadyTimeout:      intVal(d.ReadyTimeout),
 			JumpHost:          strVal(d.JumpHost),
 			AgentForward:      boolVal(d.AgentForward),
@@ -990,9 +988,6 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 		if p.Options.KeepaliveInterval < 0 {
 			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q has negative keepaliveInterval", ErrInvalidDocument, p.ID)
 		}
-		if p.Options.KeepaliveCountMax < 0 {
-			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q has negative keepaliveCountMax", ErrInvalidDocument, p.ID)
-		}
 		if p.Options.ReadyTimeout < 0 {
 			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q has negative readyTimeout", ErrInvalidDocument, p.ID)
 		}
@@ -1028,9 +1023,6 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 			}
 			if o.KeepaliveInterval < 0 {
 				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default keepaliveInterval", ErrInvalidDocument, g.ID)
-			}
-			if o.KeepaliveCountMax < 0 {
-				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default keepaliveCountMax", ErrInvalidDocument, g.ID)
 			}
 			if o.ReadyTimeout < 0 {
 				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default readyTimeout", ErrInvalidDocument, g.ID)
@@ -1539,7 +1531,6 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			Auth:                 optAuth(bp.Options.Auth),
 			KeyPath:              optStr(bp.Options.KeyPath),
 			KeepaliveInterval:    optInt(bp.Options.KeepaliveInterval),
-			KeepaliveCountMax:    optInt(bp.Options.KeepaliveCountMax),
 			ReadyTimeout:         optInt(bp.Options.ReadyTimeout),
 			JumpHost:             optStr(bp.Options.JumpHost),
 			AgentForward:         optBool(bp.Options.AgentForward),
@@ -1569,7 +1560,6 @@ func backupToGroup(bg BackupGroup) profile.ProfileGroup {
 		g.Defaults.User = optStr(o.User)
 		g.Defaults.Auth = optAuth(o.Auth)
 		g.Defaults.KeepaliveInterval = optInt(o.KeepaliveInterval)
-		g.Defaults.KeepaliveCountMax = optInt(o.KeepaliveCountMax)
 		g.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
 		g.Defaults.JumpHost = optStr(o.JumpHost)
 		g.Defaults.AgentForward = optBool(o.AgentForward)
@@ -1598,7 +1588,6 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.Options.KeyPath = optStr(bp.Options.KeyPath)
 	mp.Options.Auth = optAuth(bp.Options.Auth)
 	mp.Options.KeepaliveInterval = optInt(bp.Options.KeepaliveInterval)
-	mp.Options.KeepaliveCountMax = optInt(bp.Options.KeepaliveCountMax)
 	mp.Options.ReadyTimeout = optInt(bp.Options.ReadyTimeout)
 	mp.Options.JumpHost = optStr(bp.Options.JumpHost)
 	mp.Options.DesiredMode = optDesired(bp.Options.DesiredMode)
@@ -1651,7 +1640,6 @@ func mergeGroup(bg BackupGroup, cg profile.ProfileGroup) profile.ProfileGroup {
 		mg.Defaults.User = optStr(o.User)
 		mg.Defaults.Auth = optAuth(o.Auth)
 		mg.Defaults.KeepaliveInterval = optInt(o.KeepaliveInterval)
-		mg.Defaults.KeepaliveCountMax = optInt(o.KeepaliveCountMax)
 		mg.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
 		mg.Defaults.JumpHost = optStr(o.JumpHost)
 		mg.Defaults.AgentForward = optBool(o.AgentForward)
@@ -1682,7 +1670,6 @@ func profileEqual(bp BackupProfile, cp profile.SSHProfile) bool {
 		bp.Options.User != strVal(cp.Options.User) || bp.Options.Auth != authVal(cp.Options.Auth) ||
 		bp.Options.KeyPath != strVal(cp.Options.KeyPath) ||
 		bp.Options.KeepaliveInterval != intVal(cp.Options.KeepaliveInterval) ||
-		bp.Options.KeepaliveCountMax != intVal(cp.Options.KeepaliveCountMax) ||
 		bp.Options.ReadyTimeout != intVal(cp.Options.ReadyTimeout) ||
 		bp.Options.JumpHost != strVal(cp.Options.JumpHost) ||
 		bp.Options.AgentForward != boolVal(cp.Options.AgentForward) ||
@@ -1746,9 +1733,6 @@ func backupSSHToSafeMap(o BackupSSHOptions) map[string]any {
 	if o.KeepaliveInterval != 0 {
 		m["keepaliveInterval"] = o.KeepaliveInterval
 	}
-	if o.KeepaliveCountMax != 0 {
-		m["keepaliveCountMax"] = o.KeepaliveCountMax
-	}
 	if o.ReadyTimeout != 0 {
 		m["readyTimeout"] = o.ReadyTimeout
 	}
@@ -1780,9 +1764,6 @@ func sparseDefaultsToSafeMap(d *profile.ProfileDefaults) map[string]any {
 	}
 	if d.KeepaliveInterval != nil {
 		m["keepaliveInterval"] = *d.KeepaliveInterval
-	}
-	if d.KeepaliveCountMax != nil {
-		m["keepaliveCountMax"] = *d.KeepaliveCountMax
 	}
 	if d.ReadyTimeout != nil {
 		m["readyTimeout"] = *d.ReadyTimeout

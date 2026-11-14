@@ -74,9 +74,9 @@ file stays small and a restore never re-asserts a default that has since moved.
 jump host, agent forwarding, port forwards, and the rest. Everything except the credential.
 A connection that had one carries `"requiresCredential": true` in its place.
 
-**Groups** — name, icon, colour, parent, and ten SSH default fields: `port`, `user`,
-`auth`, `keepaliveInterval`, `keepaliveCountMax`, `readyTimeout`, `jumpHost`,
-`agentForward`, `desiredMode`, `portDiscovery`.
+**Groups** — name, icon, colour, parent, and nine SSH default fields: `port`, `user`,
+`auth`, `keepaliveInterval`, `readyTimeout`, `jumpHost`, `agentForward`, `desiredMode`,
+`portDiscovery`.
 
 ### What is left out
 

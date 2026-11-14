@@ -536,21 +536,14 @@ type ProfileDefaults struct {
 // allowedDefaultKeys returns the set of JSON field names ProfileDefaults
 // accepts. Used in custom unmarshaling and DecodeDefaults.
 var allowedFields = map[string]bool{
-	"passwordSecret":      true,
-	"keySecret":           true,
-	"keyPassphraseSecret": true,
-	"port":                true,
-	"user":                true,
-	"keyPath":             true,
-	"jumpHost":            true,
-	"keepaliveInterval":   true,
-	// keepaliveCountMax was a field until stage 2 and is RETIRED: design §5.3
-	// replaced "N missed intervals" with a fixed soft deadline, so nothing
-	// reads it. It stays ACCEPTED here because this map is what decides
-	// whether a stored group default is refused — and refusing a document a
-	// person already saved would take their connections down on upgrade. It is
-	// ignored, and dropped the next time the group is written.
-	"keepaliveCountMax":    true,
+	"passwordSecret":       true,
+	"keySecret":            true,
+	"keyPassphraseSecret":  true,
+	"port":                 true,
+	"user":                 true,
+	"keyPath":              true,
+	"jumpHost":             true,
+	"keepaliveInterval":    true,
 	"readyTimeout":         true,
 	"agentForward":         true,
 	"portDiscovery":        true,

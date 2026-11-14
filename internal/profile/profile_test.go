@@ -906,3 +906,28 @@ func TestAllowedDefaultKeysMatchesSparseSSHOptionsTags(t *testing.T) {
 		}
 	}
 }
+
+// TestProfileDefaults_RetiredKeepaliveCountMaxIsRefused is the consequence of
+// deleting keepaliveCountMax from the product (design §5.3 replaced "N missed
+// intervals" with a fixed soft deadline): it is no longer a field, so a stored
+// GROUP DEFAULT that still carries it holds an unknown key, and unknown keys
+// are refused — at write (the store's CreateGroup/UpdateGroup) and at
+// resolution (ResolveEffectiveProfile). This repository is greenfield and
+// carries no compatibility shims, so a document from before the deletion is
+// refused rather than quietly accepted; a backup document carrying the key is
+// refused by the same rule (internal/backup decodes with
+// DisallowUnknownFields).
+func TestProfileDefaults_RetiredKeepaliveCountMaxIsRefused(t *testing.T) {
+	data := []byte(`{"keepaliveInterval":30000,"keepaliveCountMax":3}`)
+	var d ProfileDefaults
+	if err := d.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON records unknown keys rather than failing the decode: %v", err)
+	}
+	keys := d.UnknownKeys()
+	if len(keys) != 1 || keys[0] != "keepaliveCountMax" {
+		t.Fatalf("UnknownKeys = %v, want [keepaliveCountMax]", keys)
+	}
+	if err := d.Validate(); err == nil {
+		t.Fatal("Validate accepted the retired keepaliveCountMax: a stored group default carrying it must be refused")
+	}
+}

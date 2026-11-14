@@ -11,12 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -460,19 +457,14 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 	}
 	lines[398] = marker
 
-	// The provider: list, then read the window the total points at, then
-	// answer with what the tool result actually carried.
-	prov := &blockToolProvider{marker: marker}
-	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
-	defer srv.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(srv.URL)
-
+	listResult := filepath.Join(t.TempDir(), "list-result")
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.list", Arguments: map[string]any{}, ResultFile: listResult},
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"count": 20}, ArgumentsFromResult: map[string]string{"id": "items.0.id", "start": "items.0.lines"}, ArgumentOffsets: map[string]float64{"start": -20}},
+		{Kind: protocol.StepAnswer, Text: marker},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}
+	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(autonomousPolicyStore(t)))
 	seedPaneChain(t, h.db, blockPaneThis, blockPaneOther)
 	sid, openErr := openSessionInPane(t, h.conn, blockPaneThis, 1)
 	if openErr != nil {
@@ -509,99 +501,39 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 		answer.WriteString(d.Text)
 	}
 	if !strings.Contains(answer.String(), marker) {
-		t.Fatalf("answer = %q, want the line at the END of 400 lines of output.\nprovider saw %d requests, last tool call: %s",
-			answer.String(), prov.requests, prov.lastCall)
+		t.Fatalf("answer = %q, want the line at the end of 400 lines", answer.String())
 	}
-	if prov.readStart < 300 {
-		t.Errorf("the model read from line %d; the marker is at 398 — the list's total did not reach it", prov.readStart)
+	result := h.toolResult()
+	if !strings.Contains(result, marker) {
+		t.Fatalf("actual read result lacks marker: %s", result)
 	}
-}
-
-// blockToolProvider is the fake model of the end-to-end: it proposes
-// blocks.list, then aims blocks.read at the END using the total the list
-// result carried, then answers with the marker IF the tool result it was
-// handed actually contained it. The last step is what makes the assertion
-// about the product rather than about the test.
-type blockToolProvider struct {
-	marker    string
-	requests  int
-	lastCall  string
-	readStart int
-}
-
-func (p *blockToolProvider) serve(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	p.requests++
-	switch p.requests {
-	case 1:
-		p.lastCall = "session.list"
-		streamToolCallChunk(w, "session.list", `{}`)
-	case 2:
-		itemID, total := listedItemFrom(string(body))
-		p.readStart = total - 20
-		if p.readStart < 0 {
-			p.readStart = 0
-		}
-		p.lastCall = "session.read"
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":%d,"count":20}`, itemID, p.readStart))
-	default:
-		if strings.Contains(string(body), p.marker) {
-			streamAnswerChunk(w, p.marker)
-			return
-		}
-		streamAnswerChunk(w, "the output ends with something else")
+	var listed struct {
+		Items []struct {
+			ID    string `json:"id"`
+			Lines int    `json:"lines"`
+		} `json:"items"`
+	}
+	decodeBridgeOutput(t, string(h.agent.read(listResult)), &listed)
+	if len(listed.Items) != 1 || listed.Items[0].Lines != 400 {
+		t.Fatalf("list result = %+v, want 400 lines", listed)
+	}
+	var read struct {
+		Window struct {
+			Start int `json:"start"`
+		} `json:"window"`
+	}
+	decodeBridgeOutput(t, result, &read)
+	if read.Window.Start != 380 {
+		t.Fatalf("read start = %d, want total-20", read.Window.Start)
 	}
 }
 
-// listedItemFrom reads the item id and line count out of the session.list
-// result the engine put into the conversation — the model's own path to both.
-func listedItemFrom(body string) (string, int) {
-	id := jsonStringAfter(body, `\"id\":\"`)
-	total := 0
-	if i := strings.Index(body, `\"lines\":`); i >= 0 {
-		rest := body[i+len(`\"lines\":`):]
-		end := 0
-		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-			end++
-		}
-		total, _ = strconv.Atoi(rest[:end])
+// decodeBridgeOutput reads the actual tool result the process received.
+func decodeBridgeOutput(t *testing.T, result string, target any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(result), target); err != nil {
+		t.Fatalf("tool result: %v: %s", err, result)
 	}
-	return id, total
-}
-
-func jsonStringAfter(body, key string) string {
-	i := strings.Index(body, key)
-	if i < 0 {
-		return ""
-	}
-	rest := body[i+len(key):]
-	end := strings.Index(rest, `\"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
-
-// streamAnswerChunk writes one streamed answer the way a completion arrives.
-func streamAnswerChunk(w http.ResponseWriter, text string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	chunk := func(content, finish string) {
-		d := map[string]any{
-			"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 0,
-			"model": "probe-model",
-			"choices": []map[string]any{{
-				"index": 0, "delta": map[string]any{"role": "assistant", "content": content},
-				"finish_reason": finish,
-			}},
-		}
-		b, _ := json.Marshal(d)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-	}
-	chunk(text, "")
-	chunk("", "stop")
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
 func sessionOpenedAt(t *testing.T, ws *WSServer, sid string) int64 {

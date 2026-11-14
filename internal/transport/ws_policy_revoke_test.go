@@ -10,12 +10,12 @@ package transport
 // and a hand-built one would be a grant nobody minted.
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -23,69 +23,24 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-// heldAskClient keeps every run it is asked to answer ALIVE until either the
-// run's own context is cancelled or the test releases them all. That is what
-// makes a run "in flight" for these tests: the grant is minted, the run is in
-// the registry, and nothing has terminalized it.
-type heldAskClient struct {
-	started chan int64
-	release chan struct{}
-	once    sync.Once
-	mu      sync.Mutex
-	discard []string
-}
-
-func newHeldAskClient() *heldAskClient {
-	return &heldAskClient{started: make(chan int64, 8), release: make(chan struct{})}
-}
-
-func (c *heldAskClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{}, nil
-}
-
-func (c *heldAskClient) Ask(ctx context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "in flight"}); err != nil {
-		return err
-	}
-	c.started <- 1
-	select {
-	case <-c.release:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (c *heldAskClient) Discard(runID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.discard = append(c.discard, runID)
-}
-
-// releaseAll lets every held run finish normally. Idempotent: a test that
-// releases and then defers a release must not panic on the second close.
-func (c *heldAskClient) releaseAll() { c.once.Do(func() { close(c.release) }) }
-
-// revokeHarness is newPolicyHarness with a client that holds its runs open.
+// Each live turn owns a real actor conversation. A separate terminal session
+// avoids queuing turns behind a single conversation's active turn.
 type revokeHarness struct {
 	*askHarness
 	store  *assistant.GlobalPolicyStore
-	client *heldAskClient
-	sid    string
 	nextID int
 }
 
 func newRevokeHarness(t *testing.T) *revokeHarness {
 	t.Helper()
-	client := newHeldAskClient()
 	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
-	h := newAskHarnessWithOpts(t, client,
-		WithAgentPolicy(store),
-		WithLiveEffects(agenttools.LiveEffects()),
-	)
-	t.Cleanup(client.releaseAll)
-	h.createEndpoint()
-	return &revokeHarness{askHarness: h, store: store, client: client, sid: openLocalSession(t, h.conn), nextID: 100}
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "in flight"},
+		{Kind: protocol.StepGate},
+		{Kind: protocol.StepEnd, Model: "test-model"},
+	}}
+	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(store), WithLiveEffects(agenttools.LiveEffects()))
+	return &revokeHarness{askHarness: h, store: store, nextID: 100}
 }
 
 // startHeldRun asks a question and waits until the stream is really running,
@@ -94,34 +49,25 @@ func newRevokeHarness(t *testing.T) *revokeHarness {
 func (h *revokeHarness) startHeldRun(askID string) askWireResult {
 	h.t.Helper()
 	h.nextID++
+	sid := openLocalSession(h.t, h.conn)
 	res, errObj := askOverWire(h.t, h.conn, map[string]any{
-		"askId": askID, "sessionId": h.sid, "question": "keep going",
-		"cwd": "/repo", "attachedContent": []any{},
+		"askId": askID, "sessionId": sid, "question": "keep going", "cwd": "/repo", "attachedContent": []any{},
 	}, h.nextID)
 	if errObj != nil {
 		h.t.Fatalf("agent.ask %s: %+v", askID, errObj)
 	}
-	select {
-	case <-h.client.started:
-	case <-time.After(5 * time.Second):
-		h.t.Fatalf("run %s never started streaming", askID)
+	// The actor delta is the observable proof this run is driving, not queued.
+	raw := readNotification(h.t, h.conn, "agent.runDelta", 5*time.Second)
+	var delta struct {
+		RunID int64 `json:"runId"`
 	}
-	// The registry entry is written before the stream is submitted, so a
-	// started stream means the run is registered; assert it rather than
-	// assume it, because every count below is over this map.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		h.ws.pendingRunsMu.Lock()
-		_, live := h.ws.pendingRuns[res.RunID]
-		h.ws.pendingRunsMu.Unlock()
-		if live {
-			return res
-		}
-		if time.Now().After(deadline) {
-			h.t.Fatalf("run %d never reached the live registry", res.RunID)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		h.t.Fatal(err)
 	}
+	if !h.isLive(res.RunID) {
+		h.t.Fatalf("run %d missing from live registry", res.RunID)
+	}
+	return res
 }
 
 func (h *revokeHarness) isLive(runID int64) bool {
@@ -336,7 +282,11 @@ func TestPolicyForgetRule_FutureOnlyLeavesTheRunningWorkAloneAtBothEnds(t *testi
 
 	// AND THE INTERVAL CLOSES WHERE IT SHOULD: the run in flight reaches its
 	// own ending, not one the revocation gave it.
-	h.client.releaseAll()
+	// Retire the newer probe first so the shared FIFO has exactly one reader.
+	// This is an explicit user stop, not a side effect of revocation.
+	jsonrpcCall(t, h.conn, "agent.cancel", map[string]any{"runId": next.RunID})
+	waitForRunTermination(t, h, next.EntryID, content.RunCancelled, content.TermUserKilled)
+	h.release()
 	waitForRunTermination(t, h, inFlight.EntryID, content.RunCompleted, content.TermCompleted)
 }
 

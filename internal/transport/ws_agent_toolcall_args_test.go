@@ -21,80 +21,47 @@ package transport
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
-	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
-
-// twoReadsProvider is the fake model: it reads one finished command, then
-// another, then answers. One tool, one session, two different blocks — the
-// exact shape the owner could not tell apart.
-type twoReadsProvider struct {
-	first    string
-	second   string
-	requests int
-	bodies   []string
-	ready    chan struct{}
-}
-
-func (p *twoReadsProvider) serve(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	p.bodies = append(p.bodies, string(body))
-	p.requests++
-	if p.requests == 3 {
-		close(p.ready)
-	}
-	switch p.requests {
-	case 1:
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":0,"count":1}`, p.first))
-	case 2:
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":0,"count":1}`, p.second))
-	default:
-		streamAnswerChunk(w, "both of them")
-	}
-}
 
 func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
 
-	prov := &twoReadsProvider{ready: make(chan struct{})}
-	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
-	defer srv.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(srv.URL)
-
+	firstResult, secondResult := filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")
+	// The connector serializes the script only when the ask starts, after the ledger IDs are known.
+	var first, second string
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"id": first, "start": 0, "count": 1}, ResultFile: firstResult},
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"id": second, "start": 0, "count": 1}, ResultFile: secondResult},
+		{Kind: protocol.StepAnswer, Text: "both of them"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}
+	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(autonomousPolicyStore(t)))
 	seedPaneChain(t, h.db, blockPaneThis, blockPaneOther)
 	sid, openErr := openSessionInPane(t, h.conn, blockPaneThis, 1)
 	if openErr != nil {
 		t.Fatalf("open in pane: %+v", openErr)
 	}
 	waitPastMilli(sessionOpenedAt(t, h.ws, sid))
-	prov.first = recordBlockWithBody(t, h.db, blockPaneThis, "df -h",
+	first = recordBlockWithBody(t, h.db, blockPaneThis, "df -h",
 		"0198f2b0-0000-7000-8000-0000000000f1", "Filesystem  Size")
-	prov.second = recordBlockWithBody(t, h.db, blockPaneThis, "du -sh .",
+	second = recordBlockWithBody(t, h.db, blockPaneThis, "du -sh .",
 		"0198f2b0-0000-7000-8000-0000000000f2", "12G\t.")
+	script.Steps[0].Arguments["id"] = first
+	script.Steps[1].Arguments["id"] = second
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "0198f2b0-0000-7000-8000-0000000000fa",
 		"sessionId": sid,
 		"question":  "what did those two commands say?",
 		"cwd":       "/repo",
 		"attachedContent": []any{
-			map[string]any{"itemId": prov.first, "command": "df -h", "state": "exited"},
-			map[string]any{"itemId": prov.second, "command": "du -sh .", "state": "exited"},
+			map[string]any{"itemId": first, "command": "df -h", "state": "exited"},
+			map[string]any{"itemId": second, "command": "du -sh .", "state": "exited"},
 		},
 	}, 2); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
@@ -119,17 +86,14 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 		}
 		calls = append(calls, got)
 	}
-	<-prov.ready
-	if len(prov.bodies) < 3 {
-		t.Fatalf("provider requests = %d, want initial prompt plus two tool-result requests", len(prov.bodies))
+	if !strings.Contains(h.prompt().Text, first) || !strings.Contains(h.prompt().Text, second) {
+		t.Fatalf("initial prompt omitted granted item ids: %+v", h.prompt())
 	}
-	if !strings.Contains(prov.bodies[0], prov.first) || !strings.Contains(prov.bodies[0], prov.second) {
-		t.Fatalf("initial model request omitted granted item ids: %s", prov.bodies[0])
+	firstBody := string(h.agent.read(firstResult))
+	secondBody := string(h.agent.read(secondResult))
+	if !strings.Contains(firstBody, "Filesystem  Size") || !strings.Contains(secondBody, "12G") {
+		t.Fatalf("session.read results did not reach agent: %q / %q", firstBody, secondBody)
 	}
-	if !strings.Contains(prov.bodies[1], "Filesystem  Size") || !strings.Contains(prov.bodies[2], "12G") {
-		t.Fatalf("session.read tool results did not reach the model: %q / %q", prov.bodies[1], prov.bodies[2])
-	}
-
 	// The tool and the resource are IDENTICAL — which is the whole reason
 	// the announcement had to grow the arguments. Asserted rather than
 	// assumed: if these ever differ, this test stops being the case the
@@ -147,11 +111,11 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 
 	// …and the arguments tell them apart, with the value the model really
 	// sent and the tool really ran on.
-	if calls[0].Args["id"] != prov.first {
-		t.Fatalf("first call args = %v, want id %q", calls[0].Args, prov.first)
+	if calls[0].Args["id"] != first {
+		t.Fatalf("first call args = %v, want id %q", calls[0].Args, first)
 	}
-	if calls[1].Args["id"] != prov.second {
-		t.Fatalf("second call args = %v, want id %q", calls[1].Args, prov.second)
+	if calls[1].Args["id"] != second {
+		t.Fatalf("second call args = %v, want id %q", calls[1].Args, second)
 	}
 	if calls[0].Args["sessionId"] != nil || calls[1].Args["sessionId"] != nil {
 		t.Fatalf("session.read calls carried model sessionId arguments: %v / %v", calls[0].Args, calls[1].Args)
@@ -165,15 +129,8 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 // (AGENTS.md testing rule 3).
 func TestAgentRunToolCall_NoArgumentsIsAnEmptyObjectOverTheWire(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-			Tool: "git.status", CallID: "call_9", EntryID: "entry-action-9",
-			Effect: content.EffectObserve,
-		}},
-		{Kind: assistant.AskAnswer, Text: "clean"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	source := &recordingScreenCapture{body: screenCaptureBody(t, 0, "clean")}
+	h := newAskHarnessWithOpts(t, bridgeToolScript("session.read", map[string]any{}, "clean"), WithAgentPolicy(autonomousPolicyStore(t)), WithScreenCaptureSource(source))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "is the tree clean?", "cwd": "/repo",

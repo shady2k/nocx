@@ -57,19 +57,8 @@ func TestAgentApprovalRequested_DTOConformsToContract(t *testing.T) {
 // assertion that would catch a field nobody sends.
 func TestAgentApprovalRequested_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
-	const args = `{"path":"/repo/a.txt"}`
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: policyAsk("files.read", "call_1", args, "hash-a")},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	h := suspendedRun(t, askObserveStore(t))
+	raw := h.rawAsked
 	validateJSON(t, schema, raw, "agent.approvalRequested params (real socket)")
 }
 
@@ -77,25 +66,11 @@ func TestAgentApprovalRequested_OverTheWireConformsToContract(t *testing.T) {
 // the same literal payload is what the over-the-socket flow accepts.
 func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approve.schema.json")
-	const args = `{"path":"/repo/a.txt"}`
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: policyAsk("files.read", "call_1", args, "hash-a"), after: []string{"done"}},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
-	}, 1)
-	if errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
-
+	h := suspendedRun(t, askObserveStore(t))
 	// The renderer's literal payload — runId as the string the notification
 	// carried, never a number a helper would complete the shape with.
-	params := `{"runId":` + strconv.Quote(strconv.FormatInt(res.RunID, 10)) +
-		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true,"scope":"once"}`
+	params := `{"runId":` + strconv.Quote(h.asked.RunID) +
+		`,"attempt":1,"tool":` + strconv.Quote(h.asked.Tool) + `,"callId":` + strconv.Quote(h.asked.CallID) + `,"argHash":` + strconv.Quote(h.asked.ArgHash) + `,"approved":true,"scope":"once"}`
 	validateJSON(t, schema, []byte(params), "agent.approve params (renderer's literal payload)")
 
 	got, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
@@ -170,27 +145,9 @@ func askObserveStore(t *testing.T) *assistant.GlobalPolicyStore {
 func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 
-	fake, srv := newToolCallingServer()
-	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(askObserveStore(t)))
-	h.createEndpointAt(srv.URL)
-
-	sid := openLocalSession(t, h.conn)
-
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-effect-1", "sessionId": sid, "question": "what is on the screen?", "cwd": "/repo",
-	}, 2); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
-	if raw == nil {
-		t.Fatalf("no approvalRequested within 15s; provider requests=%d", fake.requests.Load())
-	}
+	h := suspendedRun(t, askObserveStore(t))
+	sid := h.sid
+	raw := h.rawAsked
 	validateJSON(t, schema, raw, "agent.approvalRequested params (real gate, real socket)")
 
 	var got struct {
@@ -227,28 +184,8 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 // has stopped being a contract.
 func TestAgentApprovalRequested_EgressArmOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: func(runID string) approvalAsk {
-			return approvalAsk{egress: &assistant.EgressRequest{
-				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
-				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
-				Effect:   content.EffectObserve,
-				Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-				Findings: []assistant.EgressFinding{{
-					Source: assistant.EgressFindingHeuristic, Kind: "openai-api-key", Start: 0, End: 8,
-				}},
-			}}
-		}},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-egress-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	h := suspendedEgressRun(t, askObserveStore(t))
+	raw := h.rawAsked
 	validateJSON(t, schema, raw, "agent.approvalRequested params (egress arm, real socket)")
 
 	var got struct {

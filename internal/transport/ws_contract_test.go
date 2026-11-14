@@ -5981,7 +5981,7 @@ func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 
 func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.ask.schema.json")
-	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hi"}})
+	h := newAskHarness(t, answerScript("hi"))
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
@@ -6150,7 +6150,7 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
 	stateSchema := loadSchema(t, "agent.runState.schema.json")
 
-	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hello", "world"}})
+	h := newAskHarness(t, answerScript("hello", "world"))
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)

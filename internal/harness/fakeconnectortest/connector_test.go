@@ -28,7 +28,7 @@ func TestFakeProcessChecks(t *testing.T) {
 func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture {
 	t.Helper()
 	path := func(name string) string { return filepath.Join(setup.Dir, name) }
-	script := protocol.Script{EnvironmentFile: path("environment"), PIDFile: path("agent.pid"), PromptFile: path("prompt"), ResultFile: path("result"), HangFile: path("hang")}
+	script := protocol.Script{ProbeEnvironment: true, EnvironmentFile: path("environment"), PIDFile: path("agent.pid"), PromptFile: path("prompt"), ResultFile: path("result"), HangFile: path("hang")}
 	end := protocol.Step{Kind: protocol.StepEnd, Model: "fake-model", Usage: &protocol.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2}}
 	switch setup.Scenario {
 	case harnesstest.ModelPin:

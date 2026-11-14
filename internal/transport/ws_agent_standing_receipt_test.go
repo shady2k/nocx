@@ -107,7 +107,8 @@ func TestAgentApprove_StandingAnswer_ReceiptCarriesTheStoredRuleID(t *testing.T)
 	// The guard that keeps this assertion honest: two entries that happened
 	// to be equal — which is what an empty one on both sides was — would
 	// make it pass whichever the handler sent.
-	if h.entryID == "" || h.entryID == proposalEntryID {
+	proposalEntryID, ok := h.ws.agentApprovals.EntryIDFor(scopeApprovalBinding(h))
+	if !ok || proposalEntryID == "" || h.entryID == "" || h.entryID == proposalEntryID {
 		t.Fatalf("turn entry %q and proposal entry %q must differ and be present, or this "+
 			"assertion cannot fail", h.entryID, proposalEntryID)
 	}

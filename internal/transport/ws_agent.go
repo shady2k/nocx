@@ -1192,10 +1192,18 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	var prose content.ProseBlock
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
+	requester := h.requester
+	if requester != nil {
+		bound := runBoundRequester{RendererRequester: requester, control: rc.control, degradation: rc.leaseDegradation}
+		requester = bound
+		if waiter, ok := bound.RendererRequester.(assistant.RunWaiter); ok {
+			requester = runBoundWaitRequester{runBoundRequester: bound, waiter: waiter}
+		}
+	}
 	err := h.askHarness(ctx, rc, assistant.AskParams{
 		Grant:         rc.grant,
 		AttemptLedger: h.attemptLedger,
-		Requester:     h.requester,
+		Requester:     requester,
 		ScreenCapture: h.screenCapture,
 		SessionSource: h.sessions,
 		Expansions:    h.expansions,
@@ -1453,6 +1461,49 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
 }
 
+// runBoundRequester carries the turn's lease ownership across external tool
+// admission without replacing the admitted request's context or cancellation.
+type runBoundRequester struct {
+	assistant.RendererRequester
+	control     *agentRunControl
+	degradation *assistant.RunLeaseDegradation
+}
+
+func (r runBoundRequester) runContext(ctx context.Context) context.Context {
+	if r.control != nil {
+		ctx = context.WithValue(ctx, agentRunControlContextKey{}, r.control)
+	}
+	if r.degradation != nil {
+		ctx = assistant.WithRunLeaseDegradation(ctx, r.degradation)
+	}
+	return ctx
+}
+
+func (r runBoundRequester) RequestRun(ctx context.Context, sessionID, command string) (json.RawMessage, error) {
+	body, err := r.RendererRequester.RequestRun(r.runContext(ctx), sessionID, command)
+	if err != nil && r.control != nil {
+		r.control.mu.Lock()
+		cancelled, cancelDone := r.control.cancelled, r.control.cancelDone
+		r.control.mu.Unlock()
+		if cancelled && cancelDone != nil {
+			// Withdrawal wakes the call before the synchronous stop ladder
+			// ends. Do not turn that withdrawal into an actor failure.
+			<-cancelDone
+			return nil, context.Canceled
+		}
+	}
+	return body, err
+}
+
+type runBoundWaitRequester struct {
+	runBoundRequester
+	waiter assistant.RunWaiter
+}
+
+func (r runBoundWaitRequester) RequestRunWait(ctx context.Context, runID string, decision assistant.RunDecision) (json.RawMessage, error) {
+	return r.waiter.RequestRunWait(r.runContext(ctx), runID, decision)
+}
+
 // askHarness translates only agent prose and reasoning. Tool announcements come
 // from the endpoint kernel, after its durable attempt has been recorded.
 func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assistant.AskParams, emit func(assistant.AskEvent) error) error {
@@ -1461,7 +1512,7 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	}
 	var authority agentharness.TurnAuthority
 	if p.Grant != nil {
-		tools, err := assistant.BindRunTools(h.client, p, func(call assistant.ToolCall) error {
+		tools, err := assistant.BindRunTools(ctx, h.client, p, func(call assistant.ToolCall) error {
 			return emit(assistant.AskEvent{Kind: assistant.AskToolCall, Call: &call})
 		})
 		if err != nil {
@@ -1502,6 +1553,11 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		rc.control.answeringModel = outcome.Model
+		// The actor cancels for both Stop and socket loss. Only an accepted
+		// Stop is a user cancellation; a lost transport interrupts the run.
+		if errors.Is(err, agentharness.ErrCancelled) && !rc.control.cancelled {
+			err = context.Canceled
+		}
 		// The actor owns terminal precedence. A non-cancelled terminal
 		// was taken before cancellation, even if Stop raced queued events.
 		if !errors.Is(err, agentharness.ErrCancelled) && !errors.Is(err, context.Canceled) {

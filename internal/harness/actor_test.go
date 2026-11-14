@@ -45,6 +45,59 @@ func (shellProtocol) Decode(line []byte) (Decoded, error) {
 	return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: "test"}}}}, nil
 }
 
+type closingTerminalTools struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*closingTerminalTools) BeginTurn(TurnAuthority) error { return nil }
+func (s *closingTerminalTools) EndTurn(ctx context.Context) error {
+	close(s.entered)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (*closingTerminalTools) Pending() bool                { return false }
+func (*closingTerminalTools) Retire(context.Context) error { return nil }
+
+func TestCloseConversationAfterTerminalChosenBeforePublication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tools := &closingTerminalTools{entered: make(chan struct{}), release: make(chan struct{})}
+	m := NewSessionManager(Base{Tools: func(context.Context, SessionInfo) (ToolSession, ToolBridge, error) {
+		return tools, ToolBridge{}, nil
+	}}, shellProtocol{})
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "closing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-tools.entered:
+	case <-ctx.Done():
+		t.Fatal("terminal was not chosen")
+	}
+	m.mu.Lock()
+	session := m.sessions["closing"]
+	m.mu.Unlock()
+	// Deliver close while the selected terminal is still awaiting settlement.
+	select {
+	case session.in <- request{close: true}:
+	case <-ctx.Done():
+		t.Fatal("close was not accepted")
+	}
+	close(tools.release)
+	if err := m.CloseConversation(ctx, "closing"); err != nil {
+		t.Fatalf("close after terminal selection: %v", err)
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("selected successful terminal changed: %v", err)
+	}
+}
+
 func TestSessionTwoTurns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()

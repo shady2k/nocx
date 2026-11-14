@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
@@ -19,11 +20,14 @@ type TurnTools interface {
 
 // RunTools exposes the existing assistant kernel to the tool endpoint.
 // Its state, ordering, approvals and screens belong to one run.
-type RunTools struct{ kernel *effectKernel }
+type RunTools struct {
+	kernel      *effectKernel
+	turnContext context.Context
+}
 
 // BindRunTools binds the same run inputs the in-process assistant uses.
 // FreshGrant is required: authority is minted at admission, not at binding.
-func BindRunTools(c Client, p AskParams, onCall func(ToolCall) error) (*RunTools, error) {
+func BindRunTools(ctx context.Context, c Client, p AskParams, onCall func(ToolCall) error) (*RunTools, error) {
 	owner, ok := c.(*client)
 	if !ok {
 		return nil, errors.New("assistant tools: client cannot bind run tools")
@@ -35,7 +39,7 @@ func BindRunTools(c Client, p AskParams, onCall func(ToolCall) error) (*RunTools
 	if err != nil {
 		return nil, err
 	}
-	return &RunTools{kernel: k}, nil
+	return &RunTools{kernel: k, turnContext: ctx}, nil
 }
 
 // RunContext returns the complete context bound once for the run.
@@ -53,7 +57,7 @@ func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
 	if !ok {
 		return ToolInvocation{}, errors.New("assistant tools: admission grant unavailable")
 	}
-	return ToolInvocation{RunContext: r.RunContext(), Grant: grant, Dispatcher: r}, nil
+	return ToolInvocation{Context: context.WithValue(ctx, turnEndingContextKey{}, r.turnContext), RunContext: r.RunContext(), Grant: grant, Dispatcher: r}, nil
 }
 
 // Dispatch uses the kernel's own per-turn order and complete authority chain.
@@ -62,6 +66,13 @@ func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	out, err := r.kernel.invokeInvocation(invocation, uuid.NewString())
 	if err == nil && out.kind == modelNocxMessage {
 		return "", &DispatchRefusalError{Method: invocation.Method, Reason: out.text}
+	}
+	if err == nil && !json.Valid([]byte(out.text)) {
+		// Raw tool results already passed their contract in the kernel.
+		// Product-authored outcomes such as a delivered lease bound are
+		// plain text; the endpoint carries them as a JSON string.
+		encoded, marshalErr := json.Marshal(out.text)
+		return string(encoded), marshalErr
 	}
 	return out.text, err
 }

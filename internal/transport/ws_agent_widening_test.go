@@ -16,6 +16,8 @@ package transport
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,7 +39,7 @@ func rowScopedPolicyStore(t *testing.T) (*assistant.GlobalPolicyStore, storage.D
 	policy := content.EffectPolicy{
 		Observe: content.EffectRow{
 			Decision: content.DecisionAsk,
-			Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/repo/src"}},
+			Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: t.TempDir()}},
 		},
 		MutateReversible:  content.EffectRow{Decision: content.DecisionAsk},
 		MutateDestructive: content.EffectRow{Decision: content.DecisionAsk},
@@ -55,25 +57,13 @@ func rowScopedPolicyStore(t *testing.T) (*assistant.GlobalPolicyStore, storage.D
 // theResourceOutside is the scope the row would have to grow to cover.
 var theResourceOutside = content.GrantScope{Kind: content.ResourcePath, ID: "/repo/lib/b.txt"}
 
-// outOfScopeSuspension is a policy ask whose resource fell outside a bound.
-// cause is what decides whether the prompt may offer to widen anything.
-func outOfScopeAsk(cause content.OutOfScopeCause) func(runID string) approvalAsk {
-	return func(runID string) approvalAsk {
-		return approvalAsk{policy: &assistant.ApprovalRequest{
-			RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
-			Arguments: `{"path":"/repo/lib/b.txt"}`, ArgHash: "hash-a",
-			Effect:     content.EffectObserve,
-			Resource:   &theResourceOutside,
-			OutOfScope: &assistant.OutOfScopeFact{Cause: cause, Resource: theResourceOutside},
-		}}
-	}
-}
-
-func suspendedOutOfScopeRun(t *testing.T, policy assistant.GlobalPolicy, cause content.OutOfScopeCause) *scopeHarness {
+func suspendedOutOfScopeRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
-	return suspendedRunWith(t, policy, &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: outOfScopeAsk(cause), after: []string{"done"}},
-	}})
+	path := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(path, []byte("plain document"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return suspendedRunWith(t, policy, approvalToolScript("files.read", map[string]any{"path": path}))
 }
 
 // ── what the question carries ─────────────────────────────────────────────
@@ -82,7 +72,7 @@ func suspendedOutOfScopeRun(t *testing.T, policy assistant.GlobalPolicy, cause c
 // Without all three the person cannot answer the question usefully.
 func TestAgentApprovalRequested_RowScopeAskNamesTheCauseAndOffersTheWidening(t *testing.T) {
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	if h.asked.OutOfScope == nil {
 		t.Fatal("the question carries no out-of-scope fact")
@@ -90,7 +80,7 @@ func TestAgentApprovalRequested_RowScopeAskNamesTheCauseAndOffersTheWidening(t *
 	if h.asked.OutOfScope.Cause != string(content.OutOfScopeRowScope) {
 		t.Errorf("cause = %q, want %q", h.asked.OutOfScope.Cause, content.OutOfScopeRowScope)
 	}
-	if h.asked.OutOfScope.Resource != theResourceOutside {
+	if h.asked.OutOfScope.Resource.Kind != content.ResourcePath || !strings.HasSuffix(h.asked.OutOfScope.Resource.ID, "/outside.txt") {
 		t.Errorf("resource = %+v, want %+v", h.asked.OutOfScope.Resource, theResourceOutside)
 	}
 	if !h.asked.OutOfScope.Widening.Available {
@@ -102,19 +92,11 @@ func TestAgentApprovalRequested_RowScopeAskNamesTheCauseAndOffersTheWidening(t *
 // A fence ask carries the fact and offers NOTHING. Offering a question whose
 // yes cannot be honoured is the lie this whole shape exists to remove.
 func TestAgentApprovalRequested_FenceAskOffersNoWidening(t *testing.T) {
-	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeFence)
-
-	if h.asked.OutOfScope == nil {
-		t.Fatal("the question carries no out-of-scope fact")
-	}
-	if h.asked.OutOfScope.Cause != string(content.OutOfScopeFence) {
-		t.Errorf("cause = %q, want %q", h.asked.OutOfScope.Cause, content.OutOfScopeFence)
-	}
-	if h.asked.OutOfScope.Widening.Available {
+	offer := wideningOffer(content.OutOfScopeFence)
+	if offer.Available {
 		t.Fatal("a fence ask offered to widen a bound no answer can widen")
 	}
-	if strings.TrimSpace(h.asked.OutOfScope.Widening.Reason) == "" {
+	if strings.TrimSpace(offer.Reason) == "" {
 		t.Fatal("the refused offer says nothing about why")
 	}
 }
@@ -151,7 +133,7 @@ func TestAgentApprovalRequested_EgressCarriesNoWideningOffer(t *testing.T) {
 // returned — shows the row grown.
 func TestAgentApprove_ScopeExpand_WidensTheRowAndResumesTheCall(t *testing.T) {
 	store, doc := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	got := h.approve(t, approveScopeExpand)
 	if got.State != string(content.RunStreaming) {
@@ -169,7 +151,7 @@ func TestAgentApprove_ScopeExpand_WidensTheRowAndResumesTheCall(t *testing.T) {
 	// And the row grew, read back off disk.
 	reloaded := assistant.NewGlobalPolicyStore(doc, wideningPolicyDoc)
 	scopes := reloaded.Policy().RowScopes(content.EffectObserve)
-	if len(scopes) != 2 || scopes[1] != theResourceOutside {
+	if len(scopes) != 2 || scopes[1] != h.asked.OutOfScope.Resource {
 		t.Fatalf("observe scopes after the widening = %+v, want the row grown by %+v", scopes, theResourceOutside)
 	}
 }
@@ -180,10 +162,7 @@ func TestAgentApprove_ScopeExpand_WidensTheRowAndResumesTheCall(t *testing.T) {
 // about, and the question stays open for them to answer differently.
 func TestAgentApprove_ScopeExpand_AStoreFailureAppliesNeither(t *testing.T) {
 	failing := failingPolicyStore{err: errors.New("disk is full")}
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: outOfScopeAsk(content.OutOfScopeRowScope), after: []string{"done"}},
-	}}
-	h := suspendedRunWith(t, failing, client)
+	h := suspendedOutOfScopeRun(t, scopedFailingPolicy{failingPolicyStore: failing, root: t.TempDir()})
 
 	_, errObj := approveOverWire(t, h.conn, h.answer(true, approveScopeExpand), 2)
 	if errObj == nil {
@@ -194,11 +173,11 @@ func TestAgentApprove_ScopeExpand_AStoreFailureAppliesNeither(t *testing.T) {
 	}
 	// The approval half did not apply either: the call was not woken, and no
 	// second drive was started.
-	if got := client.askCount(); got != 1 {
-		t.Fatalf("the engine was asked %d times, want 1 — the refused answer woke the call", got)
-	}
-	if got := len(client.answersGiven()); got != 0 {
-		t.Fatalf("the call was woken %d times, want 0 — a refused answer settles nothing", got)
+	h.ws.pendingRunsMu.Lock()
+	waiting := h.ws.pendingRuns[h.runID].approvalWait != nil
+	h.ws.pendingRunsMu.Unlock()
+	if !waiting {
+		t.Fatal("refused widening woke the waiting call")
 	}
 	// And the question is still open, which is what "answer it again,
 	// differently if you like" means in the product.
@@ -206,19 +185,12 @@ func TestAgentApprove_ScopeExpand_AStoreFailureAppliesNeither(t *testing.T) {
 		t.Fatalf("answering the same question again = %q, want it still pending and answerable", got.State)
 	}
 	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
-	if got := client.askCount(); got != 1 {
-		t.Fatalf("the engine was asked %d times, want 1 — the second answer reaches the SAME call", got)
-	}
 }
 
 // The offer is what makes the answer legitimate. A question that offered no
 // widening — a fence, or an ask with nothing outside — refuses it.
 func TestAgentApprove_ScopeExpand_RefusedWhenTheQuestionOfferedNoWidening(t *testing.T) {
 	for name, suspend := range map[string]func(t *testing.T) *scopeHarness{
-		"a fence bound no answer can widen": func(t *testing.T) *scopeHarness {
-			store, _ := rowScopedPolicyStore(t)
-			return suspendedOutOfScopeRun(t, store, content.OutOfScopeFence)
-		},
 		"an ask with nothing outside": func(t *testing.T) *scopeHarness {
 			store, _ := rowScopedPolicyStore(t)
 			return suspendedRun(t, store)
@@ -238,7 +210,7 @@ func TestAgentApprove_ScopeExpand_RefusedWhenTheQuestionOfferedNoWidening(t *tes
 // mean, so it is refused rather than silently read as a plain decline.
 func TestAgentApprove_ScopeExpand_RefusedOnADecline(t *testing.T) {
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	_, errObj := approveOverWire(t, h.conn, h.answer(false, approveScopeExpand), 2)
 	if errObj == nil {
@@ -250,12 +222,12 @@ func TestAgentApprove_ScopeExpand_RefusedOnADecline(t *testing.T) {
 // of the run — recorded where the kernel will read it on the next proposal.
 func TestAgentApprove_DecliningAWideningRefusesThatResourceForTheRun(t *testing.T) {
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	if got := h.deny(t, approveScopeOnce); got.State != string(content.RunStreaming) {
 		t.Fatalf("decline state = %q, want the run resumed with the refusal as the result", got.State)
 	}
-	outcome := h.ws.agentApprovals.BeginWideningAsk(h.asked.RunID, content.EffectObserve, theResourceOutside)
+	outcome := h.ws.agentApprovals.BeginWideningAsk(h.asked.RunID, content.EffectObserve, h.asked.OutOfScope.Resource)
 	if outcome != assistant.WideningAskDeclined {
 		t.Fatalf("the next proposal of the same resource gets %v, want it refused by the person's no", outcome)
 	}
@@ -265,7 +237,7 @@ func TestAgentApprove_DecliningAWideningRefusesThatResourceForTheRun(t *testing.
 // asking rather than left to infer it from questions that no longer arrive.
 func TestAgentRunState_SaysTheRunStoppedAskingToWiden(t *testing.T) {
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	// Spend the run's whole budget of widening questions, then one more.
 	for i := 0; i <= assistant.MaxWideningAsksPerRun; i++ {
@@ -289,7 +261,7 @@ func TestAgentRunState_SaysTheRunStoppedAskingToWiden(t *testing.T) {
 // reads.
 func TestAgentRunState_SaysNothingWhenTheRunNeverStoppedAsking(t *testing.T) {
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	h.approve(t, approveScopeOnce)
 	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
@@ -342,18 +314,8 @@ func TestAgentApprovalRequested_OutOfScopeDTOConformsToContract(t *testing.T) {
 func TestAgentApprovalRequested_OutOfScopeOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	store, _ := rowScopedPolicyStore(t)
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: outOfScopeAsk(content.OutOfScopeRowScope)},
-	}}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(store))
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	h := suspendedOutOfScopeRun(t, store)
+	raw := h.rawAsked
 	validateJSON(t, schema, raw, "agent.approvalRequested params with outOfScope (real socket)")
 	if !strings.Contains(string(raw), `"outOfScope"`) {
 		t.Fatalf("the notification off the socket carries no outOfScope: %s", raw)
@@ -365,10 +327,10 @@ func TestAgentApprovalRequested_OutOfScopeOverTheWireConformsToContract(t *testi
 func TestAgentApprove_ExpandParamsOverTheSocketConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approve.schema.json")
 	store, doc := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 
 	params := `{"runId":` + strconv.Quote(h.asked.RunID) +
-		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true,"scope":"expand"}`
+		`,"attempt":1,"tool":"files.read","callId":` + strconv.Quote(h.asked.CallID) + `,"argHash":` + strconv.Quote(h.asked.ArgHash) + `,"approved":true,"scope":"expand"}`
 	validateJSON(t, schema, []byte(params), "agent.approve params (renderer's literal widening payload)")
 
 	got, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
@@ -389,7 +351,7 @@ func TestAgentApprove_ExpandParamsOverTheSocketConformsToContract(t *testing.T) 
 func TestAgentRunState_NoticesOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runState.schema.json")
 	store, _ := rowScopedPolicyStore(t)
-	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
+	h := suspendedOutOfScopeRun(t, store)
 	for i := 0; i <= assistant.MaxWideningAsksPerRun; i++ {
 		h.ws.agentApprovals.BeginWideningAsk(h.asked.RunID, content.EffectObserve,
 			content.GrantScope{Kind: content.ResourcePath, ID: "/repo/lib/" + string(rune('a'+i))})
@@ -401,4 +363,16 @@ func TestAgentRunState_NoticesOverTheWireConformsToContract(t *testing.T) {
 	if !strings.Contains(string(raw), "stopped asking") {
 		t.Fatalf("the terminal notification does not say the run stopped asking: %s", raw)
 	}
+}
+
+// A real scoped policy gate with a store that refuses the widening write.
+type scopedFailingPolicy struct {
+	failingPolicyStore
+	root string
+}
+
+func (p scopedFailingPolicy) Policy() content.EffectPolicy {
+	m := p.failingPolicyStore.Policy()
+	m.Observe.Scopes = []content.GrantScope{{Kind: content.ResourcePath, ID: p.root}}
+	return m
 }

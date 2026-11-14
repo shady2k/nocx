@@ -25,12 +25,14 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
 // ── reading the rows ─────────────────────────────────────────────────────
@@ -133,51 +135,14 @@ func assertProseSealed(t *testing.T, led content.LedgerRepository, turnID string
 	}
 }
 
-// ── the scripted engine, with a call in the middle of the answer ─────────
-
-// toolCallScript is a scripted assistant.Client that plays one ordered
-// sequence of ANSWER and TOOL CALL events — the one thing the other scripted
-// clients in this package cannot do, and the whole shape under test: prose,
-// then a call, then more prose.
-//
-// It emits through the SAME callback the real engine emits through, so what is
-// being tested is the transport's handling of the ordered stream and not a
-// second path built for the test.
-type toolCallScript struct {
-	events []assistant.AskEvent
-	// err is returned after the events are played, so one script can be
-	// "answer this much, then suspend".
-	err func(runID string) error
-}
-
-func (s *toolCallScript) Probe(_ context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true, Model: p.Model}, nil
-}
-
-func (s *toolCallScript) Discard(string) {}
-
-func (s *toolCallScript) Ask(_ context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	for _, ev := range s.events {
-		if err := onEvent(ev); err != nil {
-			return err
-		}
+// readFileStep crosses the real tool bridge with an existing local file.
+func readFileStep(t *testing.T) protocol.Step {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if s.err != nil {
-		return s.err(p.RunID)
-	}
-	return nil
-}
-
-// answerEvent and callEvent name the two halves of the script so a test reads
-// as the sequence a person would see.
-func answerEvent(text string) assistant.AskEvent {
-	return assistant.AskEvent{Kind: assistant.AskAnswer, Text: text}
-}
-
-func callEvent(callID, tool, actionEntry string) assistant.AskEvent {
-	return assistant.AskEvent{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-		Tool: tool, CallID: callID, EntryID: actionEntry, Effect: content.EffectObserve,
-	}}
+	return protocol.Step{Kind: protocol.StepTool, Name: "files.read", Arguments: map[string]any{"path": path}}
 }
 
 // askAndWaitForState drives one ask over the real socket and waits for the
@@ -207,12 +172,14 @@ func askAndWaitForState(t *testing.T, h *askHarness, sid, question string) strin
 // A test that read the notifications back would be asserting that the server
 // said what it said.
 func TestAgentAsk_ProseEitherSideOfACallIsTwoBlocks(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("let me "), answerEvent("look:"),
-		callEvent("call_1", "files.read", ""),
-		answerEvent(" it says"), answerEvent(" hello"),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "let me "},
+		{Kind: protocol.StepAnswer, Text: "look:"},
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: " it says"},
+		{Kind: protocol.StepAnswer, Text: " hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -230,9 +197,8 @@ func TestAgentAsk_ProseEitherSideOfACallIsTwoBlocks(t *testing.T) {
 		t.Errorf("the second block reads %q, want what was said after the call", prose[1].text)
 	}
 	// And the seats really are either side, which is the fact a reader draws.
-	// The action entry is not in this list — this scripted call carries no
-	// ledger entry, so the two prose seats are 0 and 1 and the assertion is
-	// that they are DIFFERENT seats in the right order.
+	// The real tool attempt has its own seat between these prose blocks.
+	// The prose seats must remain distinct and in the right order.
 	if prose[0].pos >= prose[1].pos {
 		t.Fatalf("the two blocks are seated %d and %d — the second must come after the first",
 			prose[0].pos, prose[1].pos)
@@ -246,22 +212,17 @@ func TestAgentAsk_ProseEitherSideOfACallIsTwoBlocks(t *testing.T) {
 	}
 }
 
-// TestAgentAsk_ProseEitherSideOfACallWithNoIdIsTwoBlocks: the same scenario
-// with an EMPTY call id. The call id is the model's own name for a call —
-// optional on the wire, absent from some providers — and nothing about the
-// boundary may key on it: a call that cannot name itself is still a call,
-// and the prose on either side of it is still two runs. Without this, the
-// seam is only proven for the case where the id happens to be present, and
-// a server that sends a boundary whose call carries no id merges the two
-// blocks again — exactly the mask the renderer fix removed, re-entering
-// through the id's optionality.
-func TestAgentAsk_ProseEitherSideOfACallWithNoIdIsTwoBlocks(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("let me "), answerEvent("look:"),
-		callEvent("", "files.read", ""),
-		answerEvent(" it says"), answerEvent(" hello"),
-	}})
-	h.createEndpoint()
+// A bridge call receives its id from the backend. Prose identity must still
+// change at that boundary, rather than reusing the turn's id.
+func TestAgentAsk_ProseEitherSideOfABridgeCallHasDistinctBlockIDs(t *testing.T) {
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "let me "},
+		{Kind: protocol.StepAnswer, Text: "look:"},
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: " it says"},
+		{Kind: protocol.StepAnswer, Text: " hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -298,11 +259,13 @@ func TestAgentAsk_ProseEitherSideOfACallWithNoIdIsTwoBlocks(t *testing.T) {
 // two blocks for any reason at all — one per delta, say — and the test would
 // not notice.
 func TestAgentAsk_ProseWithNoCallIsOneBlock(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("let me "), answerEvent("look:"),
-		answerEvent(" it says"), answerEvent(" hello"),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "let me "},
+		{Kind: protocol.StepAnswer, Text: "look:"},
+		{Kind: protocol.StepAnswer, Text: " it says"},
+		{Kind: protocol.StepAnswer, Text: " hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -322,11 +285,11 @@ func TestAgentAsk_ProseWithNoCallIsOneBlock(t *testing.T) {
 // written, and the ordinary turn — the one that looks something up before
 // answering — is exactly this shape, so the defect would be the common case.
 func TestAgentAsk_ACallBeforeAnyProseOpensNoBlock(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		callEvent("call_1", "files.read", ""),
-		answerEvent("it says hello"),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: "it says hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -350,11 +313,11 @@ func TestAgentAsk_ACallBeforeAnyProseOpensNoBlock(t *testing.T) {
 // And the run that ends on a call leaves no trailing empty block either: the
 // seal happens at the call, and the terminal close opens nothing.
 func TestAgentAsk_ACallAfterTheLastProseOpensNoTrailingBlock(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("looking"),
-		callEvent("call_1", "files.read", ""),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "looking"},
+		readFileStep(t),
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -378,12 +341,12 @@ func TestAgentAsk_ACallAfterTheLastProseOpensNoTrailingBlock(t *testing.T) {
 // ws_contract_test.go (…_OverTheWireConformToContract); this is the product
 // claim the schema cannot make: that the id names the piece.
 func TestAgentRunDelta_CarriesItsBlockOverTheWire(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("before"),
-		callEvent("call_1", "files.read", ""),
-		answerEvent("after"),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "before"},
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: "after"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -456,8 +419,7 @@ func runOf(t *testing.T, led content.LedgerRepository, turnID string) int64 {
 // Paired, on the same store, with the ordinary open that lands — a store that
 // refused everything would satisfy the first half and be an outage.
 func TestOpenProse_RefusesAParentThatIsNotThereAndOpensOneThatIs(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{answerEvent("x")}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "x"}, {Kind: protocol.StepEnd, Model: "fixture-model"}}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "q")
 	led := h.db.Ledger()
@@ -490,8 +452,7 @@ func TestOpenProse_RefusesAParentThatIsNotThereAndOpensOneThatIs(t *testing.T) {
 // fact being recorded is about the block and is true either way. Paired with
 // the seal that does reach a body.
 func TestSealProse_IsANoOpOnABodilessBlockAndSealsARealOne(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{answerEvent("x")}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "x"}, {Kind: protocol.StepEnd, Model: "fixture-model"}}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "q")
 	led := h.db.Ledger()
@@ -533,8 +494,7 @@ func TestSealProse_IsANoOpOnABodilessBlockAndSealsARealOne(t *testing.T) {
 // would put every piece of every answer into the scrollback as a block of its
 // own — and into the model's own blocks.list beside them.
 func TestProseBlocksAreNotAnchoredToThePane(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{answerEvent("hello")}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "hello"}, {Kind: protocol.StepEnd, Model: "fixture-model"}}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "q")
 	led := h.db.Ledger()
@@ -580,12 +540,12 @@ func TestProseBlocksAreNotAnchoredToThePane(t *testing.T) {
 // as a block that kept nothing. A soft degrade the surface contradicts is how
 // a feature that no longer exists survives a release (AGENTS.md).
 func TestBlocksRead_OfATurnReturnsItsProse(t *testing.T) {
-	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("let me look:"),
-		callEvent("call_1", "files.read", ""),
-		answerEvent(" it says hello"),
-	}})
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "let me look:"},
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: " it says hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	turn := askAndWaitForState(t, h, sid, "what does it say?")
 
@@ -606,10 +566,10 @@ func TestBlocksRead_OfATurnReturnsItsProse(t *testing.T) {
 	// The paired absence, so "kept" above is not simply what this read always
 	// answers: a turn that streamed nothing kept nothing, and says so rather
 	// than reporting an empty output.
-	silent := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
-		callEvent("call_1", "files.read", ""),
-	}})
-	silent.createEndpoint()
+	silent := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		readFileStep(t),
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	silentSID := openLocalSession(t, silent.conn)
 	silentTurn := askAndWaitForState(t, silent, silentSID, "q")
 	quiet, err := silent.ws.blockBody(context.Background(), silent.db.Ledger(), silentTurn)

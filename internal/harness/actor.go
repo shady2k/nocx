@@ -570,6 +570,9 @@ func (s *session) loop() {
 			frame = nil
 			idleAt = time.Now().Add(idle)
 		}
+		if closing && current == nil && (process != nil || starting) && !retiring {
+			retire(false)
+		}
 		if closing && current == nil && !starting && !retiring && process == nil {
 			return
 		}

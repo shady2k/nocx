@@ -199,7 +199,7 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 	store := assistant.NewApprovalStore()
 	bind := func(run string, person *turnPerson, owner *grantOwner) assistant.TurnTools {
 		t.Helper()
-		tools, bindErr := assistant.BindRunTools(client, assistant.AskParams{
+		tools, bindErr := assistant.BindRunTools(context.Background(), client, assistant.AskParams{
 			Grant: &owner.grant, FreshGrant: func() *content.Grant {
 				mintMu.Lock()
 				defer mintMu.Unlock()

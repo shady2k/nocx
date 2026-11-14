@@ -9,6 +9,8 @@ import "github.com/shady2k/nocx/internal/harness"
 // Script is what the fake agent does on each prompt. It arrives in the
 // FAKEAGENT_SCRIPT environment variable as JSON.
 type Script struct {
+	// ProbeEnvironment adds agent environment facts to calls to the conformance probe tool.
+	ProbeEnvironment bool `json:"probeEnvironment,omitempty"`
 	// IgnoreAbort makes the actor exercise its shutdown bound.
 	IgnoreAbort      bool     `json:"ignoreAbort,omitempty"`
 	Turns            [][]Step `json:"turns,omitempty"`
@@ -35,11 +37,24 @@ type Script struct {
 // Step is one instruction to the fake agent.
 type Step struct {
 	Kind StepKind `json:"kind"`
+	// Decision answers each quiet-running command renewal in StepWaitRun.
+	Decision string `json:"decision,omitempty"`
 	// Text is the delta, for StepAnswer and StepReasoning.
 	Text string `json:"text,omitempty"`
 	// Name and Arguments describe the tool call, for StepTool.
 	Name      string         `json:"name,omitempty"`
 	Arguments map[string]any `json:"arguments,omitempty"`
+	// FailOnError ends the turn with the actual MCP tool error text.
+	FailOnError bool `json:"failOnError,omitempty"`
+	// ArgumentsFromResult copies JSON fields from the preceding tool-output.
+	ArgumentsFromResult map[string]string `json:"argumentsFromResult,omitempty"`
+	// ArgumentOffsets adds a numeric offset after resolving a result argument.
+	ArgumentOffsets map[string]float64 `json:"argumentOffsets,omitempty"`
+	// ArgumentsFromPrompt copies facts the agent learned from its prompt.
+	// The supported fact is attachedItemID (the first attached terminal item).
+	ArgumentsFromPrompt map[string]string `json:"argumentsFromPrompt,omitempty"`
+	// ResultFile records this step's result separately from the script's last result.
+	ResultFile string `json:"resultFile,omitempty"`
 	// Model and Usage are what StepEnd states.
 	Model string `json:"model,omitempty"`
 	Usage *Usage `json:"usage,omitempty"`
@@ -62,6 +77,8 @@ const (
 	// StepTool calls one tool through the turn's bridge, then writes the
 	// result to ResultFile.
 	StepTool StepKind = "tool"
+	// StepWaitRun answers session.wait while the previous tool result says STILL RUNNING.
+	StepWaitRun StepKind = "wait_run"
 	// StepEnd emits the end event.
 	StepEnd StepKind = "end"
 	// StepFail emits a failure event.

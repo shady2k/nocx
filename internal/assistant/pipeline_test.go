@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -622,5 +623,30 @@ func TestPipeline_CancellationDuringScreenWithholdsResult(t *testing.T) {
 	out, err := pipeline.Dispatch(invocation, 1, "screen-stopped")
 	if out != "" || !errors.Is(err, context.Canceled) {
 		t.Fatalf("screen returned after cancellation: result=%q error=%v", out, err)
+	}
+}
+
+func TestPipeline_CancelledSubmissionPreservesOnlyTheKnownLeaseFailure(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired=%v", expired), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pipeline, _ := pipelineForTest(t, AuthorityChain{})
+			lease := &RunLeaseError{SubmissionExpired: expired, Err: context.Canceled}
+			pipeline.chain.execute = func(context.Context, Call, agenttools.Tool, agenttools.Capability, []byte) (string, error) {
+				cancel()
+				return "", lease
+			}
+			invocation := pipelineInvocationForTest()
+			invocation.Context = ctx
+			_, err := pipeline.runOrdered(invocation, 0, "call", false)
+			var got *RunLeaseError
+			if errors.As(err, &got) != expired {
+				t.Fatalf("error = %v; want expired lease preserved = %v", err, expired)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v; want cancellation", err)
+			}
+		})
 	}
 }

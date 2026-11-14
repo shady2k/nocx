@@ -1,65 +1,57 @@
 package transport
 
-// The fresh grant after an answer, from the transport's side (nocx-a62cl.3.4,
-// ADR-anntnxdj §3).
-//
-// The authority a call goes on under is minted AGAIN after the person answers,
-// from the policy as it stands then — the very write the answer just made
-// included. The transport owns that mint (the composition root's, over the
-// session's overlay), and this asserts what it HANDS the engine: the run's Ask
-// carries a FreshGrant seam, and calling it after "allow in this session"
-// returns a grant that permits the effect class.
-//
-// What is asserted is the seam, because that is the whole of the mechanism on
-// this side: the pipeline calls it after the answer, and the kernel's own test
-// proves the guards and the capability read what it returns.
-
+// A session-scoped answer refreshes the real kernel's authority: the second
+// tool call in the same actor turn executes without another question.
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
-// TestAgentApprove_TheRunCarriesTheFreshGrantAfterAnAnswer: one run, one
-// question, answered "in this session" — and the grant the engine can mint
-// after the answer PERMITS that effect class, so the call that was answered
-// and every call after it in the same run do not ask again.
 func TestAgentApprove_TheRunCarriesTheFreshGrantAfterAnAnswer(t *testing.T) {
-	answered := make(chan *content.Grant, 1)
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: policyAsk("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a"), after: []string{"done"}},
-	}}
-	// The seam is read where the pipeline reads it: after the answer.
-	client.onAnswer = func(p assistant.AskParams) {
-		if p.FreshGrant == nil {
-			answered <- nil
-			return
-		}
-		answered <- p.FreshGrant()
+	h := suspendedRunWith(t, askPolicyStore(t), protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{}},
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{}},
+		{Kind: protocol.StepAnswer, Text: "both reads completed"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}})
+	h.ws.pendingRunsMu.Lock()
+	before := h.ws.pendingRuns[h.runID].grant
+	h.ws.pendingRunsMu.Unlock()
+	if before == nil || before.Policy.DecisionFor(content.EffectObserve) != content.DecisionAsk {
+		t.Fatalf("initial grant = %+v, want observe ask", before)
 	}
-	h := suspendedRunWith(t, askPolicyStore(t), client)
-
 	h.approve(t, "session")
-	var afterAnswer *content.Grant
-	select {
-	case afterAnswer = <-answered:
-		if afterAnswer == nil {
-			t.Fatal("the run carried no fresh-grant seam")
+	// An unrefreshed second call would stop here on approvalRequested, not End.
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var state struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil || state.State != "completed" {
+		t.Fatalf("run state = %s (%v)", raw, err)
+	}
+	entries, err := h.db.Ledger().Caused(t.Context(), h.entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	for _, entry := range entries {
+		if entry.Kind != content.EntryAction || entry.Intent != "session.read" {
+			continue
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the answer did not reach the call")
+		detail, err := h.db.Ledger().Entry(t.Context(), entry.EntryID)
+		if err != nil || detail == nil || detail.Status != content.EntrySuccess {
+			t.Fatalf("read action = %+v (%v)", detail, err)
+		}
+		calls++
 	}
-
-	got := client.params()
-	if len(got) != 1 {
-		t.Fatalf("the engine was driven %d times, want 1 — the answer reaches the call that asked", len(got))
+	if calls != 2 {
+		t.Fatalf("completed reads = %d, want two", calls)
 	}
-	if got[0].Grant == nil || got[0].Grant.Policy.DecisionFor(content.EffectObserve) != content.DecisionAsk {
-		t.Fatalf("the ask ran under %+v, want a grant that ASKS for observe — otherwise the question below is not the one being answered", got[0].Grant)
-	}
-	if d := afterAnswer.Policy.DecisionFor(content.EffectObserve); d != content.DecisionPermit {
-		t.Fatalf("the fresh grant decides observe = %q, want permit: the person answered \"allow in this session\" and the run they answered about went on asking (nocx-v94ne)", d)
+	if got := h.ws.runGrantFor(h.sid).Policy.DecisionFor(content.EffectObserve); got != content.DecisionPermit {
+		t.Fatalf("fresh session grant observe = %q", got)
 	}
 }

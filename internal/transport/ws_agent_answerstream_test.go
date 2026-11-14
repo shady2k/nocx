@@ -11,45 +11,14 @@ package transport
 // well-formed, not that the server sends it.
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
-
-// scriptedEventClient is the injected engine as an EVENT script: whatever
-// sequence of AskEvents a test names, played in order. The transport's job
-// is to turn each into the right notification, in the same order, so the
-// fake must be able to express an order the old delta-only fake could not.
-type scriptedEventClient struct {
-	mu     sync.Mutex
-	events []assistant.AskEvent
-	err    error
-	calls  int
-}
-
-func (s *scriptedEventClient) Probe(_ context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true, Model: p.Model}, nil
-}
-
-func (*scriptedEventClient) Discard(string) {}
-
-func (s *scriptedEventClient) Ask(_ context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls++
-	for _, e := range s.events {
-		if err := onEvent(e); err != nil {
-			return err
-		}
-	}
-	return s.err
-}
 
 // askAndCollect drives one ask over the real socket and reads notifications
 // until the run's terminal agent.runState, returning them in ARRIVAL order.
@@ -100,15 +69,8 @@ func methodsOf(ns []wireNotification) []string {
 	return out
 }
 
-// oneToolCall is the event a permitted call produces — the middleware's
-// announcement, with the resource the ONE derivation produced.
-func oneToolCall() assistant.AskEvent {
-	return assistant.AskEvent{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-		Tool: "files.read", CallID: "call_1", EntryID: "entry-action-1",
-		Effect:   content.EffectObserve,
-		Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-	}}
-}
+// A permitted read announces the durable attempt through the real kernel.
+func oneToolCall(t *testing.T) protocol.Step { return readFileStep(t) }
 
 // ── criterion 1: the order, on the wire ───────────────────────────────────
 
@@ -116,12 +78,11 @@ func oneToolCall() assistant.AskEvent {
 // announcing the call reaches the renderer BEFORE the delta of the answer
 // written from its result. Asserted on arrival order off the real socket.
 func TestAskStream_TheToolCallPrecedesTheAnswerWrittenFromIt(t *testing.T) {
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		oneToolCall(),
-		{Kind: assistant.AskAnswer, Text: "the file says hello"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		oneToolCall(t),
+		{Kind: protocol.StepAnswer, Text: "the file says hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 
 	got := askAndCollect(t, h, "what is in that file?")
 	call, delta := -1, -1
@@ -148,12 +109,11 @@ func TestAskStream_TheToolCallPrecedesTheAnswerWrittenFromIt(t *testing.T) {
 
 func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		oneToolCall(),
-		{Kind: assistant.AskAnswer, Text: "done"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		oneToolCall(t),
+		{Kind: protocol.StepAnswer, Text: "done"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "what is in that file?", "cwd": "/repo",
@@ -180,13 +140,13 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Tool != "files.read" || got.CallID != "call_1" || got.ActionEntryID != "entry-action-1" {
+	if got.Tool != "files.read" || got.CallID == "" || got.ActionEntryID == "" {
 		t.Fatalf("payload = %s, want the middleware's facts", raw)
 	}
 	if got.Effect != "observe" {
 		t.Fatalf("effect = %q, want observe", got.Effect)
 	}
-	if got.Resource == nil || got.Resource.Kind != "path" || got.Resource.ID != "/repo/a.txt" {
+	if got.Resource == nil || got.Resource.Kind != "path" || !strings.HasSuffix(got.Resource.ID, "/a.txt") {
 		t.Fatalf("resource = %+v, want the path the call named", got.Resource)
 	}
 	// files.read opens no block, so its LINE is the only thing that says the
@@ -203,15 +163,11 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 // boolean asserted in one state is a field nobody has checked.
 func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-			Tool: "session.run", CallID: "call_r", EntryID: "entry-action-r",
-			Effect: content.EffectMutateDestructive, OpensBlock: true,
-		}},
-		{Kind: assistant.AskAnswer, Text: "41G free"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.run", Arguments: map[string]any{"command": "df -h"}},
+		{Kind: protocol.StepAnswer, Text: "41G free"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "how much disk is left?", "cwd": "/repo",
@@ -233,43 +189,42 @@ func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
 	}
 }
 
-// A tool that names no resource in its parameters at all (git.status): the
-// notification still validates, with resource absent. The paired end of the
-// case above — a schema that only ever saw a populated resource would not
-// have been checked against the shape that omits it.
+// Optional resource omission is a DTO/socket contract, not a fabricated
+// engine event. The real bridge case above proves the populated variant.
 func TestAgentRunToolCall_NoResourceOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-			Tool: "git.status", CallID: "call_9", EntryID: "entry-action-9",
-			Effect: content.EffectObserve,
-		}},
-		{Kind: assistant.AskAnswer, Text: "clean"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "is the tree clean?", "cwd": "/repo",
-		"attachedContent": []any{},
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
+	h := newAskHarness(t, answerScript("unused"))
+	// A completed control-plane round trip proves the connection is registered.
+	_ = jsonrpcCall(t, h.conn, "settings.list", map[string]any{})
+	h.ws.connsMu.Lock()
+	var conn *wsConn
+	for live := range h.ws.conns {
+		conn = live
+	}
+	h.ws.connsMu.Unlock()
+	if conn == nil {
+		t.Fatal("no registered WebSocket")
+	}
+	if err := conn.TryNotify("agent.runToolCall", mustMarshal(agentRunToolCall{
+		RunID: 1, EntryID: "turn", CallID: "call", ActionEntryID: "action",
+		Tool: "git.status", Args: map[string]any{}, Effect: string(content.EffectObserve),
+	})); err != nil {
+		t.Fatal(err)
 	}
 	raw := readNotification(t, h.conn, "agent.runToolCall", 5*time.Second)
 	validateJSON(t, schema, raw, "agent.runToolCall params, no resource (real socket)")
 	if strings.Contains(string(raw), `"resource"`) {
-		t.Fatalf("a call that named no resource still carried one: %s", raw)
+		t.Fatalf("resource unexpectedly present: %s", raw)
 	}
 }
 
 func TestAgentRunReasoning_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runReasoning.schema.json")
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskReasoning, Text: "the question is about the file"},
-		{Kind: assistant.AskAnswer, Text: "it says hello"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepReasoning, Text: "the question is about the file"},
+		{Kind: protocol.StepAnswer, Text: "it says hello"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "what is in that file?", "cwd": "/repo",
@@ -282,6 +237,7 @@ func TestAgentRunReasoning_OverTheWireConformsToContract(t *testing.T) {
 	if !strings.Contains(string(raw), "the question is about the file") {
 		t.Fatalf("reasoning payload = %s, want the model's thinking", raw)
 	}
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
 }
 
 // ── criterion 2 and 4: what the ANSWER carries, and the unchanged run ─────
@@ -291,12 +247,11 @@ func TestAgentRunReasoning_OverTheWireConformsToContract(t *testing.T) {
 // a renderer that read the reasoning out of agent.runDelta would be right
 // back at the defect.
 func TestAskStream_ReasoningNeverReachesTheAnswerDeltas(t *testing.T) {
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskReasoning, Text: "SENTINEL-thinking"},
-		{Kind: assistant.AskAnswer, Text: "the answer"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepReasoning, Text: "SENTINEL-thinking"},
+		{Kind: protocol.StepAnswer, Text: "the answer"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	for _, n := range askAndCollect(t, h, "why?") {
 		if n.Method == "agent.runDelta" && strings.Contains(string(n.Params), "SENTINEL-thinking") {
 			t.Fatalf("the model's thinking travelled the delta path: %s", n.Params)
@@ -309,12 +264,11 @@ func TestAskStream_ReasoningNeverReachesTheAnswerDeltas(t *testing.T) {
 // tool calls put deltas and one terminal state on the wire, and NOTHING
 // else. No empty reasoning frame, no placeholder call.
 func TestAskStream_APlainRunIsExactlyWhatItWas(t *testing.T) {
-	client := &scriptedEventClient{events: []assistant.AskEvent{
-		{Kind: assistant.AskAnswer, Text: "he"},
-		{Kind: assistant.AskAnswer, Text: "llo"},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "he"},
+		{Kind: protocol.StepAnswer, Text: "llo"},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)))
 	got := methodsOf(askAndCollect(t, h, "hi?"))
 	want := []string{"agent.runDelta", "agent.runDelta", "agent.runState"}
 	if len(got) != len(want) {

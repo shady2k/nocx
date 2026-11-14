@@ -3,151 +3,19 @@ package transport
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/note"
 )
 
-type noteCompletionRequest struct {
-	Tools []struct {
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	} `json:"tools"`
-	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"messages"`
-}
-
-type noteProvider struct {
-	mu       sync.Mutex
-	requests []noteCompletionRequest
-}
-
-func (p *noteProvider) handler(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read request", http.StatusInternalServerError)
-		return
-	}
-	var req noteCompletionRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "decode request", http.StatusBadRequest)
-		return
-	}
-	p.mu.Lock()
-	p.requests = append(p.requests, req)
-	requestNumber := len(p.requests)
-	p.mu.Unlock()
-
-	if requestNumber == 1 {
-		var article string
-		for _, message := range req.Messages {
-			if message.Role == "user" {
-				article = message.Content
-			}
-		}
-		args, _ := json.Marshal(map[string]string{"body": article})
-		streamNoteToolCall(w, "notes.create", string(args))
-		return
-	}
-	streamNoteAnswer(w, "saved the text as a note")
-}
-
-func (p *noteProvider) snapshot() []noteCompletionRequest {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]noteCompletionRequest(nil), p.requests...)
-}
-
-func streamNoteToolCall(w http.ResponseWriter, name, args string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	payload := map[string]any{
-		"id":      "chatcmpl-note",
-		"object":  "chat.completion.chunk",
-		"created": 0,
-		"model":   "note-model",
-		"choices": []map[string]any{{
-			"index": 0,
-			"delta": map[string]any{
-				"role": "assistant",
-				"tool_calls": []map[string]any{{
-					"id":       "call_note",
-					"type":     "function",
-					"function": map[string]string{"name": name, "arguments": args},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-	}
-	encoded, _ := json.Marshal(payload)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-}
-
-func streamNoteAnswer(w http.ResponseWriter, text string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	payload := map[string]any{
-		"id":      "chatcmpl-note",
-		"object":  "chat.completion.chunk",
-		"created": 0,
-		"model":   "note-model",
-		"choices": []map[string]any{{
-			"index":         0,
-			"delta":         map[string]string{"role": "assistant", "content": text},
-			"finish_reason": "stop",
-		}},
-	}
-	encoded, _ := json.Marshal(payload)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-}
-
-func createNoteTestEndpoint(t *testing.T, h *askHarness, baseURL string) {
-	t.Helper()
-	endpoint, code := decodeEndpointResult(t, jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Notes",
-		"baseUrl": baseURL,
-		"schema":  "openai-compatible",
-		"key":     "sk-test-123",
-		"models":  []map[string]any{{"name": "note-model"}},
-	}))
-	if code != 0 {
-		t.Fatalf("endpoints.create: code %d", code)
-	}
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role":       "answering",
-		"endpointId": endpoint.ID,
-		"model":      "note-model",
-	})) {
-		t.Fatal("roles.assign refused the test endpoint")
-	}
-}
-
 func TestAgentAsk_BareTextCreatesAndSearchesNoteThroughProvider(t *testing.T) {
 	const article = "Debian 11 LTS reaches end of life in June 2024."
-	provider := &noteProvider{}
-	server := httptest.NewServer(http.HandlerFunc(provider.handler))
-	defer server.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClientAndRegistry: %v", err)
-	}
-
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
@@ -165,11 +33,14 @@ func TestAgentAsk_BareTextCreatesAndSearchesNoteThroughProvider(t *testing.T) {
 		return fmt.Sprintf("bare-note-%d", nextID.Add(1))
 	}, nil)
 
-	h := newAskHarnessWithOpts(t, client,
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "notes.create", Arguments: map[string]any{"body": article}},
+		{Kind: protocol.StepAnswer, Text: "saved the text as a note"},
+		{Kind: protocol.StepEnd},
+	}},
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithNotes(noteSvc),
 	)
-	createNoteTestEndpoint(t, h, server.URL)
 	sid := openLocalSession(t, h.conn)
 	result, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "bare-text-note",
@@ -191,22 +62,11 @@ func TestAgentAsk_BareTextCreatesAndSearchesNoteThroughProvider(t *testing.T) {
 		t.Fatalf("runState: %v", err)
 	}
 	if state.State != string(content.RunCompleted) {
-		t.Fatalf("runState = %q, want completed", state.State)
+		t.Fatalf("runState = %s, want completed", stateRaw)
 	}
 
-	requests := provider.snapshot()
-	if len(requests) < 2 {
-		t.Fatalf("provider received %d requests, want the tool call and follow-up answer", len(requests))
-	}
-	var offeredNoteCreate bool
-	for _, tool := range requests[0].Tools {
-		if tool.Function.Name == "notes.create" {
-			offeredNoteCreate = true
-			break
-		}
-	}
-	if !offeredNoteCreate {
-		t.Fatalf("first provider request did not offer notes.create")
+	if got := h.toolResult(); !strings.Contains(got, "bare-note-1") {
+		t.Fatalf("agent received note result = %q, want the created note", got)
 	}
 
 	listRaw := jsonrpcCallWithID(t, h.conn, "notes.list", map[string]any{}, 3)

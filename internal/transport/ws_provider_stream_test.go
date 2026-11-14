@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/providertest"
 )
 
 // delayedProviderBody lets the test send the body only after the handler
@@ -50,8 +52,11 @@ func (w *providerResponseOrder) WriteHeader(status int) {
 // while its body is delivered only after the handler attempts to read it.
 func TestProviderStreams_ConsumeRequestBeforeResponse(t *testing.T) {
 	handlers := map[string]http.HandlerFunc{
-		"malformed model output": malformedReadScreen,
-		"missing grant":          (&missingGrantProvider{missingID: "not-granted"}).serve,
+		"shared provider request boundary": func(w http.ResponseWriter, r *http.Request) {
+			if providertest.ConsumeRequestBeforeResponse(w, r) {
+				w.WriteHeader(http.StatusOK)
+			}
+		},
 	}
 	for name, handler := range handlers {
 		t.Run(name, func(t *testing.T) {
@@ -101,7 +106,7 @@ func TestProviderRequest_ReadFailureDoesNotStreamCompletion(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Body = io.NopCloser(failedProviderBody{})
 	response := httptest.NewRecorder()
-	malformedReadScreen(response, req)
+	providertest.ConsumeRequestBeforeResponse(response, req)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("provider status = %d, want 400 for an unreadable request", response.Code)
 	}

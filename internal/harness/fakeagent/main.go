@@ -5,11 +5,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/harness"
@@ -132,6 +135,7 @@ func main() {
 
 func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, steps []protocol.Step, emit func(protocol.Line)) {
 	calls := 0
+	var lastResult string
 	for _, step := range steps {
 		if ctx.Err() != nil {
 			return
@@ -163,32 +167,132 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 		case protocol.StepGate:
 			ready := make(chan struct{})
 			go func() {
-				gate, err := os.Open(script.Gate)
-				if err == nil {
+				for ctx.Err() == nil {
+					gate, err := os.Open(script.Gate)
+					if err != nil {
+						return
+					}
 					var b [1]byte
-					_, _ = gate.Read(b[:])
+					n, _ := gate.Read(b[:])
 					_ = gate.Close()
+					if n == 1 {
+						close(ready)
+						return
+					}
 				}
-				close(ready)
 			}()
 			select {
 			case <-ctx.Done():
 				return
 			case <-ready:
 			}
+		case protocol.StepWaitRun:
+			for strings.Contains(lastResult, "STILL RUNNING") {
+				match := regexp.MustCompile(`run id ([0-9a-f]+)`).FindStringSubmatch(lastResult)
+				if len(match) != 2 {
+					emit(protocol.Line{Kind: "failure", Reason: "quiet result has no run id"})
+					return
+				}
+				calls++
+				id := "call-" + strconv.Itoa(calls)
+				emit(protocol.Line{Kind: "tool_started", ID: id, Name: "session.wait"})
+				result, _, err := callTool(ctx, prompt.Tools, "session.wait", map[string]any{"runId": match[1], "decision": step.Decision}, script.ProbeEnvironment, false)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					emit(protocol.Line{Kind: "failure", Reason: fmt.Sprintf("tool call failed: %v", err)})
+					return
+				}
+				lastResult = result
+				if script.ResultFile != "" {
+					_ = os.WriteFile(script.ResultFile, []byte(result), 0o600)
+				}
+				emit(protocol.Line{Kind: "tool_finished", ID: id, Name: "session.wait"})
+			}
 		case protocol.StepTool:
 			calls++
 			id := "call-" + strconv.Itoa(calls)
 			emit(protocol.Line{Kind: "tool_started", ID: id, Name: step.Name})
-			result, err := callTool(ctx, prompt.Tools, step.Name, step.Arguments)
+			arguments := make(map[string]any, len(step.Arguments)+len(step.ArgumentsFromResult))
+			for key, value := range step.Arguments {
+				arguments[key] = value
+			}
+			for key, fact := range step.ArgumentsFromPrompt {
+				if fact != "attachedItemID" {
+					emit(protocol.Line{Kind: "failure", Reason: "unknown prompt fact: " + fact})
+					return
+				}
+				found := false
+				for _, line := range strings.Split(prompt.Text+"\n"+prompt.SystemPrompt, "\n") {
+					if rest, ok := strings.CutPrefix(line, "- id: "); ok {
+						attachedID, _, _ := strings.Cut(rest, ";")
+						arguments[key] = attachedID
+						found = true
+						break
+					}
+				}
+				if !found {
+					emit(protocol.Line{Kind: "failure", Reason: "no attached item in prompt"})
+					return
+				}
+			}
+			if len(step.ArgumentsFromResult) > 0 {
+				var decoded any
+				if json.Unmarshal([]byte(lastResult), &decoded) != nil {
+					emit(protocol.Line{Kind: "failure", Reason: "invalid preceding tool result JSON"})
+					return
+				}
+				for key, path := range step.ArgumentsFromResult {
+					value := decoded
+					for _, part := range strings.Split(path, ".") {
+						var ok bool
+						switch object := value.(type) {
+						case map[string]any:
+							value, ok = object[part]
+						case []any:
+							index, err := strconv.Atoi(part)
+							if err == nil && index >= 0 && index < len(object) {
+								value, ok = object[index], true
+							}
+						}
+						if !ok {
+							emit(protocol.Line{Kind: "failure", Reason: "missing result field: " + path})
+							return
+						}
+					}
+					if offset, ok := step.ArgumentOffsets[key]; ok {
+						number, ok := value.(float64)
+						if !ok {
+							emit(protocol.Line{Kind: "failure", Reason: "result argument is not numeric: " + key})
+							return
+						}
+						value = number + offset
+					}
+					arguments[key] = value
+				}
+			}
+			result, isError, err := callTool(ctx, prompt.Tools, step.Name, arguments, script.ProbeEnvironment, step.FailOnError)
 			if ctx.Err() != nil {
 				return
 			}
 			if err != nil {
+				if result != "" {
+					if step.ResultFile != "" {
+						_ = os.WriteFile(step.ResultFile, []byte(result), 0o600)
+					}
+					if script.ResultFile != "" && !isError {
+						_ = os.WriteFile(script.ResultFile, []byte(result), 0o600)
+					}
+				}
 				emit(protocol.Line{Kind: "failure", Reason: fmt.Sprintf("tool call failed: %v", err)})
 				return
 			}
-			if script.ResultFile != "" {
+			lastResult = result
+			if step.ResultFile != "" {
+				_ = os.WriteFile(step.ResultFile, []byte(result), 0o600)
+			}
+			if script.ResultFile != "" && !isError {
 				_ = os.WriteFile(script.ResultFile, []byte(result), 0o600)
 			}
 			emit(protocol.Line{Kind: "tool_finished", ID: id, Name: step.Name})
@@ -229,23 +333,23 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 // callTool launches the turn's bridge as an MCP stdio client and makes one
 // tools/call. The bridge's environment is added to this child alone; this
 // process's own environment is what it is.
-func callTool(ctx context.Context, bridge harness.ToolBridge, name string, arguments map[string]any) (string, error) {
+func callTool(ctx context.Context, bridge harness.ToolBridge, name string, arguments map[string]any, probeEnvironment, failOnError bool) (string, bool, error) {
 	if len(bridge.Command) == 0 {
-		return "", fmt.Errorf("no tool bridge was declared")
+		return "", false, fmt.Errorf("no tool bridge was declared")
 	}
 	cmd := exec.CommandContext(ctx, bridge.Command[0], bridge.Command[1:]...) //nolint:gosec // the turn states the bridge's argv
 	cmd.Env = append(os.Environ(), bridge.Env...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer func() {
 		_ = cmd.Process.Kill()
@@ -262,14 +366,14 @@ func callTool(ctx context.Context, bridge harness.ToolBridge, name string, argum
 			"clientInfo":      map[string]any{"name": "fakeagent", "version": "1"},
 		},
 	}); err != nil {
-		return "", err
+		return "", false, err
 	}
 	var initialized rpcResponse
 	if err := decoder.Decode(&initialized); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if initialized.Error != nil {
-		return "", fmt.Errorf("initialize: %s", initialized.Error.Message)
+		return "", false, fmt.Errorf("initialize: %s", initialized.Error.Message)
 	}
 
 	args := make(map[string]any, len(arguments)+1)
@@ -279,34 +383,40 @@ func callTool(ctx context.Context, bridge harness.ToolBridge, name string, argum
 	// The server reports this value next to its own view of the same
 	// variable, which is how the suite proves the bridge's environment
 	// reached the server and not the agent.
-	args["agent_secret"] = os.Getenv("NOCX_TEST_SECRET")
-	args["agent_environment"] = os.Environ()
+	if probeEnvironment {
+		args["agent_secret"] = os.Getenv("NOCX_TEST_SECRET")
+		args["agent_environment"] = os.Environ()
+	}
 
 	if err := encoder.Encode(map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
 		"params": map[string]any{"name": name, "arguments": args},
 	}); err != nil {
-		return "", err
+		return "", false, err
 	}
 	var response rpcResponse
 	if err := decoder.Decode(&response); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if response.Error != nil {
-		return "", fmt.Errorf("tools/call: %s", response.Error.Message)
+		return "", false, fmt.Errorf("tools/call: %s", response.Error.Message)
 	}
 	var result struct {
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
+		IsError bool `json:"isError"`
 	}
 	if err := json.Unmarshal(response.Result, &result); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if len(result.Content) == 0 {
-		return "", nil
+		return "", false, nil
 	}
-	return result.Content[0].Text, nil
+	if failOnError && result.IsError {
+		return result.Content[0].Text, true, errors.New(result.Content[0].Text)
+	}
+	return result.Content[0].Text, result.IsError, nil
 }
 
 type rpcResponse struct {

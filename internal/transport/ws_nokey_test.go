@@ -3,13 +3,16 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/providertest"
 )
 
@@ -57,63 +60,60 @@ func TestEndpointsProbe_RequiredCredentialMissingIsRefused(t *testing.T) {
 	}
 }
 
-func TestAgentAsk_NoKeyEndpointAnswersWithoutAuthorization(t *testing.T) {
+// Endpoint probes still own provider HTTP; agent.ask now runs an installed agent.
+func TestEndpointsProbe_NoKeyEndpointAnswersWithoutAuthorization(t *testing.T) {
 	auth := make(chan string, 1)
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !providertest.ConsumeRequestBeforeResponse(w, r) {
 			return
 		}
 		auth <- r.Header.Get("Authorization")
-		streamOKChunks(w)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer model.Close()
-
 	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
+		t.Fatal(err)
 	}
-	h := newAskHarness(t, client)
-	e, code := decodeEndpointResult(t, jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Local",
-		"baseUrl": model.URL + "/v1",
-		"schema":  "openai-compatible",
-		"noKey":   true,
-		"models":  []map[string]any{{"name": "local-model"}},
-	}))
-	if code != 0 {
-		t.Fatalf("endpoints.create: code %d", code)
+	h := newAssistantHarness(t, &stubAssistantClient{probe: client.Probe})
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"name": "Local", "baseUrl": model.URL + "/v1", "schema": "openai-compatible", "noKey": true, "model": "local-model",
+	})
+	var env struct {
+		Result assistant.ProbeResult `json:"result"`
+		Error  *jsonrpcErrorObj      `json:"error"`
 	}
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role":       "answering",
-		"endpointId": e.ID,
-		"model":      "local-model",
-	})) {
-		t.Fatal("roles.assign refused the no-key endpoint")
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
 	}
-	sid := openLocalSession(t, h.conn)
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":           "ask-nokey",
-		"sessionId":       sid,
-		"question":        "answer locally",
-		"cwd":             "/repo",
-		"attachedContent": []any{},
-	}, 2)
-	if errObj != nil {
-		t.Fatalf("agent.ask: %+v", errObj)
+	if env.Error != nil || !env.Result.OK {
+		t.Fatalf("no-key probe: %s", raw)
 	}
-	if res.State != "prepared" {
-		t.Fatalf("agent.ask state = %q, want prepared", res.State)
-	}
-	for range 2 {
-		readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
-	}
-	readNotification(t, h.conn, "agent.runState", 5*time.Second)
 	select {
 	case got := <-auth:
 		if got != "" {
 			t.Fatalf("Authorization = %q, want no Authorization header", got)
 		}
 	default:
-		t.Fatal("the model server did not receive the ask")
+		t.Fatal("the model server did not receive the probe")
+	}
+}
+
+func TestAgentAsk_AnswersWithoutEndpointCredential(t *testing.T) {
+	h := newAskHarness(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "local agent answer"}, {Kind: protocol.StepEnd},
+	}})
+	sid := openLocalSession(t, h.conn)
+	if _, rpcErr := askOverWire(t, h.conn, map[string]any{"askId": "without-credential", "sessionId": sid, "question": "answer locally", "cwd": "/repo"}, 2); rpcErr != nil {
+		t.Fatalf("agent.ask: %+v", rpcErr)
+	}
+	delta := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+	if !strings.Contains(string(delta), "local agent answer") {
+		t.Fatalf("answer: %s", delta)
+	}
+	state := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if !strings.Contains(string(state), `"state":"completed"`) {
+		t.Fatalf("state: %s", state)
 	}
 }

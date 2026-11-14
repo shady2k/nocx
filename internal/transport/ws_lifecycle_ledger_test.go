@@ -3,17 +3,13 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/notify"
@@ -279,29 +275,27 @@ func TestLifecycleSubmitAttempt_StoreUnavailableStillRunsCommand(t *testing.T) {
 }
 
 func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *testing.T) {
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
-	provider := &lifecycleBlockReadProvider{
-		promptID:       make(chan string, 1),
-		runningResult:  make(chan struct{}),
-		finishedResult: make(chan struct{}),
-		releaseSecond:  make(chan struct{}),
-	}
-	server := httptest.NewServer(http.HandlerFunc(provider.serve))
-	defer server.Close()
+	resultDir := t.TempDir()
+	firstResult := filepath.Join(resultDir, "running")
+	secondResult := filepath.Join(resultDir, "completed")
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"start": 5, "count": 1}, ArgumentsFromPrompt: map[string]string{"id": "attachedItemID"}, ResultFile: firstResult},
+		{Kind: protocol.StepAnswer, Text: "running read returned"},
+		{Kind: protocol.StepGate},
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"start": 0, "count": 1}, ArgumentsFromPrompt: map[string]string{"id": "attachedItemID"}, ResultFile: secondResult},
+		{Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{"id": "unmarked-block-id", "start": 0, "count": 20}},
+		{Kind: protocol.StepEnd, Model: "fixture-model"},
+	}}
 
 	screenSource := &recordingScreenCapture{body: screenCaptureBody(t, 5, "live block output")}
-	h := newAskHarnessWithOpts(t, client,
+	h := newAskHarnessWithOpts(t, script,
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithLifecyclePublisher(pub),
 		WithScreenCaptureSource(screenSource),
 	)
 	pub.SetEmitter(h.ws)
-	h.createEndpointAt(server.URL)
 	sid, errObj := openSessionInPane(t, h.conn, askPaneID, 1)
 	if errObj != nil {
 		t.Fatalf("open session: %+v", errObj)
@@ -312,9 +306,9 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if bindErr := pub.BindTransport("T", noopPort{}); bindErr != nil {
 		t.Fatalf("BindTransport: %v", bindErr)
 	}
-	domain, err := pub.RequestDomain(lane, nil, "T")
-	if err != nil {
-		t.Fatalf("RequestDomain: %v", err)
+	domain, domainErr := pub.RequestDomain(lane, nil, "T")
+	if domainErr != nil {
+		t.Fatalf("RequestDomain: %v", domainErr)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, domain, 1, lifecycleHelloEvt()))
 	ackEstablishmentFrom(t, pub, lane, domain, h.conn)
@@ -328,7 +322,7 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	attemptID := lifecycle.AttemptID(submitted.ID)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, domain, 2, lifecycleStartEvt(&attemptID, command)))
 
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
+	askResult, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-block-read",
 		"sessionId": sid,
 		"question":  "what did the deploy command print?",
@@ -336,22 +330,13 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 		"attachedContent": []any{
 			map[string]any{"itemId": submitted.ID, "command": command, "state": "running"},
 		},
-	}, 42); errObj != nil {
+	}, 42)
+	if errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
 
-	var promptID string
-	select {
-	case promptID = <-provider.promptID:
-	case <-time.After(10 * time.Second):
-		t.Fatal("fake model never received the attached-content prompt")
-	}
-	if promptID == "" {
-		t.Fatal("fake model extracted an empty attempt id from the prompt")
-	}
-	if promptID != submitted.ID {
-		t.Fatalf("prompt id = %q, want the submitted attempt id %q", promptID, submitted.ID)
-	}
+	promptID := submitted.ID
+	// A tool notification proves the subprocess received and parsed the prompt.
 
 	firstCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)
 	var first struct {
@@ -368,10 +353,12 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 		t.Fatalf("first session.read = %+v, want no model session id and prompt id %q", first, promptID)
 	}
 
-	select {
-	case <-provider.runningResult:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("fake model never received the running session.read result: %v", provider.failure())
+	readNotification(t, h.conn, "agent.runDelta", 10*time.Second)
+	firstBody := string(h.agent.read(firstResult))
+	for _, want := range []string{`"state":"running"`, "live block output", promptID} {
+		if !strings.Contains(firstBody, want) {
+			t.Fatalf("running read = %s, missing %q", firstBody, want)
+		}
 	}
 
 	calls := screenSource.snapshotCalls()
@@ -383,7 +370,7 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	// durable row is ready before the next agent read, so this test no longer
 	// calls the retired history.record RPC.
 	recordRowsBody(t, h.db, submitted.ID, "artifact-block-read", "finished block output")
-	close(provider.releaseSecond)
+	h.release()
 
 	secondCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)
 	var second struct {
@@ -400,11 +387,6 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 		t.Fatalf("second session.read = %+v, want no model session id and the same prompt id %q", second, promptID)
 	}
 
-	select {
-	case <-provider.finishedResult:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("fake model never received the completed session.read result: %v", provider.failure())
-	}
 	thirdCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)
 	var third struct {
 		Tool string `json:"tool"`
@@ -433,138 +415,36 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if state.State != "failed" {
 		t.Fatalf("agent.runState = %q, want failed after an unmarked read", state.State)
 	}
-	if !strings.Contains(state.Error, "session.read") || !strings.Contains(state.Error, "no such item") {
-		t.Fatalf("agent.runState error = %q, want the current unmarked-read refusal", state.Error)
+	if !strings.Contains(state.Error, "tools/call") {
+		t.Fatalf("unmarked read failure = %q, want bridge refusal", state.Error)
 	}
-	if err := provider.failure(); err != nil {
+	entries, err := h.db.Ledger().Caused(t.Context(), askResult.EntryID)
+	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-type lifecycleBlockReadProvider struct {
-	promptID       chan string
-	runningResult  chan struct{}
-	finishedResult chan struct{}
-	releaseSecond  chan struct{}
-
-	mu      sync.Mutex
-	learned string
-	errs    []string
-}
-
-func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.fail("read model request: %v", err)
-		streamAnswerChunk(w, "provider could not read the request")
-		return
-	}
-	body := string(raw)
-	p.mu.Lock()
-	if p.learned == "" {
-		p.learned = lifecycleBlockReadPromptID(body)
-		if p.learned == "" {
-			p.errs = append(p.errs, "prompt did not name an attached item id")
+	var failedRead bool
+	for _, caused := range entries {
+		entry, err := h.db.Ledger().Entry(t.Context(), caused.EntryID)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(body, "state: running") {
-			p.errs = append(p.errs, "prompt did not name the attached item as running")
-		}
-		learned := p.learned
-		p.mu.Unlock()
-		p.promptID <- learned
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":5,"count":1}`, learned))
-		return
-	}
-	learned := p.learned
-	p.mu.Unlock()
-	tool := lifecycleBlockReadToolResult(body)
-
-	switch {
-	case strings.Contains(tool, `"state":"running"`) && strings.Contains(tool, "live block output"):
-		if !strings.Contains(tool, learned) {
-			p.fail("running session.read result omitted prompt id %q", learned)
-		}
-		close(p.runningResult)
-		<-p.releaseSecond
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":0,"count":1}`, learned))
-	case strings.Contains(tool, `"state":"exited"`) &&
-		strings.Contains(tool, `"exitCode":7`) &&
-		strings.Contains(tool, "finished block output"):
-		if !strings.Contains(tool, learned) {
-			p.fail("completed session.read result omitted prompt id %q", learned)
-		}
-		close(p.finishedResult)
-		streamToolCallChunk(w, "session.read",
-			`{"id":"unmarked-block-id","start":0,"count":20}`)
-	default:
-		p.fail("unexpected model tool result: %s", tool)
-		streamAnswerChunk(w, "unexpected provider request")
-	}
-}
-
-func (p *lifecycleBlockReadProvider) fail(format string, args ...any) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.errs = append(p.errs, fmt.Sprintf(format, args...))
-}
-
-func (p *lifecycleBlockReadProvider) failure() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.errs) == 0 {
-		return nil
-	}
-	return fmt.Errorf("fake model assertions: %s", strings.Join(p.errs, "; "))
-}
-
-func lifecycleBlockReadToolResult(body string) string {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		return ""
-	}
-	latest := ""
-	for _, message := range req.Messages {
-		if message.Role == "tool" {
-			latest = message.Content
+		if entry.Kind == content.EntryAction && entry.Intent == "session.read" && entry.Status == content.EntryFailure {
+			failedRead = true
 		}
 	}
-	return latest
-}
+	if !failedRead {
+		t.Fatalf("no durable failed read in %+v", entries)
+	}
+	if logs := h.agent.endpointLogs.String(); !strings.Contains(logs, "no such item in this session") {
+		t.Fatalf("unmarked read diagnostic missing refusal: %s", logs)
+	}
 
-func lifecycleBlockReadPromptID(body string) string {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		return ""
-	}
-	for _, message := range req.Messages {
-		if message.Role != "system" {
-			continue
-		}
-		for _, line := range strings.Split(message.Content, "\n") {
-			const marker = "- id: "
-			if !strings.Contains(line, marker) {
-				continue
-			}
-			id := line[strings.Index(line, marker)+len(marker):]
-			if end := strings.Index(id, ";"); end >= 0 {
-				id = id[:end]
-			}
-			return strings.TrimSpace(id)
+	secondBody := string(h.agent.read(secondResult))
+	for _, want := range []string{`"state":"exited"`, `"exitCode":7`, "finished block output", promptID} {
+		if !strings.Contains(secondBody, want) {
+			t.Fatalf("completed read = %s, missing %q", secondBody, want)
 		}
 	}
-	return ""
 }
 
 // lifecycleSubmitParamsFrom is lifecycleSubmitParams with the submitting

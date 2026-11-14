@@ -22,6 +22,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
+
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 )
@@ -223,7 +225,9 @@ func TestPolicySet_FutureOnlyLeavesTheRunningWorkAloneAtBothEnds(t *testing.T) {
 
 	// AND THE INTERVAL CLOSES WHERE IT SHOULD: the run in flight reaches its
 	// own ending, not one the write gave it.
-	h.client.releaseAll()
+	jsonrpcCall(t, h.conn, "agent.cancel", map[string]any{"runId": next.RunID})
+	waitForRunTermination(t, h, next.EntryID, content.RunCancelled, content.TermUserKilled)
+	h.release()
 	waitForRunTermination(t, h, inFlight.EntryID, content.RunCompleted, content.TermCompleted)
 }
 
@@ -350,17 +354,12 @@ func TestPolicySetRuns_OverTheWireConformsToContract(t *testing.T) {
 // (StopRunsForRevokedAnswer says so where it happens). Asserting it here would
 // be a second account of somebody else's failure path.
 func TestPolicySet_AStoreThatRefusesTheWriteStopsNothing(t *testing.T) {
-	client := newHeldAskClient()
-	ah := newAskHarnessWithOpts(t, client,
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "in flight"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "test-model"}}}
+	ah := newAskHarnessWithOpts(t, script,
 		WithAgentPolicy(failingPolicyStore{err: errors.New("the policy document could not be written")}),
 		WithLiveEffects(agenttools.LiveEffects()),
 	)
-	t.Cleanup(client.releaseAll)
-	ah.createEndpoint()
-	// A revokeHarness around a store that refuses every write. It carries no
-	// *GlobalPolicyStore because there is nothing to seed and nothing to read
-	// back — the assertion is entirely about what did NOT happen.
-	h := &revokeHarness{askHarness: ah, client: client, sid: openLocalSession(t, ah.conn), nextID: 300}
+	h := &revokeHarness{askHarness: ah, nextID: 300}
 
 	inFlight := h.startHeldRun("in-flight")
 

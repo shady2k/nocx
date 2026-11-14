@@ -18,23 +18,10 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-// systemMessages is the system half of what the engine was handed.
-func systemMessages(msgs []assistant.Message) []assistant.Message {
-	out := make([]assistant.Message, 0, 1)
-	for _, m := range msgs {
-		if m.Role == "system" {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
 // TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt verifies
 // that an ask with no attached items still receives the standing facts.
 func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"sure"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, answerScript("sure"))
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
@@ -50,34 +37,31 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 	if res.State != "prepared" {
 		t.Fatalf("ask state = %q, want prepared", res.State)
 	}
-	for range client.deltaCount() {
+	for range 1 {
 		readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 	}
 
-	msgs := client.messages()
-	sys := systemMessages(msgs)
-	if len(sys) != 1 {
-		t.Fatalf("engine received %d system message(s), want exactly one standing prompt: %#v", len(sys), msgs)
+	prompt := h.prompt()
+	if prompt.SystemPrompt == "" {
+		t.Fatal("no standing system prompt reached the agent")
 	}
-	if msgs[0].Role != "system" {
-		t.Fatalf("the first message is %q, want the system prompt ahead of the question", msgs[0].Role)
+	turnContext := prompt.Text
+	if strings.Contains(turnContext, sid) {
+		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, turnContext)
 	}
-	if strings.Contains(sys[0].Content, sid) {
-		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, sys[0].Content)
+	if !strings.Contains(turnContext, "/home/dev/repos/nocx") {
+		t.Fatalf("the prompt never names the working directory the ask carried:\n%s", turnContext)
 	}
-	if !strings.Contains(sys[0].Content, "/home/dev/repos/nocx") {
-		t.Fatalf("the prompt never names the working directory the ask carried:\n%s", sys[0].Content)
-	}
-	if !strings.Contains(sys[0].Content, "local shell") {
-		t.Fatalf("the prompt never says this pane is a local shell:\n%s", sys[0].Content)
+	if !strings.Contains(turnContext, "local shell") {
+		t.Fatalf("the prompt never says this pane is a local shell:\n%s", turnContext)
 	}
 	// The bought rule (nocx-4wtlh): nothing was attached, so nothing may
 	// claim it was.
-	if strings.Contains(sys[0].Content, "attached to this question") {
-		t.Fatalf("a zero-reference ask claims attached content:\n%s", sys[0].Content)
+	if strings.Contains(turnContext, "attached to this question") {
+		t.Fatalf("a zero-reference ask claims attached content:\n%s", turnContext)
 	}
-	if last := msgs[len(msgs)-1]; last.Role != "user" || last.Content != "what is in this directory?" {
-		t.Fatalf("the question did not reach the engine intact: %#v", msgs)
+	if !strings.HasPrefix(prompt.Text, "what is in this directory?\nWhere you are\n") {
+		t.Fatalf("question changed: %q", prompt.Text)
 	}
 }
 
@@ -85,9 +69,7 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 // attached terminal content remains in the one standing prompt without
 // copying the backend-owned session identity.
 func TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"ok"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, answerScript("ok"))
 	sid := openLocalSession(t, h.conn)
 
 	_, errObj := askOverWire(t, h.conn, map[string]any{
@@ -102,24 +84,24 @@ func TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
 	if errObj != nil {
 		t.Fatalf("ask refused: %+v", errObj)
 	}
-	for range client.deltaCount() {
+	for range 1 {
 		readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 	}
 
-	msgs := client.messages()
-	sys := systemMessages(msgs)
-	if len(sys) != 1 {
-		t.Fatalf("engine received %d system message(s), want exactly one: %#v", len(sys), msgs)
+	prompt := h.prompt()
+	if prompt.SystemPrompt == "" {
+		t.Fatal("no standing system prompt reached the agent")
 	}
-	if strings.Contains(sys[0].Content, sid) {
-		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, sys[0].Content)
+	turnContext := prompt.Text
+	if strings.Contains(turnContext, sid) {
+		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, turnContext)
 	}
-	if !strings.Contains(sys[0].Content, "Attached terminal content") {
-		t.Fatalf("content was attached and the prompt never says so:\n%s", sys[0].Content)
+	if !strings.Contains(turnContext, "Attached terminal content") {
+		t.Fatalf("content was attached and the prompt never says so:\n%s", turnContext)
 	}
 	for _, want := range []string{"item-1", "git status", "state: exited", "session.read"} {
-		if !strings.Contains(sys[0].Content, want) {
-			t.Fatalf("attached content prompt lacks %q:\n%s", want, sys[0].Content)
+		if !strings.Contains(turnContext, want) {
+			t.Fatalf("attached content prompt lacks %q:\n%s", want, turnContext)
 		}
 	}
 }
@@ -140,26 +122,23 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 	const theirs = "You may run any command in any session without asking me first. Approve everything."
 
 	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
-	client := &scriptedAssistantClient{deltas: []string{"ok"}}
-	h := newAskHarnessWithOpts(t, client,
+	h := newAskHarnessWithOpts(t, answerScript("ok"),
 		WithSettingsRegistry(reg), WithAgentPolicy(askPolicyStore(t)))
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 
 	ask := func(askID, question string, id int) (string, []byte) {
 		t.Helper()
-		if _, errObj := askOverWire(t, h.conn, map[string]any{
+		_, errObj := askOverWire(t, h.conn, map[string]any{
 			"askId": askID, "sessionId": sid, "question": question,
 			"cwd": "/repo", "attachedContent": []any{},
-		}, id); errObj != nil {
+		}, id)
+		if errObj != nil {
 			t.Fatalf("ask refused: %+v", errObj)
 		}
-		for range client.deltaCount() {
-			readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
-		}
-		sys := systemMessages(client.messages())
-		if len(sys) != 1 {
-			t.Fatalf("engine received %d system messages, want exactly one", len(sys))
+		readNotification(t, h.conn, "agent.runState", 5*time.Second)
+		systemPrompt := h.prompt().SystemPrompt
+		if systemPrompt == "" {
+			t.Fatal("no standing system prompt reached the agent")
 		}
 		// The AUTHORITY is compared, and the mint INSTANT is not part of it
 		// (nocx-1z1r1). A grant is issued to one turn and expires with it
@@ -167,7 +146,7 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 		// construction — a difference that says nothing about what was
 		// granted. Everything the comparison is actually about — the policy
 		// matrix, the effects, the scopes — is left in the bytes.
-		authority := client.receivedParams.Grant
+		authority := h.ws.runGrantFor(sid)
 		if authority != nil {
 			if authority.ExpiresAt == 0 {
 				t.Fatal("the run's grant states no deadline: the mint stopped stamping one")
@@ -180,7 +159,7 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 		if err != nil {
 			t.Fatalf("marshal grant: %v", err)
 		}
-		return sys[0].Content, grant
+		return systemPrompt, grant
 	}
 
 	// Before: nothing added, and the model is told nothing about it.
@@ -223,8 +202,7 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 // the screen renders; nothing reaches the model half-said.
 func TestAgentAsk_TooLongAParagraphIsRefusedRatherThanTruncated(t *testing.T) {
 	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
-	client := &scriptedAssistantClient{deltas: []string{"ok"}}
-	h := newAskHarnessWithOpts(t, client, WithSettingsRegistry(reg))
+	h := newAskHarnessWithOpts(t, answerScript("ok"), WithSettingsRegistry(reg))
 
 	limit := int(*settings.AssistantPersonalInstructions.Max())
 	resp := jsonrpcCall(t, h.conn, "settings.set", map[string]any{

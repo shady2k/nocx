@@ -38,6 +38,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	agentharness "github.com/shady2k/nocx/internal/harness"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -378,28 +380,23 @@ type runLeaseHarness struct {
 	domain lifecycle.DomainHandle
 	// fake is the run-tool provider: first request streams the run tool
 	// call, later requests stream the answer.
-	fake *runToolCallingServer
-	srv  *testSrv
+	agent           *scriptedAgentFixture
+	quietDecision   string
+	quietQuestion   string
+	failOnToolError bool
+	router          *runLeaseActor
 }
 
-// testSrv is the fake provider's server handle (URL + Close), so the
-// harness can name the endpoint after construction.
-type testSrv struct {
-	url string
-}
-
-func (s *testSrv) URL() string  { return s.url }
-func (s *testSrv) Close() error { return nil }
+type runLeaseActor struct{ agentharness.Harness }
 
 func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServerOption) *runLeaseHarness {
 	t.Helper()
-	fake, srv := newRunToolCallingServer("")
-	t.Cleanup(srv.Close)
+
+	router := &runLeaseActor{}
 	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
+		t.Fatal(err)
 	}
-
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
 	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
@@ -441,6 +438,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
 		WithAssistantClient(client),
+		WithAgentHarness("scripted", router),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithLifecyclePublisher(pub),
@@ -456,7 +454,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	t.Cleanup(func() { _ = ws.Stop(t.Context()) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, pub: pub, fake: fake, srv: &testSrv{url: srv.URL}}
+	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, pub: pub, router: router}
 }
 
 func (h *runLeaseHarness) openSession(t *testing.T) string {
@@ -484,7 +482,7 @@ func (h *runLeaseHarness) createEndpointAt() {
 	h.t.Helper()
 	e, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
 		"name":    "Local",
-		"baseUrl": h.srv.url,
+		"baseUrl": "http://127.0.0.1:11434/v1",
 		"schema":  "openai-compatible",
 		"key":     "sk-test-123",
 		"models":  []map[string]any{{"name": "qwen3"}},
@@ -505,7 +503,15 @@ func (h *runLeaseHarness) createEndpointAt() {
 // with the given session and command, and returns the ask result.
 func (h *runLeaseHarness) askRunsTool(sid, command string) askWireResult {
 	h.t.Helper()
-	h.fake.args = `{"command":` + strconv.Quote(command) + `}`
+	steps := []protocol.Step{{Kind: protocol.StepTool, Name: "session.run", Arguments: map[string]any{"command": command}, ResultFile: h.quietQuestion, FailOnError: h.failOnToolError}}
+	if h.quietDecision != "" {
+		steps = append(steps, protocol.Step{Kind: protocol.StepWaitRun, Decision: h.quietDecision})
+	}
+	steps = append(steps, protocol.Step{Kind: protocol.StepAnswer, Text: "ok"}, protocol.Step{Kind: protocol.StepEnd})
+	h.agent = newScriptedAgent(h.t, protocol.Script{Steps: steps})
+
+	h.router.Harness = h.agent.harness
+	h.ws.agentHarnessID = "scripted"
 	res, errObj := askOverWire(h.t, h.conn, map[string]any{
 		"askId":     "ask-lease-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		"sessionId": sid,
@@ -711,6 +717,7 @@ func TestRunLease_BoundBeforeBrokerDeliveryNamesExpiredSubmissionInRunState(t *t
 	)
 	h.ws.broker = broker
 
+	h.failOnToolError = true
 	res := h.askRunsTool(sid, "echo never submitted")
 	<-deliverStarted
 
@@ -785,8 +792,8 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
-	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "wall-clock deadline") {
-		t.Fatalf("model request after lease = %v, want the wall-clock tool result", h.fake.bodies)
+	if !strings.Contains(h.agent.toolResult(), "wall-clock deadline") {
+		t.Fatalf("model request after lease = %v, want the wall-clock tool result", h.agent.toolResult())
 	}
 
 	// Criterion 2: the cancellation reached the CHILD — the pid the command
@@ -885,6 +892,7 @@ func TestRunLease_AQuietCommandIsNotKilledAndTheModelIsAsked(t *testing.T) {
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"
+	h.quietQuestion = filepath.Join(t.TempDir(), "quiet-question")
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
@@ -907,8 +915,12 @@ func TestRunLease_AQuietCommandIsNotKilledAndTheModelIsAsked(t *testing.T) {
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
-	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "STILL RUNNING") {
-		t.Fatalf("model request after the quiet bound = %v, want the still-running question", h.fake.bodies)
+	question, err := os.ReadFile(h.quietQuestion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(question), "STILL RUNNING") {
+		t.Fatalf("model request after the quiet bound = %s, want the still-running question", question)
 	}
 	// THE ASSERTION THAT IS THE WHOLE BEAD: the command is still running.
 	waitChildAlive(t, pid)
@@ -1099,8 +1111,8 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
-	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "output exceeded the budget") {
-		t.Fatalf("model request after lease = %v, want the output-budget tool result", h.fake.bodies)
+	if !strings.Contains(h.agent.toolResult(), "output exceeded the budget") {
+		t.Fatalf("model request after lease = %v, want the output-budget tool result", h.agent.toolResult())
 	}
 	waitChildDead(t, pid)
 

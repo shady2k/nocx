@@ -10,23 +10,9 @@ package transport
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
-	"github.com/shady2k/nocx/internal/content"
 )
-
-func expansionAsk(facts *assistant.ExpansionFacts) func(runID string) approvalAsk {
-	return func(runID string) approvalAsk {
-		return approvalAsk{policy: &assistant.ApprovalRequest{
-			RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
-			Arguments: `{"command":"rm -rf $HOME/x $(id -u)","sessionId":"s"}`,
-			ArgHash:   "hash-a",
-			Effect:    content.EffectMutateDestructive,
-			Expansion: facts,
-		}}
-	}
-}
 
 func askedExpansionFacts() *assistant.ExpansionFacts {
 	return &assistant.ExpansionFacts{
@@ -97,18 +83,8 @@ func TestAgentApprovalRequested_ExpansionDTOConformsToContract(t *testing.T) {
 // proves the struct is well-formed, not that the server sends it.
 func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: expansionAsk(askedExpansionFacts())},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "please clean it", "cwd": "/repo",
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	h := suspendedRunWith(t, askPolicyStore(t), approvalToolScript("session.run", map[string]any{"command": "rm -rf $HOME/x $(id -u)"}))
+	raw := h.rawAsked
 	validateJSON(t, schema, raw, "agent.approvalRequested params with expansion (real socket)")
 
 	var got struct {
@@ -129,15 +105,21 @@ func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testin
 	// BESIDE, NEVER INSTEAD: the arguments the person answers about still
 	// carry the model's own verbatim command, and the expanded form is a
 	// separate field the surface labels as a reading.
-	if got.Arguments != `{"command":"rm -rf $HOME/x $(id -u)","sessionId":"s"}` {
+	var arguments struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(got.Arguments), &arguments); err != nil {
+		t.Fatal(err)
+	}
+	if arguments.Command != "rm -rf $HOME/x $(id -u)" {
 		t.Fatalf("arguments = %q, want the model's own proposal untouched", got.Arguments)
 	}
-	if got.Expansion.Command == got.Arguments || got.Expansion.Command != "rm -rf /home/dev/x $(id -u)" {
+	if got.Expansion.Command == got.Arguments || got.Expansion.Command != "rm -rf $HOME/x $(id -u)" {
 		t.Fatalf("expansion.command = %q, want the expanded display form", got.Expansion.Command)
 	}
 	var sawExpanded, sawUnsafe bool
 	for _, part := range got.Expansion.Parts {
-		if part.Text == "$HOME" && part.State == "expanded" && part.Value == "/home/dev" {
+		if part.Text == "$HOME" && part.State == "unasked" && part.Value == "" {
 			sawExpanded = true
 		}
 		if part.Text == "$(id -u)" && part.State == "unsafe" {
@@ -145,7 +127,7 @@ func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testin
 		}
 	}
 	if !sawExpanded || !sawUnsafe {
-		t.Fatalf("parts = %+v, want the value shown and the substitution left as written", got.Expansion.Parts)
+		t.Fatalf("parts = %+v, want the unavailable value and the unsafe substitution left as written", got.Expansion.Parts)
 	}
 }
 
@@ -153,18 +135,8 @@ func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testin
 // it as "unsafe" would tell a person nocx had refused to read a value it had
 // simply been unable to read.
 func TestAgentApprovalRequested_NotAskedIsItsOwnStateOnTheWire(t *testing.T) {
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: expansionAsk(unaskedExpansionFacts())},
-	}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": sid, "question": "please clean it", "cwd": "/repo",
-	}, 1); errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	h := suspendedRunWith(t, askPolicyStore(t), approvalToolScript("session.run", map[string]any{"command": "rm -rf $HOME/x"}))
+	raw := h.rawAsked
 
 	var got struct {
 		Expansion struct {

@@ -2,25 +2,19 @@ package transport
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
-
-type fetchE2ECall struct {
-	URL      string `json:"url"`
-	Start    *int64 `json:"start,omitempty"`
-	Revision string `json:"revision,omitempty"`
-}
 
 type fetchE2EResult struct {
 	URL      string `json:"url"`
@@ -34,118 +28,13 @@ type fetchE2EResult struct {
 	Truncated bool   `json:"truncated"`
 }
 
-type fetchE2EProvider struct {
-	mu          sync.Mutex
-	url         string
-	secondCall  bool
-	answer      string
-	marker      string
-	requests    int
-	calls       []fetchE2ECall
-	results     []fetchE2EResult
-	failureText string
-}
-
-func (p *fetchE2EProvider) serve(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.fail(fmt.Sprintf("read provider request: %v", err))
-		streamAnswerChunk(w, "provider failed to read its request")
-		return
-	}
-
-	p.mu.Lock()
-	p.requests++
-	requestNumber := p.requests
-	p.mu.Unlock()
-
-	switch {
-	case requestNumber == 1:
-		p.emitCall(w, fetchE2ECall{URL: p.url})
-	case requestNumber == 2 && p.secondCall:
-		result, decodeErr := fetchE2EResultFromBody(string(body))
-		if decodeErr != nil {
-			p.fail(fmt.Sprintf("decode first fetch result: %v", decodeErr))
-			streamAnswerChunk(w, "provider could not decode the first fetch result")
-			return
-		}
-		p.recordResult(result)
-		p.emitCall(w, fetchE2ECall{
-			URL:      p.url,
-			Start:    &result.Window.End,
-			Revision: result.Revision,
-		})
-	default:
-		result, decodeErr := fetchE2EResultFromBody(string(body))
-		if decodeErr != nil {
-			p.fail(fmt.Sprintf("decode fetch result: %v", decodeErr))
-			streamAnswerChunk(w, "provider could not decode the fetch result")
-			return
-		}
-		p.recordResult(result)
-		if p.marker != "" && strings.Contains(result.Text, p.marker) {
-			streamAnswerChunk(w, p.marker)
-			return
-		}
-		streamAnswerChunk(w, p.answer)
-	}
-}
-
-func (p *fetchE2EProvider) emitCall(w http.ResponseWriter, call fetchE2ECall) {
-	raw, err := json.Marshal(call)
-	if err != nil {
-		p.fail(fmt.Sprintf("marshal fetch call: %v", err))
-		streamAnswerChunk(w, "provider could not marshal its fetch call")
-		return
-	}
-	var decoded fetchE2ECall
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		p.fail(fmt.Sprintf("decode emitted fetch call: %v", err))
-		streamAnswerChunk(w, "provider could not decode its fetch call")
-		return
-	}
-	p.mu.Lock()
-	p.calls = append(p.calls, decoded)
-	p.mu.Unlock()
-	streamToolCallChunk(w, "fetch.url", string(raw))
-}
-
-func (p *fetchE2EProvider) recordResult(result fetchE2EResult) {
-	p.mu.Lock()
-	p.results = append(p.results, result)
-	p.mu.Unlock()
-}
-
-func (p *fetchE2EProvider) fail(message string) {
-	p.mu.Lock()
-	if p.failureText == "" {
-		p.failureText = message
-	}
-	p.mu.Unlock()
-}
-
-func (p *fetchE2EProvider) snapshot() (calls []fetchE2ECall, results []fetchE2EResult, failure string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	calls = append([]fetchE2ECall(nil), p.calls...)
-	results = append([]fetchE2EResult(nil), p.results...)
-	return calls, results, p.failureText
-}
-
-func fetchE2EResultFromBody(body string) (fetchE2EResult, error) {
-	toolResult := lifecycleBlockReadToolResult(body)
-	const openTag = "<tool-output>\n"
-	const closeTag = "\n</tool-output>"
-	start := strings.Index(toolResult, openTag)
-	end := strings.LastIndex(toolResult, closeTag)
-	if start < 0 || end <= start+len(openTag) {
-		return fetchE2EResult{}, fmt.Errorf("tool result has no tool-output envelope")
-	}
+func fetchE2EResultFromText(t *testing.T, text string) fetchE2EResult {
+	t.Helper()
 	var result fetchE2EResult
-	if err := json.Unmarshal([]byte(strings.TrimSpace(toolResult[start+len(openTag):end])), &result); err != nil {
-		return fetchE2EResult{}, err
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatal(err)
 	}
-	return result, nil
+	return result
 }
 
 func directFetchE2EClient() *apifetch.Client {
@@ -168,15 +57,11 @@ func TestAgentAsk_FetchURLDecodesLegacyRSSEndToEnd(t *testing.T) {
 	}))
 	defer feed.Close()
 
-	provider := &fetchE2EProvider{url: feed.URL, answer: "the feed item is Привет"}
-	model := httptest.NewServer(http.HandlerFunc(provider.serve))
-	defer model.Close()
-
-	h := newAskHarnessWithOpts(t, mustClient(t),
-		WithAgentPolicy(autonomousPolicyStore(t)),
-		WithAgentFetcher(directFetchE2EClient()),
-	)
-	h.createEndpointAt(model.URL)
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "fetch.url", Arguments: map[string]any{"url": feed.URL}},
+		{Kind: protocol.StepAnswer, Text: "the feed item is Привет"},
+		{Kind: protocol.StepEnd},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(directFetchE2EClient()))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "fetch-rss-e2e", "sessionId": sid,
@@ -204,16 +89,7 @@ func TestAgentAsk_FetchURLDecodesLegacyRSSEndToEnd(t *testing.T) {
 		t.Fatalf("runState = %s, want completed", state)
 	}
 
-	calls, results, failure := provider.snapshot()
-	if failure != "" {
-		t.Fatalf("provider failure: %s", failure)
-	}
-	if len(calls) != 1 || calls[0].URL != feed.URL || calls[0].Start != nil || calls[0].Revision != "" {
-		t.Fatalf("fetch.url calls = %+v, want one initial call for %q", calls, feed.URL)
-	}
-	if len(results) != 1 {
-		t.Fatalf("fetch.url results = %d, want one", len(results))
-	}
+	results := []fetchE2EResult{fetchE2EResultFromText(t, h.toolResult())}
 	if !strings.Contains(results[0].Text, "Привет") {
 		t.Fatalf("fetch.url result text = %q, want decoded item title", results[0].Text)
 	}
@@ -245,20 +121,13 @@ func TestAgentAsk_FetchURLReadsTailFromOneSnapshot(t *testing.T) {
 	}))
 	defer feed.Close()
 
-	provider := &fetchE2EProvider{
-		url:        feed.URL,
-		secondCall: true,
-		answer:     "the fact was not in the returned tail",
-		marker:     marker,
-	}
-	model := httptest.NewServer(http.HandlerFunc(provider.serve))
-	defer model.Close()
-
-	h := newAskHarnessWithOpts(t, mustClient(t),
-		WithAgentPolicy(autonomousPolicyStore(t)),
-		WithAgentFetcher(directFetchE2EClient()),
-	)
-	h.createEndpointAt(model.URL)
+	firstResultPath := filepath.Join(t.TempDir(), "first-result")
+	h := newAskHarnessWithOpts(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "fetch.url", Arguments: map[string]any{"url": feed.URL}, ResultFile: firstResultPath},
+		{Kind: protocol.StepTool, Name: "fetch.url", Arguments: map[string]any{"url": feed.URL}, ArgumentsFromResult: map[string]string{"start": "window.end", "revision": "revision"}},
+		{Kind: protocol.StepAnswer, Text: marker},
+		{Kind: protocol.StepEnd},
+	}}, WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(directFetchE2EClient()))
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "fetch-window-e2e", "sessionId": sid,
@@ -288,27 +157,16 @@ func TestAgentAsk_FetchURLReadsTailFromOneSnapshot(t *testing.T) {
 		t.Fatalf("runState = %s, want completed", state)
 	}
 
-	calls, results, failure := provider.snapshot()
-	if failure != "" {
-		t.Fatalf("provider failure: %s", failure)
+	firstRaw, err := os.ReadFile(firstResultPath) //nolint:gosec // path is generated in this test's temporary directory
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("fetch.url calls = %d, want first window plus one continuation", len(calls))
+	results := []fetchE2EResult{fetchE2EResultFromText(t, string(firstRaw)), fetchE2EResultFromText(t, h.toolResult())}
+	if !results[0].Truncated || results[1].Window.Start != results[0].Window.End {
+		t.Fatalf("continuation windows = %+v, want contiguous windows", results)
 	}
-	if calls[0].URL != feed.URL || calls[0].Start != nil || calls[0].Revision != "" {
-		t.Fatalf("first fetch.url call = %+v, want initial call for %q", calls[0], feed.URL)
-	}
-	if calls[1].URL != feed.URL || calls[1].Start == nil || calls[1].Revision == "" {
-		t.Fatalf("second fetch.url call = %+v, want continuation with start and revision", calls[1])
-	}
-	if len(results) != 2 {
-		t.Fatalf("fetch.url results = %d, want one result per model continuation", len(results))
-	}
-	if !results[0].Truncated || results[0].Window.End != *calls[1].Start {
-		t.Fatalf("first fetch.url result = %+v, want truncated window ending at second start %d", results[0], *calls[1].Start)
-	}
-	if results[1].Revision != results[0].Revision || calls[1].Revision != results[0].Revision {
-		t.Fatalf("snapshot revisions = first %q, second result %q, second call %q; want one revision", results[0].Revision, results[1].Revision, calls[1].Revision)
+	if results[1].Revision != results[0].Revision || results[0].Revision == "" {
+		t.Fatalf("snapshot revisions = %q and %q, want one nonempty revision", results[0].Revision, results[1].Revision)
 	}
 	if !strings.Contains(results[1].Text, marker) {
 		t.Fatalf("second fetch.url result text = %q, want the tail fact", results[1].Text)

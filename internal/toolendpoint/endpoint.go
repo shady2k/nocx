@@ -1093,6 +1093,11 @@ func (e *Endpoint) log() *slog.Logger {
 }
 
 func rpcErrorFor(err error) (code int, message, reason string) {
+	var lease *assistant.RunLeaseError
+	if errors.As(err, &lease) {
+		sentence := assistant.RunLeaseSentence(lease.Reason, lease.SubmissionExpired)
+		return rpcInternalError, sentence, sentence
+	}
 	var refusal *assistant.DispatchRefusalError
 	if errors.As(err, &refusal) {
 		return rpcDomainError, "worker request refused", refusal.Reason

@@ -496,7 +496,7 @@ func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	store := assistant.NewApprovalStore()
 	person := &turnPerson{store: store, asked: make(chan *assistant.ApprovalRequest, 1), answer: make(chan struct{}), egress: make(chan struct{})}
-	tools, err := assistant.BindRunTools(client, assistant.AskParams{
+	tools, err := assistant.BindRunTools(context.Background(), client, assistant.AskParams{
 		Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
 		RunID: "real-chain", SessionID: string(stand.sess.ID()), Attempt: 1,
 		AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: secret}, Approvals: store, Questioner: person,

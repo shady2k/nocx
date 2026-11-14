@@ -49,6 +49,10 @@ func TurnEndedReason(err error) (content.TerminationReason, bool) {
 	return "", false
 }
 
+// turnEndingContextKey binds only the run's cancellation reason. It grants no
+// authority and does not change the admitted request's lifetime or values.
+type turnEndingContextKey struct{}
+
 // stoppedEnding is the ONE answer to "did this call fail, or was it STOPPED",
 // shared by both places an attempt is closed — the in-process kernel
 // (effectKernel.closeFailedAttempt, kernel.go) and the tool endpoint's attempt
@@ -83,6 +87,10 @@ func stoppedEnding(ctx context.Context, cause error) (content.TerminationReason,
 		ended = stated
 	} else if stated, ok := TurnEndedReason(context.Cause(ctx)); ok {
 		ended = stated
+	} else if turn, ok := ctx.Value(turnEndingContextKey{}).(context.Context); ok {
+		if stated, ok := TurnEndedReason(context.Cause(turn)); ok {
+			ended = stated
+		}
 	}
 	return ended, content.EntryInterrupted, true
 }

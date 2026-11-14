@@ -161,13 +161,6 @@ export function extensionOf(path: string): string {
   return base.slice(dot).toLowerCase()
 }
 
-/** Whether a path names a markdown document. The skill pane uses this before
- * choosing rendered output; all other extensions remain byte-oriented there. */
-export function isMarkdownPath(path: string): boolean {
-  const extension = extensionOf(path)
-  return extension === '.md' || extension === '.markdown'
-}
-
 /** Markdown by NAME rather than by path — the snippet body is authored as
  *  prose and is not a file, so it has no extension to look up (design
  *  §10.4). Same registry, because "which language module a surface gets" is

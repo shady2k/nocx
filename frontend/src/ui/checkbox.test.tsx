@@ -87,8 +87,7 @@ describe('Checkbox', () => {
   // the opposite, and the switch is the louder of the two.
   //
   // It is settled here rather than in each surface because it is a property of
-  // any controlled Checkbox whose write can fail — and there are two such
-  // surfaces already (the Skills row and the skill tab).
+  // any controlled Checkbox whose write can fail.
   it('snaps back when a synchronous handler does not change the state', () => {
     const onChange = vi.fn() // a write that refused: the state never moves
     subject({ checked: false, onChange })

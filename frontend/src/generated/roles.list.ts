@@ -33,7 +33,7 @@ export interface RolesListResult {
 }
 export interface Role {
   /**
-   * The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead); 'summarizing' drafts reusable skills from the person's own words; 'auditing' reads one skill the person already holds and describes it back to them when they ask.
+   * The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls; 'summarizing' reads a transcript and writes a short text from it; 'auditing' reads a document somebody else wrote and describes it back to the person. The classifier, summarizing and auditing roles stay declared with no consumer in this build, so a feature that asks for one later adds its resolution rather than the table.
    */
   role: 'answering' | 'classifier' | 'summarizing' | 'auditing'
   /**

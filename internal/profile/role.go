@@ -7,14 +7,14 @@ import (
 
 // ModelRole is a NAMED model assignment — one (endpoint, model) pair a
 // feature asks for by name (bead nocx-e6kn2). A feature never names a model
-// id: the assistant asks for the answering role, the classifier bead
-// (nocx-kpy23) will ask for the classifier role, and the assignment changes
+// id: the assistant asks for the answering role, a later feature will ask
+// for one of the declared-but-unresolved roles, and the assignment changes
 // in ONE place — the roles surface — while the consumers stay ignorant.
 //
 // The set is CLOSED and defined by the product, never by the user: a role
 // is requested by a feature, and a feature only knows the names compiled
 // into it, so a user-invented role name would have nobody to ask for it.
-// Adding a third role is one const here plus the feature that consumes it.
+// Adding a role is one const here plus the feature that consumes it.
 type ModelRole string
 
 const (
@@ -30,23 +30,18 @@ const (
 	RoleClassifier ModelRole = "classifier"
 	// RoleSummarizing is the model that reads a transcript and writes a
 	// short text from it. It was named by nocx-0s2gh.3 (compaction's
-	// rolling summary) and is introduced by the skills work, which is its
-	// first consumer — a role in the closed set that nothing asks for is
-	// the shape RoleClassifier is stuck in (nocx-01ud6), and repeating it
-	// would be worse than not having the role. Compaction consumes this
-	// one when it lands.
-	//
-	// Unassigned, it falls back to the ANSWERING role's endpoint with a
-	// note in the UI, never silently: it spends money the person did not
-	// ask to spend.
+	// rolling summary) and has no consumer in this build, exactly as
+	// RoleClassifier does not: it stays in the closed set so the feature
+	// that asks for one later adds its resolution rather than the table
+	// (ADR-anntnxdj decision 6). Compaction consumes this one when it
+	// lands; until then an unassigned role is the visible "no model
+	// assigned" state, and no backend falls back to another role's
+	// endpoint on its behalf.
 	RoleSummarizing ModelRole = "summarizing"
-	// RoleAuditing is the model a person asks to READ one skill they
-	// already hold and describe it back to them — design §7's audit, which
-	// gates nothing and certifies nothing. It arrives WITH its consumer
-	// (skills.audit), which is the whole of the warning above: a role in
-	// the closed set that nothing asks for is the shape RoleClassifier is
-	// stuck in, and this const would have been worse than no role at all
-	// if the button had landed a bead later.
+	// RoleAuditing is the model that READS a document somebody else wrote
+	// and describes it back to a person. Its first consumer was the skill
+	// library's audit, which left with the library (ADR-anntnxdj §7); the
+	// role stays declared and unresolved, for RoleClassifier's reason.
 	//
 	// It is its own role rather than a second use of RoleSummarizing
 	// because the two want opposite things from a model. Summarizing reads
@@ -55,12 +50,6 @@ const (
 	// one call in the product whose input is attacker-controlled prose. A
 	// person may reasonably want a cheap model for the first and a careful
 	// one for the second, and one role could not say that.
-	//
-	// Unassigned, it falls back to the ANSWERING role's endpoint with a
-	// note in the UI, never silently — for RoleSummarizing's reason, which
-	// binds harder here: an audit is a call the person pressed a button
-	// for, and being billed for a model they did not choose is exactly the
-	// surprise the note exists to prevent.
 	RoleAuditing ModelRole = "auditing"
 )
 

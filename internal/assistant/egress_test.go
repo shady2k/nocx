@@ -2,15 +2,13 @@ package assistant
 
 // The egress gate's acceptance tests (nocx-0p7y2, design §7.1): a tool
 // result containing secret-shaped material does not leave for the provider —
-// the run suspends and the findings name what was found and where. These
-// are the criteria 1-5 assertions, driven through the REAL eino agent
-// against the fake OpenAI server (asserted on what the engine sent) and
-// through the middleware where the engine seam cannot reach.
+// the call BLOCKS on the person's answer and the findings name what was found
+// and where. These are the criteria 1-5 assertions, driven through the REAL
+// eino agent against the fake OpenAI server (asserted on what the engine sent)
+// and through the middleware where the engine seam cannot reach.
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +19,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/skill"
 )
 
 // knownMatcher is the vault-comparison seam whose answer is computed from
@@ -52,13 +49,14 @@ func askParamsWith(baseURL string, grant *content.Grant, ledger AttemptLedger, a
 
 // ── criterion 1: a value known to the vault does not leave ───────────────
 
-// TestAsk_EgressKnownVaultValueSuspends is acceptance criterion 1: a tool
-// result containing a value the vault holds suspends the run before the
-// bytes leave, and the finding names it as known material. The value is
+// TestAsk_EgressKnownVaultValueIsAskedBeforeItLeaves is acceptance criterion
+// 1: a tool result containing a value the vault holds is withheld until the
+// person answers, and the finding names it as known material. The value is
 // deliberately NOT a recognizer shape (a short password-like token) — the
 // vault comparison is what catches it, and the assertion proves that path
-// fires. Nothing reached the model: exactly one request hit the server.
-func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
+// fires. Nothing reached the model before the answer: exactly one request hit
+// the server, the one that proposed the call.
+func TestAsk_EgressKnownVaultValueIsAskedBeforeItLeaves(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "known-secret-value-123"
 	writeFile(t, filepath.Join(dir, "a.txt"), "deploy key: "+secret)
@@ -71,20 +69,26 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{value: secret, name: "github-token"}, nil),
-		func(AskEvent) error { return nil })
-	var want *EgressRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the egress suspension (not a failure, not a tool result)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
+	q.before = func() {
+		if n := f.requests.Load(); n != 1 {
+			t.Errorf("the engine made %d model requests while the result was withheld, want 1", n)
+		}
 	}
-	if want.Request == nil {
-		t.Fatal("the egress suspension carried no request")
+	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{value: secret, name: "github-token"}, nil)
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
+		t.Fatal("the run went on after the person refused to send the result")
 	}
-	if len(want.Request.Findings) != 1 {
-		t.Fatalf("findings = %+v, want exactly one", want.Request.Findings)
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
 	}
-	f0 := want.Request.Findings[0]
+	req := q.egressAsked[0]
+	if len(req.Findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly one", req.Findings)
+	}
+	f0 := req.Findings[0]
 	if f0.Source != EgressFindingKnown {
 		t.Fatalf("finding source = %q, want known (the vault comparison fired)", f0.Source)
 	}
@@ -100,25 +104,16 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	if s := ledger.started(); s != 1 {
 		t.Fatalf("ledger opened %d executions, want 1 (the call ran; its result was withheld)", s)
 	}
-	interrupted := false
-	for _, c := range ledger.calls() {
-		if c == "finish:interrupted" {
-			interrupted = true
-		}
-	}
-	if !interrupted {
-		t.Fatalf("the suspended pass's attempt did not close as interrupted: %v", ledger.calls())
-	}
 }
 
 // ── criterion 2: a heuristic match suspends the same way, distinguishably ─
 
-// TestAsk_EgressHeuristicSuspendsDistinguishably is acceptance criterion 2:
-// a recognizer match suspends through the same gate, and the finding is
-// distinguishable from the known-material case — the source field names
-// which detector fired, and the heuristic finding carries the recognizer's
-// own kind where the known finding carried the vault's name.
-func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
+// TestAsk_EgressHeuristicIsAskedDistinguishably is acceptance criterion 2: a
+// recognizer match asks through the same gate, and the finding is
+// distinguishable from the known-material case — the source field names which
+// detector fired, and the heuristic finding carries the recognizer's own kind
+// where the known finding carried the vault's name.
+func TestAsk_EgressHeuristicIsAskedDistinguishably(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const key = "sk-proj-abcdefghijklmnopqrstuvwx"
 	writeFile(t, filepath.Join(dir, "a.txt"), "the key is "+key)
@@ -131,17 +126,20 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, nil), // the vault knows nothing
-		func(AskEvent) error { return nil })
-	var want *EgressRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the egress suspension", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
+	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, nil) // the vault knows nothing
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
+		t.Fatal("the run went on after the person refused to send the result")
 	}
-	if len(want.Request.Findings) == 0 {
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
+	}
+	if len(q.egressAsked[0].Findings) == 0 {
 		t.Fatal("no findings for a recognizer-shaped value")
 	}
-	f0 := want.Request.Findings[0]
+	f0 := q.egressAsked[0].Findings[0]
 	if f0.Source != EgressFindingHeuristic {
 		t.Fatalf("finding source = %q, want heuristic — a shape, not a known value", f0.Source)
 	}
@@ -159,8 +157,8 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 // FAILS is screened on the same path as a success — an error string carries
 // paths, hostnames and names, and the gate that screens successes and not
 // failures has closed the wide door and left the narrow one open. The
-// readScreen tool's renderer-request seam fails with a secret-shaped
-// message; the suspension reports the finding and that it was an error.
+// session.read tool's renderer-request seam fails with a secret-shaped
+// message; the question reports the finding and that it was an error.
 func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	requester := &recordingRequester{err: errors.New("capture failed: token sk-proj-abcdefghijklmnopqrstuvwx")}
@@ -173,17 +171,20 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, requester),
-		func(AskEvent) error { return nil })
-	var want *EgressRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the egress suspension (the error string was screened)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
+	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, requester)
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
+		t.Fatal("the run went on after the person refused to send the error")
 	}
-	if !want.Request.WasError {
-		t.Fatal("the suspension does not say the findings were in an error string")
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
 	}
-	if len(want.Request.Findings) == 0 {
+	if !q.egressAsked[0].WasError {
+		t.Fatal("the question does not say the findings were in an error string")
+	}
+	if len(q.egressAsked[0].Findings) == 0 {
 		t.Fatal("no findings in the error string")
 	}
 	if n := f.requests.Load(); n != 1 {
@@ -237,43 +238,13 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	}
 }
 
-func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "deploy", "references"), 0o700); err != nil {
-		t.Fatalf("mkdir references: %v", err)
-	}
-	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
-	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
-
-	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, nil)
-	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
-		Kind: content.ResourceContent,
-		ID:   "content",
-	}})
-	got, err := executeSkillsRead(context.Background(), cap, json.RawMessage(`{"name":"deploy","path":"./references/guide.md"}`), toolSeams{skills: source})
-	if err != nil {
-		t.Fatalf("executeSkillsRead: %v", err)
-	}
-
-	var result skillReadResult
-	if err := json.Unmarshal([]byte(got), &result); err != nil {
-		t.Fatalf("decode result: %v", err)
-	}
-	if result.Path != "references/guide.md" {
-		t.Fatalf("result path = %q, want normalized path", result.Path)
-	}
-	if result.Content != "guide" {
-		t.Fatalf("result content = %q, want guide", result.Content)
-	}
-}
-
 // ── criterion 5: no finding ever carries the secret material ──────────────
 
-// TestEgressRequest_NeverCarriesMaterial is acceptance criterion 5: a
-// finding is kind/source/offset/name only — the value it found is the thing
-// being withheld. Asserted on BOTH serializations the request travels in:
-// the JSON the surface renders, and the gob form the checkpoint persists.
-// Neither may contain the value or a fragment of it.
+// TestEgressRequest_NeverCarriesMaterial is acceptance criterion 5: a finding
+// is kind/source/offset/name only — the value it found is the thing being
+// withheld. Asserted on the JSON the surface renders, which is the one form
+// the request travels in now that the question blocks instead of crossing a
+// checkpoint.
 func TestEgressRequest_NeverCarriesMaterial(t *testing.T) {
 	const secret = "sk-proj-abcdefghijklmnopqrstuvwx"
 	req := &EgressRequest{
@@ -287,56 +258,28 @@ func TestEgressRequest_NeverCarriesMaterial(t *testing.T) {
 			{Source: EgressFindingKnown, SecretName: "github-token", Start: 60, End: 90},
 		},
 	}
-	for name, serialized := range map[string]func() []byte{
-		"json": func() []byte {
-			b, err := json.Marshal(req)
-			if err != nil {
-				t.Fatalf("json.Marshal: %v", err)
-			}
-			return b
-		},
-		"gob": func() []byte {
-			var buf bytes.Buffer
-			if err := gob.NewEncoder(&buf).Encode(req); err != nil {
-				t.Fatalf("gob encode: %v", err)
-			}
-			return buf.Bytes()
-		},
-	} {
-		raw := serialized()
-		if strings.Contains(string(raw), secret) {
-			t.Errorf("%s form carries the secret value itself", name)
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Error("the request carries the secret value itself")
+	}
+	for _, frag := range []string{"sk-proj", "abcdefghijklmnopqrstuvwx"} {
+		if strings.Contains(string(raw), frag) {
+			t.Errorf("the request carries a fragment of the value (%q)", frag)
 		}
-		for _, frag := range []string{"sk-proj", "abcdefghijklmnopqrstuvwx"} {
-			if strings.Contains(string(raw), frag) {
-				t.Errorf("%s form carries a fragment of the value (%q)", name, frag)
-			}
-		}
-	}
-
-	// And the gob round trip must decode — the checkpoint depends on the
-	// registration in init(), and an unregistered type fails the run at
-	// the suspension.
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(req); err != nil {
-		t.Fatalf("gob encode: %v", err)
-	}
-	var back EgressRequest
-	if err := gob.NewDecoder(&buf).Decode(&back); err != nil {
-		t.Fatalf("gob decode: %v", err)
-	}
-	if len(back.Findings) != 2 || back.Findings[0].Source != EgressFindingHeuristic || back.Findings[1].SecretName != "github-token" {
-		t.Fatalf("gob round trip lost the findings: %+v", back.Findings)
 	}
 }
 
-// ── the batch latch on an egress suspension ───────────────────────────────
+// ── a declined result ends the run before the next call ───────────────────
 
-// TestAsk_EgressFindingStopsLaterCallsInTheBatch is the egress half of the
-// batch-latch invariant: a finding suspends the run, and no call after it in
-// that model response runs — asserted by what the ledger records: exactly
-// one execution (the first call's), never a second.
-func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
+// TestAsk_ADeclinedEgressStopsTheRunBeforeTheNextCall: a finding is answered
+// with a no, and no call after it in that model response runs — asserted by
+// what the ledger records: exactly one execution (the first call's), never a
+// second. The bytes ARE the call's result, so a no leaves nothing to continue
+// with and the run ends (ADR-anntnxdj §3).
+func TestAsk_ADeclinedEgressStopsTheRunBeforeTheNextCall(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "token: sk-proj-abcdefghijklmnopqrstuvwx")
 	writeFile(t, filepath.Join(dir, "b.txt"), "clean")
@@ -352,15 +295,15 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, nil),
-		func(AskEvent) error { return nil })
-	var want *EgressRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the egress suspension", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
+	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, nil)
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
+		t.Fatal("the run went on after the person refused to send the result")
 	}
 	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1 — the second call must not run after the finding", s)
+		t.Fatalf("ledger opened %d executions, want exactly 1 — the second call must not run after the refusal", s)
 	}
 	if n := f.requests.Load(); n != 1 {
 		t.Fatalf("the engine made %d model requests, want 1 — nothing left for the provider", n)
@@ -380,18 +323,18 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }
 
 // THE MASKING BELT IS FOR THE ONE MOMENT THE GATE STANDS DOWN (nocx-hp8p2.13).
-// The egress gate refuses-and-asks on a finding, so a result reaching the
-// durable record normally carries none. An APPROVED resume is the exception:
-// the person authorised sending those exact bytes to the provider, and they
-// go. What must not follow is a second, unmasked copy of them in the store —
-// the pane's "show me what it returned" would then be a path around the
-// masking every other durable row obeys (ADR-0021, nocx-a21v).
+// The egress gate asks on a finding, so a result reaching the durable record
+// normally carries none. An APPROVED question is the exception: the person
+// authorised sending those exact bytes to the provider, and they go. What must
+// not follow is a second, unmasked copy of them in the store — the pane's
+// "show me what it returned" would then be a path around the masking every
+// other durable row obeys (ADR-0021, nocx-a21v).
 func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "sk-proj-abcdefghijklmnopqrstuvwx"
@@ -402,18 +345,16 @@ func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
 	approvals := NewApprovalStore()
 	mw := middlewareFor(t, grant, ledger, approvals)
 
-	// The gate finds the key and suspends, retaining the exact bytes.
-	if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err == nil {
-		t.Fatal("the gate passed a result carrying a key; want a suspension")
-	}
-	if len(ledger.recordedCaptures()) != 0 {
-		t.Fatal("a withheld result was recorded before the person decided")
-	}
-
-	// The person approves: the retained bytes go to the model as they are.
+	// The gate finds the key and asks; nothing is recorded while the person
+	// decides, and the tool's body is not entered a second time.
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	mw.kernel.questioner = q
 	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
 	if err != nil {
-		t.Fatalf("approved resume: %v", err)
+		t.Fatalf("the approved call failed: %v", err)
+	}
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
 	}
 	if !strings.Contains(out, secret) {
 		t.Fatalf("the model received %q, want the exact approved bytes", out)

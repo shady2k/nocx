@@ -416,12 +416,12 @@ func (p EffectPolicy) EvaluateResources(e Effect, decision Decision, resources, 
 // rather than one at a time.
 //
 // The scopes are UNIONED and not intersected, because the rows do not govern
-// the same resources. skills.install names a destination and a content item:
-// the destination is the fetch's, the content item is the write's, and each
-// belongs to the row that performs it. Intersecting would demand the fetched
-// address be inside the write row's scopes and refuse an install a person had
-// granted both halves of. What the union does NOT do is admit a resource no
-// reached row admits, which is the check that matters.
+// the same resources. workers.spawn's worktree ask names a session and a
+// path: the session is the delegation's, the path is the write's, and each
+// belongs to the row that performs it. Intersecting would demand the pane be
+// inside the write row's scopes and refuse a spawn a person had granted both
+// halves of. What the union does NOT do is admit a resource no reached row
+// admits, which is the check that matters.
 //
 // Asking each row in turn would be the intersection by another name, which is
 // why this is one call over one scope set and not a loop over EvaluateResources

@@ -36,7 +36,7 @@ func TestTheKernelDispatchesThroughThePipeline(t *testing.T) {
 				oldEntry = true
 			}
 		}
-		if selector.Sel.Name == "run" {
+		if selector.Sel.Name == "runOrdered" {
 			if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == "pipeline" {
 				pipelineCall = true
 			}

@@ -8,8 +8,8 @@ package credential
 // dialog whose only working button is Cancel.
 //
 // It was said in words twice and broken twice — nocx-o3606 (secrets.save-
-// KeyPassphrase, vault.resolveLine) and nocx-9fzkk (skills.audit, the skill
-// draft), the second on a handler written after the first was fixed. A rule
+// KeyPassphrase, vault.resolveLine) and nocx-9fzkk (a model-resolution path),
+// the second on a handler written after the first was fixed. A rule
 // that lives in a comment is one a new handler does not have to satisfy, so
 // it lives here instead: the operation that holds such a gate says so on the
 // context it hands its callback, and an operation-stance read that sees the

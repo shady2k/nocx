@@ -41,6 +41,8 @@ import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
+import { createApprovalQueue } from './agent-approval-queue'
+import type { AgentApprovalRetired } from './generated/agent.approvalRetired'
 import { EmittingClient } from './emitting-client'
 import { AgentAccessClient } from './agent-access-client'
 import { AgentRecordsClient } from './agent-records-client'
@@ -94,7 +96,6 @@ import {
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
-import { registerSkillSurface } from './skill-view'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
 import { createSessionHomeSource } from './where/session-home'
@@ -140,8 +141,6 @@ import {
 import { HostKeyDialog, AgentApprovalDialog, type IntegrationMethod } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
-import { SkillsClient } from './skills-client'
-import { SkillsStore } from './skills-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
 import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
@@ -316,7 +315,6 @@ function main(): void {
   // wire, a writer re-reads). Constructed with the other clients because
   // the Settings tab's factory below closes over it.
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
-  const skillsStore = new SkillsStore(new SkillsClient(dispatcher))
   const policyClient = new PolicyClient(dispatcher)
   // What an enrolled pane is emitting, and what its rule reads on it
   // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
@@ -373,7 +371,7 @@ function main(): void {
     if (!p || !p.requestId) return
     pendingBackendUnlock = p.requestId
     // The backend's reason is a verb phrase by contract (credential.Operation:
-    // "audit a skill", "answer the ask"), so it completes the prompt's title.
+    // "answer the ask"), so it completes the prompt's title.
     // An absent one passes nothing rather than a sentence: undefined gets the
     // bare "Unlock the vault", where 'The vault is locked.' got "Unlock the
     // vault to The vault is locked." (nocx-0nhec).
@@ -394,45 +392,21 @@ function main(): void {
     setPendingConnectionPassword(p)
   })
 
-  // ── Backend-initiated approval questions (nocx-z9hj4) ──────────────
-  // A run suspended — the policy gate or the egress gate asked a person a
-  // question. ONE surface for both (design §7.3): the prompt renders the
-  // question and the decision names the exact binding. Questions are
-  // QUEUED keyed by runId: two runs can escalate while a person is deciding
-  // the first, and no run may be stranded unanswered — the next question
-  // shows when the current one is decided.
-  const pendingApprovals = new Map<string, AgentApprovalRequested>()
-  const [activeApproval, setActiveApproval] = createSignal<AgentApprovalRequested | null>(null)
-  const [approvalBusy, setApprovalBusy] = createSignal(false)
+  // The queue retains each exact call and phase while a previous answer is in flight.
+  const approvals = createApprovalQueue()
+  const activeApproval = approvals.active
+  const approvalBusy = approvals.busy
   dispatcher.subscribe('agent.approvalRequested', (params) => {
-    const p = params as AgentApprovalRequested
-    if (!p || !p.runId || !p.argHash) return
-    if (pendingApprovals.has(p.runId)) return // the same run's question is already open
-    pendingApprovals.set(p.runId, p)
-    // One-shot guard: only the FIRST unanswered question is shown; the
-    // rest wait in the queue. The read is deliberately untracked — this is
-    // an event handler, not a reactive scope.
-    if (!untrack(() => activeApproval())) setActiveApproval(p)
+    const ask = params as AgentApprovalRequested
+    if (ask?.runId && ask.argHash) approvals.add(ask)
   })
-  const nextApproval = () => {
-    const first = pendingApprovals.values().next().value
-    setActiveApproval(first ?? null)
-  }
-  const decideApproval = async (approved: boolean, scope: AgentApprove['scope']) => {
-    const ask = activeApproval()
-    if (!ask || approvalBusy()) return
-    setApprovalBusy(true)
-    try {
-      // The exchange itself is agent-approval-decision.ts: this surface owns
-      // the QUEUE — which question is up and which wait behind it — and that
-      // is a different job from putting one answer on the wire.
-      const recorded = await recordApprovalDecision(ask, approved, scope, {
+  dispatcher.subscribe('agent.approvalRetired', (params) => {
+    approvals.retire(params as AgentApprovalRetired)
+  })
+  const decideApproval = (approved: boolean, scope: AgentApprove['scope']) =>
+    approvals.answer((ask) =>
+      recordApprovalDecision(ask, approved, scope, {
         dispatcher,
-        // The standing half did not stick. The decision itself stood, so
-        // nothing is refused; what must not happen is silence, which is how
-        // a person ends up being asked again a question they answered for
-        // good. Sticky, because it is about what will happen LATER and is
-        // therefore worth reading after the moment has passed.
         onWarning: (sentence) => showToast({ level: 'warning', message: sentence, duration: 0 }),
         onError: (message) =>
           showToast({
@@ -440,17 +414,8 @@ function main(): void {
             message: `Could not record the decision: ${message}`,
             duration: 0,
           }),
-      })
-      // Only a RECORDED decision closes the question. A refusal (a stale
-      // binding — the question was already answered) keeps the prompt up:
-      // the person sees the honest refusal and can answer anew or deny.
-      if (!recorded) return
-      pendingApprovals.delete(ask.runId)
-      nextApproval()
-    } finally {
-      setApprovalBusy(false)
-    }
-  }
+      }),
+    )
 
   // Open-time host-key decisions share the same consent surface as
   // Connections → Test. Requests are queued because restored tabs can fail
@@ -773,7 +738,6 @@ function main(): void {
         // The same source the workbench takes below: one panel, one
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
-        skillsStore,
         emittingClient,
         agentAccessClient,
         calibrationClient,
@@ -907,11 +871,6 @@ function main(): void {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
-  // The skill tab (nocx-btg7d), replacing the modal card skills-section.tsx
-  // used to read a skill in. `skillsStore` is the one built above (line
-  // 242) — every consumer of skills.* shares it, so a toggle from this tab
-  // and a toggle from the Settings page's row are one write seen by both.
-  registerSkillSurface(registry, tm, { store: skillsStore })
   // The upload surface (design §5.5), resolved from the dispatcher — the
   // SAME instance the terminal panes resolve, because a transfer has one
   // state and two stores would each mint a row for every transfer the other
@@ -2132,9 +2091,7 @@ function main(): void {
     vaultController.closeUnlock()
     pendingBackendUnlock = null
     setPendingConnectionPassword(null)
-    pendingApprovals.clear()
-    setActiveApproval(null)
-    setApprovalBusy(false)
+    approvals.clear()
     while (pendingOpenHostKey()) {
       pendingOpenHostKey()!.abort()
     }

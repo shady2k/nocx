@@ -542,7 +542,12 @@ type Scope struct {
 	settled     atomic.Bool
 	settleDone  chan struct{}
 	outcome     atomic.Value // Outcome
-	expiry      *time.Timer
+	expiry      Timer
+	clock       Clock
+	answering   bool
+	remaining   time.Duration
+	generation  uint64
+	workStarted bool
 	cancelReg   func() bool
 	mu          sync.Mutex
 	closed      bool
@@ -551,7 +556,7 @@ type Scope struct {
 // Begin starts an invocation's scope. It never fails: a missing declaration is
 // a programming error the handle itself prevents, so a zero handle panics.
 func Begin(ctx context.Context, op Method, inv Invocation) *Scope {
-	return begin(ctx, op, inv, false)
+	return BeginWithClock(ctx, op, inv, realClock{})
 }
 
 // BeginInternal starts a backend-initiated operation. Its origin is background
@@ -562,6 +567,10 @@ func BeginInternal(ctx context.Context, op Method) *Scope {
 }
 
 func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
+	return beginClock(ctx, op, inv, strict, realClock{})
+}
+
+func beginClock(ctx context.Context, op Method, inv Invocation, strict bool, clock Clock) *Scope {
 	d := op.Declaration()
 	if inv.Origin == "" {
 		inv.Origin = OriginPerson
@@ -571,7 +580,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	}
 	s := &Scope{
 		op: op, decl: d, origin: inv.Origin, owner: inv.Owner,
-		started: time.Now(), ctx: ctx, strict: strict,
+		started: clock.Now(), ctx: ctx, strict: strict, clock: clock,
 		settleDone: make(chan struct{}),
 	}
 	// MAX IS THE ONLY DEADLINE STAGE 2 CAN OBSERVE. Turn is the wait for
@@ -587,7 +596,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	// remainder (ADR-8eej3e66 §3). Stage 2 applies it to the recorded expiry
 	// only; nothing is cancelled.
 	if parent, ok := ScopeFrom(ctx); ok {
-		if remaining := time.Until(parent.maxDeadline); remaining > 0 && remaining < maxLifetime {
+		if remaining := parent.Deadline().Sub(clock.Now()); remaining > 0 && remaining < maxLifetime {
 			maxLifetime = remaining
 		}
 	}
@@ -597,7 +606,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	}
 	s.mu.Lock()
 	if !s.settled.Load() {
-		s.expiry = time.AfterFunc(maxLifetime, s.expire)
+		s.armMaxLocked(maxLifetime)
 		if ctx != nil {
 			s.cancelReg = context.AfterFunc(ctx, func() { s.Settle(OutcomeCancelled) })
 		}
@@ -616,7 +625,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 func (s *Scope) Deadline() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.settled.Load() {
+	if s.settled.Load() || s.answering {
 		return time.Time{}
 	}
 	return s.maxDeadline
@@ -637,7 +646,11 @@ func (s *Scope) StartWork() time.Duration {
 	if s.closed || s.settled.Load() {
 		return 0
 	}
-	now := time.Now()
+	if s.workStarted {
+		return s.maxDeadline.Sub(s.clock.Now())
+	}
+	s.workStarted = true
+	now := s.clock.Now()
 	deadline := now.Add(s.decl.Max.Duration())
 	if s.parent != nil {
 		if parentDeadline := s.parent.Deadline(); !parentDeadline.IsZero() && parentDeadline.Before(deadline) {
@@ -649,9 +662,7 @@ func (s *Scope) StartWork() time.Duration {
 		return 0
 	}
 	s.maxDeadline = deadline
-	if s.expiry != nil {
-		s.expiry.Reset(lifetime)
-	}
+	s.armMaxLocked(lifetime)
 	return lifetime
 }
 
@@ -724,6 +735,11 @@ func (s *Scope) Settle(outcome Outcome) bool {
 		<-s.settleDone
 		return false
 	}
+	s.finishSettlement(outcome)
+	return true
+}
+
+func (s *Scope) finishSettlement(outcome Outcome) {
 	s.outcome.Store(outcome)
 	s.stopTimers()
 	if outcome == OutcomeExpired {
@@ -732,7 +748,6 @@ func (s *Scope) Settle(outcome Outcome) bool {
 			"max_ms", s.decl.Max.Millis, "elapsed_ms", time.Since(s.started).Milliseconds())
 	}
 	close(s.settleDone)
-	return true
 }
 
 // Complete settles a successful invocation.
@@ -744,15 +759,68 @@ func (s *Scope) Refuse() bool { return s.Settle(OutcomeRefused) }
 // Cancel settles an invocation its sender abandoned.
 func (s *Scope) Cancel() bool { return s.Settle(OutcomeCancelled) }
 
-func (s *Scope) expire() {
-	if s.settled.Load() {
+// armMaxLocked invalidates callbacks already dispatched by an earlier timer.
+func (s *Scope) armMaxLocked(d time.Duration) {
+	if s.expiry != nil {
+		s.expiry.Stop()
+	}
+	s.generation++
+	generation := s.generation
+	s.expiry = s.clock.AfterFunc(d, func() {
+		s.mu.Lock()
+		won := generation == s.generation && !s.answering && s.settled.CompareAndSwap(false, true)
+		s.mu.Unlock()
+		if won {
+			s.finishSettlement(OutcomeExpired)
+		}
+	})
+}
+
+// BeginAnswer pauses the remaining work budget while a person is being asked.
+// It never renews max, and refuses phases the declaration does not offer.
+func (s *Scope) BeginAnswer() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.decl.Answer.Deadline(); !ok || s.closed || s.settled.Load() || s.answering {
+		return false
+	}
+	declared := false
+	for _, phase := range s.decl.Phases {
+		if phase.Name == "answer" {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return false
+	}
+	s.remaining = s.maxDeadline.Sub(s.clock.Now())
+	if s.remaining <= 0 {
+		return false
+	}
+	s.answering = true
+	s.generation++
+	if s.expiry != nil {
+		s.expiry.Stop()
+	}
+	return true
+}
+
+// EndAnswer resumes only the work time left when the question began.
+func (s *Scope) EndAnswer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.answering || s.closed || s.settled.Load() {
 		return
 	}
-	// An expiry before any effect is the declaration's own not-started answer;
-	// after one it is the declaration's expired outcome. Stage 2 has no effect
-	// tracking, so it records the declared expired outcome and says so in the
-	// log line, which is the whole of what this stage does with a deadline.
-	s.Settle(OutcomeExpired)
+	s.answering = false
+	s.maxDeadline = s.clock.Now().Add(s.remaining)
+	if s.parent != nil {
+		if d := s.parent.Deadline(); !d.IsZero() && d.Before(s.maxDeadline) {
+			s.maxDeadline = d
+		}
+	}
+	s.armMaxLocked(s.maxDeadline.Sub(s.clock.Now()))
 }
 
 func (s *Scope) logContext() context.Context {

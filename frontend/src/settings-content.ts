@@ -17,7 +17,6 @@ import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import { t } from './i18n/locale-model'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
-import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
 import type { CheckoutsStatusStore } from './checkouts-status'
@@ -65,7 +64,6 @@ export class SettingsContent extends SolidPaneContent {
      *  main.tsx's would be the same wiring written twice — agreeing until the
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
-    private readonly skillsStore?: SkillsStore,
     /** What an enrolled pane is emitting (nocx-02uci), and what the window
      *  calls that pane. */
     private readonly emittingClient?: import('./emitting-client').EmittingClient,
@@ -122,7 +120,6 @@ export class SettingsContent extends SolidPaneContent {
           paneName: this.paneName,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
-          skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,
           checkoutsStatus: this.checkoutsStatus,
           aboutClient: this.aboutClient,

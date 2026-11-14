@@ -922,18 +922,18 @@ describe('dispatcher heartbeat', () => {
   // is refreshed only by frames the CLIENT sends. The heartbeat used to stand
   // down while anything was pending — on the reading that an in-flight request
   // proves the socket alive, which is true of the connection and false of the
-  // server's read deadline. So a skills.audit, which is a model reading a whole
-  // skill, died at thirty seconds and took every other call on the socket with
-  // it: "This skill was not read — ws closed".
+  // server's read deadline. So a backup.restore, which writes several
+  // documents, died at thirty seconds and took every other call on the socket
+  // with it.
   it('keeps pinging while a slow call is still pending', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connected(d)
 
-    const slow = d.call('skills.audit', { name: 'agentmail' })
-    const audit = socket()
+    const slow = d.call('backup.restore', { contents: '{}', strategy: 'merge' })
+    const restore = socket()
       .requests()
-      .find((request) => request.method === 'skills.audit')
-    expect(audit).toBeDefined()
+      .find((request) => request.method === 'backup.restore')
+    expect(restore).toBeDefined()
 
     // Three idle windows with the call still in flight — more than the 30s the
     // server allows — and each one answered, as the real server answers
@@ -953,8 +953,8 @@ describe('dispatcher heartbeat', () => {
     }
 
     expect(socket().closeCalled).toBe(false)
-    socket().deliverText({ jsonrpc: '2.0', id: audit!.id, result: { verdict: 'clear' } })
-    await expect(slow).resolves.toMatchObject({ verdict: 'clear' })
+    socket().deliverText({ jsonrpc: '2.0', id: restore!.id, result: { strategy: 'merge' } })
+    await expect(slow).resolves.toMatchObject({ strategy: 'merge' })
   })
 
   // The same confusion from the other side: a frame the SERVER sent does not

@@ -22,7 +22,6 @@ import (
 // the model turn can be proved independent from stopping its foreground child.
 
 type cancelBlockingClient struct {
-	unauditedClient
 	started chan struct{}
 	emitted chan struct{}
 	stopped chan struct{}
@@ -428,8 +427,8 @@ func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {
 	if err := json.Unmarshal(late, &lateEnv); err != nil {
 		t.Fatalf("decode late approval: %v\nraw: %s", err, late)
 	}
-	if lateEnv.Error == nil || !strings.Contains(lateEnv.Error.Message, "no pending question") {
-		t.Fatalf("late approval = %s, want no pending question", late)
+	if lateEnv.Error == nil || !strings.Contains(lateEnv.Error.Message, "unknown approval") {
+		t.Fatalf("late approval = %s, want the answer refused because no question is open", late)
 	}
 }
 

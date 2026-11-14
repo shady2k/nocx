@@ -798,22 +798,10 @@ func TestAReleasedSchema16DatabaseOpensAndReads(t *testing.T) {
 		got[0] != "entry-sixteen|echo the command written under schema sixteen|success" {
 		t.Fatalf("the command recorded under schema 16 reads %q", got)
 	}
-	if !aTableExists(t, path, "skill_checks") {
-		t.Fatal("skill_checks does not exist after migrating a schema 16 database forward — the 16→17 rung did not run")
-	}
-
-	// The new table is not just present, it WORKS on a database that got
-	// here by migration rather than by a fresh Open — the distinction
-	// nocx-rtg0.17 bought: a file that opens perfectly and then fails every
-	// INSERT is not open in any sense that matters.
-	if _, found, err := db.SkillChecks().Get(context.Background(), "nobody-checked-this"); err != nil || found {
-		t.Fatalf("SkillChecks().Get on a migrated schema 16 database: found=%v err=%v", found, err)
-	}
-	if err := db.SkillChecks().Put(context.Background(), SkillCheck{
-		Name: "deploy", Provenance: "installed", Verdict: "clear", Report: "r",
-		Role: "auditing", Endpoint: "local", Model: "m", Digest: "d", CheckedAt: 1,
-		Read: []string{}, Omitted: []SkillCheckOmission{}, Findings: []SkillCheckFinding{},
-	}); err != nil {
-		t.Fatalf("SkillChecks().Put on a migrated schema 16 database: %v", err)
+	// The 16→17 rung created skill_checks and the 23→24 rung retired it
+	// with the skill library: a table a rung added and a later rung removed
+	// must be gone from a file that climbed both.
+	if aTableExists(t, path, "skill_checks") {
+		t.Fatal("skill_checks survived the walk from a schema 16 database — the 23→24 rung did not run")
 	}
 }

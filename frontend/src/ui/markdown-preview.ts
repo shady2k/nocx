@@ -23,17 +23,18 @@
 //
 // ── THE BYTES ARE SOMEBODY ELSE'S ─────────────────────────────────────────
 //
-// A skill can be installed from a URL, and this is a Wails WKWebView with IPC
-// reach. So the posture is two layers, and the FIRST is the important one:
+// A document can come from anywhere — a note pasted in, a file read off a
+// host — and this is a Wails WKWebView with IPC reach. So the posture is two
+// layers, and the FIRST is the important one:
 //
 // INERT BY CONSTRUCTION. A link never becomes an `<a>` and an image never
 // becomes an `<img>`. The renderer emits their text and their target as
 // characters. There is therefore no `href` to police, no `src` to fetch, and
-// no unprompted GET to whatever host the skill's author named — which is a
+// no unprompted GET to whatever host the document's author named — which is a
 // real leak with no script in it at all, and the one a sanitiser alone would
 // have let through if it kept `img[src]`. A reader still sees the words AND
 // the URL, because hiding the target from the person deciding whether to
-// trust the skill would be the wrong trade.
+// trust the document would be the wrong trade.
 //
 // DOMPURIFY IS THE SECOND GATE, not the policy. `html: false` means
 // markdown-it never parses author HTML at all; the sanitiser is what catches
@@ -127,8 +128,9 @@ const md = new MarkdownIt({
 
 /** A link, rendered inert: its words, then its target, both as text.
  *
- *  The target is kept deliberately. A person auditing a skill needs to see
- *  where it points, and rendering only the words would hide exactly the
+ *  The target is kept deliberately. A person reading somebody else's
+ *  document needs to see where it points, and rendering only the words would
+ *  hide exactly the
  *  thing they opened the file to judge — "see the runbook" says nothing
  *  about which host it names.
  *

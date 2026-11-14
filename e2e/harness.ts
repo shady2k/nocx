@@ -134,7 +134,7 @@ export async function settingsReady(page: Page): Promise<void> {
  * Russian where it expects English and fails for a reason that has nothing to
  * do with what it measures. Measured on the #745 run: one spec failed at its
  * own assertion, and twenty-four in chromium-2 and eighteen in webkit-1 failed
- * behind it (`proof-matrix`, `sidebar`, `tabs`, `notes`, `skills-switch-column`,
+ * behind it (`proof-matrix`, `sidebar`, `tabs`, `notes`,
  * `renderer-memory-soak` waiting for `[aria-label="Close tab"]`,
  * `shell-startup-visibility` reading «Локальная оболочка`).
  *

@@ -23,13 +23,13 @@
 
 /* NARROW: THE NAME GOES ABOVE THE VALUE (nocx-p49e9). `max-content` gives the
    name column its full natural width out of whatever there is, which is right
-   in a dialog and ruinous in a rail — measured at the 180px MIN_LIST_WIDTH the
-   skill tab allows, the name took 83 of 148 usable pixels and the value, the
+   in a dialog and ruinous in a rail — measured at the 180px MIN_LIST_WIDTH a
+   narrow rail allows, the name took 83 of 148 usable pixels and the value, the
    half a person actually reads, got 53: a path rendered one syllable per line,
    and a list 654px tall instead of 274px.
    The threshold is 320px of LIST width, and it was set from the product
-   rather than from arithmetic: the skill tab's rail gives this list 218px at
-   its ordinary width, and a first cut pitched at 200px did not fire there at
+   rather than from arithmetic: that rail gives this list 218px at its
+   ordinary width, and a first cut pitched at 200px did not fire there at
    all. A dialog's list is far wider — 368px at a 400px rail — so 320 divides
    the two shapes rather than splitting either. Below it the alignment this
    component exists for, every value starting at the same x, is given up for

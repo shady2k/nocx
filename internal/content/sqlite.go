@@ -493,16 +493,17 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // That is a decision and its argument is in schema_migrate.go under "ONE
 // COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
 // by folding the `api_run*` tables in and retiring the private counter they
-// used to carry (nocx-lmb6v.5). 17 added the skill_checks table
-// (nocx-e5f55); 18 widened the executions.termination_reason CHECK so a run
-// stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
+// used to carry (nocx-lmb6v.5). 18 widened the
+// executions.termination_reason CHECK so a run stopped by a revoked answer
+// has a reason of its own (nocx-4yjwk.7); 19
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
 // 20 widened artifacts.media_type for row blocks, 21 added clear_boundaries,
 // 22 added entries_by_ended_at for the exact no-evictions history horizon
-// (ADR-0085), and 23 adds the panel a tab shows to the tabs row
-// (nocx-ouru5.1.18) — the right-hand panel is the tab's, not the window's.
-const schemaVersion = 23
+// (ADR-0085), 23 added the panel a tab shows to the tabs row
+// (nocx-ouru5.1.18), and 24 retires the skill_checks table with the skill
+// library (ADR-anntnxdj §7).
+const schemaVersion = 24
 
 // schema22EntriesByEndedAtIndexDDL is the one index definition introduced by
 // the 21→22 edge. Keep it immutable: a future schema gets its own DDL and rung
@@ -1065,45 +1066,6 @@ CREATE INDEX IF NOT EXISTS api_runs_by_request
   ON api_runs(collection_path, request_rel_path, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS api_run_artifacts_by_run
   ON api_run_artifacts(run_id, kind);
-
--- One row per skill NAME, because a name resolves to exactly one skill by
--- root precedence (discover.go:153). The check is a RECORD and never a
--- control: nothing in the product reads verdict to decide anything, and
--- Skill.Offered() is asserted to have no third term.
---
--- It lives here rather than in skills.json, and rather than in the skill's
--- own directory, and both halves are deliberate. Not in the directory: a
--- record among the bytes it describes can be written by whoever wrote them,
--- so a hostile bundle could ship its own "clear" — the same rule provenance
--- already keeps by being the root and never a field in a file. Not in
--- skills.json: that document is the CONTROL plane (the enable switch), it
--- must work when nothing else does, and it is copied byte-for-byte into a
--- backup (backup.go:93) which a model's prose about a stranger's files has
--- no business riding in.
---
--- digest is the sha256 of the DOCUMENT the model was given (audit.go), which
--- is what makes "is this check still about these bytes" answerable by
--- recomputing a bounded value. It is not skills.json's Digests[name] and
--- answers a different question; see AuditMaterial.Digest.
---
--- The three lists are JSON because they are read whole, by one reader, and
--- never queried across rows — the same judgement api_run makes about its
--- payloads. A row per finding would buy a query nobody makes.
-CREATE TABLE IF NOT EXISTS skill_checks (
-  name        TEXT PRIMARY KEY,
-  provenance  TEXT NOT NULL,
-  verdict     TEXT NOT NULL,
-  report      TEXT NOT NULL,
-  role        TEXT NOT NULL,
-  endpoint    TEXT NOT NULL,
-  model       TEXT NOT NULL,
-  digest      TEXT NOT NULL,
-  checked_at  INTEGER NOT NULL,
-  read_paths  TEXT NOT NULL DEFAULT '[]',
-  omitted     TEXT NOT NULL DEFAULT '[]',
-  findings    TEXT NOT NULL DEFAULT '[]',
-  max_bytes   INTEGER NOT NULL DEFAULT 0
-) STRICT;
 
 -- The durable half of the checkouts workers.spawn's worktree ask creates
 -- (nocx-xn63t.1.4). git's own worktree list — read through the seam when the

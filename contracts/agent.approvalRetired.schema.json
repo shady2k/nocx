@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://nocx.local/contracts/agent.approvalRetired.schema.json",
+  "title": "AgentApprovalRetired",
+  "description": "Params of agent.approvalRetired: the exact question is no longer answerable, whether answered, expired or withdrawn. Retire only this binding and phase.",
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "reason"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id the question belongs to \u2014 the value agent.approve echoes back.",
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "description": "The run's attempt \u2014 part of the binding; the answer echoes it back.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "The tool the model proposed calling \u2014 one of the names internal/agenttools' declaration table declares, and nothing else. The set is CLOSED on purpose (nocx-69sew): the renderer keys two sentences on this value (the command block for the command carrier, the network row for fetch.url), and while it was a bare string a rename in the table \u2014 `run` became `session.run` \u2014 left the renderer comparing against a dead literal, which no test and no schema could see. Enumerated here, the generated renderer type is a union, so a comparison against a name the table no longer declares is a compile error rather than a branch that is quietly never taken; TestApprovalRequestedToolEnumMatchesTheTable is the other end, and fails the moment the table and this list disagree. Only a declared tool can reach this notification: the two names that are not declarations \u2014 the unknown-tool anchor and tools.search \u2014 are answered inside WrapInvokableToolCall and never reach the kernel that escalates.",
+      "type": "string",
+      "minLength": 1,
+      "enum": [
+        "files.read",
+        "fetch.url",
+        "session.list",
+        "session.read",
+        "session.keys",
+        "session.message",
+        "session.run",
+        "session.wait",
+        "files.edit",
+        "files.create",
+        "git.status",
+        "notes.search",
+        "notes.create",
+        "notes.update",
+        "notes.delete",
+        "snippets.list",
+        "snippets.create",
+        "snippets.update",
+        "snippets.delete",
+        "snippets.reorder",
+        "workers.holdings",
+        "workers.spawn",
+        "workers.say",
+        "workers.inbox",
+        "workers.report",
+        "workers.close",
+        "workers.removeCheckout"
+      ]
+    },
+    "callId": {
+      "description": "The model's call id for the proposed call \u2014 part of the binding.",
+      "type": "string",
+      "minLength": 1
+    },
+    "argHash": {
+      "description": "The canonical-argument hash of the binding \u2014 what distinguishes one proposal from a changed one. The answer echoes it back; a changed argument never resumes under the old approval.",
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "description": "Which gate asked: the policy gate (an effect coming in) or the egress gate (a secret going out).",
+      "type": "string",
+      "enum": ["policy", "egress"]
+    }
+  }
+}

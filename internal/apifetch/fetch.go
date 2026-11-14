@@ -102,9 +102,9 @@ type TextRequest struct {
 	// It is a request field and not this package's default because the two
 	// callers want opposite things. A person pasting an address wants a
 	// vanity host to redirect them to wherever the document actually lives;
-	// a caller that RESOLVES relative paths against that address — the skill
-	// bundle (internal/skill/bundle.go) — is asking for bytes from one
-	// origin, and a hop to another silently answers a different question.
+	// a caller that RESOLVES relative paths against that address is asking
+	// for bytes from one origin, and a hop to another silently answers a
+	// different question.
 	// The rule itself lives in httppolicy, which owns what a redirect may
 	// do, so this field only says which requests it applies to.
 	SameOriginOnly bool

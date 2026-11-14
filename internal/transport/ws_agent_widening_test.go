@@ -57,9 +57,9 @@ var theResourceOutside = content.GrantScope{Kind: content.ResourcePath, ID: "/re
 
 // outOfScopeSuspension is a policy ask whose resource fell outside a bound.
 // cause is what decides whether the prompt may offer to widen anything.
-func outOfScopeSuspension(cause content.OutOfScopeCause) func(runID string) error {
-	return func(runID string) error {
-		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+func outOfScopeAsk(cause content.OutOfScopeCause) func(runID string) approvalAsk {
+	return func(runID string) approvalAsk {
+		return approvalAsk{policy: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
 			Arguments: `{"path":"/repo/lib/b.txt"}`, ArgHash: "hash-a",
 			Effect:     content.EffectObserve,
@@ -72,8 +72,7 @@ func outOfScopeSuspension(cause content.OutOfScopeCause) func(runID string) erro
 func suspendedOutOfScopeRun(t *testing.T, policy assistant.GlobalPolicy, cause content.OutOfScopeCause) *scopeHarness {
 	t.Helper()
 	return suspendedRunWith(t, policy, &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: outOfScopeSuspension(cause)},
-		{deltas: []string{"done"}},
+		{ask: outOfScopeAsk(cause), after: []string{"done"}},
 	}})
 }
 
@@ -182,8 +181,7 @@ func TestAgentApprove_ScopeExpand_WidensTheRowAndResumesTheCall(t *testing.T) {
 func TestAgentApprove_ScopeExpand_AStoreFailureAppliesNeither(t *testing.T) {
 	failing := failingPolicyStore{err: errors.New("disk is full")}
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: outOfScopeSuspension(content.OutOfScopeRowScope)},
-		{deltas: []string{"done"}},
+		{ask: outOfScopeAsk(content.OutOfScopeRowScope), after: []string{"done"}},
 	}}
 	h := suspendedRunWith(t, failing, client)
 
@@ -194,18 +192,22 @@ func TestAgentApprove_ScopeExpand_AStoreFailureAppliesNeither(t *testing.T) {
 	if !strings.Contains(errObj.Message, "disk is full") {
 		t.Fatalf("error = %q, want it to name the store failure", errObj.Message)
 	}
-	// The approval half did not apply either: the run was never re-driven.
+	// The approval half did not apply either: the call was not woken, and no
+	// second drive was started.
 	if got := client.askCount(); got != 1 {
-		t.Fatalf("the engine was asked %d times, want 1 — the refused answer resumed the run", got)
+		t.Fatalf("the engine was asked %d times, want 1 — the refused answer woke the call", got)
 	}
-	// And the question is still pending, which is what "answer it again,
+	if got := len(client.answersGiven()); got != 0 {
+		t.Fatalf("the call was woken %d times, want 0 — a refused answer settles nothing", got)
+	}
+	// And the question is still open, which is what "answer it again,
 	// differently if you like" means in the product.
 	if got := h.approve(t, approveScopeOnce); got.State != string(content.RunStreaming) {
 		t.Fatalf("answering the same question again = %q, want it still pending and answerable", got.State)
 	}
 	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
-	if got := client.askCount(); got != 2 {
-		t.Fatalf("the engine was asked %d times, want 2 — one ask and one resume", got)
+	if got := client.askCount(); got != 1 {
+		t.Fatalf("the engine was asked %d times, want 1 — the second answer reaches the SAME call", got)
 	}
 }
 
@@ -341,7 +343,7 @@ func TestAgentApprovalRequested_OutOfScopeOverTheWireConformsToContract(t *testi
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	store, _ := rowScopedPolicyStore(t)
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: outOfScopeSuspension(content.OutOfScopeRowScope)},
+		{ask: outOfScopeAsk(content.OutOfScopeRowScope)},
 	}}
 	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(store))
 	h.createEndpoint()

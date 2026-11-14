@@ -28,6 +28,10 @@ type screenFunc func(context.Context, Call, Outbound) Verdict
 
 func (f screenFunc) Inspect(ctx context.Context, c Call, r Outbound) Verdict { return f(ctx, c, r) }
 
+type attemptFunc func(context.Context, Call) error
+
+func (f attemptFunc) Open(ctx context.Context, c Call) error { return f(ctx, c) }
+
 // pipelineTestResult is what the planted tool answers, and it satisfies
 // workers.holdings' own result contract so a passing call is a complete call.
 const pipelineTestResult = `{"participants":[],"checkoutsComplete":true}`
@@ -40,7 +44,7 @@ type plantedTool struct {
 	onRun func()
 }
 
-func (p *plantedTool) executor(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error) {
+func (p *plantedTool) executor(context.Context, Call, agenttools.Tool, agenttools.Capability, []byte) (string, error) {
 	p.runs++
 	if p.onRun != nil {
 		p.onRun()
@@ -532,8 +536,13 @@ func TestPipeline_EveryPointSeesTheSameImmutableCall(t *testing.T) {
 		t.Fatalf("points saw %d calls, want 4", len(seen))
 	}
 	for i, call := range seen {
-		if call != want {
-			t.Fatalf("point %d saw %+v, want %+v", i, call, want)
+		if call.RunID() != want.runID || call.Attempt() != want.attempt || call.Tool() != want.tool ||
+			call.CallID() != want.callID || call.ArgHash() != want.argHash {
+			t.Fatalf("point %d saw %+v, want the caller's own identity %+v", i, call, want)
+		}
+		if call.Declaration().Name != want.tool {
+			t.Fatalf("point %d saw declaration %q, want %q — every point decides on the same prepared call",
+				i, call.Declaration().Name, want.tool)
 		}
 	}
 	if seen[0].RunID() != "run-1" || seen[0].Attempt() != 3 || seen[0].Tool() != "workers.holdings" ||

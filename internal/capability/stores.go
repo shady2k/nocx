@@ -69,9 +69,9 @@ const (
 	// StoreVault is the vault: one document plus provider material behind a
 	// journal.
 	StoreVault = "vault"
-	// StoreContent is the content store family restore rewrites (snippets,
-	// notes, skills). Its own domain stage owns the operations; the barrier is
-	// what makes restore's exclusive claim over it hold.
+	// StoreContent is the content store family restore rewrites (snippets and
+	// notes). Its own domain stage owns the operations; the barrier is what
+	// makes restore's exclusive claim over it hold.
 	StoreContent = "content"
 )
 
@@ -477,7 +477,7 @@ func storeName(store string) string {
 	case StoreVault:
 		return "vault"
 	case StoreContent:
-		return "snippets, notes and skill"
+		return "snippets and notes"
 	default:
 		return store
 	}

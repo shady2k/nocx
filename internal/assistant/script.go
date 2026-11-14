@@ -35,10 +35,9 @@ package assistant
 // and the day the two disagreed the window would show a file the policy never
 // saw.
 //
-// AND NOTHING IS SCANNED. `skill.Scan` is the skill package's vocabulary for a
-// body somebody is adopting; running it over every shell script a command
-// names would be a new advisory surface on every approval, which is a policy
-// widening nobody asked for. The bytes are shown. What they mean is the
+// AND NOTHING IS SCANNED. Running a pattern scanner over every shell script a
+// command names would be a new advisory surface on every approval, which is a
+// policy widening nobody asked for. The bytes are shown. What they mean is the
 // person's reading, which is the entire point of showing them.
 
 import (
@@ -49,16 +48,14 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// MaxScriptBytes bounds one reading. It is skill.MaxReadBytes, the same
-// ceiling a person's own read of a skill file gets, because it is the same
-// question — how much of a file a person is shown in a window they are
-// deciding in — and two budgets for it would be two numbers to tune.
+// MaxScriptBytes bounds one reading: how much of a file a person is shown in
+// a window they are deciding in.
 const MaxScriptBytes = 64 << 10
 
 // scriptReadBudget bounds the WHOLE set of readings for one question, not each
 // one. A question that appears late is a worse defect than one whose file is
-// missing from it: the escalation is already holding a suspended run and a
-// person waiting on a modal, so the reads get one shared deadline and whatever
+// missing from it: the escalation is already holding a call blocked on a
+// person's answer, so the reads get one shared deadline and whatever
 // is past it is reported as unread, in words, rather than making the window
 // wait. Two seconds because the remote arm acquires an SFTP lease over the
 // session's own connection before it can read anything, and a local read that
@@ -67,13 +64,10 @@ const MaxScriptBytes = 64 << 10
 const scriptReadBudget = 2 * time.Second
 
 // ScriptRefusal names why a named file's bytes are not being shown. The set is
-// closed and the wire declares it. Three of the four values are skill.File's,
-// spelled the same because they are the same sentences about the same facts —
-// FileReadout in the kit owns the wording for all of them and must not learn a
-// second vocabulary. The fourth is this surface's own: skills.file answers a
-// REQUEST and can fail it, while an approval question is a notification with
-// nowhere to put an error, so "there was no file to read" has to be a fact
-// inside the question.
+// closed and the wire declares it. FileReadout in the kit owns the wording for
+// all of them, and an approval question is a notification with nowhere to put
+// an error, so "there was no file to read" has to be a fact inside the
+// question rather than a failed request.
 type ScriptRefusal string
 
 const (
@@ -230,9 +224,9 @@ func readScript(ctx context.Context, source ScriptSource, sessionID, cwd string,
 	}
 	switch {
 	case read.TooLarge:
-		// Asked BEFORE the text check, for skill.File's reason: an over-long
-		// file is over-long whatever its bytes decode to, and reporting a
-		// 40 MiB blob as "not text" names the less useful of two true facts.
+		// Asked BEFORE the text check: an over-long file is over-long
+		// whatever its bytes decode to, and reporting a 40 MiB blob as "not
+		// text" names the less useful of two true facts.
 		reading.Refusal = ScriptRefusalTooLarge
 	case read.NotText:
 		reading.Refusal = ScriptRefusalNotText

@@ -240,9 +240,11 @@ func TestAReleasedSchema18DatabaseMigratesAndGainsWorkerCheckouts(t *testing.T) 
 	if got := rawUserVersion(t, path); got != schemaVersion {
 		t.Fatalf("user_version = %d, want %d", got, schemaVersion)
 	}
-	// The row the file carried before the rung, whole.
-	if got := rawRow(t, path, `SELECT provenance || '|' || verdict FROM skill_checks WHERE name = 'the-check'`); got != "the-provenance|pass" {
-		t.Fatalf("skill_checks row after the rung = %q, want it intact", got)
+	// The table the file carried is gone: the skill library left the
+	// product and the 23→24 rung retires its storage. A migration that kept
+	// a table nothing reads would leave the feature half-present.
+	if aTableExists(t, path, "skill_checks") {
+		t.Fatal("skill_checks survived the walk to the current schema — the 23→24 rung did not run")
 	}
 	// And the rung's own table takes a row and gives it back — through the
 	// repository, which is the only door anything else uses.

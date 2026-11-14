@@ -12,7 +12,6 @@
     "connections",
     "groups",
     "snippets",
-    "skills",
     "notes",
     "connectionsRequiringCredential",
     "omissions"
@@ -38,16 +37,6 @@
       "$ref": "#/$defs/itemCounts"
     },
     "snippets": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["included"],
-      "properties": {
-        "included": {
-          "type": "integer"
-        }
-      }
-    },
-    "skills": {
       "type": "object",
       "additionalProperties": false,
       "required": ["included"],

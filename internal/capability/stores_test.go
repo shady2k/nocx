@@ -314,7 +314,7 @@ func TestRestoreOperation_QuarantinesTheStoresAfterAFailedRollback(t *testing.T)
 			Profiles: []profile.SSHProfile{{Base: profile.Base{ID: "new", Type: "ssh", Name: "new"}, Options: profile.StoredSSHProfileOptions{Host: "new.example"}}},
 		}},
 		&failingSettingsStore{overrides: map[string]any{"tab.placement": "new"}},
-		&mapDocStore{}, nil, nil, nil,
+		&mapDocStore{}, nil, nil,
 	)
 	created, err := source.Create()
 	if err != nil {
@@ -325,7 +325,7 @@ func TestRestoreOperation_QuarantinesTheStoresAfterAFailedRollback(t *testing.T)
 		Profiles: []profile.SSHProfile{{Base: profile.Base{ID: "old", Type: "ssh", Name: "old"}, Options: profile.StoredSSHProfileOptions{Host: "old.example"}}},
 	}}
 	sett := &failingSettingsStore{overrides: map[string]any{"tab.placement": "old"}}
-	svc := backup.NewService(conn, sett, &mapDocStore{}, nil, nil, nil)
+	svc := backup.NewService(conn, sett, &mapDocStore{}, nil, nil)
 	svc.SetRecoveryBudget(time.Minute)
 
 	preview, err := svc.Preview(created.Contents, backup.RestoreReplace)

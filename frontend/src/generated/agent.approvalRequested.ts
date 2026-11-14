@@ -45,12 +45,6 @@ export interface AgentApprovalRequested {
     | 'snippets.update'
     | 'snippets.delete'
     | 'snippets.reorder'
-    | 'skills.read'
-    | 'skills.create'
-    | 'skills.update'
-    | 'skills.delete'
-    | 'skills.resolve'
-    | 'skills.install'
     | 'workers.holdings'
     | 'workers.spawn'
     | 'workers.say'
@@ -128,24 +122,6 @@ export interface AgentApprovalRequested {
       available: boolean
       reason: string
     }
-  } | null
-  /**
-   * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
-   */
-  finding?: {
-    path: string
-    patternId: string
-    line: string
-    lineNumber: number
-  } | null
-  /**
-   * Skill write only: the classifier verdict or bounded failure fact.
-   */
-  classifier?: {
-    consulted: boolean
-    verdict?: 'clear' | 'suspect'
-    model?: string
-    reason: string
   } | null
   /**
    * Egress only: the findings are in an ERROR string the tool returned rather than in its result — the surface reads the two differently.
@@ -243,7 +219,7 @@ export interface AgentApprovalRequested {
      */
     text: string
     /**
-     * Why the bytes are not shown. Empty means nothing was refused and `text` is the file. The first three are skills.file's own values, spelled the same because they are the same sentences about the same facts and one viewer draws both. `unreadable` is this notification's own: skills.file answers a REQUEST and can fail it, while a question has nowhere to put an error, so "there was no file to read" must arrive as a fact inside the question or not at all. Never null.
+     * Why the bytes are not shown. Empty means nothing was refused and `text` is the file. `unreadable` is this notification's own: a question has nowhere to put an error, so "there was no file to read" must arrive as a fact inside the question or not at all. Never null.
      */
     refusal: '' | 'not-text' | 'too-large' | 'unreadable'
     /**
@@ -255,136 +231,6 @@ export interface AgentApprovalRequested {
      */
     reason: string
   }[]
-  /**
-   * skills.install only (nocx-ojfuc.2, widened by nocx-295uk.3): what the proposed address RESOLVED to. The tool's arguments are an address, and an address is not something anybody can decide about — the model was asked to install a skill from a page, and what it resolved that page to is the thing the person is actually deciding. A question naming the ask rather than the answer would let somebody approve a page they read and receive a repository they never saw. So this carries the resolution: the route it travelled, and every skill the answer covers — the name and description each document gives itself, the digest each write is bound to, and EVERY file that will land, with its bytes. Absent for every other proposal. ONE QUESTION CARRIES A SET rather than one question per skill, because 'which one, or all of them?' is a real answer to a repository holding nine: nine dialogues for it are worse than one listing nine, and the person reads the same content either way. A plain URL install is that same shape with a set of one and no route. THE ROUTE FACTS — source, destination, originsDiffer, ref, commit — are shared by every skill in the set because they are properties of the journey, not of a skill, and originsDiffer is stated rather than left to be re-derived: a surface comparing two hosts itself would be a second answer to a question the server already answered. THE BYTES ARE HERE rather than behind a request, because none of these files is on disk yet and must not be until the person answers: skills.file reads an INSTALLED skill, a notification cannot answer a follow-up, and bytes fetched a second time from a mutable server slot would not be the bytes the question was built from. It is the shape `scripts` already has for the file a command names. The size is bounded upstream and not here: internal/skill refuses a bundle over 32 files, over 512 KiB of support text or with a document over 64 KiB before any question can exist.
-   */
-  install?: {
-    /**
-     * The address the person supplied before repository resolution.
-     */
-    source?: string
-    /**
-     * The canonical repository address reached by resolution.
-     */
-    destination?: string
-    /**
-     * Whether the source and destination URL hosts differ.
-     */
-    originsDiffer?: boolean
-    /**
-     * The repository ref pinned by the resolution.
-     */
-    ref?: string
-    /**
-     * The immutable repository commit pinned by the resolution.
-     */
-    commit?: string
-    /**
-     * Every skill covered by this approval. Direct installs contain one item; resolved installs contain the selected candidates.
-     *
-     * @minItems 1
-     */
-    skills: [
-      {
-        /**
-         * The candidate path inside the resolved repository. Absent for a direct URL install.
-         */
-        path?: string
-        /**
-         * The skill name from its own frontmatter.
-         */
-        name: string
-        /**
-         * The skill description from its own frontmatter.
-         */
-        description: string
-        /**
-         * The address fetched for this skill.
-         */
-        url: string
-        /**
-         * The sha256 digest over the complete skill bundle.
-         */
-        digest: string
-        /**
-         * Every file that will land, with its exact text and findings.
-         *
-         * @minItems 1
-         */
-        files: [
-          {
-            path: string
-            text: string
-            findings: {
-              path: string
-              patternId: string
-              line: string
-              lineNumber: number
-            }[]
-          },
-          ...{
-            path: string
-            text: string
-            findings: {
-              path: string
-              patternId: string
-              line: string
-              lineNumber: number
-            }[]
-          }[],
-        ]
-      },
-      ...{
-        /**
-         * The candidate path inside the resolved repository. Absent for a direct URL install.
-         */
-        path?: string
-        /**
-         * The skill name from its own frontmatter.
-         */
-        name: string
-        /**
-         * The skill description from its own frontmatter.
-         */
-        description: string
-        /**
-         * The address fetched for this skill.
-         */
-        url: string
-        /**
-         * The sha256 digest over the complete skill bundle.
-         */
-        digest: string
-        /**
-         * Every file that will land, with its exact text and findings.
-         *
-         * @minItems 1
-         */
-        files: [
-          {
-            path: string
-            text: string
-            findings: {
-              path: string
-              patternId: string
-              line: string
-              lineNumber: number
-            }[]
-          },
-          ...{
-            path: string
-            text: string
-            findings: {
-              path: string
-              patternId: string
-              line: string
-              lineNumber: number
-            }[]
-          }[],
-        ]
-      }[],
-    ]
-  } | null
   /**
    * Egress only: what was found and where. Facts, never the material.
    */

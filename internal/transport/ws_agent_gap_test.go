@@ -135,17 +135,6 @@ func (f *fakeAgentService) finishState() content.RunState {
 	return f.finish.State
 }
 
-func (f *fakeAgentService) transitionsText() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var b strings.Builder
-	for _, s := range f.transitions {
-		b.WriteString(string(s))
-		b.WriteString(",")
-	}
-	return b.String()
-}
-
 // directAgentOp is an AgentOperation that runs its function inline with the
 // recorded service — the unit tests exercise the stream's logic, not the
 // content gate (whose acquire/release the askHarness tests already cover).
@@ -292,66 +281,6 @@ func TestAgentAsk_SeqAdvancesPastDroppedDeltas(t *testing.T) {
 	}
 }
 
-// The count survives a suspension: drops recorded before the question
-// reached the person are still part of the run's live-view record when the
-// resume's (or the decline's) terminal close arrives.
-func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
-	svc := &fakeAgentService{}
-	approvals := assistant.NewApprovalStore()
-	h := newGapHandlers(svc, &scriptedAssistantClient{
-		deltas: []string{"first"},
-		err: &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
-			RunID: "7", Attempt: 1, Tool: "session.read", CallID: "c1", ArgHash: "h",
-			Effect: content.EffectObserve,
-		}},
-	}, approvals)
-	rc := gapRunContext()
-	rc.attempt = 1
-	h.pendingRuns[rc.runID] = rc // handleAsk stores the context before the stream
-	first := &gapResponder{failDeltaTimes: 1}
-
-	h.runAskStream(context.Background(), rc, first)
-
-	if !first.approvalAsked {
-		t.Fatal("the run never suspended for approval")
-	}
-	h.pendingRunsMu.Lock()
-	stored, ok := h.pendingRuns[rc.runID]
-	h.pendingRunsMu.Unlock()
-	if !ok {
-		t.Fatal("pending run context lost at suspension")
-	}
-	if got := stored.control.droppedDeltaCount(); got != 1 {
-		t.Fatalf("control dropped deltas = %d, want 1 — the run control must carry the pre-approval drops", got)
-	}
-
-	// The person approves; the resume re-streams with the SAME run. Its
-	// terminal close must name BOTH drops — the gap describes the whole
-	// answer, not just the last Ask invocation.
-	h.client = &scriptedAssistantClient{deltas: []string{"second"}}
-	second := &gapResponder{failDeltaTimes: 1}
-	h.resumeRun(context.Background(), stored, second)
-
-	if second.runState == nil {
-		t.Fatal("no terminal runState after the resume")
-	}
-	if second.runState.DroppedDeltas != 2 {
-		t.Errorf("resume runState droppedDeltas = %d, want 2 (1 before + 1 after the approval)", second.runState.DroppedDeltas)
-	}
-	if got := svc.appendedText(); got != "firstsecond" {
-		t.Errorf("persisted answer = %q, want %q", got, "firstsecond")
-	}
-	if got := svc.finishState(); got != content.RunCompleted {
-		t.Errorf("persisted run state = %q, want completed", got)
-	}
-	// resumeRun moves the run to streaming itself before re-driving the
-	// stream (which transitions streaming again), so the full span is
-	// streaming → awaiting_approval → streaming → streaming.
-	if got := svc.transitionsText(); got != "streaming,awaiting_approval,streaming,streaming," {
-		t.Errorf("transitions = %q, want streaming → awaiting_approval → streaming → streaming", got)
-	}
-}
-
 // ── criterion 2: a slow consumer is bounded on the delta path ──────────────
 
 // blockingSocket is the pump's write seam held mid-write: WriteMessage
@@ -440,7 +369,6 @@ func (r outboundNotifyResponder) TryNotify(method string, params json.RawMessage
 // test releases it — the deterministic stand-in for "the stream is still
 // producing while the consumer has stopped reading".
 type barrierAskClient struct {
-	unauditedClient
 	n           int
 	emitted     chan struct{}
 	release     chan struct{}
@@ -747,7 +675,6 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 // about which text belongs to which run then reported the swap as
 // corruption (nocx-sxvnh).
 type interleavedAskClient struct {
-	unauditedClient
 	mu          sync.Mutex
 	scripts     map[string][]string
 	started     int

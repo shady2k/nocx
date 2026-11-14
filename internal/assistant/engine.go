@@ -81,7 +81,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, onEvent func(AskEvent) error) error {
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalAssistantAskStream)
 	defer scope.Complete()
 	cm, err := buildModel(httpClient, key, baseURL, model)
@@ -96,15 +96,12 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// that is the shape every existing explain run depends on, and the
 		// probe below always passes nil.
 		//
-		// ExecuteSequentially is MANDATORY, not a preference: the policy
-		// middleware's batch latch (nocx-lndv) stops the calls AFTER a
-		// refused or escalated one, and it can only do that if the calls
-		// actually run in order — the ADK's default is PARALLEL, where a
-		// later call races the earlier refusal and can run before the latch
-		// trips. The framework's own doc names the contract: sequential
-		// means in order, NOT stop on failure — sequentialRunToolCall loops
-		// every task and never inspects tasks[i].err, so the latch is what
-		// makes a refused call stop the ones after it.
+		// ExecuteSequentially is MANDATORY, not a preference: the calls of
+		// one turn run one at a time, in order (ADR-anntnxdj §2). The ADK's
+		// default is PARALLEL, where a later call races the earlier one; the
+		// pipeline's per-turn order enforces the same rule for a caller that
+		// is not eino, and this is what keeps the framework from presenting
+		// it with two calls at once.
 		//
 		// UnknownToolsHandler is the framework's seam for a name we never
 		// declared, and without it the node FAILS: eino resolves the call
@@ -123,8 +120,8 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 	}
 	// The policy middleware (nocx-lndv): the run's grant decides what the
 	// model may call. It rides the agent's Handlers — the pipeline at the
-	// framework's own seam — and BeforeAgent mints the batch latch for the
-	// run. Zero handlers (every explain-mode run today) changes nothing.
+	// framework's own seam. Zero handlers (every explain-mode run today)
+	// changes nothing.
 	if len(handlers) > 0 {
 		cfg.Handlers = handlers
 	}
@@ -143,50 +140,12 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		ctx = withCustomHeaderNames(ctx, names)
 	}
 
-	// The run goes through adk.Runner rather than agent.Run, and that is
-	// what makes an approval resumable at all: ONLY the Runner carries a
-	// CheckPointStore. agent.Run builds a private temporary bridge store of
-	// its own (adk/chatmodel.go), so adding WithCheckPointID to it changes
-	// nothing — the checkpoint dies with the call that wrote it.
-	//
-	// Under the Runner, ToolsNode checkpoints its INPUT message with its
-	// tool calls and restores it before regenerating the tasks
-	// (compose/tool_node.go). That is the whole fix: the resumed attempt
-	// sees the SAME call id and the SAME arguments the person approved,
-	// already-executed siblings are retained by call id, and no model call
-	// is spent rebuilding a proposal the model would have re-rolled with a
-	// fresh id — which is what left a person answering the same question
-	// forever.
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:           agent,
-		EnableStreaming: true,
-		CheckPointStore: checkpoints,
-	})
-	var it *adk.AsyncIterator[*adk.AgentEvent]
-	if target, ok := checkpoints.resumable(checkpointID); ok {
-		// A resume, and it takes NO messages: the continuation is the
-		// checkpoint, and the target names WHICH suspended branch goes on.
-		// The decision itself is not passed here — it lives in the
-		// ApprovalStore, which the middleware consults when the restored
-		// call reaches the pipeline again; eino's resume data would be a
-		// second place for one answer to live.
-		var err error
-		it, err = runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
-			Targets: map[string]any{target: nil},
-		}, runOpts...)
-		if err != nil {
-			return fmt.Errorf("resume the suspended run: %w", err)
-		}
-	} else {
-		// A first drive. Without a run id there is nothing to key a
-		// checkpoint by — and nothing an approval could bind to either
-		// (the binding starts with the run), so such a run cannot suspend
-		// resumably and does not pretend to.
-		if checkpointID != "" {
-			runOpts = append(runOpts, adk.WithCheckPointID(checkpointID))
-		}
-		it = runner.Run(ctx, msgs, runOpts...)
-	}
+	// One run, one drive, and no continuation: a person's question blocks the
+	// call that asked it (ADR-anntnxdj §3), so there is no suspension for a
+	// checkpoint to carry and nothing to resume. agent.Run builds a private,
+	// temporary checkpoint store of its own (adk/chatmodel.go) and nothing
+	// reads it.
+	it := agent.Run(ctx, &adk.AgentInput{Messages: msgs, EnableStreaming: true}, runOpts...)
 	for {
 		ev, ok := it.Next()
 		if !ok {
@@ -194,32 +153,6 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		}
 		if ev.Err != nil {
 			return ev.Err
-		}
-		// A suspension: the policy escalated (design §7.2) and the run is
-		// awaiting approval — the call that asked has not run. This is not a
-		// failure; it is the state the approval surface renders and the
-		// resume re-validates. Without this check the interrupt event would
-		// fall through the Output==nil guard and the suspension would be
-		// silently reported as a completed run.
-		if ev.Action != nil && ev.Action.Interrupted != nil {
-			// The Runner has already written the checkpoint by the time
-			// this event reaches us (it saves, then sends). Recording the
-			// interrupt's id against it is what completes the pair the
-			// next drive reads: the bytes are the framework's, the branch
-			// is ours to name.
-			if req, interruptID := approvalRequestFrom(ev.Action.Interrupted); req != nil {
-				checkpoints.suspend(checkpointID, interruptID)
-				return &ApprovalRequestedError{Request: req}
-			}
-			// The egress gate's ask (design §7.1): a tool result contained
-			// secret-shaped material and the run suspended before the bytes
-			// left for the provider. Same shape as the inbound ask — NOT a
-			// failure, the state the approval surface renders.
-			if req, interruptID := egressRequestFrom(ev.Action.Interrupted); req != nil {
-				checkpoints.suspend(checkpointID, interruptID)
-				return &EgressRequestedError{Request: req}
-			}
-			return &ApprovalRequestedError{}
 		}
 		if ev.Output == nil || ev.Output.MessageOutput == nil {
 			continue
@@ -395,31 +328,35 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		grant.Policy = grant.Policy.WithFloor(c.floor)
 		permitted := c.tools.ForGrant(grant)
 		// The approval store is the client's own (process-lifetime, one
-		// per client, keyed by run id — ADR-0028: checkpoints are
-		// process-lifetime state); a caller may pass one explicitly.
+		// per client, keyed by the exact proposal); a caller may pass one
+		// explicitly.
 		approvals := p.Approvals
 		if approvals == nil {
 			approvals = c.approvals
 		}
-		// The classifier (bead nocx-kpy23): the middleware consults a
-		// SECOND model for every permitted proposal. The engine builds
-		// the classifier over ITS guarded client and the caller's role
-		// resolver — the model call is the engine's (design §6: usage
-		// has an owner); nil without a resolver is the feature off.
-		var classifier CallClassifier
-		if p.Classifier != nil {
-			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
+		// The fresh grant of ADR-anntnxdj §3: the caller's mint, wearing the
+		// floor every grant this engine hands a run wears. The floor is the
+		// ENGINE's (it is the build's), and a mint that came back without it
+		// would be a second, weaker authority for the calls after an answer.
+		var freshGrant func() *content.Grant
+		if p.FreshGrant != nil {
+			freshGrant = func() *content.Grant {
+				minted := p.FreshGrant()
+				if minted == nil {
+					return nil
+				}
+				fresh := *minted
+				fresh.Policy = fresh.Policy.WithFloor(c.floor)
+				return &fresh
+			}
 		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
+		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
 			sessions:          p.SessionSource,
 			screenCapture:     p.ScreenCapture,
 			noteOperation:     p.NoteOperation,
 			snippetOperation:  p.SnippetOperation,
-			skills:            p.Skills,
-			skillDraft:        p.SkillDraft,
-			skillDraftHTTP:    c.http,
 			fetcher:           p.Fetcher,
 			snapshots:         c.snapshots,
 			runID:             p.RunID,
@@ -429,6 +366,8 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			scripts:           p.Scripts,
 			cwd:               p.Cwd,
 			paneAccessBinder:  p.PaneAccessBinder,
+			questioner:        p.Questioner,
+			freshGrant:        freshGrant,
 		})
 		if err != nil {
 			return err
@@ -469,32 +408,16 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		handlers = append(handlers, newOrderedAnswerMiddleware(sink), mw)
 	}
 
-	// The checkpoint is keyed by the run id, because that is what a drive
-	// of this run already is: one run, one suspension, one continuation.
-	// So an Ask whose run has a live checkpoint IS the resume of it —
-	// there is no second flag to keep in step with the store, and no way
-	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, runTools, unknownTool, handlers, c.checkpoints, p.RunID, sink)
+	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, runTools, unknownTool, handlers, sink)
 	if err != nil {
-		// A suspension is the ONE outcome that keeps the checkpoint: the
-		// run is not over, and the checkpoint is the only thing that can
-		// carry it past the person's answer. Every other error ends the
-		// run — a refusal, a malformed proposal, a failed stream, a
-		// cancelled context — and a run that has ended leaves nothing
-		// behind (ADR-0028: checkpoints are deleted on terminalization).
-		// v0.9.13 deletes nothing itself; the store's owner is
-		// responsible, which the framework says in as many words.
-		var apErr *ApprovalRequestedError
-		var egErr *EgressRequestedError
-		if !errors.As(err, &apErr) && !errors.As(err, &egErr) {
-			c.Discard(p.RunID)
-		}
+		c.Discard(p.RunID)
 		return err
 	}
 	c.Discard(p.RunID)
 	if text.Len() == 0 {
 		return &StreamError{Message: "the model returned no text"}
 	}
+
 	// A non-empty declared set means the model was offered tools. If no real
 	// tool call crossed the policy seam and the complete answer is only a
 	// textual envelope, the stream succeeded mechanically but not
@@ -506,12 +429,12 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	return nil
 }
 
-// Discard implements Client: it drops whatever suspended state the engine
-// holds for one run. Ask calls it on every terminal outcome of its own; the
-// transport calls it for the terminal outcomes Ask never returns from — the
-// person declined, or the run was closed while its question was still open.
-// Discarding a run that holds nothing is the ordinary case and does
-// nothing.
+// Discard implements Client: it drops whatever process-lifetime state the
+// engine holds for one run — today the command snapshots a renderer request
+// left behind. Ask calls it on every outcome of its own; the transport calls it
+// for the outcomes Ask never returns from, so a run that ended by any path
+// leaves nothing behind. Discarding a run that holds nothing is the ordinary
+// case and does nothing.
 func (c *client) Discard(runID string) {
 	if runID == "" {
 		return
@@ -519,7 +442,6 @@ func (c *client) Discard(runID string) {
 	if c.snapshots != nil {
 		c.snapshots.Discard(runID)
 	}
-	_ = c.checkpoints.Delete(context.Background(), runID)
 }
 
 // declaredTools converts the registry's assembled tools into the ADK tools

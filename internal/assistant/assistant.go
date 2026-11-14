@@ -32,13 +32,11 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/skill"
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
-// endpoint form's Test button (Probe, nocx-edio), the ask transaction (Ask,
-// nocx-x8s2.2 — the run f4s5 prepares is driven here), and the skill card's
-// audit button (AuditSkill, nocx-0bsa4.4).
+// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
+// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
 type Client interface {
 	// Probe streams one real response from the given endpoint configuration
 	// — the Test button's whole meaning: it probes what will actually be
@@ -67,32 +65,13 @@ type Client interface {
 	// stream produced no ANSWER text — reasoning alone is not an answer),
 	// and any other Go error when the ask could not run at all.
 	Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error
-	// Discard drops the engine's suspended state for one run — the eino
-	// checkpoint an escalation wrote, and the interrupt it named. A run
-	// that has terminalized has no branch left to continue, and ADR-0028
-	// says a checkpoint is deleted on terminalization.
-	//
-	// Ask already does this for every terminal outcome it returns from.
-	// This is the seam for the ones it does not: the person DECLINED, or
-	// the run was closed by another path while its question was still
-	// open. Discarding a run that holds nothing does nothing, so the
-	// transport can call it from its one terminal funnel without asking
-	// whether the run ever suspended.
+	// Discard drops the process-lifetime state the engine holds for one run.
+	// Ask already does this for every outcome it returns from; this is the
+	// seam for the ones it does not — the run was closed by another path, or
+	// its call was refused while its question was still open. Discarding a
+	// run that holds nothing does nothing, so the transport can call it from
+	// its one terminal funnel without asking what the run ever held.
 	Discard(runID string)
-	// AuditSkill asks the auditing role's model to CHECK one skill's bundle
-	// and returns its reading — a verdict plus the prose that says why
-	// (design §7, reversed: the refusal to conclude is gone). It is here
-	// beside Probe rather than behind a seam of its own because it is the
-	// same shape: the caller resolves the pair and the credential, the
-	// engine owns the model call.
-	//
-	// It gates nothing and certifies nothing. Nothing in the product
-	// branches on what comes back — a skill is offered to the assistant
-	// when the person's switch is on and the bytes still match, and this
-	// call touches neither. An error means there is no reading, and the
-	// caller must say so rather than showing an empty one: a blank report
-	// reads exactly like a clean report.
-	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed
@@ -148,8 +127,7 @@ type ToolCall struct {
 	// Tool is the declared tool name, e.g. "files.read".
 	Tool string
 	// CallID is the model's own id for this call. The renderer keys on it,
-	// so a call that is announced twice — an approved egress resume passes
-	// the same call through the pipeline again — renders once.
+	// so a call that is announced twice renders once.
 	CallID string
 	// Args is what the model asked for, AS VALIDATED against the tool's own
 	// schema — the object the call actually ran on, never the raw string the
@@ -202,32 +180,6 @@ type Message struct {
 type Header struct {
 	Name  string
 	Value string
-}
-
-// SkillLibrary is the assistant's filesystem-backed skill seam. Read and
-// mutation tools share this one owner so a composition root cannot offer
-// writes with a read-only source.
-type SkillLibrary interface {
-	SkillSource
-	Create(name, description, body string) error
-	Update(name, description, body string) error
-	Delete(name string) error
-	// Preview and Install are the two halves of adopting a skill published
-	// at an address, and they are on THIS interface rather than one of their
-	// own for the reason the writes are: one owner, so a composition root
-	// cannot offer an install whose preview came from somewhere else. The
-	// pair is not two ways to do one thing — Preview fetches and writes
-	// nothing, Install re-fetches and refuses unless the bytes are the ones
-	// Preview showed. What joins them is a digest the store keeps on the
-	// server, which is why neither method takes anything but an address:
-	// there is no field in which a caller could assert what the bytes were.
-	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
-	Install(ctx context.Context, url string) (skill.InstallResult, error)
-	// Resolve enumerates a supported public repository without writing.
-	Resolve(ctx context.Context, address string) (*skill.Resolution, error)
-	// RecordUse notes successful skills.read calls. It returns nothing on
-	// purpose: usage telemetry must never make a read fail.
-	RecordUse(name string)
 }
 
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
@@ -327,22 +279,30 @@ type AskParams struct {
 	// them as seams; it never owns a service or a second store implementation.
 	NoteOperation    capability.NoteOperation
 	SnippetOperation capability.SnippetOperation
-	// Skills is the filesystem-backed library for all skill tools. The
-	// transport supplies one owner whose index, reads and writes agree.
-	Skills SkillLibrary
-	// SkillDraft is the run's immutable transcript and summarizing-role seam.
-	// When set, a model-proposed skills.create call uses its cached generated
-	// arguments before validation, policy, approval, or execution.
-	SkillDraft *SkillDraftRequest
 	// Fetcher is the guarded direct-network seam for fetch.url. It is wired
 	// by the composition root; the tool cannot select a pane's connection
 	// route or construct another HTTP client.
 	Fetcher apifetch.TextFetcher
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
-	// id and a hash of the canonical arguments. Nil disables escalation's
-	// persistence — an ask still suspends, but nothing records the answer.
+	// id and a hash of the canonical arguments. Nil disables the store: an
+	// ask is still put to the person, and the guards that read the answer
+	// find nothing recorded.
 	Approvals *ApprovalStore
+	// Questioner puts a prepared question to a person and returns their
+	// answer (ADR-anntnxdj §3, Questioner in kernel.go). The transport hands
+	// its approval service here, beside the store, and the call then BLOCKS
+	// on the answer: the run rests in awaiting_approval while it waits, and
+	// the answer reaches this very call. Nil is a caller with no person to
+	// ask, where every ask is refused.
+	Questioner Questioner
+	// FreshGrant mints the run's authority again from the policy as it stands
+	// NOW (ADR-anntnxdj §3, "refreshed after an answer"). The pipeline calls
+	// it after a person answers, and the guards and the capability of that
+	// call read what it returns. Nil is a caller with no mint: a call that
+	// waited runs on the grant minted at admission, and an expired one is
+	// refused with the sentence that says so.
+	FreshGrant func() *content.Grant
 	// KnownMaterial is the egress vault comparison (design §7.1): "the
 	// vault knows the real values, and a comparison beats any pattern." It
 	// is legitimate here precisely because it happens in the backend and
@@ -351,14 +311,6 @@ type AskParams struct {
 	// whose tools may execute FAILS without it: the gate must see short
 	// vault values, or a result would leave for the provider unscreened.
 	KnownMaterial KnownMaterial
-	// Classifier resolves the classifier role (bead nocx-kpy23): the
-	// second, cheaper model that judges each permitted proposal and may
-	// only escalate. Nil means the classifier is not wired for this run —
-	// permitted calls run exactly as they do without one (criterion 7's
-	// second end). Non-nil means every call the policy permits is
-	// consulted, and every classification failure escalates. The transport
-	// adapts THE ONE role resolver (e6kn2) and the vault to this seam.
-	Classifier ClassifierResolver
 	// Presentation controls the model-facing lazy tool catalog. It changes
 	// visibility only; the grant and kernel remain the authority boundary.
 	Presentation *agenttools.PresentationConfig
@@ -498,8 +450,8 @@ type ProbeResult struct {
 // NewClientAndRegistry builds the assistant and returns the exact registry
 // used by its engine. The composition root passes that same registry to
 // transport so prompt offers and execution use one declaration table.
-func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
-	reg, err := assembleToolRegistry(tools.Schemas, skillRoots)
+func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, agenttools.Registry, error) {
+	reg, err := assembleToolRegistry(tools.Schemas)
 	if err != nil {
 		return nil, agenttools.Registry{}, err
 	}
@@ -507,16 +459,8 @@ func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor conten
 	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
 }
 
-func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {
-	var (
-		reg agenttools.Registry
-		err error
-	)
-	if len(skillRoots) == 0 {
-		reg, err = agenttools.Assemble(toolsFS)
-	} else {
-		reg, err = agenttools.AssembleWithSkillRoots(toolsFS, skillRoots)
-	}
+func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
+	reg, err := agenttools.Assemble(toolsFS)
 	if err != nil {
 		return agenttools.Registry{}, fmt.Errorf("assistant: tool registry: %w", err)
 	}
@@ -538,7 +482,6 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder 
 		searchSchema: schema,
 		floor:        floor,
 		approvals:    NewApprovalStore(),
-		checkpoints:  newRunCheckpoints(),
 		snapshots:    newRunSnapshots(),
 	}
 }
@@ -550,7 +493,6 @@ type client struct {
 	searchSchema []byte
 	floor        content.Floor
 
-	approvals   *ApprovalStore
-	checkpoints *runCheckpoints
-	snapshots   *runSnapshots
+	approvals *ApprovalStore
+	snapshots *runSnapshots
 }

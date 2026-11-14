@@ -400,9 +400,8 @@ func TestFetchTextKeepsOriginalURLAcrossRedirect(t *testing.T) {
 
 // TestFetchTextSameOriginOnlyRefusesACrossOriginRedirect and its paired
 // success below are the two halves of one rule: a caller that resolves
-// relative paths against an address it was given (internal/skill's bundle)
-// must be answered by that origin and no other, at every hop and not only on
-// the first request.
+// relative paths against an address it was given must be answered by that
+// origin and no other, at every hop and not only on the first request.
 func TestFetchTextSameOriginOnlyRefusesACrossOriginRedirect(t *testing.T) {
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("bytes from an origin the caller never named"))

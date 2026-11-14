@@ -1277,54 +1277,6 @@
       "snippet": "Clear"
     },
     {
-      "file": "src/skill-view/skill-view-body.tsx",
-      "line": 763,
-      "context": "attr:aria-label",
-      "snippet": "Files in"
-    },
-    {
-      "file": "src/skill-view/skill-view-check.tsx",
-      "line": 216,
-      "context": "attr:description",
-      "snippet": "Reading what content.db knows about “”."
-    },
-    {
-      "file": "src/skill-view/skill-view-check.tsx",
-      "line": 239,
-      "context": "attr:description",
-      "snippet": "Something moved since this reading was made — an edit, a rei"
-    },
-    {
-      "file": "src/skill-view/skill-view-check.tsx",
-      "line": 243,
-      "context": "jsx-text",
-      "snippet": "This is the model's conclusion, not nocx's, and it decides n"
-    },
-    {
-      "file": "src/skill-view/skill-view-check.tsx",
-      "line": 291,
-      "context": "attr:description",
-      "snippet": "A model is reading the files of “” and writing a description"
-    },
-    {
-      "file": "src/skill-view/skill-view-header.tsx",
-      "line": 150,
-      "context": "attr:description",
-      "snippet": "Reading “” from the discovered skills."
-    },
-    {
-      "file": "src/skill-view/skill-view-header.tsx",
-      "line": 164,
-      "context": "attr:description",
-      "snippet": "They are no longer the bytes recorded for it, so the assista"
-    },
-    {
-      "file": "src/skill-view/skill-view-header.tsx",
-      "line": 166,
-      "context": "jsx-text",
-      "snippet": "Re-approve"
-    },
-    {
       "file": "src/tab-strip.tsx",
       "line": 636,
       "context": "prop:label",

@@ -99,12 +99,14 @@ func askAbout(t *testing.T, source ScriptSource, dir, command string) *ApprovalR
 	p := askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore())
 	p.Scripts = source
 	p.Cwd = dir
-	askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-	var asked *ApprovalRequestedError
-	if !errors.As(askErr, &asked) || asked.Request == nil {
-		t.Fatalf("proposal %q: err = %v, want the approval-requested suspension", command, askErr)
+	q, askErr := withPerson(t, cl, p, Declined{Reason: "not this one"}, DeclineCallOnce)
+	if askErr != nil {
+		t.Fatalf("proposal %q: err = %v, want the person's no as the call's answer", command, askErr)
 	}
-	return asked.Request
+	if len(q.asked) != 1 {
+		t.Fatalf("proposal %q: the person was asked %d times, want exactly 1", command, len(q.asked))
+	}
+	return q.asked[0]
 }
 
 func readingFor(t *testing.T, req *ApprovalRequest, path string) ScriptReading {

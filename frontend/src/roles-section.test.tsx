@@ -175,11 +175,10 @@ describe('the closed role set is visible', () => {
     })
     expect(text(roleRows(container)[0])).toMatch(/No model assigned/)
   })
-  it('shows that an unassigned auditing role uses the answering endpoint', async () => {
-    // The audit is a button a person presses, so being billed for a model
-    // they did not choose is exactly the surprise role.go's note exists to
-    // prevent — and the page has to say it BEFORE they press it, not only
-    // in the reading afterwards.
+  it('says an unassigned auditing role cannot be used, rather than promising a fallback', async () => {
+    // The role stays declared with no consumer in this build, so nothing
+    // spends another role's endpoint on its behalf: the page says the honest
+    // state rather than a fallback no backend performs.
     const { container } = mountRoles(
       [ep('e1', 'OpenAI', ['gpt-4o'])],
       [
@@ -191,10 +190,11 @@ describe('the closed role set is visible', () => {
     )
     await vi.waitFor(() => expect(roleRows(container).length).toBe(4))
     expect(text(roleRows(container)[3])).toMatch(/Auditing/)
-    expect(text(roleRows(container)[3])).toMatch(/answering role.*OpenAI|OpenAI.*answering role/i)
+    expect(text(roleRows(container)[3])).toMatch(/No model assigned/)
+    expect(text(roleRows(container)[3])).not.toMatch(/answering role/i)
   })
 
-  it('shows that an unassigned summarizing role uses the answering endpoint', async () => {
+  it('says an unassigned summarizing role cannot be used, rather than promising a fallback', async () => {
     const { container } = mountRoles(
       [ep('e1', 'OpenAI', ['gpt-4o'])],
       [
@@ -204,7 +204,8 @@ describe('the closed role set is visible', () => {
       ],
     )
     await vi.waitFor(() => expect(roleRows(container).length).toBe(3))
-    expect(text(roleRows(container)[2])).toMatch(/answering role.*OpenAI|OpenAI.*answering role/i)
+    expect(text(roleRows(container)[2])).toMatch(/No model assigned/)
+    expect(text(roleRows(container)[2])).not.toMatch(/answering role/i)
   })
 })
 

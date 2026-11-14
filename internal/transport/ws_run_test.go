@@ -132,7 +132,7 @@ func TestRunResolved_ACompletedOutcomeMayNameNoEntry(t *testing.T) {
 // protocol phase: cancellation addresses the broker request id, the renderer
 // is told to withdraw it, and no command can create an execution artifact.
 func TestRun_ContextCancellationWithdrawsBeforeExecution(t *testing.T) {
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

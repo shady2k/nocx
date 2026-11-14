@@ -342,31 +342,30 @@ func TestAProposalJoinsItsTurnAndTheApprovedCallDoesNotJoinAgain(t *testing.T) {
 	led := &fakeLedger{}
 	approvals := NewApprovalStore()
 	mw := middlewareForTurn(t, grant, led, approvals, nil, &fakeKnownMaterial{}, "turn-entry")
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	q.before = func() {
+		// While the question is open: the call is recorded as a proposal
+		// and has not run.
+		got := led.recordedCauses()
+		if len(got) != 1 || got[0].turn != "turn-entry" || got[0].caused != "entry-files.read" {
+			t.Errorf("causes after the escalation = %+v, want the proposal joined to the turn", got)
+			return
+		}
+		if got[0].position != 0 {
+			t.Errorf("the proposal took position %d, want 0", got[0].position)
+		}
+	}
+	mw.kernel.questioner = q
 
-	// The ask: the call is recorded as a proposal and suspends.
-	if _, err := wrappedEndpoint(mw, "files.read", "call-1", args); err == nil {
-		t.Fatal("the call ran — an ask matrix must escalate it")
-	}
-	got := led.recordedCauses()
-	if len(got) != 1 || got[0].turn != "turn-entry" || got[0].caused != "entry-files.read" {
-		t.Fatalf("causes after the escalation = %+v, want the proposal joined to the turn", got)
-	}
-	if got[0].position != 0 {
-		t.Fatalf("the proposal took position %d, want 0", got[0].position)
-	}
-
-	// The person says yes, and the approved call runs as a SUBSEQUENT
-	// attempt of that same entry (ADR-0020 decision 4). It is not a second
-	// cause: the question already holds the place in the turn, and joining
-	// again would move it to after everything that followed it.
-	if !approvals.Approve(Approval{
-		RunID: "run-1", Attempt: 1, Tool: "files.read",
-		CallID: "call-1", ArgHash: canonicalArgHash(args),
-	}) {
-		t.Fatal("the exact proposal the middleware asked about was not pending")
-	}
+	// The person says yes, and the approved call runs as a SUBSEQUENT attempt
+	// of that same entry (ADR-0020 decision 4). It is not a second cause: the
+	// question already holds the place in the turn, and joining again would
+	// move it to after everything that followed it.
 	if _, err := wrappedEndpoint(mw, "files.read", "call-1", args); err != nil {
 		t.Fatalf("the approved call: %v", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatal("the call ran without being asked — an ask matrix must ask")
 	}
 	after := led.recordedCauses()
 	if len(after) != 1 || after[0].position != 0 {

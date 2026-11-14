@@ -65,8 +65,6 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/skill"
-	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -119,7 +117,6 @@ type App struct {
 	Updater                 update.Updater
 	Profiles                profile.ProfileRepository
 	Credentials             credential.SecretStore
-	skills                  assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -447,10 +444,6 @@ type optionSet struct {
 	// run and never writes four megabytes to prove a two-line wiring. nil
 	// means the embedded artifacts, which is production.
 	helperArtifacts deploy.ArtifactSource
-	// forgeAPIBase and forgeRawBase override the GitHub resolver endpoints.
-	// Empty values retain the resolver's production defaults.
-	forgeAPIBase string
-	forgeRawBase string
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
@@ -684,17 +677,6 @@ func New(opts ...Option) (*App, error) {
 	paths, err := storage.NewAppPaths()
 	if err != nil {
 		return nil, fmt.Errorf("storage paths: %w", err)
-	}
-
-	skillRoots := []skill.Root{
-		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
-		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
-		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
-		// LAST, and the order is the whole of the precedence decision:
-		// discovery's seen map is the entire collision rule, so a skill
-		// downloaded from a URL can never shadow one the person wrote or
-		// one we ship.
-		{Dir: filepath.Join(paths.ConfigDir(), "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}
 
 	// THE PROCESS'S DIAGNOSTIC RECORD (nocx-3an1s.1.8). Created before
@@ -1129,31 +1111,6 @@ func New(opts ...Option) (*App, error) {
 
 	settingsRegistry := settings.New(docStore, v)
 
-	// The skill library is built after the settings registry so the ageing
-	// threshold is read at evaluation time. A notifier is unnecessary: List
-	// calls the function on each discovery pass, so a changed setting applies
-	// without rebuilding the store.
-	skills := skill.NewStore(
-		skill.OSFileSystem{},
-		skillRoots,
-		docStore,
-		skill.WithFetcher(apiFetcher),
-		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
-		// The clock is NAMED here rather than defaulted inside the store. The
-		// store stamps a skill's first-seen date and reads it back to decide
-		// ageing, so which clock it uses is a composition decision like every
-		// other seam on this line — and an option only tests ever pass is an
-		// option nothing in the product has agreed to.
-		skill.WithClock(time.Now),
-		skill.WithIdleDays(func() int {
-			days, settingErr := settingsRegistry.GetNumber(settings.SkillsIdleDays)
-			if settingErr != nil {
-				return 0
-			}
-			return int(days)
-		}),
-	)
-
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
 	// their UPGRADE rule, not in their secrecy. History rebuilds its file
@@ -1215,7 +1172,7 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
 	// Recovery runs BEFORE anything serves, and under its declared budget
 	// (ADR-8eej3e66 §5, stage 7): a rollback that cannot finish inside it must
 	// stop the start rather than hand a half-applied generation to the first
@@ -1464,15 +1421,6 @@ func New(opts ...Option) (*App, error) {
 		// pane nocx opens standing inside a recorded checkout moves its
 		// last-used forward, through the one note both open callers share.
 		transport.WithPaneOpenedNote(checkouts.notePaneOpened),
-		// Where skills.audit files what a model concluded, once it has
-		// answered (ws_skill_audit.go), and where skills.check reads it back
-		// for free (ws_skill_check.go) — one repository, one writer, one
-		// reader that spends nothing. With the store stubbed — no content
-		// key — Put refuses and the audit still returns its report with
-		// stored:"no", and Get answers found:false with no error, so a
-		// check the person already spent a model call on is never swallowed
-		// and a check nobody made never looks like a broken store.
-		transport.WithSkillChecks(contentDB.SkillChecks()),
 		// The durable sink for what a session prints while nothing is
 		// attached (nocx-22k1c.1). It is the replay ring's consumer in that
 		// interval, so a session whose window is closed keeps running past
@@ -2100,14 +2048,13 @@ func New(opts ...Option) (*App, error) {
 	// vault, ledger, and shell-integration documents; no policy layer can
 	// widen it.
 	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
-	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor, skill.FilesystemRoots(skillRoots))
+	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor)
 	if err != nil {
 		return nil, err
 	}
 	tpOpts = append(tpOpts,
 		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
-		transport.WithSkillSource(skills),
 		transport.WithAgentToolRegistry(agentToolRegistry),
 		transport.WithAgentFetcher(apiFetcher),
 	)
@@ -2791,7 +2738,6 @@ func New(opts ...Option) (*App, error) {
 		UploadSources:           tp.UploadSources(),
 		ShellIntegration:        shint,
 		Credentials:             v,
-		skills:                  skills,
 		vaultCloser:             v,
 		noteCloser:              noteCloser,
 		contentCloser:           contentDB,

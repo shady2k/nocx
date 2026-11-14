@@ -208,9 +208,9 @@ func TestReadScript_WithNoProviderFactorySaysSo(t *testing.T) {
 
 // ── the wire ──────────────────────────────────────────────────────────────
 
-func scriptSuspension(readings *[]assistant.ScriptReading) func(runID string) error {
-	return func(runID string) error {
-		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+func scriptAsk(readings *[]assistant.ScriptReading) func(runID string) approvalAsk {
+	return func(runID string) approvalAsk {
+		return approvalAsk{policy: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 			Arguments: `{"command":"bash deploy.sh","sessionId":"s"}`,
 			ArgHash:   "hash-a",
@@ -273,7 +273,7 @@ func TestAgentApprovalRequested_ScriptsOverTheWireConformsToContract(t *testing.
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	var readings []assistant.ScriptReading
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: scriptSuspension(&readings)},
+		{ask: scriptAsk(&readings)},
 	}}
 	h := newScriptHarness(t, client)
 	const body = "#!/bin/sh\nrm -rf /srv/app\n"
@@ -329,7 +329,7 @@ func TestAgentApprovalRequested_ScriptsOverTheWireConformsToContract(t *testing.
 func TestAgentApprovalRequested_NoScriptIsNoFieldOnTheWire(t *testing.T) {
 	var none []assistant.ScriptReading
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: scriptSuspension(&none)},
+		{ask: scriptAsk(&none)},
 	}}
 	h := newScriptHarness(t, client)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
@@ -354,7 +354,7 @@ func TestAgentApprovalRequested_NoScriptIsNoFieldOnTheWire(t *testing.T) {
 func TestAgentApprovalRequested_AnUnreadableScriptCarriesItsSentence(t *testing.T) {
 	var readings []assistant.ScriptReading
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: scriptSuspension(&readings)},
+		{ask: scriptAsk(&readings)},
 	}}
 	h := newScriptHarness(t, client)
 	// Nothing is written: the command names a file that is not there.

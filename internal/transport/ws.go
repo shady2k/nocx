@@ -787,9 +787,6 @@ type WSServer struct {
 	// endpoints.probe and agent.status's last-probe fact. When nil, the
 	// endpoints.probe method answers -32601 "agent not available".
 	assistantClient assistant.Client
-	// skillLibrary is the single filesystem-backed owner for skills.read and
-	// the skills mutation tools.
-	skillLibrary assistant.SkillLibrary
 	// agentTools is the registry used to decide which declarations this run
 	// may be offered. It is the same assembled table used by the assistant.
 	agentTools agenttools.Registry
@@ -942,11 +939,6 @@ type WSServer struct {
 	// it from contentDB; tests can inject failure behavior without replacing
 	// the rest of ContentDB.
 	blockRowsStore blockOutputStore
-	// skillChecks is where skills.audit files what a model concluded, once
-	// it has answered (ws_skill_audit.go). When nil, an audit still returns
-	// its report and says stored:"no" — a store failure or a missing store
-	// must never swallow an answer the person already spent a model call on.
-	skillChecks skillCheckStore
 	// hostSessionInventory answers what active helper generations hold. It is
 	// nil when the helper plane is not wired, which is a visible unavailable
 	// method rather than a fabricated empty answer.
@@ -1533,26 +1525,8 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
-// WithSkillSource attaches the single skill library used by assistant asks.
-func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
-	return func(ws *WSServer) { ws.skillLibrary = source }
-}
-
-// WithSkillChecks attaches the repository skills.audit writes a verdict to
-// once the model has answered (ws_skill_audit.go). It is wired beside
-// WithContentDB, the same way WithSessionOutputRecorder is — a distinct
-// option computed by calling the sub-repository getter on the content db —
-// rather than derived lazily from s.contentDB at registration time, so a nil
-// contentDB and a nil skillChecks are two independent facts a test can set
-// apart. When nil, a successful audit still returns its report and says
-// stored:"no", because a store that is not there must not swallow the
-// answer a model was already billed for.
-func WithSkillChecks(store skillCheckStore) WSServerOption {
-	return func(ws *WSServer) { ws.skillChecks = store }
-}
-
-// WithAgentToolRegistry attaches the registry used by the assistant engine.
-// Prompt indexing asks this registry which declarations the grant permits.
+// WithAgentToolRegistry attaches the registry used by the assistant engine:
+// the one declaration table that decides which tools a run may be offered.
 func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
 	return func(ws *WSServer) { ws.agentTools = reg }
 }
@@ -2230,7 +2204,7 @@ func (s *WSServer) buildControlPlane() {
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(work)...)
 	specs = append(specs, s.checkoutsStatusSpecs(work)...)
-	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(work, contentOrder)...)
 	specs = append(specs, s.layoutSpecs(work, contentOrder)...)
 	specs = append(specs, s.shellSpecs(gates.session)...)

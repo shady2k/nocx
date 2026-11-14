@@ -265,7 +265,7 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 	wg := launcherStandIn(t, w, stop)
 	defer func() { close(stop); wg.Wait() }()
 
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{}, nil)
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant client: %v", err)
 	}

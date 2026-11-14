@@ -16,7 +16,6 @@ package assistant
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,16 +51,21 @@ func readArgs(path string) string { return `{"path":"` + path + `"}` }
 // approval request it raised, or nil with the refusal the model was handed.
 func askFor(t *testing.T, mw *policyMiddleware, callID, args string) (*ApprovalRequest, string) {
 	t.Helper()
-	out, err := mw.kernel.Invoke(context.Background(), "files.read", callID, args)
-	var asked *ApprovalRequestedError
-	if errors.As(err, &asked) {
-		if asked.Request == nil {
-			t.Fatalf("%s: the suspension carried no request", callID)
-		}
-		return asked.Request, ""
+	store := mw.kernel.approvals
+	if store == nil {
+		store = NewApprovalStore()
 	}
+	// The person says yes: these tests are about WHICH questions are raised,
+	// and a no would both end this call's part and refuse every call behind
+	// it in the same turn (the turn's order), hiding the second question.
+	q := &recordingQuestioner{store: store, answer: Approved{}}
+	mw.kernel.questioner = q
+	out, err := mw.kernel.Invoke(context.Background(), "files.read", callID, args)
 	if err != nil {
 		t.Fatalf("%s: unexpected error: %v", callID, err)
+	}
+	if len(q.asked) > 0 {
+		return q.asked[0], ""
 	}
 	return nil, out
 }
@@ -248,7 +252,7 @@ func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, a
 			break
 		}
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

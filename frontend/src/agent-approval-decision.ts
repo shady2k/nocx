@@ -52,8 +52,8 @@ export interface ApprovalDecisionSeams {
 /**
  * Put one answer on the wire. Resolves true when the decision was RECORDED,
  * which is what lets the caller close the question and show the next one; a
- * refusal resolves false and leaves it open, so the person sees the honest
- * refusal and can answer anew or deny.
+ * refusal resolves false and leaves retirement to the backend notification.
+ * Expired or withdrawn questions are no longer answerable and must not stay open.
  *
  * The scope travels WITH the decision because the backend applies it: a
  * renderer that read the matrix, edited a row and wrote it back would be a

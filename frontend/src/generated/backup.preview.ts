@@ -19,9 +19,6 @@ export interface BackupRestorePreview {
   snippets: {
     included: number
   }
-  skills: {
-    included: number
-  }
   connectionsRequiringCredential: ProfileRef[]
   omissions: {
     credentialBindingsRemoved: number

@@ -185,7 +185,7 @@
 
 /* A link's target and an image's source, shown as TEXT because neither ever
    becomes an element (markdown-preview.ts). Dimmed: it is there so a person
-   auditing a skill can see where it points, not to be read as prose. */
+   can see where it points, not to be read as prose. */
 .ui-md-inert {
   color: var(--color-text-dim);
 }

@@ -1546,6 +1546,19 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'No agent has asked yet. The question comes up the first time you start one in a pane.',
   'agents.access.forget.ariaHead': 'Forget the answer for',
   'agents.access.forget.ariaOn': 'on',
+  'agents.installed.title': 'Agents on this computer',
+  'agents.installed.desc':
+    "Which of the agents nocx can run are on your login shell's PATH, the version each reports, and whether it says it can answer. Nothing here starts an agent or changes how the assistant answers.",
+  'agents.installed.listAria': 'Agents on this computer',
+  'agents.installed.refresh': 'Refresh',
+  'agents.installed.loading': 'Looking for the agents on your login shell’s PATH…',
+  'agents.installed.failedHead': 'Could not look for the agents:',
+  'agents.installed.notInstalled': 'Not installed',
+  'agents.installed.installed': 'Installed',
+  'agents.installed.ready': 'Ready',
+  'agents.installed.notReady': 'Not ready',
+  'agents.installed.invalid': 'Not usable',
+  'agents.installed.unknown': 'Could not tell',
   'agents.calibrate.title': 'Calibrate an agent',
   'agents.cal.desc':
     'nocx asks you to drive your agent into one named state at a time and labels the screen with the state it asked for. The labelled set is what a detection rule is then checked against — a rule verified against a recording nobody produced on purpose proves nothing.',
@@ -1672,6 +1685,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.fallback.perms.title': 'Assistant permissions',
   'settings.fallback.access.title': 'Agent access',
   'settings.fallback.agents.title': 'Agents',
+  'settings.fallback.installed.title': 'Agents on this computer',
   'settings.fallback.screens.title': 'Agent screens',
   'settings.fallback.rules.title': 'Agent rules',
   'settings.fallback.calibrate.title': 'Calibrate an agent',
@@ -1683,6 +1697,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.fallback.perms.body': 'Your assistant permissions are not available in this window.',
   'settings.fallback.access.body': 'Which agents are allowed is not available in this window.',
   'settings.fallback.agents.body': 'Agent launch records are not available in this window.',
+  'settings.fallback.installed.body':
+    'Which agents are on this computer is not available in this window.',
   'settings.fallback.screens.body': 'What an agent is emitting is not available in this window.',
   'settings.fallback.rules.body':
     'Editing the rules nocx reads your agents with is not available in this window.',

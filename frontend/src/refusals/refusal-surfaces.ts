@@ -294,6 +294,7 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'agentRecords.list',
       'agentRecords.save',
       'agentRecords.remove',
+      'agentRecords.detect',
       'policy.get',
       'policy.set',
       'policy.classify',

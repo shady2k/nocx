@@ -82,9 +82,9 @@ func (t *turn) Cancel(ctx context.Context) error {
 	default:
 	}
 	t.cancelOnce.Do(func() {
-		if !t.state.status.CompareAndSwap(turnActive, turnCancelled) {
-			return
-		}
+		cancelled := t.state.status.CompareAndSwap(turnActive, turnCancelled)
+		// A decoded terminal may still be blocked on the event consumer. Always
+		// bound shutdown; Base.Cancel also interrupts its event forwarding.
 		go func() {
 			timer := time.NewTimer(abortGrace)
 			defer timer.Stop()
@@ -94,6 +94,9 @@ func (t *turn) Cancel(ctx context.Context) error {
 				_ = t.Process.Cancel(context.Background())
 			}
 		}()
+		if !cancelled {
+			return
+		}
 		go func() {
 			if err := t.writeCommand(map[string]string{"type": "abort"}); err != nil {
 				_ = t.Process.Cancel(context.Background())
@@ -122,7 +125,7 @@ func (t *turn) Wait(ctx context.Context) (harness.Outcome, error) {
 // The writer is released when the cancellation grace timer kills that agent.
 func (t *turn) write(ctx context.Context, value any) error {
 	result := make(chan error, 1)
-	go func() { result <- t.writeCommand(value) }()
+	go func() { result <- t.writeActiveCommand(value) }()
 	select {
 	case err := <-result:
 		return err
@@ -135,6 +138,18 @@ func (t *turn) write(ctx context.Context, value any) error {
 		}
 		return err
 	}
+}
+
+// writeActiveCommand admits work only while the turn is active. The check
+// shares the command mutex with abort: admitted writes precede abort, and work
+// queued behind abort cannot start a new operation afterward.
+func (t *turn) writeActiveCommand(value any) error {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	if t.state.status.Load() != turnActive {
+		return harness.ErrCancelled
+	}
+	return json.NewEncoder(t.Process.Stdin()).Encode(value)
 }
 
 func (t *turn) writeCommand(value any) error {
@@ -155,7 +170,7 @@ func cancellationResult(cancelled bool, outcome harness.Outcome, err error) (har
 
 func (t *turn) startPrompt(text string) {
 	go func() {
-		if err := t.write(context.Background(), map[string]string{"type": "prompt", "message": text}); err != nil {
+		if err := t.write(context.Background(), map[string]string{"type": "prompt", "message": text}); err != nil && !errors.Is(err, harness.ErrCancelled) {
 			_ = t.Process.Cancel(context.Background())
 		}
 	}()

@@ -2,6 +2,8 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,5 +64,86 @@ func TestModelSelectionRejectsUnavailableInAnsweringProcess(t *testing.T) {
 	events, err := selection.Decode([]byte(`{"type":"response","command":"set_model","success":false,"error":"Model not found"}`))
 	if err != nil || len(events) != 1 || events[0].Kind != harness.EventFailure || !strings.Contains(events[0].Failure.Reason, "fixture/original") {
 		t.Fatalf("events = %+v, %v", events, err)
+	}
+}
+
+func TestRealPiCancellationDuringModelSelectionMakesNoProviderRequest(t *testing.T) {
+	for _, gate := range []string{"before_set_model", "set_model", "get_state"} {
+		t.Run(gate, func(t *testing.T) {
+			c, fake := configuredPi(t)
+			state := &cancelState{}
+			selection := newModelSelection("nocx-test/test-model", newDecoder(state))
+			reached, release := make(chan struct{}), make(chan struct{})
+			var commands []string
+			decode := func(line []byte) ([]harness.Event, error) {
+				var response struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				}
+				_ = json.Unmarshal(line, &response)
+				if response.Type == "response" {
+					commands = append(commands, response.Command)
+				}
+				if response.Type == "response" && response.Command == gate {
+					close(reached)
+					<-release
+				}
+				return selection.Decode(line)
+			}
+			process, err := (harness.Base{}).Start(context.Background(), harness.Launch{
+				Argv: []string{"pi", "--mode", "rpc", "--no-session", "--no-builtin-tools", "--model", "nocx-test/test-model"},
+				Env:  c.env, Decode: decode, CompleteOnEnd: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn := newTurn(context.Background(), process, func() error { return nil }, state)
+			t.Cleanup(func() { _ = process.Cancel(context.Background()); _, _ = process.Wait(context.Background()) })
+			ctx, cancel := context.WithTimeout(context.Background(), abortGrace+5*time.Second)
+			defer cancel()
+			if gate == "before_set_model" {
+				turn.writeMu.Lock()
+			}
+			selectionDone := make(chan struct{})
+			go func() { selection.prompt(turn, "must not call provider"); close(selectionDone) }()
+			if gate != "before_set_model" {
+				select {
+				case <-reached:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			cancelCtx, stop := context.WithCancel(context.Background())
+			stop()
+			_ = turn.Cancel(cancelCtx)
+			if gate == "before_set_model" {
+				turn.writeMu.Unlock()
+			} else {
+				// Deliver abort while idle, before the gated response admits the
+				// next command. Abort does not prohibit a later prompt in pi.
+				if err := turn.writeCommand(map[string]string{"type": "abort"}); err != nil {
+					t.Fatal(err)
+				}
+				close(release)
+			}
+			select {
+			case <-selectionDone:
+			case <-ctx.Done():
+				t.Fatal("selection writer retained")
+			}
+			if _, err := turn.Wait(ctx); !errors.Is(err, harness.ErrCancelled) {
+				t.Fatalf("Wait = %v", err)
+			}
+			for range turn.Events() {
+			}
+			for _, command := range commands {
+				if gate == "before_set_model" && command == "set_model" || gate == "set_model" && command == "get_state" {
+					t.Fatalf("command %s admitted after cancellation at %s", command, gate)
+				}
+			}
+			if requests := fake.Requests(); len(requests) != 0 {
+				t.Fatalf("cancelled selection made %d provider requests", len(requests))
+			}
+		})
 	}
 }

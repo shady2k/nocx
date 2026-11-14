@@ -3,6 +3,7 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -69,8 +70,10 @@ func (s *modelSelection) prompt(t *turn, text string) {
 		{"type": "set_model", "provider": provider, "modelId": model},
 		{"type": "get_state"},
 	} {
-		if err := t.writeCommand(command); err != nil {
-			_ = t.Process.Cancel(context.Background())
+		if err := t.writeActiveCommand(command); err != nil {
+			if !errors.Is(err, harness.ErrCancelled) {
+				_ = t.Process.Cancel(context.Background())
+			}
 			return
 		}
 		select {

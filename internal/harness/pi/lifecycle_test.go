@@ -23,6 +23,11 @@ func TestPiLifecycleHelper(t *testing.T) {
 		fmt.Println(`{"type":"ready"}`)
 		<-time.After(time.Hour)
 		os.Exit(0)
+	case "terminal-backpressure":
+		fmt.Println(`{"type":"fill"}`)
+		fmt.Println(`{"type":"agent_settled"}`)
+		_, _ = os.Stdin.Read(make([]byte, 1))
+		os.Exit(0)
 	case "success":
 		fmt.Println(`{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"answer"}],"model":"test"}}`)
 		fmt.Println(`{"type":"agent_settled"}`)
@@ -230,5 +235,57 @@ func TestRunCancelsBlockedInitialPrompt(t *testing.T) {
 		if entry.IsDir() {
 			t.Fatalf("retained turn directory: %s", entry.Name())
 		}
+	}
+}
+
+// The decoder has claimed End, but Base cannot publish it until a consumer
+// drains its 64 queued events. Cancel must not depend on that consumer.
+func TestCancellationBoundsTerminalBackpressure(t *testing.T) {
+	state := &cancelState{}
+	decode := newDecoder(state)
+	claimed := make(chan struct{})
+	p := lifecycleProcess(t, "terminal-backpressure", func(line []byte) ([]harness.Event, error) {
+		if strings.Contains(string(line), `"fill"`) {
+			events := make([]harness.Event, 64)
+			for i := range events {
+				events[i] = harness.Event{Kind: harness.EventAnswerDelta, Text: "queued"}
+			}
+			return events, nil
+		}
+		events, err := decode(line)
+		close(claimed)
+		return events, err
+	})
+	cleaned := make(chan struct{})
+	turn := newTurn(context.Background(), p, func() error { close(cleaned); return nil }, state)
+	ctx, cancel := context.WithTimeout(context.Background(), abortGrace+3*time.Second)
+	defer cancel()
+	select {
+	case <-claimed:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := turn.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel blocked behind terminal publication: %v", err)
+	}
+	if _, err := turn.Wait(ctx); !errors.Is(err, harness.ErrCancelled) {
+		t.Fatalf("Wait = %v", err)
+	}
+	select {
+	case <-cleaned:
+	default:
+		t.Fatal("turn cleanup did not finish")
+	}
+	var ends, failures int
+	for event := range turn.Events() {
+		if event.Kind == harness.EventEnd {
+			ends++
+		}
+		if event.Kind == harness.EventFailure {
+			failures++
+		}
+	}
+	if ends != 0 || failures != 1 {
+		t.Fatalf("terminal events: ends=%d failures=%d", ends, failures)
 	}
 }

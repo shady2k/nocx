@@ -13,8 +13,9 @@
  *   A person asks for something that runs a long command. The assistant
  *   proposes it, they answer the approval, the command runs — and while it is
  *   running they press Stop on the answer's own block. The block reads
- *   `stopped`, no event about that turn follows, no tool result ever reaches
- *   the model, and the next question in the same pane completes normally.
+ *   `stopped`, no event about that turn follows, and the next question in the
+ *   same pane completes normally. Its model request carries the cancelled
+ *   call's result: the person cancelled, not command output or a transport error.
  *
  * THE CALL IS REAL AND LONG. `session.run` with `sleep 60` is proposed by the
  * scripted model; the renderer types it into the pane exactly as a person
@@ -43,10 +44,10 @@
  * turn's `cancelled` runState and closes at the NEXT turn's `completed`
  * runState, so a late delta, a late tool call or a second state for the
  * stopped run would be inside the window rather than racing an arbitrary
- * sleep. The model's own half is the same fact on the other side of the wire:
- * no chat-completions request after the stop carries a tool message, because a
- * tool result that left the tool would be the only thing that could put one
- * there.
+ * sleep. The cancelled turn never resumes the model. The next turn resumes
+ * pi's persisted conversation with the explicit cancellation result for the
+ * stopped call (ADR-4khgzeyp §§3–4), never the interrupted command's output or
+ * the socket closing as a transport error.
  */
 import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
@@ -62,6 +63,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { configurePiHome } from './pi-home'
+import { terminalContext } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -76,6 +78,8 @@ const nonce = Date.now().toString(36)
  *  found by. Sixty seconds is long enough that nothing but the person's Stop
  *  can end it inside this test. */
 const COMMAND = 'sleep 60'
+const CANCELLED_CALL =
+  'The person cancelled this call before it finished. Do not repeat it unless they ask.'
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -148,9 +152,8 @@ function chatRequests(fake: FakeOpenAI, from: number): FakeRequest[] {
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
 }
 
-/** All model-facing tool messages, including prior turns. Unlike ordinary
- * result readers, this must not start at the latest user message: a cancelled
- * call's late result carried into the next ask would still violate Stop. */
+/** All model-facing tool messages, including prior turns: pi must persist
+ * the cancelled call's result and carry it into the next question. */
 function toolMessages(body: string): string[] {
   const parsed = JSON.parse(body) as {
     messages?: { role?: string; content?: string | { type?: string; text?: string }[] }[]
@@ -323,17 +326,23 @@ test.describe('cancelling a turn stops the call it is running (nocx-a62cl.4.1)',
       `events for the stopped run after its cancelled state: ${JSON.stringify(after)}`,
     ).toEqual([])
 
-    // ── NO TOOL RESULT REACHED THE MODEL. The stopped turn's call is the only
-    //    thing that could have produced one, and a request carrying a tool
-    //    message is that result leaving.
+    // pi may begin a model continuation after receiving the tool result but
+    // before processing abort. The next question must resume that result from
+    // disk, regardless of whether that intermediate round started.
     const requests = chatRequests(fake, base)
-    const withToolResults = requests.filter((request) => toolMessages(request.body).length > 0)
+    expect(toolMessages(requests[0].body)).toEqual([])
+    const nextRequests = requests.filter((request) => terminalContext(request.body).includes(NEXT))
+    expect(nextRequests).toHaveLength(1)
+    const nextRequest = nextRequests[0]
     expect(
-      withToolResults.map((request) => request.body),
-      'a tool result was sent to the model after the person stopped the turn',
-    ).toEqual([])
-    // One model round for the stopped turn (the proposal) and one for the
-    // next question: the stop ended the turn rather than resuming it.
-    expect(requests).toHaveLength(2)
+      toolMessages(nextRequest.body),
+      'the resumed conversation must record the person cancelling, not command output or a transport error',
+    ).toEqual([CANCELLED_CALL])
+    const resumed = JSON.parse(nextRequest.body) as {
+      messages: { role: string; tool_call_id?: string }[]
+    }
+    expect(resumed.messages.filter((message) => message.role === 'tool')).toEqual([
+      expect.objectContaining({ tool_call_id: 'call_long' }),
+    ])
   })
 })

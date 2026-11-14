@@ -531,7 +531,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(answerBody).not.toContainText('command not found')
   })
 
-  test('a second ask while the first streams lands its deltas on the right entry', async ({
+  test('a second ask waits for the first to end and both answers land in order', async ({
     page,
   }) => {
     await openApp(page)
@@ -547,14 +547,20 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const { block: blockA } = await runCommand(page, cmdA, markerA)
     const { block: blockB } = await runCommand(page, cmdB, markerB)
 
-    // Request 1 is held after its first chunk; request 2 answers at once.
+    // Request 1 stays open until released. Request 2 must wait behind it.
     const answerA = `Answer one: ${markerA}`
     const answerB = `Answer two: ${markerB}`
     // The fake's request ids accumulate across the file's tests; every index
     // and release below is relative to this test's first request.
     const base = fake.requests().length
+    let secondStartedAfterFirstFinished = false
     fake.setScript({ chunks: ['Answer one: ', markerA], holdAfter: 1 })
-    fake.setScript({ chunks: ['Answer two: ', markerB] })
+    fake.setScript({
+      chunks: () => {
+        secondStartedAfterFirstFinished = fake.requests()[base]?.state === 'done'
+        return ['Answer two: ', markerB]
+      },
+    })
 
     // Ask about A; the stream opens and is held.
     // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
@@ -591,25 +597,37 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
     await askFromPrompt(page, q2)
 
+    // The second question has been accepted into the pane, but cannot reach
+    // the model while the first turn is open. No steering is requested here.
+    const blockQ2 = answerBlockOf(page, q2)
+    await expect(blockQ2).toHaveCount(1)
+    await expect(page.locator(INPUT)).toHaveText('')
+    expect(fake.requests()[base]?.state).toBe('streaming')
+    expect(fake.requests()).toHaveLength(base + 1)
+    await expect(blockQ1).not.toHaveAttribute('data-outcome', 'success')
+    await expect(blockQ2.locator('.cmd-output[data-answer-body]')).toHaveCount(0)
+
+    // Ending the first turn releases the queued question. Each new user
+    // message carries only its own attachment; the conversation may still
+    // include the earlier question and answer as history.
+    fake.release(req1.id)
+    await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
     const reqs2 = await fake.waitForRequests(base + 2)
     const req2 = reqs2[base + 1]
-    // Each payload carries its own block's output and no other's.
-    expect(req1.body).toContain(markerA)
-    expect(req1.body).not.toContain(markerB)
-    expect(req2.body).toContain(markerB)
-    expect(req2.body).not.toContain(markerA)
-    // The second ask was made while the first stream was GENUINELY open —
-    // a state fact, asserted directly: nothing has released request 1.
-    expect(fake.requests()[base]?.state).toBe('streaming')
-
-    // Release the first stream; both runs terminalize.
-    fake.release(req1.id)
+    expect(terminalContext(req1.body)).toContain(markerA)
+    expect(terminalContext(req1.body)).not.toContain(markerB)
+    expect(terminalContext(req2.body)).toContain(q2)
+    expect(terminalContext(req2.body)).toContain(markerB)
+    expect(terminalContext(req2.body)).not.toContain(markerA)
     await expect.poll(() => fake.requests()[base]?.state).toBe('done')
     await expect.poll(() => fake.requests()[base + 1]?.state).toBe('done')
+    expect(
+      secondStartedAfterFirstFinished,
+      'the second model call started before the first ended',
+    ).toBe(true)
 
     // The deltas landed on the RIGHT entries: two distinct answer blocks,
     // each holding its own answer and not the other's.
-    const blockQ2 = answerBlockOf(page, q2)
     await expect(blockQ1).toHaveCount(1)
     await expect(blockQ2).toHaveCount(1)
     const body1 = blockQ1.locator('.cmd-output[data-answer-body]')
@@ -620,6 +638,12 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(body2).not.toContainText(answerA)
     await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
     await expect(blockQ2).toHaveAttribute('data-outcome', 'success')
+    const questions = page
+      .locator('.pane.active .cmd-block')
+      .filter({ hasText: /Question (one|two) about/ })
+    await expect(questions).toHaveCount(2)
+    await expect(questions.nth(0)).toContainText(q1)
+    await expect(questions.nth(1)).toContainText(q2)
   })
 })
 

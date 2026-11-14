@@ -84,7 +84,7 @@ func (s *Service) Watch(ctx context.Context, d proto.SSHDestination) (func(), er
 			Params:  connectionEvent(f),
 		}); err != nil {
 			s.log.Debug("ssh: a connection observation could not be sent",
-				"connection", string(key.ID()), "error", err)
+				"connection", key.ID(), "error", err)
 		}
 	}), nil
 }

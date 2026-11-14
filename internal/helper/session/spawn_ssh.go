@@ -135,9 +135,9 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 	// knows which coordinator asked and which destination it named, and it
 	// outlives this function with the session: a connection that stalls an
 	// hour later is still this pane's.
-	stopWatch, err := p.opener.Watch(ctx, req.Destination)
-	if err != nil {
-		return nil, err
+	stopWatch, watchErr := p.opener.Watch(ctx, req.Destination)
+	if watchErr != nil {
+		return nil, watchErr
 	}
 	kept := false
 	defer func() {
@@ -166,15 +166,15 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		// and the tool socket path, and neither exists until the far side has
 		// been asked for a listener. A command built before them would name a
 		// port nobody listens on and a path nobody answers.
-		listeners, err := p.openPaneListeners(ctx, req)
-		if err != nil {
+		listeners, lerr := p.openPaneListeners(ctx, req)
+		if lerr != nil {
 			// Refused, never degraded: the caller asked for an authenticated
 			// channel, and a launch that carries a port or a path nothing
 			// answers is a shell that blocks until its hello budget runs out
 			// (or an agent that fails for a reason that is not about it). A
 			// caller that wants the pane without the channel opens it without
 			// asking for one.
-			return nil, err
+			return nil, lerr
 		}
 		pane = listeners
 

@@ -536,7 +536,7 @@ func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		clock.Advance(hostconn.ProbeInterval)
 		waittest.WaitFor(t, "the probe to be answered", func() bool {
-			return answered.Load() >= int32(i+1)
+			return int(answered.Load()) >= i+1
 		})
 		if got := lastState(holder.States()).Kind; got != hostconn.Connected {
 			t.Fatalf("a healthy connection reads %v after %v", got, time.Duration(i+1)*hostconn.ProbeInterval)

@@ -188,14 +188,9 @@ func lookThrough(ctx context.Context, hop *gossh.Client, dest string) error {
 	if err != nil {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
-	defer func() { _ = conn.Close() }()
-	// A CHANNEL IS NOT A SOCKET (nocx-oalo1.4.3): x/crypto's channel conn answers
-	// SetDeadline without honouring it, so a context deadline cannot free the
-	// version read below. A destination that accepts the channel and never speaks
-	// would park this look until the hop's connection ended — and the guard has
-	// ONE look slot, so no later look would ever run and the connection would
-	// stop collecting the evidence the person is shown. Cancellation closes the
-	// channel, which is the only thing that frees its read.
+	// THE READ IS THE PART A DEADLINE CANNOT REACH, and the helper below owns the
+	// connection because of it: it returns when the context ends and leaves the
+	// read to end with the channel (see its own comment).
 	line, err := readVersionLineWithin(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
@@ -214,7 +209,6 @@ func lookDirect(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("look %s: %w", addr, err)
 	}
-	defer func() { _ = conn.Close() }()
 	line, err := readVersionLineWithin(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("look %s: %w", addr, err)
@@ -225,25 +219,42 @@ func lookDirect(ctx context.Context, addr string) error {
 	return nil
 }
 
-// readVersionLineWithin reads one version line on a connection the context may
-// not be able to interrupt with a deadline, and frees the read when the context
-// ends by closing the connection.
+// readVersionLineWithin reads one version line on a connection a deadline cannot
+// reach, and gives the CALLER up the moment the context ends. It owns the
+// connection: the caller hands it over and does not close it again.
 //
-// It is the ONE way a look reads its answer, both direct and routed, so there is
-// one answer to "what stops a silent peer". A deadline is the cheaper mechanism
-// where it exists and is still used for the DIAL (lookDirect's net.Dialer); the
-// read is guarded by the close, which works on a socket and on a channel alike.
+// THE READ CANNOT BE FREED FROM HERE, AND CLOSING DOES NOT DO IT (nocx-oalo1.4.3,
+// x/crypto v0.54.0). A channel conn answers SetDeadline with "deadline not
+// supported" (ssh/tcpip.go:535), and a channel's Close only SENDS a close packet
+// (ssh/channel.go:594); a local read is released by the peer's EOF, by the peer's
+// own close arriving, or by the transport ending (ssh/channel.go:427). So the
+// read runs on its own goroutine, the caller returns the instant the context
+// ends — which is what frees the guard's ONE look slot and lets the next look
+// run — and the abandoned read ends when the channel or the connection does. Its
+// lifetime is bounded by the connection's, which is the same bound every channel
+// on that connection has.
+//
+// The close packet is SENT AND NOT WAITED FOR: the case that gets here is a hop
+// that has gone quiet, where the packet has nowhere to go and the write itself
+// parks. It is the honest second half of "public cancellation, not a deadline".
 func readVersionLineWithin(ctx context.Context, conn io.ReadWriteCloser) ([]byte, error) {
-	done := make(chan struct{})
-	defer close(done)
+	type answer struct {
+		line []byte
+		err  error
+	}
+	read := make(chan answer, 1)
 	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
+		line, err := readVersionLine(conn)
+		read <- answer{line: line, err: err}
 	}()
-	return readVersionLine(conn)
+	select {
+	case got := <-read:
+		go func() { _ = conn.Close() }()
+		return got.line, got.err
+	case <-ctx.Done():
+		go func() { _ = conn.Close() }()
+		return nil, ctx.Err()
+	}
 }
 
 // readVersionLine reads one CRLF-terminated version line, bounded the way the

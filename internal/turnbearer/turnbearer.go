@@ -1,28 +1,12 @@
-// Package turnbearer mints and retires the bearer that admits one assistant
-// turn's agent to nocx's tool endpoint.
+// Package turnbearer owns the session bearer that admits an assistant's agent
+// to nocx's tool endpoint. A bearer lives for one agent process; each connection
+// is bound to the immutable authority of the turn running at admission.
 //
-// # Why a bearer at all
-//
-// An agent in a pane reaches the tool endpoint as a process inside that pane's
-// tree, and the endpoint decides which pane from the kernel's peer credentials.
-// The assistant's agent is not in a pane's tree: nocx-server starts it, so the
-// process tree says "the backend" and nothing more. ADR-anntnxdj decision 3
-// gives that case its own way in: nocx-server mints a bearer for the turn,
-// hands it to the MCP bridge the agent launches (nocx-helper mcp --socket) in
-// the child's environment, and retires it when the turn ends. The endpoint
-// checks the bearer at admission and selects the assistant's chain.
-//
-// # What the bearer carries
-//
-// The assistant's already-built run handle. The handle owns the complete bound
-// context, grant minting at admission and refresh after an answer, and the same
-// authority pipeline the in-process caller uses.
-//
-// # The secret
-//
-// The bearer is 32 random bytes in lower-case hex. It is compared in constant
-// time at admission (internal/app's authorizer, through Registry.Lookup), it
-// never appears in the bridge argv, and nothing here logs it.
+// The session actor mints once, calls BeginTurn before sending a prompt, and
+// waits for EndTurn before publishing a terminal or admitting the next turn.
+// Pending includes accepted calls waiting for approval; an idle open connection
+// does not count. A cancelled turn ends its session: the actor must retire the
+// bearer rather than start another turn on it (ADR-4khgzeyp decisions 3 and 5).
 package turnbearer
 
 import (
@@ -38,22 +22,20 @@ import (
 	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 )
 
-// Authority binds a bearer to the assistant's already-built run, not a
-// reconstruction of its grant or pane capabilities.
+// Authority binds an admission to the assistant's already-built run. It is
+// never rebound when the session starts another turn.
 type Authority struct {
 	Tools    assistant.TurnTools
 	lifetime *turnLifetime
 }
 
-// turnLifetime serializes publication with retirement without retaining a
-// permanent endpoint tombstone for every completed turn.
 type turnLifetime struct {
 	mu   sync.Mutex
 	live bool
 }
 
-// Publish makes publication part of the live bearer decision. A lookup made
-// before retirement cannot publish after retirement has closed this lifetime.
+// Publish serializes admission publication with the end of this authority.
+// An earlier lookup cannot publish a connection after EndTurn closes it.
 func (a Authority) Publish(publish func() bool) bool {
 	if a.lifetime == nil {
 		return false
@@ -63,77 +45,70 @@ func (a Authority) Publish(publish func() bool) bool {
 	return a.lifetime.live && publish()
 }
 
-// TurnBridge is the MCP server entry the agent launches for one turn: the argv
-// and the environment. It is deliberately the same two fields internal/harness's
-// TurnSpec carries, so the next stage maps one to the other without a
-// translation table.
+// TurnBridge is the MCP bridge command and private environment of a session.
+// The bearer is 32 random bytes in lower-case hex and never appears in argv.
 type TurnBridge struct {
 	Command []string
 	Env     []string
 }
 
-// Registry answers which live turn a presented bearer names. It is the
-// authorizer's view of a Minter, so the authorizer cannot mint.
+// Registry is the authorizer's read-only view of the session bearers.
 type Registry interface {
 	Lookup(token string) (Authority, bool)
 }
 
-// Minter is the live set of assistant turns. It mints one bearer per turn,
-// hands back the bridge that presents it, and retires it with the turn.
+// Endpoint supplies turn-scoped call settlement and activity information.
+// The owner closes publication before settling admissions.
+type Endpoint interface {
+	SocketPath() string
+	SettleAdmissions(scope string, epoch toolendpoint.AdmissionEpoch)
+	PendingAdmissions(scope string, epoch toolendpoint.AdmissionEpoch) bool
+}
+
+// Minter owns session bearers and each session's current turn authority.
 type Minter struct {
 	endpoint Endpoint
 	helper   string
-
-	mu    sync.Mutex
-	turns []turn
+	mu       sync.Mutex
+	sessions map[string]*session
 }
 
-// Endpoint is the part of toolendpoint.Endpoint a turn needs: where the bridge
-// connects, and how the turn's connections are closed when it retires.
-type Endpoint interface {
-	SocketPath() string
-	RetireAdmissions(scope string, epoch toolendpoint.AdmissionEpoch) int
-}
-
-type turn struct {
+type session struct {
 	token     string
 	authority Authority
+	settling  chan struct{}
+	retired   bool
 }
 
-// NewMinter builds the set of live turns over the endpoint their bridges reach
-// and the helper binary those bridges exec.
+// NewMinter constructs the session registry without touching the endpoint.
 func NewMinter(endpoint Endpoint, helper string) *Minter {
-	return &Minter{endpoint: endpoint, helper: helper}
+	return &Minter{endpoint: endpoint, helper: helper, sessions: make(map[string]*session)}
 }
 
-// Mint registers one turn, and returns the bridge that presents its bearer and
-// the function that retires it.
-//
-// Retire refuses further admissions of this bearer and closes the connections
-// admitted under the turn — which cancels the calls in flight on them. It is
-// idempotent: a turn ends once.
-func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
+// Mint registers a session without admitting tools until BeginTurn. Retire
+// removes its bearer, closes publication, and waits for accepted calls to
+// settle. The returned retirement function is idempotent.
+func (m *Minter) Mint(id string) (TurnBridge, func(), error) {
 	switch {
 	case m == nil || m.endpoint == nil:
 		return TurnBridge{}, nil, errors.New("turnbearer: no endpoint")
 	case m.helper == "":
 		return TurnBridge{}, nil, errors.New("turnbearer: no helper binary for the bridge")
-	case authority.Tools == nil:
-		return TurnBridge{}, nil, errors.New("turnbearer: no assistant run")
-	case authority.Tools.RunContext().RunID == "":
-		return TurnBridge{}, nil, errors.New("turnbearer: no run id")
-	case authority.Tools.RunContext().Session == "":
+	case id == "":
 		return TurnBridge{}, nil, errors.New("turnbearer: no session")
 	}
 	token, err := mintToken()
 	if err != nil {
 		return TurnBridge{}, nil, err
 	}
+	s := &session{token: token}
 	m.mu.Lock()
-	authority.lifetime = &turnLifetime{live: true}
-	m.turns = append(m.turns, turn{token: token, authority: authority})
+	if _, exists := m.sessions[id]; exists {
+		m.mu.Unlock()
+		return TurnBridge{}, nil, errors.New("turnbearer: session already minted")
+	}
+	m.sessions[id] = s
 	m.mu.Unlock()
-
 	bridge := TurnBridge{
 		Command: []string{m.helper, "mcp", "--socket", m.endpoint.SocketPath()},
 		Env:     []string{turnbind.TokenEnvVar + "=" + token},
@@ -141,25 +116,100 @@ func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
 	var once sync.Once
 	retire := func() {
 		once.Do(func() {
-			// Close publication first. A lookup already in flight still holds
-			// this lifetime and cannot publish after the live bit is cleared.
-			// Then remove the secret and close any published connection.
-			authority.lifetime.mu.Lock()
-			authority.lifetime.live = false
-			authority.lifetime.mu.Unlock()
-			m.forget(token)
-			m.endpoint.RetireAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+			m.mu.Lock()
+			s.retired = true
+			delete(m.sessions, id)
+			s.token = ""
+			m.mu.Unlock()
+			m.endTurn(s)
 		})
 	}
 	return bridge, retire, nil
 }
 
-// Lookup answers which live turn a presented bearer names.
-//
-// THE COMPARISON IS CONSTANT TIME AND DOES NOT STOP AT A MATCH: the bearer is a
-// secret that admits, and a comparison that returned at the first difference
-// would tell a caller how much of a guess was right. The set is small — one
-// turn per assistant run in flight — so comparing all of it is cheap.
+// BeginTurn attaches fresh authority to a minted session. The previous turn
+// must have finished settlement before another turn can begin.
+func (m *Minter) BeginTurn(id string, authority Authority) error {
+	switch {
+	case authority.Tools == nil:
+		return errors.New("turnbearer: no assistant run")
+	case authority.Tools.RunContext().RunID == "":
+		return errors.New("turnbearer: no run id")
+	case authority.Tools.RunContext().Session == "":
+		return errors.New("turnbearer: no run session")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[id]
+	if s == nil || s.retired {
+		return errors.New("turnbearer: unknown session")
+	}
+	if s.authority.lifetime != nil {
+		return errors.New("turnbearer: session already has a turn")
+	}
+	authority.lifetime = &turnLifetime{live: true}
+	s.authority = authority
+	return nil
+}
+
+// EndTurn refuses new admissions, closes turn connections and waits until all
+// accepted calls have settled. The session bearer remains available for the
+// next BeginTurn. Ending an idle or unknown session is a no-op.
+func (m *Minter) EndTurn(id string) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	m.mu.Unlock()
+	if s != nil {
+		m.endTurn(s)
+	}
+}
+
+func (m *Minter) endTurn(s *session) {
+	m.mu.Lock()
+	if s.settling != nil {
+		done := s.settling
+		m.mu.Unlock()
+		<-done
+		return
+	}
+	authority := s.authority
+	if authority.lifetime == nil {
+		m.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	s.settling = done
+	m.mu.Unlock()
+	authority.lifetime.mu.Lock()
+	authority.lifetime.live = false
+	authority.lifetime.mu.Unlock()
+	m.endpoint.SettleAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+	m.mu.Lock()
+	s.authority = Authority{}
+	s.settling = nil
+	close(done)
+	m.mu.Unlock()
+}
+
+// Pending reports accepted tool work, including an approval waiting for an
+// answer. Merely having an open bridge connection is not pending activity.
+func (m *Minter) Pending(id string) bool {
+	m.mu.Lock()
+	s := m.sessions[id]
+	var authority Authority
+	if s != nil {
+		authority = s.authority
+	}
+	m.mu.Unlock()
+	if authority.Tools == nil {
+		return false
+	}
+	return m.endpoint.PendingAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+}
+
+// Lookup returns the turn authority running now, never authority from an idle
+// session. Every bearer is compared in constant time without stopping at a
+// match. Publication must still pass Authority.Publish.
 func (m *Minter) Lookup(token string) (Authority, bool) {
 	if m == nil || token == "" {
 		return Authority{}, false
@@ -167,35 +217,16 @@ func (m *Minter) Lookup(token string) (Authority, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var found Authority
-	matched := 0
-	for _, t := range m.turns {
-		if subtle.ConstantTimeCompare([]byte(t.token), []byte(token)) == 1 {
-			found = t.authority
-			matched = 1
+	matched := false
+	for _, s := range m.sessions {
+		if subtle.ConstantTimeCompare([]byte(s.token), []byte(token)) == 1 && s.authority.lifetime != nil && s.settling == nil {
+			found = s.authority
+			matched = true
 		}
 	}
-	return found, matched == 1
+	return found, matched
 }
 
-// forget removes one token. It is only reached from the retire closure, which
-// holds the token this Minter minted, so the comparison does not have to hide
-// anything from a caller — but it is the same comparison, so there is one rule
-// for "is this the token" in the package.
-func (m *Minter) forget(token string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	kept := m.turns[:0]
-	for _, t := range m.turns {
-		if subtle.ConstantTimeCompare([]byte(t.token), []byte(token)) != 1 {
-			kept = append(kept, t)
-		}
-	}
-	clear(m.turns[len(kept):])
-	m.turns = kept
-}
-
-// mintToken produces one bearer: 32 random bytes, spelled the one way
-// panebind accepts.
 func mintToken() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {

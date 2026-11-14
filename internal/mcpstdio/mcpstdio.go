@@ -966,6 +966,13 @@ func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error)
 	return l.conn, l.nextID, nil
 }
 
+// Assistant bridges keep their session bearer across reconnects. The endpoint
+// closes a turn's connections after settling its calls. A normal agent turn
+// leaves no request in flight; cancelling a turn retires the entire session
+// bearer (ADR-4khgzeyp decisions 3 and 5). Those lifecycle rules, not this
+// transport retry, prevent an abandoned request from reaching a later turn.
+// Only an incomplete frame may be retried once; a complete frame is never replayed.
+//
 // call sends one request over the shared connection and waits for the answer
 // carrying ITS id. Waiting is per request: a cancelled caller stops waiting
 // for its own answer and leaves the connection, and every other call on it,

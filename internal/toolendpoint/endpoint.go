@@ -154,7 +154,7 @@ type Endpoint struct {
 	// happens to end. The epoch is what makes the closing exact: a session can
 	// hold two intervals with identical approval, and only the epoch says which
 	// of them a live connection belongs to.
-	admitted map[string]map[*net.UnixConn]AdmissionEpoch
+	admitted map[string]map[*net.UnixConn]*admission
 	// retired is the highest epoch per pane whose interval has ENDED, and
 	// it only ever moves forward. A publication naming an epoch at or below it
 	// is refused: the interval that decided the admission is over, so a
@@ -165,6 +165,15 @@ type Endpoint struct {
 	// then published", which refuses it.
 	retired map[string]AdmissionEpoch
 	wait    sync.WaitGroup
+}
+
+// admission stays registered until every accepted call and the authorizer's
+// release have completed. All fields except done are protected by Endpoint.mu.
+type admission struct {
+	epoch    AdmissionEpoch
+	pending  int
+	stopping bool
+	done     chan struct{}
 }
 
 // New validates the endpoint configuration and computes its socket path. It
@@ -200,7 +209,7 @@ func New(cfg Config) (*Endpoint, error) {
 		cfg:      cfg,
 		socket:   filepath.Join(cfg.Dir, toolSocketName),
 		conns:    make(map[*net.UnixConn]struct{}),
-		admitted: make(map[string]map[*net.UnixConn]AdmissionEpoch),
+		admitted: make(map[string]map[*net.UnixConn]*admission),
 		retired:  make(map[string]AdmissionEpoch),
 	}
 	// An authorizer whose own authority can end while a connection is open
@@ -282,7 +291,8 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 	}
 	var connections []*net.UnixConn
 	for conn, admitted := range e.admitted[session] {
-		if admitted <= floor {
+		if admitted.epoch <= floor {
+			admitted.stopping = true
 			connections = append(connections, conn)
 		}
 	}
@@ -291,6 +301,54 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 		_ = conn.Close()
 	}
 	return len(connections)
+}
+
+// SettleAdmissions closes connections at or before epoch and waits for their
+// accepted calls and authorizer releases. The authority owner must prevent new
+// publications for this interval before calling it, as with RetireAdmissions.
+func (e *Endpoint) SettleAdmissions(scope string, epoch AdmissionEpoch) {
+	e.RetireAdmissions(scope, epoch)
+	e.mu.Lock()
+	var waiting []<-chan struct{}
+	for _, a := range e.admitted[scope] {
+		if a.epoch <= epoch {
+			waiting = append(waiting, a.done)
+		}
+	}
+	e.mu.Unlock()
+	for _, done := range waiting {
+		<-done
+	}
+}
+
+// PendingAdmissions reports accepted calls, including calls waiting for an
+// approval or still unwinding cancellation. Idle connections do not count.
+func (e *Endpoint) PendingAdmissions(scope string, epoch AdmissionEpoch) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, a := range e.admitted[scope] {
+		if a.epoch <= epoch && a.pending > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Endpoint) acceptRequest(scope string, conn *net.UnixConn) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a := e.admitted[scope][conn]
+	if e.closed || a == nil || a.stopping {
+		return false
+	}
+	a.pending++
+	return true
+}
+
+func (e *Endpoint) finishRequest(scope string, conn *net.UnixConn) {
+	e.mu.Lock()
+	e.admitted[scope][conn].pending--
+	e.mu.Unlock()
 }
 
 func isNilDependency(value any) bool {
@@ -477,12 +535,12 @@ func (e *Endpoint) publishAdmission(session string, epoch AdmissionEpoch, conn *
 		return false
 	}
 	if e.admitted == nil {
-		e.admitted = make(map[string]map[*net.UnixConn]AdmissionEpoch)
+		e.admitted = make(map[string]map[*net.UnixConn]*admission)
 	}
 	if e.admitted[session] == nil {
-		e.admitted[session] = make(map[*net.UnixConn]AdmissionEpoch)
+		e.admitted[session] = make(map[*net.UnixConn]*admission)
 	}
-	e.admitted[session][conn] = epoch
+	e.admitted[session][conn] = &admission{epoch: epoch, done: make(chan struct{})}
 	return true
 }
 
@@ -491,6 +549,9 @@ func (e *Endpoint) forgetSession(session string, conn *net.UnixConn) {
 		return
 	}
 	e.mu.Lock()
+	if a := e.admitted[session][conn]; a != nil {
+		close(a.done)
+	}
 	delete(e.admitted[session], conn)
 	if len(e.admitted[session]) == 0 {
 		delete(e.admitted, session)
@@ -618,14 +679,14 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			token, readErr := e.readPresentedToken(conn, reader)
 			_ = conn.SetReadDeadline(time.Time{})
 			if readErr != nil || token != "" {
+				if release != nil {
+					release()
+					release = nil
+				}
 				if published {
 					e.forgetSession(publishedSession, conn)
 					published = false
 					publishedSession = ""
-				}
-				if release != nil {
-					release()
-					release = nil
 				}
 				if readErr != nil {
 					err = readErr
@@ -646,6 +707,9 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		// never starts, so nothing else would remove it, and the endpoint would
 		// report a session as admitted with no connection behind it until some
 		// later retirement closed an interval that has nothing to close.
+		if release != nil {
+			release()
+		}
 		if published {
 			e.forgetSession(publishedSession, conn)
 		}
@@ -748,10 +812,16 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			e.writeError(conn, request.ID, rpcInvalidRequest, "invalid request", "request id is already in flight; use a distinct id")
 			continue
 		}
+		if !e.acceptRequest(publishedSession, conn) {
+			cancels.remove(request.ID, entry)
+			requestCancel()
+			return
+		}
 		requests.Add(1)
 		inFlight.Add(1)
 		go func(request rpcRequest, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer requests.Done()
+			defer e.finishRequest(publishedSession, conn)
 			defer func() {
 				if inFlight.Add(-1) == 0 {
 					_ = conn.SetReadDeadline(time.Now().Add(requestReadWindow))

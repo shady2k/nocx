@@ -1,4 +1,4 @@
-// Package turnbind owns the explicit frame for a new assistant turn bearer.
+// Package turnbind owns the explicit frame for an assistant session bearer.
 package turnbind
 
 import (
@@ -8,13 +8,13 @@ import (
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
-// TokenEnvVar carries only a turn bearer to its MCP bridge.
+// TokenEnvVar carries only a session bearer to its MCP bridge.
 const TokenEnvVar = "NOCX_TURN_TOKEN" // #nosec G101 -- environment key, not a credential
 
 // TokenMagic cannot start a JSON request or a legacy pane token.
 const TokenMagic = "NXTB1:"
 
-// EncodeToken renders a turn bearer, not a pane's existing wire frame.
+// EncodeToken renders a session bearer, not a pane's existing wire frame.
 func EncodeToken(token string) ([]byte, error) {
 	line, err := panebind.EncodeToken(token)
 	if err != nil {

@@ -188,7 +188,7 @@ func TestATurnBearerIsAdmittedAndItsCallCarriesTheTurnsGrant(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
 	grant := turnGrantForTest()
 	paneAccess := &turnPaneAccess{run: "run-turn-1"}
-	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-turn-1", Session: string(stand.sess.ID()), PaneAccess: paneAccess}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -209,7 +209,7 @@ func TestATurnBearerIsAdmittedAndItsCallCarriesTheTurnsGrant(t *testing.T) {
 		t.Fatalf("invalid bearer hex: %v", err)
 	}
 
-	second, _, err := stand.minter.Mint(turnbearer.Authority{
+	second, _, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-turn-2", Session: string(stand.sess.ID())}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -261,7 +261,7 @@ func assertNotLogged(t *testing.T, logger *slog.Logger, token string) {
 func TestAWrongOrRetiredTurnBearerIsRefused(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
 	grant := turnGrantForTest()
-	bridge, retire, err := stand.minter.Mint(turnbearer.Authority{
+	bridge, retire, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-retired", Session: string(stand.sess.ID())}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func TestAWrongOrRetiredTurnBearerIsRefused(t *testing.T) {
 func TestRetiringATurnCancelsItsBlockedCallAndClosesItsConnection(t *testing.T) {
 	dispatcher := &turnDispatcher{hold: true, held: make(chan struct{}), stop: make(chan struct{})}
 	stand := newTurnStand(t, dispatcher)
-	bridge, retire, err := stand.minter.Mint(turnbearer.Authority{
+	bridge, retire, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-held", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -334,7 +334,7 @@ func TestRetiringATurnCancelsItsBlockedCallAndClosesItsConnection(t *testing.T) 
 
 func TestATurnBearerIsAdmittedAgainAfterItsBridgeReconnects(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
-	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-reconnect", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -367,7 +367,7 @@ func TestATurnBearerIsAdmittedAgainAfterItsBridgeReconnects(t *testing.T) {
 func TestAPanesCallerIsAdmittedAlongsideATurnBearer(t *testing.T) {
 	dispatcher := &turnDispatcher{}
 	stand := newTurnStand(t, dispatcher)
-	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-beside", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
@@ -417,7 +417,7 @@ func TestTurnAdmissionUsesBoundContextAndMintsOnEveryConnection(t *testing.T) {
 		PaneAccess:            &turnPaneAccess{run: "bound"},
 	}
 	tools := &testTurnTools{ctx: bound, grant: turnGrantForTest(), dispatcher: stand.dispatcher}
-	bridge, _, err := stand.minter.Mint(turnbearer.Authority{Tools: tools})
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{Tools: tools})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func (q *turnPerson) AskEgress(_ context.Context, req *assistant.EgressRequest) 
 
 func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(logtest.Slog(t)), nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge, _, err := stand.minter.Mint(turnbearer.Authority{Tools: tools})
+	bridge, _, err := mintTurn(t, stand, turnbearer.Authority{Tools: tools})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,4 +534,58 @@ func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	if len(stand.dispatcher.recorded()) != 0 {
 		t.Fatal("turn routed through pane dispatcher")
 	}
+}
+
+func TestSessionBearerReconnectsUnderNextTurnsAuthority(t *testing.T) {
+	stand := newTurnStand(t, &turnDispatcher{})
+	bridge, retire, err := stand.minter.Mint("conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(retire)
+	token := envToken(t, bridge.Env)
+	tools := func(run string) turnbearer.Authority {
+		return turnbearer.Authority{Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: run, Session: string(stand.sess.ID()), PaneAccess: &turnPaneAccess{run: run}}, grant: turnGrantForTest(), dispatcher: stand.dispatcher}}
+	}
+	if err := stand.minter.BeginTurn("conversation", tools("first")); err != nil {
+		t.Fatal(err)
+	}
+	client := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), token)
+	if resp := s14Await(t, client.startCall(t, "alpha.call", map[string]any{})); resp.failed != "" {
+		t.Fatal(resp.failed)
+	}
+	stand.minter.EndTurn("conversation")
+	if resp := callWithToken(t, stand.endpoint.SocketPath(), token, "alpha.call", map[string]any{}); resp.failed == "" {
+		t.Fatal("connection admitted between turns")
+	}
+	if err := stand.minter.BeginTurn("conversation", tools("second")); err != nil {
+		t.Fatal(err)
+	}
+	if resp := s14Await(t, client.startCall(t, "alpha.call", map[string]any{})); resp.failed != "" {
+		t.Fatal(resp.failed)
+	}
+	stand.minter.EndTurn("conversation")
+	calls := stand.dispatcher.recorded()
+	if len(calls) != 2 || calls[0].RunContext.RunID != "first" || calls[1].RunContext.RunID != "second" {
+		t.Fatalf("turn authority crossed: %+v", calls)
+	}
+	retire()
+	if resp := callWithToken(t, stand.endpoint.SocketPath(), token, "alpha.call", map[string]any{}); resp.failed == "" {
+		t.Fatal("retired session admitted")
+	}
+}
+
+// mintTurn starts a session and its first turn for the admission tests.
+func mintTurn(t *testing.T, stand *turnStand, authority turnbearer.Authority) (turnbearer.TurnBridge, func(), error) {
+	t.Helper()
+	id := authority.Tools.RunContext().RunID
+	bridge, retire, err := stand.minter.Mint(id)
+	if err != nil {
+		return bridge, retire, err
+	}
+	t.Cleanup(retire)
+	if err := stand.minter.BeginTurn(id, authority); err != nil {
+		return bridge, retire, err
+	}
+	return bridge, retire, nil
 }

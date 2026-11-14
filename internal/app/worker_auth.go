@@ -185,8 +185,8 @@ type toolAuthorizer struct {
 	// sessionKeys for the identical reason. Nil until the composition root
 	// wires it.
 	sessionMessages any
-	// turnGrants is the live set of assistant turns a bearer admits
-	// (ADR-anntnxdj decision 3). Nil means no turn was ever minted, and then
+	// turnGrants resolves a session bearer to the turn running at admission
+	// (ADR-4khgzeyp decision 5). Nil means no session was ever minted, and then
 	// a connection presenting a bearer is refused: the third way in exists
 	// only where the composition root wired a minter.
 	turnGrants turnbearer.Registry
@@ -253,7 +253,7 @@ func (a *toolAuthorizer) BindSessionMessages(m any) {
 	a.sessionMessages = m
 }
 
-// BindTurnGrants wires the live set of assistant turns a bearer admits.
+// BindTurnGrants wires the session registry that binds connections to turns.
 // Called once at the composition root, beside the minter that fills it, and
 // BEFORE the endpoint starts accepting: the accept path reads the field to
 // decide whether a bearer preamble is worth reading.
@@ -609,7 +609,7 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 
 // admitTurn binds a connection to the turn's existing assistant kernel. Its
 // admission method invokes the run's grant owner and carries its complete bound
-// context unchanged. Publication and retirement share the bearer's lifetime lock.
+// context unchanged. Publication and EndTurn share the turn's lifetime lock.
 // The turn owns a slot distinct from the pane caller's slot.
 func (a *toolAuthorizer) admitTurn(token string, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
 	if a == nil || a.turnGrants == nil {

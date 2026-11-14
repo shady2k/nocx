@@ -125,7 +125,10 @@ package coordinator
 // 30 (nocx-a62cl.3.5): skills.* contracts are removed, agent approval
 // shapes change, and exact approval retirement is published. A window using
 // the previous surface must not pair with this coordinator.
-const ProtocolVersion = 30
+//
+// 31 (nocx-a62cl.12.1): agentRecords.detect is added, so a window built
+// against 30 does not know the method Settings now calls.
+const ProtocolVersion = 31
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

@@ -77,3 +77,14 @@ func KillGroup(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) {
 		}
 	}
 }
+
+// KillGroupImmediately stops a group without allowing a cooperative leader's
+// exit to interrupt escalation before its descendants receive KILL. Callers
+// must own the started, unreaped child (for example exec.Cmd.Cancel), and must
+// still call Wait. Use InOwnGroup before starting the command.
+func KillGroupImmediately(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}

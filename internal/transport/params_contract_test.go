@@ -796,6 +796,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"agentRecords.list": {
 			[]byte(`{}`),
 		},
+		// Detection takes one optional flag: absent means the cached pass,
+		// true asks the login shell again.
+		"agentRecords.detect": {
+			[]byte(`{}`),
+			[]byte(`{"refresh":false}`),
+			[]byte(`{"refresh":true}`),
+		},
 		"agentRecords.save": {
 			[]byte(`{"id":"custom-agent","displayName":"Custom agent","command":"/usr/bin/env","args":["--flag"],"icon":"sparkles","colour":"#ffffff","disabled":false,"env":["MODE=dev"],"resume":{"sessionIdArgs":[],"resumeIdArgs":[],"resumeCwdArgs":[]}}`),
 		},

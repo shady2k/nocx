@@ -277,3 +277,19 @@ func TestInOwnGroup_MakesTheChildItsOwnGroupLeader(t *testing.T) {
 		t.Fatalf("child shares our group %d; a group kill would reach us", pgid)
 	}
 }
+
+func TestKillGroupImmediatelyStopsIgnoringDescendant(t *testing.T) {
+	f := newFixture(t)
+	cmd := exec.Command("sh", "-c", f.script) //nolint:gosec // private fixture
+	proc.InOwnGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	child, grandchild := f.awaitStarted(t)
+	if err := proc.KillGroupImmediately(cmd); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	waitGone(t, "leader", child)
+	waitGone(t, "descendant", grandchild)
+}

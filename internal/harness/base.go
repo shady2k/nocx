@@ -348,9 +348,7 @@ readLoop:
 				log.From(ctx).Warn("agent event after the terminal one was dropped", "kind", ev.Kind)
 				continue
 			}
-			select {
-			case p.events <- ev:
-			case <-p.stopped:
+			if !p.forward(ev) {
 				break readLoop
 			}
 
@@ -381,61 +379,55 @@ readLoop:
 	p.finish(terminal, protocolErr)
 }
 
-// finish decides the turn's truth. Success is never read from one event: the
-// terminal event is necessary and not sufficient, and the process's own exit
-// is the other half.
-func (p *Process) finish(terminal *Event, protocolErr string) {
-	p.mu.Lock()
-	cancelled := p.cancelled
-	shutdownErr := p.shutdownErr
-	p.mu.Unlock()
+// forward reports whether the event was published, including when cancellation
+// and a newly available queue slot are both ready.
+func (p *Process) forward(ev Event) bool {
+	select {
+	case p.events <- ev:
+		return true
+	case <-p.stopped:
+		return false
+	}
+}
 
-	switch {
-	case p.cleanupErr != nil:
-		p.err = &TurnError{Reason: "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()}
-		if terminal == nil {
-			p.sendFailure(p.err.Error())
-		}
-	case cancelled:
-		if terminal == nil {
-			p.sendFailure("cancelled")
-		}
-		p.err = ErrCancelled
-	case shutdownErr != nil:
-		p.err = &TurnError{Reason: fmt.Sprint(shutdownErr)}
-		if terminal == nil {
-			p.sendFailure(p.err.Error())
-		}
-	case protocolErr != "":
-		if terminal == nil {
-			p.sendFailure(protocolErr)
-		}
-		p.err = &TurnError{Reason: protocolErr}
-	case terminal != nil && terminal.Kind == EventFailure:
-		p.err = &TurnError{Reason: terminal.Failure.Reason}
-	case p.waitErr != nil:
-		reason := exitReason(p.waitErr)
-		if p.failureReason != nil {
-			if diagnostic := p.failureReason(p.stderr.String(), p.waitErr); diagnostic != "" {
-				reason = diagnostic
+// finish follows the terminal event actually published. Only cleanup failure can
+// invalidate a published End; cancellation cannot rewrite an event already sent.
+func (p *Process) finish(terminal *Event, protocolErr string) {
+	if terminal == nil {
+		p.mu.Lock()
+		shutdownErr := p.shutdownErr
+		p.mu.Unlock()
+		var reason string
+		switch {
+		case p.cleanupErr != nil:
+			reason = "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()
+		case shutdownErr != nil:
+			reason = fmt.Sprint(shutdownErr)
+		case protocolErr != "":
+			reason = protocolErr
+		case p.waitErr != nil:
+			reason = exitReason(p.waitErr)
+			if p.failureReason != nil {
+				if diagnostic := p.failureReason(p.stderr.String(), p.waitErr); diagnostic != "" {
+					reason = diagnostic
+				}
 			}
+		default:
+			reason = "the agent ended without an end event"
 		}
-		if terminal == nil {
-			p.sendFailure(reason)
-		}
-		p.err = &TurnError{Reason: reason}
-	case terminal == nil:
-		reason := "the agent ended without an end event"
-		p.sendFailure(reason)
-		p.err = &TurnError{Reason: reason}
-	case terminal.Kind == EventEnd:
+		ev := p.sendFailure(reason)
+		terminal = &ev
+	}
+	if p.cleanupErr != nil {
+		p.err = &TurnError{Reason: "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()}
+	} else if terminal.Kind == EventEnd {
 		p.outcome = Outcome{Model: terminal.End.Model, Usage: terminal.End.Usage}
+	} else if terminal.Failure.Reason == "cancelled" {
+		p.err = ErrCancelled
+	} else {
+		p.err = &TurnError{Reason: terminal.Failure.Reason}
 	}
 	p.mu.Lock()
-	if p.cancelled && p.cleanupErr == nil {
-		p.outcome = Outcome{}
-		p.err = ErrCancelled
-	}
 	p.finished = true
 	close(p.events)
 	close(p.done)
@@ -475,16 +467,26 @@ func readBoundedLine(r *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
-// sendFailure cannot keep cancellation alive when the consumer disconnected.
-func (p *Process) sendFailure(reason string) {
+// sendFailure returns the failure actually published, so a cancellation racing
+// publication cannot give Wait a different reason from the event stream.
+func (p *Process) sendFailure(reason string) Event {
+	p.mu.Lock()
+	if p.cancelled && p.cleanupErr == nil {
+		reason = "cancelled"
+	}
 	ev := Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
 	select {
 	case p.events <- ev:
-		return
+		p.mu.Unlock()
+		return ev
 	default:
+		p.mu.Unlock()
 	}
 	select {
 	case <-p.stopped:
+		if p.cleanupErr == nil {
+			ev.Failure.Reason = "cancelled"
+		}
 		// The disconnected consumer cannot free space. Discard one queued delta,
 		// retaining the sole terminal failure as the final event.
 		select {
@@ -494,6 +496,7 @@ func (p *Process) sendFailure(reason string) {
 		p.events <- ev
 	case p.events <- ev:
 	}
+	return ev
 }
 
 type diagnostics struct {

@@ -164,9 +164,9 @@ func testFailures(t *testing.T, factory Factory, agentPath, serverPath string) {
 		if events[len(events)-1].Kind != harness.EventEnd {
 			t.Fatalf("last event = %+v, want the end event", events[len(events)-1])
 		}
-		_, err := turn.Wait(context.Background())
-		if err == nil || !strings.Contains(fmt.Sprint(err), "status 1") {
-			t.Fatalf("Wait error = %v, want the exit status rather than the end event", err)
+		outcome, err := turn.Wait(context.Background())
+		if err != nil || outcome.Model != "fake-model" {
+			t.Fatalf("Wait outcome=%+v error=%v, want the published end", outcome, err)
 		}
 	})
 

@@ -8,8 +8,9 @@
 //
 // One agent process per turn. The turn is the unit of the process, its MCP
 // bridge, its bearer and its lifetime, so a turn ending closes all of it. A
-// turn's success is never read from one event: Wait is the authority, and a
-// process that exits non-zero or ends without its end event is a failure.
+// published terminal event determines Wait's result after process cleanup:
+// an end succeeds if cleanup succeeds, and a failure retains its reason. A
+// stream without a terminal event receives a failure from the shared base.
 package harness
 
 import "context"
@@ -41,8 +42,9 @@ type Turn interface {
 	// or reports a cleanup failure. Terminated orphan zombies belong to their
 	// OS reaper, not to the turn. Cancelling this observer's ctx stops only
 	// this wait, never the turn; cancel Run's ctx or call Cancel to stop it.
-	// Its result is the turn's truth: a non-zero exit or a stream that ended
-	// without an end event is an error, whatever the last event said.
+	// A published end returns its model and usage if cleanup succeeded, even
+	// if cancellation or a non-zero exit followed it. A published failure
+	// returns its reason; a cancelled failure returns ErrCancelled.
 	Wait(ctx context.Context) (Outcome, error)
 }
 

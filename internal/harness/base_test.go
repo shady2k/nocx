@@ -74,15 +74,15 @@ func TestBaseGracefulProtocolCompletion(t *testing.T) {
 	}
 }
 
-func TestBaseEndNeedsSuccessfulExit(t *testing.T) {
+func TestBasePublishedEndSurvivesFailedExit(t *testing.T) {
 	turn, err := (Base{}).Start(context.Background(), Launch{Argv: []string{"/bin/sh", "-c", "echo end; exit 7"}, Decode: endDecoder})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range turn.Events() {
 	}
-	if _, err := turn.Wait(context.Background()); err == nil {
-		t.Fatal("end followed by failed exit succeeded")
+	if outcome, err := turn.Wait(context.Background()); err != nil || outcome.Model != "test" {
+		t.Fatalf("published end followed by failed exit: outcome=%+v error=%v", outcome, err)
 	}
 }
 
@@ -186,8 +186,8 @@ func TestBaseShutdownBounded(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			if _, err := turn.Wait(ctx); err == nil || !strings.Contains(err.Error(), "did not exit after stdin closed") {
-				t.Fatalf("Wait = %v", err)
+			if outcome, err := turn.Wait(ctx); err != nil || outcome.Model != "test" {
+				t.Fatalf("published end after bounded shutdown: outcome=%+v error=%v", outcome, err)
 			}
 		})
 	}
@@ -305,8 +305,8 @@ func TestBaseCancelDuringFinishWithFullQueue(t *testing.T) {
 	for ev := range turn.Events() {
 		last = ev
 	}
-	if last.Kind != EventFailure {
-		t.Fatalf("last event = %+v", last)
+	if last.Kind != EventFailure || last.Failure.Reason != "cancelled" {
+		t.Fatalf("last event = %+v, want cancelled failure", last)
 	}
 }
 

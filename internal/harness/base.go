@@ -216,6 +216,8 @@ type Process struct {
 	finished  bool
 	cancelled bool
 
+	terminalPublished bool // Owned by pump, including forward and finish.
+
 	cancelOnce sync.Once
 	outcome    Outcome
 	err        error
@@ -348,16 +350,19 @@ readLoop:
 				log.From(ctx).Warn("agent event after the terminal one was dropped", "kind", ev.Kind)
 				continue
 			}
-			if !p.forward(ev) {
-				break readLoop
-			}
-
 			if ev.Kind == EventEnd || ev.Kind == EventFailure {
-				done := ev
-				terminal = &done
 				if p.completeOnEnd {
 					_ = p.CloseStdin()
 				}
+				// End is provisional until exit and cleanup succeed. A provider
+				// failure can be reported immediately and remains authoritative.
+				if ev.Kind == EventFailure && !p.forward(ev) {
+					break readLoop
+				}
+				done := ev
+				terminal = &done
+			} else if !p.forward(ev) {
+				break readLoop
 			}
 		}
 	}
@@ -379,21 +384,37 @@ readLoop:
 	p.finish(terminal, protocolErr)
 }
 
-// forward reports whether the event was published, including when cancellation
-// and a newly available queue slot are both ready.
+// forward checks cancellation before publication. A send and cancellation that
+// race while waiting for queue space are arbitrated by the select below.
 func (p *Process) forward(ev Event) bool {
+	p.mu.Lock()
+	if p.cancelled {
+		p.mu.Unlock()
+		return false
+	}
 	select {
 	case p.events <- ev:
+		p.terminalPublished = ev.Kind == EventEnd || ev.Kind == EventFailure
+		p.mu.Unlock()
+		return true
+	default:
+		p.mu.Unlock()
+	}
+	select {
+	case p.events <- ev:
+		p.mu.Lock()
+		p.terminalPublished = ev.Kind == EventEnd || ev.Kind == EventFailure
+		p.mu.Unlock()
 		return true
 	case <-p.stopped:
 		return false
 	}
 }
 
-// finish follows the terminal event actually published. Only cleanup failure can
-// invalidate a published End; cancellation cannot rewrite an event already sent.
+// finish publishes End only after successful exit and cleanup. Once a terminal
+// event is published, neither cancellation nor cleanup can rewrite its result.
 func (p *Process) finish(terminal *Event, protocolErr string) {
-	if terminal == nil {
+	if !p.terminalPublished {
 		p.mu.Lock()
 		shutdownErr := p.shutdownErr
 		p.mu.Unlock()
@@ -412,15 +433,18 @@ func (p *Process) finish(terminal *Event, protocolErr string) {
 					reason = diagnostic
 				}
 			}
-		default:
+		case terminal == nil:
 			reason = "the agent ended without an end event"
 		}
-		ev := p.sendFailure(reason)
-		terminal = &ev
+		if reason != "" {
+			ev := p.sendFailure(reason)
+			terminal = &ev
+		} else if !p.forward(*terminal) {
+			ev := p.sendFailure("cancelled")
+			terminal = &ev
+		}
 	}
-	if p.cleanupErr != nil {
-		p.err = &TurnError{Reason: "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()}
-	} else if terminal.Kind == EventEnd {
+	if terminal.Kind == EventEnd {
 		p.outcome = Outcome{Model: terminal.End.Model, Usage: terminal.End.Usage}
 	} else if terminal.Failure.Reason == "cancelled" {
 		p.err = ErrCancelled
@@ -471,7 +495,7 @@ func readBoundedLine(r *bufio.Reader, max int) ([]byte, error) {
 // publication cannot give Wait a different reason from the event stream.
 func (p *Process) sendFailure(reason string) Event {
 	p.mu.Lock()
-	if p.cancelled && p.cleanupErr == nil {
+	if p.cancelled {
 		reason = "cancelled"
 	}
 	ev := Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
@@ -484,9 +508,7 @@ func (p *Process) sendFailure(reason string) Event {
 	}
 	select {
 	case <-p.stopped:
-		if p.cleanupErr == nil {
-			ev.Failure.Reason = "cancelled"
-		}
+		ev.Failure.Reason = "cancelled"
 		// The disconnected consumer cannot free space. Discard one queued delta,
 		// retaining the sole terminal failure as the final event.
 		select {

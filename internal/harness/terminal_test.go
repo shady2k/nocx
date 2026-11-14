@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -29,7 +28,6 @@ func TestBaseTerminalPublicationCancellation(t *testing.T) {
 				p := &Process{
 					stdin: stdinW, stdout: stdoutR, reaped: true,
 					events: make(chan Event, 2), stopped: make(chan struct{}), done: make(chan struct{}),
-					waitErr: errors.New("killed after terminal"),
 				}
 				p.events <- Event{Kind: EventAnswerDelta, Text: "first"}
 				p.events <- Event{Kind: EventAnswerDelta, Text: "second"}
@@ -61,6 +59,9 @@ func TestBaseTerminalPublicationCancellation(t *testing.T) {
 					<-p.events
 					close(release) // Both select arms are ready before forward starts.
 					sent = <-published
+					if sent {
+						t.Fatal("publication succeeded after cancellation before entry")
+					}
 				}
 				var terminal *Event
 				if sent {
@@ -104,9 +105,12 @@ func TestBasePublishedTerminalCleanupFailure(t *testing.T) {
 	for _, kind := range []EventKind{EventEnd, EventFailure} {
 		p := &Process{events: make(chan Event, 1), done: make(chan struct{}), cleanupErr: errors.New("cleanup failed")}
 		ev := Event{Kind: kind, End: &End{Model: "test"}, Failure: &Failure{Reason: "provider failed"}}
-		p.events <- ev
+		if !p.forward(ev) {
+			t.Fatal("terminal was not published")
+		}
 		p.finish(&ev, "")
-		if outcome, err := p.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "cleanup failed") || outcome.Model != "" {
+		outcome, err := p.Wait(context.Background())
+		if kind == EventEnd && (err != nil || outcome.Model != "test") || kind == EventFailure && (err == nil || err.Error() != "provider failed") {
 			t.Fatalf("kind=%s outcome=%+v error=%v", kind, outcome, err)
 		}
 		if len(p.events) != 1 {

@@ -74,15 +74,75 @@ func TestBaseGracefulProtocolCompletion(t *testing.T) {
 	}
 }
 
-func TestBasePublishedEndSurvivesFailedExit(t *testing.T) {
+func TestBaseEndThenFailedExit(t *testing.T) {
 	turn, err := (Base{}).Start(context.Background(), Launch{Argv: []string{"/bin/sh", "-c", "echo end; exit 7"}, Decode: endDecoder})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range turn.Events() {
+	var events []Event
+	for ev := range turn.Events() {
+		events = append(events, ev)
 	}
-	if outcome, err := turn.Wait(context.Background()); err != nil || outcome.Model != "test" {
-		t.Fatalf("published end followed by failed exit: outcome=%+v error=%v", outcome, err)
+	if len(events) != 1 || events[0].Kind != EventFailure || !strings.Contains(events[0].Failure.Reason, "status 7") {
+		t.Fatalf("events = %+v, want only exit failure", events)
+	}
+	if outcome, err := turn.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "status 7") || outcome.Model != "" {
+		t.Fatalf("end followed by failed exit: outcome=%+v error=%v", outcome, err)
+	}
+}
+
+func TestBaseWithholdsEndUntilExit(t *testing.T) {
+	decoded := make(chan struct{})
+	turn, err := (Base{}).Start(context.Background(), Launch{
+		Argv: []string{"/bin/sh", "-c", "echo delta; echo end; echo after; read release; exit 7"},
+		Decode: func(line []byte) ([]Event, error) {
+			switch string(line) {
+			case "delta":
+				return []Event{{Kind: EventAnswerDelta, Text: "immediate"}}, nil
+			case "end":
+				return endDecoder(line)
+			default:
+				close(decoded) // The preceding End has been processed by pump.
+				return nil, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = turn.Cancel(context.Background()) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	select {
+	case ev := <-turn.Events():
+		if ev.Kind != EventAnswerDelta || ev.Text != "immediate" {
+			t.Fatalf("first event = %+v", ev)
+		}
+	case <-ctx.Done():
+		t.Fatal("delta was not forwarded before exit")
+	}
+	select {
+	case <-decoded:
+	case <-ctx.Done():
+		t.Fatal("end was not decoded")
+	}
+	select {
+	case ev := <-turn.Events():
+		t.Fatalf("event published before exit: %+v", ev)
+	default:
+	}
+	if _, err := turn.Stdin().Write([]byte("release\n")); err != nil {
+		t.Fatal(err)
+	}
+	var events []Event
+	for ev := range turn.Events() {
+		events = append(events, ev)
+	}
+	if len(events) != 1 || events[0].Kind != EventFailure || !strings.Contains(events[0].Failure.Reason, "status 7") {
+		t.Fatalf("events after exit = %+v, want only exit failure", events)
+	}
+	if _, err := turn.Wait(ctx); err == nil || err.Error() != events[0].Failure.Reason {
+		t.Fatalf("Wait = %v", err)
 	}
 }
 
@@ -186,8 +246,8 @@ func TestBaseShutdownBounded(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			if outcome, err := turn.Wait(ctx); err != nil || outcome.Model != "test" {
-				t.Fatalf("published end after bounded shutdown: outcome=%+v error=%v", outcome, err)
+			if outcome, err := turn.Wait(ctx); err == nil || !strings.Contains(err.Error(), "did not exit after stdin closed") || outcome.Model != "" {
+				t.Fatalf("end after bounded shutdown: outcome=%+v error=%v", outcome, err)
 			}
 		})
 	}
@@ -265,13 +325,21 @@ func TestBaseCleanupFailureIsBounded(t *testing.T) {
 	if err := awaitGroupGoneWith(123, 0, func(int) (bool, error) { return false, sentinel }); !errors.Is(err, sentinel) {
 		t.Fatalf("inspection error = %v", err)
 	}
-	p := &Process{events: make(chan Event, 1), done: make(chan struct{}), cleanupErr: sentinel, cancelled: true}
+	p := &Process{events: make(chan Event, 1), done: make(chan struct{}), cleanupErr: sentinel}
 	p.finish(nil, "")
 	if _, err := p.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), sentinel.Error()) {
 		t.Fatalf("Wait = %v", err)
 	}
 	if ev := <-p.Events(); ev.Kind != EventFailure {
 		t.Fatalf("event = %+v", ev)
+	}
+	cancelled := &Process{events: make(chan Event, 1), done: make(chan struct{}), cleanupErr: sentinel, cancelled: true}
+	cancelled.finish(nil, "")
+	if _, err := cancelled.Wait(context.Background()); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("cancelled cleanup Wait = %v", err)
+	}
+	if ev := <-cancelled.Events(); ev.Kind != EventFailure || ev.Failure.Reason != "cancelled" {
+		t.Fatalf("cancelled cleanup event = %+v", ev)
 	}
 }
 

@@ -18,7 +18,7 @@ func observeExit(pid int) error {
 		return err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	change := unix.Kevent_t{Ident: uint64(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}
+	change := unix.Kevent_t{Ident: pidIdent(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}
 	events := make([]unix.Kevent_t, 1)
 	for {
 		n, err := unix.Kevent(fd, []unix.Kevent_t{change}, events, nil)
@@ -40,7 +40,7 @@ func observeExit(pid int) error {
 }
 
 func validateExitEvent(pid int, event unix.Kevent_t) error {
-	if event.Ident != uint64(pid) || event.Filter != unix.EVFILT_PROC {
+	if event.Ident != pidIdent(pid) || event.Filter != unix.EVFILT_PROC {
 		return fmt.Errorf("unexpected exit observation: %+v", event)
 	}
 	if event.Flags&unix.EV_ERROR != 0 {
@@ -70,4 +70,13 @@ func groupRunning(pgid int) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// pidIdent is a kqueue identifier for a process id. A pid the kernel gave us
+// is positive; a non-positive one maps to an identifier no process has.
+func pidIdent(pid int) uint64 {
+	if pid <= 0 {
+		return 0
+	}
+	return uint64(pid) // #nosec G115 -- pid is positive, checked above
 }

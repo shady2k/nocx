@@ -45,6 +45,18 @@ const OpConnection = "connection"
 // sends to a coordinator that is not already holding a stream.
 const EventConnectionState = "connection-state"
 
+// OpDisconnect closes the connection a destination rides, if this helper has
+// one, and answers whether it did.
+//
+// IT IS THE RECONNECT'S FIRST MOVE, and the order is the design's (5.3:
+// "Reconnect closes the socket first"). A stalled connection is still in the
+// pool, so a new shell asked for on the same destination would JOIN it and park
+// behind the dead flow instead of dialing; closing it here is what makes the
+// acquire that follows a fresh dial. It is idempotent: a destination this
+// helper holds no live connection for is answered as closed=false, because the
+// ordinary caller is a pane whose transport already ended.
+const OpDisconnect = "disconnect"
+
 // The state names a connection event carries. They are hostconn.Kind's
 // spellings, restated here because this package is the wire's leaf and must not
 // import the state machine.
@@ -62,6 +74,21 @@ const (
 // the same shape probe, open, forward and spawn-ssh carry.
 type ConnectionParams struct {
 	Destination SSHDestination `json:"destination"`
+}
+
+// DisconnectParams names the connection to close: the same resolved destination
+// every other op takes, so one derivation of "which connection is this" is used
+// by asking, watching and closing alike.
+type DisconnectParams struct {
+	Destination SSHDestination `json:"destination"`
+}
+
+// DisconnectResult answers what the close found. Closed is false for a
+// destination this helper holds no live connection for, which is a normal
+// answer rather than a failure: the caller asked to make sure it is gone.
+type DisconnectResult struct {
+	ConnectionID string `json:"connectionId"`
+	Closed       bool   `json:"closed"`
 }
 
 // ConnectionResult names the connection the destination's shell will ride.

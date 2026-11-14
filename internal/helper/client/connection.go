@@ -1,7 +1,8 @@
 package client
 
-// The connection half of the ssh service's client: the two questions a
-// coordinator asks about a pane's connection (design §5.3, §5.6; stage 3).
+// The connection half of the ssh service's client: the questions a coordinator
+// asks about a pane's connection, and the one it asks to end it (design §5.3,
+// §5.6; nocx-oalo1.5.3 and .5.4).
 
 import (
 	"context"
@@ -29,6 +30,18 @@ func (c *Client) ConnectionID(ctx context.Context, destination proto.SSHDestinat
 		return "", fmt.Errorf("helper: the connection op answered no connection id")
 	}
 	return result.ConnectionID, nil
+}
+
+// Disconnect closes the connection a destination rides, if the helper holds one,
+// and reports whether it did. It is the reconnect's first move (design §5.3).
+func (c *Client) Disconnect(ctx context.Context, destination proto.SSHDestination) (bool, error) {
+	var result proto.DisconnectResult
+	if err := c.Call(ctx, proto.ServiceSSH, proto.OpDisconnect, proto.DisconnectParams{
+		Destination: destination,
+	}, &result); err != nil {
+		return false, err
+	}
+	return result.Closed, nil
 }
 
 // connectionState routes one `ssh.connection-state` notification to the

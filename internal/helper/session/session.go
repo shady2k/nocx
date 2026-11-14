@@ -137,6 +137,11 @@ type SSHSpawnRequest struct {
 	// which key the caller expects. See proto.SSHSpawnParams.
 	AcceptOnTrust      bool
 	HostKeyFingerprint string
+	// Reconnect asks the spawner to close the destination's existing
+	// connection before it opens the shell (design §5.3: "Reconnect closes the
+	// socket first"). A stalled connection is still pooled, so without this the
+	// shell joins it and parks behind the dead flow.
+	Reconnect bool
 	// Shell is the far shell the launcher is built for.
 	Shell proto.SSHShellKind
 	// Mode is the caller's integration intent, carried through UNINTERPRETED.

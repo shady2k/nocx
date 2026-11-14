@@ -116,6 +116,12 @@ func (c *Carrier) WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func
 	return c.conns.Supervisor(key).Watch(fn)
 }
 
+// Disconnect closes the live connection for key, if there is one, and reports
+// whether it closed one. It is the reconnect's first move (design §5.3).
+func (c *Carrier) Disconnect(key connkey.Key) bool {
+	return c.conns.Supervisor(key).Disconnect()
+}
+
 // PlanFor renders a pooled spec into the plan the supervisor keys a connection
 // by. The identity components are the pool's own — host, port, user, identity
 // and route — because a supervisor keyed by anything else would either split

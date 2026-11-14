@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.disconnect.params.schema.json",
+  "title": "HelperSSHDisconnectParams",
+  "description": "Close the connection a resolved destination rides, if this helper has one (nocx-oalo1.5.4). It is the reconnect's first move: the design requires Reconnect to close the socket first (5.3), because a stalled connection is still in the pool and the shell that follows would join it and park behind the dead flow rather than dial. The destination is the same shape every other op takes, so asking which connection a destination rides, watching it, and closing it are ONE derivation of its identity. The op is idempotent: a destination with no live connection is answered as closed=false.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination"],
+  "properties": {
+    "destination": {
+      "description": "The resolved destination whose connection is closed. Resolved by the coordinator, which reads ~/.ssh/config and holds the credential binding; the helper turns it into the same supervisor key its acquire uses.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    }
+  }
+}

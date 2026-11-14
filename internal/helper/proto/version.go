@@ -369,4 +369,19 @@ package proto
 // Nothing has shipped at 26, so the two peers this fences are both ours; the
 // number moves now so that the generation after this one inherits a truthful
 // statement rather than a widened one.
-const Version = "27"
+// This is 28 rather than 27 because the wire grew the RECONNECT's two halves
+// (nocx-oalo1.5.4): the `disconnect` op, which closes the connection a
+// destination rides so the shell that follows dials afresh rather than joining
+// a stalled flow, and a `reconnect` field on `session.spawn-ssh.params` that
+// asks for exactly that before the shell is opened.
+//
+// The FIELD is the half that cannot be added: both spawn shapes are
+// `additionalProperties: false`, so a 27-helper REJECTS a payload carrying
+// `reconnect` and answers `bad_params` — a sentence about a request that is
+// well-formed, spoken by a helper that is old. The op is the half that
+// degrades: a 27-helper answers `unknown_op`, which a coordinator reads as
+// "this machine's helper is older than this app" — and that refusal is the one
+// that stops a reconnect from becoming a second shell on a stalled connection.
+// Two peers that disagree refuse each other at hello in both directions, which
+// is what makes the number the whole of the compatibility story.
+const Version = "28"

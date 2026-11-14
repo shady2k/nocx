@@ -96,6 +96,11 @@ type Client interface {
 	// shell exists (design §5.5, §5.6): the supervisor is the one party that
 	// knows, and a watcher holds no reference and closes nothing.
 	WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func()
+	// Disconnect closes the live connection for key, if there is one, and
+	// reports whether it closed one. It is the reconnect's first move (design
+	// §5.3): a stalled connection must be out of the pool before a new shell
+	// is asked for on the same destination, or that shell joins the dead flow.
+	Disconnect(key connkey.Key) bool
 }
 
 // ProbeTimeout bounds one probe's handshake. It is the same number the
@@ -181,7 +186,7 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection, proto.OpDisconnect}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
 	ops = append(ops, s.laneOps()...)
 	return append(ops, s.toolSocketOps()...)
 }
@@ -195,6 +200,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ProbeParams{})
 	case proto.OpConnection:
 		return host.SchemaFor(proto.ConnectionParams{})
+	case proto.OpDisconnect:
+		return host.SchemaFor(proto.DisconnectParams{})
 	case proto.OpOpen:
 		return host.SchemaFor(proto.OpenChannelParams{})
 	case proto.OpClose:
@@ -272,6 +279,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.connection(p)
+	case proto.OpDisconnect:
+		var p proto.DisconnectParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadProbeParams, err)
+			}
+		}
+		return s.disconnect(p)
 	case proto.OpOpen:
 		var p proto.OpenChannelParams
 		if len(params) > 0 {

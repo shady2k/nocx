@@ -689,6 +689,18 @@ type SSHSpawnParams struct {
 	// ssh-reconnect.spec.ts's silent-death and slow-host journeys had nothing
 	// left probing at all.
 	KeepaliveIntervalMS int64 `json:"keepaliveIntervalMs,omitempty"`
+	// Reconnect asks this helper to CLOSE the destination's existing connection
+	// before it opens the shell (design §5.3: "Reconnect closes the socket
+	// first"). A stalled connection is still pooled, so without this the new
+	// shell would join it and park behind the dead flow; with it the acquire
+	// that follows dials afresh.
+	//
+	// It is a fact about THIS REQUEST and not about the destination: the same
+	// destination opened normally must join whatever connection exists, and
+	// only a pane being reconnected is entitled to end the one that is there —
+	// including the shells other panes hold on it, which is why the pane's own
+	// offer says how many end before a person presses it.
+	Reconnect bool `json:"reconnect,omitempty"`
 	// ScrollbackLines is the session's scrollback budget in physical lines,
 	// on exactly the terms SpawnParams states (nocx-zg3k3.10.1): a pointer
 	// because zero is a value — a session that keeps no history — and nil

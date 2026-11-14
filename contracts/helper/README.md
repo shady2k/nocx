@@ -596,3 +596,41 @@ so the next generation inherits a truthful statement.
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.5.4`, and why `Version` moved to 28
+
+The **reconnect's two halves**: the `disconnect` op and a `reconnect` field on
+`session.spawn-ssh.params`.
+
+The op closes the connection a resolved destination rides, if this helper holds
+one. It exists because the design's first move of a reconnect is "close the
+socket first" (§5.3), and for a concrete reason rather than tidiness: a stalled
+connection is still in the pool, so the shell a reconnect asks for would JOIN it
+and park behind the dead flow instead of dialing. It answers
+`{connectionId, closed}` — `closed=false` is idempotence for a pane whose
+transport already ended, not a failure.
+
+The field asks the same close as part of the spawn that follows, so the
+coordinator's one open path needs no second order of operations: `spawn-ssh`
+closes the destination's connection before it opens the shell, and its next
+acquire dials. Omitted means false, which is every open that is not a
+reconnect — the same destination opened normally must join whatever connection
+exists.
+
+Two decisions worth naming rather than leaving to a reader:
+
+- **The field is why the number moves.** Both spawn shapes are
+  `additionalProperties: false`, so a 27-helper REJECTS a payload carrying
+  `reconnect` and answers `bad_params` — a sentence about a request that is
+  well-formed. The op is the half that degrades (`unknown_op`), and that refusal
+  is what stops a reconnect from becoming a second shell on a stalled
+  connection. Two peers that disagree refuse each other at hello in both
+  directions.
+- **Closing is the helper's and not the coordinator's.** The coordinator does
+  not hold the transport, and a coordinator-side "close" by dropping its last
+  lease would leave any other holder's connection alive — the pane would be
+  reconnecting into a pool that still has its dead flow. The helper owns the
+  connection's life, so it owns its death.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.

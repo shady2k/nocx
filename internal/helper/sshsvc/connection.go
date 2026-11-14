@@ -55,6 +55,36 @@ func (s *Service) connection(p proto.ConnectionParams) (proto.ConnectionResult, 
 	return proto.ConnectionResult{ConnectionID: connectionKey(p.Destination).ID()}, nil
 }
 
+// disconnect closes the connection a destination rides, if this helper holds
+// one, and answers what it found.
+//
+// IT DOES NOT WAIT FOR THE FAR SIDE. Closing a stalled transport can block on a
+// write the peer never acknowledges, which is exactly the state a person presses
+// Reconnect out of; the supervisor closes the socket and lets the guard and the
+// watcher unwind, and this answers as soon as the connection has left the pool.
+func (s *Service) disconnect(p proto.DisconnectParams) (proto.DisconnectResult, error) {
+	if err := validateDestinationAddress(p.Destination); err != nil {
+		return proto.DisconnectResult{}, err
+	}
+	if err := validateIdentity(p.Destination.Identity); err != nil {
+		return proto.DisconnectResult{}, err
+	}
+	key := connectionKey(p.Destination)
+	return proto.DisconnectResult{
+		ConnectionID: key.ID(),
+		Closed:       s.client.Disconnect(key),
+	}, nil
+}
+
+// Disconnect is the spawner's half of the op: the same close, asked with the
+// destination the request carried rather than over the wire. One implementation
+// behind both, so a helper-internal reopen cannot close a different connection
+// from the one the wire op names.
+func (s *Service) Disconnect(_ context.Context, d proto.SSHDestination) (bool, error) {
+	res, err := s.disconnect(proto.DisconnectParams{Destination: d})
+	return res.Closed, err
+}
+
 // Watch begins reporting one pane's connection to the coordinator that asked,
 // and answers the function that ends the report.
 //

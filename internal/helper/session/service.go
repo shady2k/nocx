@@ -1210,6 +1210,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
 		SessionID:          proto.SessionHex(raw),
 		Destination:        p.Destination,
+		Reconnect:          p.Reconnect,
 		AcceptOnTrust:      p.AcceptOnTrust,
 		HostKeyFingerprint: p.HostKeyFingerprint,
 		Shell:              p.Shell,

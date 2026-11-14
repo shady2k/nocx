@@ -82,6 +82,10 @@ type ShellOpener interface {
 	// connection first, and the stages a pane is told about are the ones that
 	// happen while it is still empty.
 	Watch(ctx context.Context, destination proto.SSHDestination) (func(), error)
+	// Disconnect closes the destination's live connection, if this helper has
+	// one. It is the reconnect's first move (design §5.3): a stalled connection
+	// is still pooled, and the shell that follows must dial rather than park.
+	Disconnect(ctx context.Context, destination proto.SSHDestination) (bool, error)
 }
 
 // sshSpawner is the SSHSpawner this build wires into the session service.
@@ -129,6 +133,15 @@ func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
 // that waited would hold the op for the whole bootstrap budget, and a
 // coordinator's pane would appear fifteen seconds after it was asked for.
 func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process, error) {
+	// THE OLD CONNECTION GOES FIRST, if this is a reconnect (design §5.3:
+	// "Reconnect closes the socket first"). It is still in the pool while
+	// stalled, so a shell asked for on the same destination would join it; the
+	// close fences it, and the acquires below dial afresh.
+	if req.Reconnect {
+		if _, derr := p.opener.Disconnect(ctx, req.Destination); derr != nil {
+			return nil, derr
+		}
+	}
 	// THE PANE IS TOLD WHAT ITS CONNECTION IS DOING FROM BEFORE THE FIRST
 	// DIAL, not from the moment a shell exists (design §5.6). The
 	// subscription is taken here because this is the earliest point that

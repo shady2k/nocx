@@ -8,6 +8,7 @@ package hostconn_test
 // "stalled after thirty seconds" is thirty simulated seconds and not a sleep.
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -149,6 +150,42 @@ func TestASlowAnswerCarriesItsGrade(t *testing.T) {
 		f, ok := log.find(func(f hostconn.Facts) bool { return f.Measured })
 		return ok && f.Slow && f.RoundTrip == 600*time.Millisecond
 	})
+}
+
+// TestDisconnectClosesTheLiveTransportSoTheNextAcquireDials is the reconnect's
+// first move (design §5.3): a stalled/held connection is closed, and the next
+// acquire gets a fresh dial rather than the dead one.
+func TestDisconnectClosesTheLiveTransportSoTheNextAcquireDials(t *testing.T) {
+	clock := hostconntest.New()
+	link := newQuietLink()
+	link.memoryLink.probe = func() (time.Duration, error) { return time.Millisecond, nil }
+	carrier := &memoryCarrier{dialPlan: func(hostconn.Plan, hostconn.EventSink) (hostconn.Link, error) {
+		return link, nil
+	}}
+	mgr, sup := managerOn(t, carrier, clock)
+	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+
+	if !sup.Disconnect() {
+		t.Fatal("Disconnect reported no connection to close")
+	}
+	waittest.WaitFor(t, "the fenced state", func() bool {
+		return sup.Current().Kind == hostconn.Reconnecting
+	})
+	if !lease.Lost() {
+		t.Fatal("the lease survives a disconnect: the pane would keep a dead transport")
+	}
+	if sup.Disconnect() {
+		t.Fatal("a second Disconnect closed something: it must be idempotent")
+	}
+	// A new acquire dials again rather than joining the closed one.
+	again, err := mgr.Acquire(context.Background(), plan())
+	if err != nil {
+		t.Fatalf("Acquire after a disconnect: %v", err)
+	}
+	again.Release()
+	if carrier.dialCount() != 2 {
+		t.Fatalf("%d dial(s), want 2: the closed connection was reused", carrier.dialCount())
+	}
 }
 
 // TestAStoppedWatchStopsCalling keeps the subscription's end honest: a pane that

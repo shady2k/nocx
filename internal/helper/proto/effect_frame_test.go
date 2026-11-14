@@ -161,12 +161,12 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the connection vocabulary (nocx-oalo1.5.3): the `connection` op and
-// the `connection-state` event, and with them a closed set of ssh service
-// events a reader switches on.
+// moved — the reconnect's two halves (nocx-oalo1.5.4): the `disconnect` op and
+// the `reconnect` field on `session.spawn-ssh.params`, a field a frozen shape
+// cannot gain without a fence.
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "27" {
-		t.Fatalf("helper protocol version = %q, want 27", Version)
+	if Version != "28" {
+		t.Fatalf("helper protocol version = %q, want 28", Version)
 	}
 }
 

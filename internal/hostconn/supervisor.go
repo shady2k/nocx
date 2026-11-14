@@ -866,6 +866,33 @@ func (s *Supervisor) finishFenced(l *live, event Event) {
 	s.mu.Unlock()
 }
 
+// Disconnect closes this connection's live transport now, whoever holds it, and
+// reports whether there was one to close.
+//
+// IT IS THE RECONNECT'S FIRST MOVE, and the design says why (§5.3: "Reconnect
+// closes the socket first"): a stalled connection is still in the pool, so the
+// next acquire would join it and park on the same dead flow instead of dialing.
+// Closing it here fences admission, so the acquire that follows dials anew.
+//
+// The state it leaves is `reconnecting`, not `ended`, because somebody is about
+// to ask for a new one — and a connection whose last holder let go goes to
+// `ended` through the ordinary release path instead. The cause is the transport
+// ending under a held connection, which is also the one cause the auto policy
+// retries from.
+func (s *Supervisor) Disconnect() bool {
+	s.mu.Lock()
+	l := s.live
+	if l == nil || !s.fenceLocked(l) {
+		s.mu.Unlock()
+		return false
+	}
+	s.dropRidersLocked(l)
+	s.notifyWaiters(l, ErrLinkLost)
+	s.mu.Unlock()
+	s.finishFenced(l, Event{Kind: Lost, Cause: CauseLostLink})
+	return true
+}
+
 // retireLive ends one connection: the fence happens under the admission mutex,
 // the transport is closed outside it, and the connection is cleared and
 // announced after.

@@ -179,8 +179,7 @@ func TestASleepEdgeNewerThanAWakeIsNotUndone(t *testing.T) {
 	// The guard is made to go round its loop (the probe ask), so "still
 	// suspended" is read after the edge was certainly applied, not after a
 	// pause.
-	sup.Wake(base + monoclock.Nanos(time.Second))
-	syncGuard(t, sup)
+	syncGuard(t, sup, func() { sup.Wake(base + monoclock.Nanos(time.Second)) })
 	if !lease.Suspended() {
 		t.Fatal("an older wake cleared a newer sleep edge")
 	}
@@ -190,15 +189,21 @@ func TestASleepEdgeNewerThanAWakeIsNotUndone(t *testing.T) {
 	waittest.WaitFor(t, "the resume", func() bool { return !lease.Suspended() })
 }
 
-// syncGuard makes the guard complete one loop, so a test that asserts the
-// ABSENCE of an effect reads it after the edge was certainly applied. The ask
-// is the connection's own door; its short deadline is what makes the wait
-// bounded, and the assertion that follows is about state, never about time.
-func syncGuard(t *testing.T, sup *hostconn.Supervisor) {
+// syncGuard queues one control edge and waits until the guard has PROCESSED it,
+// so a test that asserts the ABSENCE of an effect reads it after the edge was
+// certainly applied.
+//
+// The count is the guard's own statement — an edge older than the one in hand is
+// refused and leaves no other trace — and it is the only observable a refused
+// edge has. A pause would prove nothing: it would pass on a slow machine and
+// fail on a fast one, which is the shape AGENTS.md forbids.
+func syncGuard(t *testing.T, sup *hostconn.Supervisor, queue func()) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_ = sup.Probe(ctx)
+	before := sup.ControlEdgesSeen()
+	queue()
+	waittest.WaitFor(t, "the guard to process the control edge", func() bool {
+		return sup.ControlEdgesSeen() > before
+	})
 }
 
 // TestAnAnswerDoesNotClearALaterSleep — finding 9: a probe sent before the

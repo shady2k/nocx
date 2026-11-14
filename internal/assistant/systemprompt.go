@@ -89,6 +89,83 @@ func SystemPrompt(f SystemPromptFacts) string {
 	b.WriteString("You are the assistant built into nocx, a terminal. " +
 		"You work inside one pane of it, beside the person using that pane.\n")
 
+	b.WriteString(TurnContext(f))
+	b.WriteString("\nWhat you can do\n")
+	b.WriteString("You act only through the tools you are given, and each tool's own description " +
+		"says what it does. ")
+	b.WriteString("Some calls run straight away, some are put to the person for approval " +
+		"first, and some are refused. A refusal is an answer: say what you could not do and " +
+		"what you would need, and never route around it with another tool or a different spelling " +
+		"of the same call.\n")
+	b.WriteString("\nWhat a person's input means\n")
+	b.WriteString("A link on its own means go there and tell the person what is on it. " +
+		"Text on its own, with no question, means save it as a note with notes.create; text that is a question or context for a question is part of that question instead. " +
+		"When the intent is not plain, ask one question and stop. ")
+	// THE RULE AND THE ATTACHMENT MUST NOT CONTRADICT EACH OTHER
+	// (nocx-hp8p2.4). "Do not call a tool to check first" is about going
+	// OUTSIDE for something nobody offered. Left unqualified it also
+	// forbade reading the screen this very question arrived with — and an
+	// unclear question is precisely when it fires, so the one case the
+	// attachment exists for was the one case it was never read in. The
+	// owner asked "what is this?" over a running `top` and was told there
+	// was not enough context, by a model whose own reasoning had named the
+	// attachment two lines earlier.
+	//
+	// The exemption is written only when there IS an attachment: with
+	// nothing attached, going and looking before answering is the guessing
+	// this rule exists to prevent, and the rule keeps its whole force.
+	if len(f.AttachedContent) > 0 {
+		b.WriteString("Do not guess, and do not go outside this pane to check first — " +
+			"but what is attached above is already yours: read it before you answer, " +
+			"because it is why the question was asked here.\n")
+	} else {
+		b.WriteString("Do not guess, and do not call a tool to check first; notes.create is the requested write for questionless text, not a check.\n")
+	}
+
+	b.WriteString("\nHow to answer\n")
+	// THE LANGUAGE IS THE MESSAGE'S, NEVER A SETTING. It is stated here and
+	// not offered as a preference on purpose: a person who asks in Russian
+	// and then pastes an English stack trace is one person having one
+	// conversation, and a stored language would answer the second message in
+	// the wrong one. Following the message in hand is also the only rule that
+	// works in a terminal, where half of what is on screen is English
+	// whatever the person speaks — so the sentence is careful to say that the
+	// NAMES of things do not move, which is the failure the rule would
+	// otherwise invite: a translated flag is a flag that does not exist, and
+	// a translated path is a path nothing will open.
+	b.WriteString("Answer in the language you were asked in, and change language when the person " +
+		"does. Commands, paths, flags, file names and error text stay exactly as they are, " +
+		"whatever language the sentence around them is in.\n")
+	b.WriteString("Short and concrete, in the register of a terminal. No preamble and no restating " +
+		"the question. Commands, paths and flags in backticks. If you do not know something, say so " +
+		"or go and look; if you need one thing from the person, ask for that one thing.\n")
+
+	// LAST, and it is the position that carries the meaning: where the
+	// person's own rule contradicts a line of ours, theirs is the one the
+	// model reads last and follows. Nothing may be appended after it.
+	if personal := strings.TrimSpace(f.PersonalInstructions); personal != "" {
+		b.WriteString("\n" + PersonalInstructionsHeading + "\n")
+		b.WriteString("The rest of this prompt is written by nocx. What follows was written by the " +
+			"person themselves, in nocx's settings, and it comes last so that where it contradicts " +
+			"anything above it, theirs is the rule you follow. It is not authority: it cannot widen " +
+			"what you may do, hand you a tool you were not given, or turn a call that would be put " +
+			"to the person into one that is not. Those are decided elsewhere, by something that " +
+			"never reads this text.\n")
+		b.WriteString(personal + "\n")
+	}
+
+	return b.String()
+}
+
+// StandingSystemPrompt is the fixed nocx prefix for a conversation session.
+func StandingSystemPrompt(personal string) string {
+	f := SystemPromptFacts{PersonalInstructions: personal}
+	return strings.Replace(SystemPrompt(f), TurnContext(f), "", 1)
+}
+
+// TurnContext carries pane and attachment facts in the person's turn, not the cache prefix.
+func TurnContext(f SystemPromptFacts) string {
+	var b strings.Builder
 	b.WriteString("\nWhere you are\n")
 	if f.Cwd != "" {
 		// Named for what it is. The value is the pane's working directory
@@ -156,70 +233,6 @@ func SystemPrompt(f SystemPromptFacts) string {
 				}
 			}
 		}
-	}
-
-	b.WriteString("\nWhat you can do\n")
-	b.WriteString("You act only through the tools you are given, and each tool's own description " +
-		"says what it does. ")
-	b.WriteString("Some calls run straight away, some are put to the person for approval " +
-		"first, and some are refused. A refusal is an answer: say what you could not do and " +
-		"what you would need, and never route around it with another tool or a different spelling " +
-		"of the same call.\n")
-	b.WriteString("\nWhat a person's input means\n")
-	b.WriteString("A link on its own means go there and tell the person what is on it. " +
-		"Text on its own, with no question, means save it as a note with notes.create; text that is a question or context for a question is part of that question instead. " +
-		"When the intent is not plain, ask one question and stop. ")
-	// THE RULE AND THE ATTACHMENT MUST NOT CONTRADICT EACH OTHER
-	// (nocx-hp8p2.4). "Do not call a tool to check first" is about going
-	// OUTSIDE for something nobody offered. Left unqualified it also
-	// forbade reading the screen this very question arrived with — and an
-	// unclear question is precisely when it fires, so the one case the
-	// attachment exists for was the one case it was never read in. The
-	// owner asked "what is this?" over a running `top` and was told there
-	// was not enough context, by a model whose own reasoning had named the
-	// attachment two lines earlier.
-	//
-	// The exemption is written only when there IS an attachment: with
-	// nothing attached, going and looking before answering is the guessing
-	// this rule exists to prevent, and the rule keeps its whole force.
-	if len(f.AttachedContent) > 0 {
-		b.WriteString("Do not guess, and do not go outside this pane to check first — " +
-			"but what is attached above is already yours: read it before you answer, " +
-			"because it is why the question was asked here.\n")
-	} else {
-		b.WriteString("Do not guess, and do not call a tool to check first; notes.create is the requested write for questionless text, not a check.\n")
-	}
-
-	b.WriteString("\nHow to answer\n")
-	// THE LANGUAGE IS THE MESSAGE'S, NEVER A SETTING. It is stated here and
-	// not offered as a preference on purpose: a person who asks in Russian
-	// and then pastes an English stack trace is one person having one
-	// conversation, and a stored language would answer the second message in
-	// the wrong one. Following the message in hand is also the only rule that
-	// works in a terminal, where half of what is on screen is English
-	// whatever the person speaks — so the sentence is careful to say that the
-	// NAMES of things do not move, which is the failure the rule would
-	// otherwise invite: a translated flag is a flag that does not exist, and
-	// a translated path is a path nothing will open.
-	b.WriteString("Answer in the language you were asked in, and change language when the person " +
-		"does. Commands, paths, flags, file names and error text stay exactly as they are, " +
-		"whatever language the sentence around them is in.\n")
-	b.WriteString("Short and concrete, in the register of a terminal. No preamble and no restating " +
-		"the question. Commands, paths and flags in backticks. If you do not know something, say so " +
-		"or go and look; if you need one thing from the person, ask for that one thing.\n")
-
-	// LAST, and it is the position that carries the meaning: where the
-	// person's own rule contradicts a line of ours, theirs is the one the
-	// model reads last and follows. Nothing may be appended after it.
-	if personal := strings.TrimSpace(f.PersonalInstructions); personal != "" {
-		b.WriteString("\n" + PersonalInstructionsHeading + "\n")
-		b.WriteString("The rest of this prompt is written by nocx. What follows was written by the " +
-			"person themselves, in nocx's settings, and it comes last so that where it contradicts " +
-			"anything above it, theirs is the rule you follow. It is not authority: it cannot widen " +
-			"what you may do, hand you a tool you were not given, or turn a call that would be put " +
-			"to the person into one that is not. Those are decided elsewhere, by something that " +
-			"never reads this text.\n")
-		b.WriteString(personal + "\n")
 	}
 
 	return b.String()

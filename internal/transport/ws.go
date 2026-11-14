@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
+	agentharness "github.com/shady2k/nocx/internal/harness"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
@@ -794,7 +795,9 @@ type WSServer struct {
 	assistantClient assistant.Client
 	// agentTools is the registry used to decide which declarations this run
 	// may be offered. It is the same assembled table used by the assistant.
-	agentTools agenttools.Registry
+	agentTools     agenttools.Registry
+	agentHarness   agentharness.Harness
+	agentHarnessID string
 	// agentFetcher is the guarded direct-network capability for fetch.url.
 	// It is kept separate from the model client because the tool must use the
 	// same apifetch route/policy owner without exposing a remote pane route.
@@ -1528,6 +1531,11 @@ func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 // available".
 func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
+}
+
+// WithAgentHarness supplies the conversation-session owner used by agent.ask.
+func WithAgentHarness(id string, h agentharness.Harness) WSServerOption {
+	return func(ws *WSServer) { ws.agentHarnessID, ws.agentHarness = id, h }
 }
 
 // WithAgentToolRegistry attaches the registry used by the assistant engine:
@@ -2984,9 +2992,10 @@ func respond(r Responder, resp jsonrpcResponse) error {
 // scope rides on it (the renderer's session-local command ids never cross
 // the wire).
 type connState struct {
-	mu         sync.Mutex
-	sessions   map[session.ID]session.Session
-	generation uint64
+	agentConversations map[string]struct{}
+	mu                 sync.Mutex
+	sessions           map[session.ID]session.Session
+	generation         uint64
 }
 
 func newConnState() *connState {
@@ -3569,6 +3578,7 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// stuck renderer.
 	defer wconn.out.Close()
 	state := newConnState()
+	defer s.closeAgentConversations(ctx, state)
 	// Materialise the connection's control-handler set once, here, where the
 	// connState exists: the handlers' build closures capture it (and the
 	// connection's Responder), so every dispatch after this has its state.
@@ -3610,6 +3620,30 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// keeps producing into its ring — this is AD-9, not a close.
 	for _, sess := range orphaned {
 		s.takeSize(sess.ID(), sess, session.NoClient())
+	}
+}
+
+func (s *WSServer) closeAgentConversations(parent context.Context, state *connState) {
+	ctx := context.WithoutCancel(parent)
+	opScope := catalog.BeginInternal(ctx, catalog.OpInternalAgentRun)
+	defer opScope.Complete()
+	ctx = catalog.WithScope(ctx, opScope)
+	closer, ok := s.agentHarness.(interface {
+		CloseConversation(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	state.mu.Lock()
+	ids := make([]string, 0, len(state.agentConversations))
+	for id := range state.agentConversations {
+		ids = append(ids, id)
+	}
+	state.mu.Unlock()
+	for _, id := range ids {
+		if err := closer.CloseConversation(ctx, id); err != nil {
+			log.From(log.WithLogger(ctx, s.log)).Warn("closing the assistant conversation failed", "conversation", id, "error", err)
+		}
 	}
 }
 

@@ -39,6 +39,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -127,18 +128,21 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu               sync.Mutex
-	eventsMu         sync.Mutex
-	drive            *agentRunDrive
-	runLeases        map[*runLease]struct{}
-	cancelled        bool
-	terminalized     bool
-	droppedDeltas    int
-	cancelState      content.RunState
-	cancelReason     content.TerminationReason
-	cancelSentence   string
-	cancelHasDetails bool
-	cancelDone       chan struct{}
+	mu                 sync.Mutex
+	eventsMu           sync.Mutex
+	drive              *agentRunDrive
+	runLeases          map[*runLease]struct{}
+	cancelled          bool
+	terminalized       bool
+	droppedDeltas      int
+	cancelState        content.RunState
+	cancelReason       content.TerminationReason
+	cancelSentence     string
+	cancelHasDetails   bool
+	cancelDone         chan struct{}
+	driveDone          chan struct{}
+	answeringModel     string
+	actorTerminalState content.RunState
 }
 
 type agentRunDrive struct {
@@ -228,7 +232,7 @@ func (c *agentRunControl) droppedDeltaCount() int {
 func (c *agentRunControl) beginCancel() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.terminalized || c.cancelled {
+	if c.terminalized || c.cancelled || c.actorTerminalState != "" {
 		return false
 	}
 	c.cancelled = true
@@ -619,6 +623,8 @@ type agentHandlers struct {
 	endpointWired bool
 	credentials   credential.Resolver
 	client        assistant.Client
+	harness       agentharness.Harness
+	harnessID     string
 	askSub        control.Submission
 	// fetcher is the guarded direct-network seam for fetch.url.
 	fetcher apifetch.TextFetcher
@@ -820,12 +826,6 @@ func (s *WSServer) personalInstructionsText() string {
 	return v
 }
 
-// errNoEndpoint is the ask's no-endpoint refusal: a renderable condition
-// (the surface says "configure an endpoint"), not a server fault — the
-// message IS the report, and agent.status carries the persistent readiness
-// line.
-var errNoEndpoint = errors.New("no endpoint configured")
-
 func decodeAgentAskParams(raw json.RawMessage) (agentAskParams, string) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
@@ -910,50 +910,17 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// tools, which is the state before readScreen.
 	runGrant := h.grantFor(p.SessionID)
 
-	// The endpoint the run will use comes from the ANSWERING ROLE (bead
-	// nocx-e6kn2): the one resolver maps the role to its assigned
-	// (endpoint, model) pair, resolved here so the run pins "endpoint and
-	// model as they were at the time" (design §5) and the refusal is
-	// visible before anything is recorded. With the role unassigned — or
-	// the assigned pair gone (endpoint deleted, model removed) — the ask
-	// is refused with the reason: a role is NEVER silently re-pointed at
-	// another endpoint or model, because then nobody can tell which model
-	// answered. Nothing lands in the ledger on a refusal (there is no run
-	// to record: the ask never started).
+	if h.harness == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "the answering agent is not available"})
+		return
+	}
+	ready := h.harness.Readiness(ctx)
+	if ready.State != agentharness.Ready {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: ready.Message})
+		return
+	}
 	var endpoint profile.Endpoint
-	var facts content.RunFacts
-	if !h.endpointWired {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})
-		return
-	}
-	err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-		ep, model, err := svc.ResolveRole(profile.RoleAnswering)
-		if err != nil {
-			return err
-		}
-		endpoint = ep
-		facts = content.RunFacts{
-			Mode:       "explain",
-			EndpointID: ep.ID,
-			BaseURL:    ep.BaseURL,
-			Model:      model,
-		}
-		return nil
-	})
-	if err != nil {
-		// A role refusal is a RENDERABLE condition with a repair: the
-		// surface shows the sentence (and its way out), not a server
-		// fault. Anything else is an internal error on the ordinary path.
-		switch {
-		case errors.Is(err, profile.ErrRoleUnassigned):
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "the answering role has no model assigned — assign one in Settings → Roles"})
-		case errors.Is(err, profile.ErrRoleEndpointGone), errors.Is(err, profile.ErrRoleModelGone):
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error() + " — reassign the answering role in Settings → Roles"})
-		default:
-			h.answerError(req, err)
-		}
-		return
-	}
+	facts := content.RunFacts{Mode: "explain", Harness: h.harnessID}
 	in.Facts = facts
 
 	// Endpoint material (the credential and secret-valued headers) is NOT
@@ -971,7 +938,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// starts — the renderer places the block from the response, then
 	// appends deltas to it.
 	var askRes content.AgentAskResult
-	err = h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		res, submitErr := svc.SubmitAsk(ctx, in)
 		if submitErr == nil {
 			askRes = res
@@ -1001,7 +968,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	runBase, cancelRun := h.detachedRunContext(ctx)
 	runCtx, _ := log.StartTrace(runBase, runTrace(askRes.RunID))
 	leaseDegradation := assistant.NewRunLeaseDegradation()
-	runControl := &agentRunControl{cancelDone: make(chan struct{})}
+	runControl := &agentRunControl{cancelDone: make(chan struct{}), driveDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:      askRes.RunID,
 		control:    runControl,
@@ -1027,6 +994,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		automaticSessionItems: automaticSessionItems(attached),
 		markedSessionWindows:  markedSessionWindows(attached),
 	}
+	conversation := string(sid)
+	if in.PaneID != nil {
+		conversation = *in.PaneID
+	}
+	h.state.mu.Lock()
+	if h.state.agentConversations == nil {
+		h.state.agentConversations = make(map[string]struct{})
+	}
+	h.state.agentConversations[conversation] = struct{}{}
+	h.state.mu.Unlock()
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
 	h.pendingRunsMu.Unlock()
@@ -1052,78 +1029,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 	}
-}
-
-// resolveEndpointMaterial resolves everything the stream needs: the endpoint
-// credential and secret-valued headers. Operation stance makes the vault raise
-// one coalesced unlock, wait, and continue independently of the wire carrier.
-// Missing credentials and headers remain distinct, renderable failures.
-func (h agentHandlers) resolveEndpointMaterial(
-	ctx context.Context,
-	endpoint profile.Endpoint,
-) (credential.Secret, []assistant.Header, error) {
-	return resolveEndpointMaterial(ctx, h.credentials, endpoint, credential.Operation("answer the ask"))
-}
-
-// resolveEndpointMaterial is the ONE place an endpoint becomes a usable
-// (key, headers) pair.
-//
-// The OPERATION is the caller's, and it is the only thing they differ on: it
-// is what the vault shows a person when it raises an unlock, so two callers
-// must not share one string.
-func resolveEndpointMaterial(
-	ctx context.Context,
-	credentials credential.Resolver,
-	endpoint profile.Endpoint,
-	op credential.Stance,
-) (credential.Secret, []assistant.Header, error) {
-	secret := credential.Secret{}
-	if endpoint.NeedsCredential() {
-		if credentials == nil {
-			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
-		}
-		resolved, err := credentials.Resolve(
-			ctx, credential.SecretID(endpoint.CredentialRef), op)
-		if err != nil {
-			// A sealed vault (headless), a dismissed unlock and a deleted
-			// secret are terminalized by runAskStream, which owns the mapping
-			// to the run's state; collapsing them into one "missing" sentence
-			// here would hide a cancellation from the caller.
-			return credential.Secret{}, nil, err
-		}
-		if resolved.IsEmpty() {
-			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
-		}
-		secret = resolved
-	}
-
-	headers := make([]assistant.Header, 0, len(endpoint.Headers))
-	for _, hd := range endpoint.Headers {
-		if hd.Value != nil {
-			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
-			continue
-		}
-		if credentials == nil {
-			return credential.Secret{}, nil,
-				fmt.Errorf("the header %q references a missing secret", hd.Name)
-		}
-		hSecret, hErr := credentials.Resolve(
-			ctx, credential.SecretID(hd.ValueRef), op)
-		if hErr != nil {
-			return credential.Secret{}, nil, hErr
-		}
-		if hSecret.IsEmpty() {
-			return credential.Secret{}, nil,
-				fmt.Errorf("the header %q references a missing secret", hd.Name)
-		}
-		var value string
-		_ = hSecret.Use(func(b []byte) error {
-			value = string(b)
-			return nil
-		})
-		headers = append(headers, assistant.Header{Name: hd.Name, Value: value})
-	}
-	return secret, headers, nil
 }
 
 // askRunContext is the durable run identity and non-secret input handed to the
@@ -1213,6 +1118,9 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	if rc.control != nil && rc.control.driveDone != nil {
+		defer close(rc.control.driveDone)
+	}
 	opScope := catalog.BeginInternal(log.WithLogger(ctx, h.log), catalog.OpInternalAgentRun)
 	defer opScope.Complete()
 	ctx = catalog.WithScope(ctx, opScope)
@@ -1242,20 +1150,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		ctx, finishDrive = rc.control.beginDrive(ctx)
 		defer finishDrive()
 	}
-	// Secret material resolves first, outside a capability admission and
-	// before any external request. A sealed vault therefore waits and
-	// continues this same durable run, and a dismissed unlock cancels it.
-	secret, headers, materialErr := h.resolveEndpointMaterial(ctx, rc.endpoint)
-	if materialErr != nil {
-		streamErr = materialErr
-		emitStreamEnded()
-		if errors.Is(materialErr, ErrUnlockCancelled) {
-			h.terminalize(ctx, rc, content.RunCancelled, content.TermUserKilled, "", r)
-			return
-		}
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, materialErr.Error(), r)
-		return
-	}
 
 	// WHAT THE RUN SPENT ITSELF ON (nocx-d6gn4.8.1). A run that thinks for
 	// four minutes and emits nothing logs NOTHING today — the lines below
@@ -1278,69 +1172,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		return
 	}
 
-	// Resolution is complete before the streaming transition. The stream
-	// never reaches for the vault again, so a later seal cannot strand it.
-
-	// Context assembly. The standing prompt (design §1) rides every ask and
-	// is assembled from facts pinned when the ask arrived. It is never
-	// stored: one run assembles it once, from the facts it was given.
-	promptFacts := rc.promptFacts
-	msgs := make([]assistant.Message, 0, 8)
-	msgs = append(msgs, assistant.Message{
-		Role:    "system",
-		Content: assistant.SystemPrompt(promptFacts),
-	})
-
-	// The conversation is a pane-scoped thread owned by the ledger. A
-	// tool line rides the assistant message for its turn: Message deliberately
-	// has only the three engine roles, so inventing a tool role or synthetic
-	// OpenAI tool_calls would create a second wire contract. The line is still
-	// separate from prose inside that message, and is never the tool output.
-	const conversationBudget = 12000
-	priorTurns, priorErr := h.priorTurns(ctx, rc)
-	if priorErr != nil {
-		h.log.Warn("the previous conversation could not be read; answering without it",
-			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
-	} else {
-		turnMessages := make([][]assistant.Message, len(priorTurns))
-		total := 0
-		for i, prior := range priorTurns {
-			turnMessages[i] = append(turnMessages[i],
-				assistant.Message{Role: "user", Content: prior.Question})
-			if answer, ok := priorAnswerMessage(prior.Prose); ok {
-				content := answer
-				if len(prior.ToolLines) > 0 {
-					content += "\n\n" + strings.Join(prior.ToolLines, "\n")
-				}
-				turnMessages[i] = append(turnMessages[i],
-					assistant.Message{Role: "assistant", Content: content})
-			} else if len(prior.ToolLines) > 0 {
-				turnMessages[i] = append(turnMessages[i],
-					assistant.Message{Role: "assistant", Content: strings.Join(prior.ToolLines, "\n")})
-			}
-			for _, message := range turnMessages[i] {
-				total += len(message.Content)
-			}
-		}
-		trimmed := false
-		for len(turnMessages) > 0 && total > conversationBudget {
-			for _, message := range turnMessages[0] {
-				total -= len(message.Content)
-			}
-			turnMessages = turnMessages[1:]
-			trimmed = true
-		}
-		if trimmed {
-			msgs = append(msgs, assistant.Message{
-				Role: "system", Content: "[older turns of this conversation are not included]",
-			})
-		}
-		for _, turn := range turnMessages {
-			msgs = append(msgs, turn...)
-		}
-	}
-	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
-
 	// One drive, one answer, numbered from zero. A person's question blocks
 	// the call that asked (ADR-anntnxdj §3), so nothing interrupts this
 	// stream and nothing resumes it: the numbering has one owner.
@@ -1351,12 +1182,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	var prose content.ProseBlock
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
-	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:           secret,
-		BaseURL:       rc.endpoint.BaseURL,
-		Model:         rc.model,
-		Headers:       headers,
-		Messages:      msgs,
+	err := h.askHarness(ctx, rc, assistant.AskParams{
 		Grant:         rc.grant,
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
@@ -1596,11 +1422,81 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			"run", rc.runID, "reason", string(reason), "sentence", sentence,
 			"error", err, "callPath", log.CallPath(0))
 		emitStreamEnded()
-		h.terminalize(ctx, rc, content.RunFailed, reason, sentence, r)
+		state := content.RunFailed
+		if errors.Is(err, agentharness.ErrCancelled) {
+			state = content.RunCancelled
+		}
+		if errors.Is(err, context.Canceled) {
+			state = content.RunInterrupted
+		}
+		h.terminalize(ctx, rc, state, reason, sentence, r)
 		return
 	}
 	emitStreamEnded()
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
+}
+
+// askHarness translates only agent prose and reasoning. Tool announcements come
+// from the endpoint kernel, after its durable attempt has been recorded.
+func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assistant.AskParams, emit func(assistant.AskEvent) error) error {
+	if h.harness == nil {
+		return errors.New("the answering agent is not available")
+	}
+	var authority agentharness.TurnAuthority
+	if p.Grant != nil {
+		tools, err := assistant.BindRunTools(h.client, p, func(call assistant.ToolCall) error {
+			return emit(assistant.AskEvent{Kind: assistant.AskToolCall, Call: &call})
+		})
+		if err != nil {
+			return err
+		}
+		authority = tools
+	}
+	conversation := string(rc.sessionID)
+	if rc.paneID != nil {
+		conversation = *rc.paneID
+	}
+	turn, err := h.harness.Run(ctx, agentharness.TurnSpec{
+		ConversationID: conversation,
+		Text:           rc.question + assistant.TurnContext(rc.promptFacts),
+		Model:          rc.model,
+		SystemPrompt:   assistant.StandingSystemPrompt(rc.promptFacts.PersonalInstructions),
+		Authority:      authority,
+	})
+	if err != nil {
+		return err
+	}
+	for event := range turn.Events() {
+		var ev assistant.AskEvent
+		switch event.Kind {
+		case agentharness.EventAnswerDelta:
+			ev = assistant.AskEvent{Kind: assistant.AskAnswer, Text: event.Text}
+		case agentharness.EventReasoningDelta:
+			ev = assistant.AskEvent{Kind: assistant.AskReasoning, Text: event.Text}
+		default:
+			continue
+		}
+		if emitErr := emit(ev); emitErr != nil {
+			_ = turn.Cancel(context.WithoutCancel(ctx))
+			return emitErr
+		}
+	}
+	outcome, err := turn.Wait(context.WithoutCancel(ctx))
+	if rc.control != nil {
+		rc.control.mu.Lock()
+		rc.control.answeringModel = outcome.Model
+		// The actor owns terminal precedence. A non-cancelled terminal
+		// was taken before cancellation, even if Stop raced queued events.
+		if !errors.Is(err, agentharness.ErrCancelled) && !errors.Is(err, context.Canceled) {
+			rc.control.cancelled = false
+			rc.control.actorTerminalState = content.RunCompleted
+			if err != nil {
+				rc.control.actorTerminalState = content.RunFailed
+			}
+		}
+		rc.control.mu.Unlock()
+	}
+	return err
 }
 
 // handleCancel stops one prepared, streaming or awaiting-approval assistant
@@ -1643,13 +1539,23 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	}
 	rc.control.cancelContext(reason)
 	rc.control.finishCancel(state, reason, sentence, hasDetails)
+	if rc.control.driveDone != nil {
+		<-rc.control.driveDone
+	}
 	h.terminalize(ctx, rc, state, reason, sentence, h.r)
+	rc.control.mu.Lock()
+	cancelAccepted := rc.control.cancelled
+	actorTerminalState := rc.control.actorTerminalState
+	rc.control.mu.Unlock()
 	result := agentCancelResponse{
 		RunID:         p.RunID,
 		State:         string(content.RunCancelled),
-		Cancelled:     true,
+		Cancelled:     cancelAccepted,
 		DroppedDeltas: rc.control.droppedDeltaCount(),
 		UnarmedBounds: unarmedRunLeaseSentences(rc),
+	}
+	if !cancelAccepted {
+		result.State = string(actorTerminalState)
 	}
 	if hasDetails {
 		result.Error = sentence
@@ -2214,9 +2120,18 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 	if h.client != nil {
 		h.client.Discard(strconv.FormatInt(rc.runID, 10))
 	}
+	model := rc.model
+	if rc.control != nil {
+		rc.control.mu.Lock()
+		if rc.control.answeringModel != "" {
+			model = rc.control.answeringModel
+		}
+		rc.control.mu.Unlock()
+	}
 	tctx := context.WithoutCancel(ctx)
 	err := h.op.Run(tctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.FinishAgentRun(ctx, rc.runID, content.FinishAgentRun{
+			Model:             model,
 			State:             state,
 			TerminationReason: reason,
 			Error:             sentence,
@@ -2295,6 +2210,13 @@ func unarmedRunLeaseSentences(rc askRunContext) []string {
 // A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
 // result, not an error, so it never reaches this function at all.
 func classifyAskFailure(err error, model string) (content.TerminationReason, string) {
+	var agentFailure *agentharness.TurnError
+	if errors.As(err, &agentFailure) {
+		return content.TermFailed, agentFailure.Reason
+	}
+	if errors.Is(err, agentharness.ErrCancelled) {
+		return content.TermUserKilled, "the person stopped this answer"
+	}
 	// The engine's own failure sentence: the endpoint answered, and did not
 	// answer (a StreamError is nocx's type, never the framework's). It is
 	// the FIRST arm because it is the most specific thing Ask can return
@@ -2507,75 +2429,6 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 // priorTurns reads the pane's thread before this run, oldest first. The
 // ledger owns the complete read and its ordering; transport only crosses the
 // capability seam once and returns that projection to context assembly.
-func (h agentHandlers) priorTurns(ctx context.Context, rc askRunContext) ([]content.PriorTurn, error) {
-	if rc.paneID == nil || *rc.paneID == "" {
-		return nil, nil
-	}
-	var prior []content.PriorTurn
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		var err error
-		prior, err = svc.PriorTurns(ctx, *rc.paneID, rc.entryID)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return prior, nil
-}
-
-// proseGoneNotice is what an earlier turn says instead of its answer when
-// retention has taken the text. It is a STATED ABSENCE and not a hole: the
-// question above it is in the conversation either way, so leaving the answer
-// out entirely would read as "that question was never answered", and inventing
-// or paraphrasing one would be worse still. AGENTS.md: a soft degrade must be
-// visible, not silent — and the surface it has to be visible on here is the
-// model's own context, because that is who reads this message.
-const proseGoneNotice = "[the text of this answer is no longer stored: retention evicted it]"
-
-// proseUnexecutedToolCallNotice replaces a stored envelope in the next
-// question's context. Showing the provider markup again would invite the
-// model to treat an unexecuted request as an earlier assistant turn.
-const proseUnexecutedToolCallNotice = "[this answer was not usable: the model asked for a tool in a form nocx could not act on]"
-
-// proseCutShortNotice marks a partial answer AS partial. Which it is — a real
-// message or an unfinished attempt — is a fact about the run's state and never
-// about how much text there is: an interrupted run leaves exactly the rows a
-// finished one leaves, so a reader with only the text cannot tell.
-const proseCutShortNotice = "[this answer was cut short: the run did not finish]"
-
-// priorAnswerMessage is one earlier turn's answer as the model is told it, and
-// the bool is whether there is anything to tell. It is the whole of the
-// mapping from a stored turn to a Message — the ARRANGEMENT (which run, what
-// order, whether the text survives) is the ledger's and has already happened.
-//
-// Four states, and each is said rather than inferred:
-//
-//   - the run finished and printed prose → the prose, whole, in seat order.
-//   - the run printed prose and did NOT finish → the prose, marked partial.
-//   - the prose was evicted → the sentence that says so, never a hole.
-//   - the run printed nothing → nothing. Not a degrade and not a loss: an
-//     answer that was never written has no text to miss, and a marker there
-//     would claim one was.
-func priorAnswerMessage(p content.TurnProse) (string, bool) {
-	if p.Text != "" && assistant.IsUnexecutedToolCallEnvelope(p.Text) {
-		// The envelope predicate leads because replay safety does not depend
-		// on the recorded state: any state can carry stored prose, and this
-		// prose is never a usable assistant answer. State only chooses the
-		// wording for ordinary non-completed prose below.
-		return proseUnexecutedToolCallNotice, true
-	}
-	if p.Evicted {
-		return proseGoneNotice, true
-	}
-	if p.Text == "" {
-		return "", false
-	}
-	if p.State == content.RunCompleted {
-		return p.Text, true
-	}
-	return p.Text + "\n\n" + proseCutShortNotice, true
-}
-
 func derefOrEmpty(s *string) string {
 	if s == nil {
 		return ""
@@ -2614,6 +2467,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
+			harness: s.agentHarness, harnessID: s.agentHarnessID,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,

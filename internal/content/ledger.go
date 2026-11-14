@@ -744,6 +744,7 @@ func (g Grant) Expired(now time.Time) bool {
 // against: unlike a shell command, nobody but this process times a turn, so
 // the close is the only place the number can come from (nocx-hoeq3).
 type FinishAgentRun struct {
+	Model             string   // the model the agent reported answering this turn
 	State             RunState // RunCompleted or RunFailed (this slice)
 	TerminationReason TerminationReason
 	Error             string // the renderable reason; empty when completed
@@ -962,6 +963,7 @@ type FrameRegion struct {
 // reinterprets what the run used. The credential is never part of this:
 // the key is resolved at stream time, never persisted.
 type RunFacts struct {
+	Harness    string `json:"harness,omitempty"`
 	Mode       string `json:"mode"` // "explain" — the only mode this slice knows
 	EndpointID string `json:"endpointId,omitempty"`
 	BaseURL    string `json:"baseUrl,omitempty"`

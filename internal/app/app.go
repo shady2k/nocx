@@ -111,6 +111,8 @@ type App struct {
 	ToolAuthorizer      toolendpoint.Authorizer
 	ToolSurfaceObserver toolendpoint.Observer
 	agentEnroller       *paneEnroller
+	assistantTools      *assistantToolBinding
+	assistantAgent      *pi.Connector
 	// workerRestorations are classified once while New owns the persisted
 	// restart document, then relaunched from Start after the local helper has
 	// been installed and before the transport accepts a client.
@@ -1782,7 +1784,10 @@ func New(opts ...Option) (*App, error) {
 	// person's login shell's PATH (nocx-a62cl.12.1). Built here, cached by the
 	// detector until Settings asks for a refresh.
 	tpOpts = append(tpOpts, transport.WithAgentDetection(agentdetect.New(agentdetect.LoginShell{})))
-	tpOpts = append(tpOpts, transport.WithAgentCatalogue(harness.NewCatalogue(map[string]harness.Harness{"pi": pi.New(paths.DataDir(), nil)})))
+	assistantTools := &assistantToolBinding{}
+	assistantAgent := pi.NewWithBase(paths.DataDir(), nil, harness.Base{Tools: assistantTools.newSession})
+	tpOpts = append(tpOpts, transport.WithAgentCatalogue(harness.NewCatalogue(map[string]harness.Harness{"pi": assistantAgent})))
+	tpOpts = append(tpOpts, transport.WithAgentHarness("pi", assistantAgent))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
@@ -2633,6 +2638,7 @@ func New(opts ...Option) (*App, error) {
 	// one place this backend already tracks that translation globally, for
 	// every participant regardless of nesting depth.
 	accessHub.BindParticipants(workerEnrol)
+	toolAuthorizer.BindTurnGrants(assistantTools)
 	toolAuthorizer.BindPaneAccess(accessHub)
 	descendantPaneReader := newPaneReader(accessHub, paneWatch, paneDrivers)
 	toolAuthorizer.BindSessionReads(descendantPaneReader)
@@ -2738,6 +2744,8 @@ func New(opts ...Option) (*App, error) {
 		Transport:               tp,
 		ToolDispatcher:          toolDispatcher,
 		ToolAuthorizer:          toolAuthorizer,
+		assistantTools:          assistantTools,
+		assistantAgent:          assistantAgent,
 		ToolSurfaceObserver:     toolSurface,
 		agentEnroller:           paneEnrol,
 		workerRestorations:      workerRestorations,
@@ -3406,6 +3414,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	if a.assistantAgent != nil {
+		if err := a.assistantAgent.Close(ctx); err != nil {
+			a.Logger.Error("assistant shutdown error", "error", err)
+		}
 	}
 	// After the transport, so no pane can still be opening. The daemon and
 	// every session on it survive this — closing the connection is this

@@ -143,12 +143,8 @@ function chunkFrame(model: string, content: string, finish: string): string {
  *  delta into `[]openai.ToolCall` and maps it to `schema.ToolCall`
  *  (eino-ext/libs/acl/openai chat_model.go, toMessageToolCalls), so `id`
  *  becomes the call id the approval binding names, `type` must be
- *  "function", and `function.arguments` is a STRING the middleware
- *  validates against the tool's params schema. `index` is deliberately
- *  ABSENT: eino concatenates a stream's tool calls by index and a call
- *  delivered whole in one frame needs no merging (eino schema/message.go,
- *  concatToolCalls appends an index-less chunk as it stands) — which is
- *  exactly what both Go fakes do.
+ *  "function", and `function.arguments` is a STRING. `index` identifies the
+ *  call within the streamed response, as pi's OpenAI client requires.
  *
  *  A REAL provider may split one call's arguments across several frames.
  *  This fake does not, because nothing in this suite tests eino's
@@ -166,6 +162,7 @@ function toolCallFrame(model: string, calls: readonly ScriptedToolCall[]): strin
         delta: {
           role: 'assistant',
           tool_calls: calls.map((c, i) => ({
+            index: i,
             id: c.id ?? `call_${i + 1}`,
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.arguments) },

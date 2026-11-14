@@ -11,15 +11,9 @@
  *
  * The seam, named where each half is decided:
  *
- * - The WIRE. A proposal is one `chat.completion.chunk` frame whose
- *   `delta.tool_calls` carries `{id, type:"function", function:{name,
- *   arguments}}` and whose `finish_reason` is `tool_calls`. That shape is
- *   not read off the OpenAI docs — it is matched against the two Go fakes
- *   this repo already parses with (`internal/assistant/policy_test.go`
- *   streamToolCalls, `internal/transport/ws_readscreen_test.go`
- *   streamToolCallChunk), because eino's openai adapter is the single
- *   consumer of all three and a drift would be a second protocol variant
- *   with a delay fuse.
+ * - The WIRE. FakeOpenAI serves OpenAI-compatible streaming responses to
+ *   real pi. Its models.json is written into this backend's disposable HOME
+ *   before startup; no endpoint or provider outside that home is used.
  * - The TOOL. `session.read`, declared in `internal/agenttools/registry.go`
  *   with `Effect: observe`, `Resources: [session]` and
  *   `ResourceArg: "sessionId"`.
@@ -59,13 +53,11 @@ import {
   appReadyForInput,
   VaultBackend,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
-  settingsReady,
   switchLanguage,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome, readScreenTool } from './pi-home'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -73,17 +65,11 @@ const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 /** The approval prompt is a kit Prompt: a role="dialog" carrying the
  *  policy title AgentApprovalPrompt gives it. */
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
-
-/** One nonce per file, so this file's endpoint name and markers are unique
- *  in the whole run. */
-const nonce = Date.now().toString(36)
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -95,11 +81,8 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-aospw-e2e-'))
-  // `true` = no Secret Service for this backend: the container has no
-  // keychain to ask, and the derived content key makes the vault available
-  // without user setup — the arrangement agent-ask.spec.ts uses.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -160,25 +143,6 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     const asks = recordAsks(page)
     await openApp(page)
 
-    // ── The endpoint and the model that answers, through the surfaces a
-    // person uses. A fresh home has no vault, so the first save stops on
-    // the setup sheet and is retried once the vault exists; createAiEndpoint
-    // reads which of the two happened rather than assuming.
-    await page.keyboard.press('Meta+,')
-    await settingsReady(page)
-    await page.locator(SETTINGS_AI_NAV).click()
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-    const endpointName = `E2E Tools ${nonce}`
-    await createAiEndpoint(page, {
-      name: endpointName,
-      baseUrl: fake.baseUrl(),
-      models: ['e2e-model'],
-      key: `e2e-key-${nonce}`,
-      vaultPassphrase: `vault-pass-${nonce}`,
-    })
-    await page.locator(SETTINGS_ROLES_NAV).click()
-    await setDefaultModel(page, endpointName, 'e2e-model')
-
     // ── Back to the terminal, where a person asks.
     await page.locator(TITLE).first().click()
     const input = page.locator(INPUT)
@@ -207,7 +171,7 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     // and the question reaches the person.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: {} }],
+      toolCalls: readScreenTool,
     })
     await askFromPrompt(page, 'Read the screen and tell me what is there.')
 
@@ -245,13 +209,13 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     // this persisted setting from reaching the next spec in the shard.
     await switchLanguage(page, 'ru')
 
-    // ── Back to the terminal, and ask again. The endpoint and the model are
-    // this file's own, set up by the test above (serial mode).
+    // ── Back to the terminal, and ask again. Real pi uses this file's
+    // disposable provider, configured before the backend starts.
     await page.locator(TITLE).first().click()
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: {} }],
+      toolCalls: readScreenTool,
     })
     await askFromPrompt(page, 'Прочитай экран и скажи, что там.')
 

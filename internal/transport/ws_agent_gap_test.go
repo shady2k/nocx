@@ -196,7 +196,7 @@ func (r *gapResponder) TryNotify(method string, params json.RawMessage) error {
 // newGapHandlers builds the agentHandlers the unit tests drive directly,
 // with the real stream logic and a recording store.
 func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *assistant.ApprovalStore) agentHandlers {
-	return agentHandlers{
+	h := agentHandlers{
 		op:            &directAgentOp{svc: svc},
 		log:           log.NewSlogAdapter(nil),
 		client:        client,
@@ -204,6 +204,10 @@ func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *a
 		pendingRuns:   make(map[int64]askRunContext),
 		pendingRunsMu: &sync.Mutex{},
 	}
+	if _, ok := client.(*scriptedAssistantClient); ok {
+		h.harness = &legacyStreamHarness{client: client}
+	}
+	return h
 }
 
 func gapRunContext() askRunContext {

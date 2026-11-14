@@ -2963,6 +2963,34 @@ describe('reclaiming a live session', () => {
     expect(late.map((recovered) => recovered?.produced)).toEqual([12_000])
   })
 
+  it("keeps a session's integration fact when the same session is claimed again", async () => {
+    const { client, ws } = await freshClient()
+    const firstClaim = client.reclaimSession(liveEntry({ replayFrom: 5_000 }))
+    await answerRecoveryStatus(ws, { produced: 5_000 })
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 5_000 })
+    await firstClaim
+
+    const fact: SessionIntegrationChanged = {
+      sessionId: SID,
+      ...OPEN_IDENTITY,
+      status: 'integrated',
+      shell: '/bin/bash',
+    }
+    ws.deliverText({ jsonrpc: '2.0', method: 'session.integrationChanged', params: fact })
+
+    // The pane observes the replacement through pane.connection and claims it;
+    // the claim registers the session a second time. The fact that arrived in
+    // between is the one the pane must still read.
+    const secondClaim = client.reclaimSession(liveEntry({ replayFrom: 5_000 }))
+    await answerRecoveryStatus(ws, { produced: 5_000 })
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 5_000 })
+    const second = await secondClaim
+
+    const seen: SessionIntegrationChanged[] = []
+    second.onIntegrationChanged((received) => seen.push(received))
+    expect(seen).toEqual([fact])
+  })
+
   it('asks the backend what is live instead of its own memory', async () => {
     const { client, ws } = await freshClient()
     const listing = client.listLiveSessions()

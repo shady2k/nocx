@@ -356,9 +356,13 @@ async function mountTerminal(
       // THE FIXTURE'S ADOPTION PATH (review finding C): the backend's
       // replacement session is taken from the sessions the fixture already
       // holds, exactly as the product's live-inventory claim takes it.
-      adoptReplacement: (sessionId: string) => {
-        const found = clientFake._sessions.find((candidate) => candidate.sessionId === sessionId)
-        return Promise.resolve(found === undefined ? null : asSessionHandleForTest(found))
+      adoptReplacement: async (sessionId: string) => {
+        // THE PRODUCTION ADOPTION PATH: the live inventory names the
+        // replacement and the claim takes it back. No ready-made handle.
+        const listed = await clientFake.listLiveSessions()
+        const entry = listed.find((candidate) => candidate.sessionId === sessionId)
+        if (entry === undefined) return null
+        return asSessionHandleForTest(await clientFake.reclaimSession(entry))
       },
       ...opts.hooks,
     },

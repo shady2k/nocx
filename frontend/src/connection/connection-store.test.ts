@@ -157,9 +157,18 @@ describe('ConnectionStore', () => {
     // The client has not named a backend yet: a stale first observation must
     // be accepted (there is nothing to compare), and must not become the
     // identity a later one is refused against.
-    const store = new ConnectionStore(wire, 'pane-1', () => null)
+    let backend: string | null = null
+    const store = new ConnectionStore(wire, 'pane-1', () => backend)
     wire.deliver('pane.connection', observation({ connectionEpoch: 9, instanceId: 'stale' }))
-    expect(store.current()?.observation.instanceId).toBe('stale')
+    expect(store.current()?.observation.connectionEpoch).toBe(9)
+
+    // THE FIRST NAME RESETS THE ANONYMOUS COUNTER: this backend's epoch 1
+    // must not be suppressed by an observation accepted before the client
+    // knew which backend it was talking to.
+    backend = 'instance-1'
+    wire.deliver('pane.connection', observation({ connectionEpoch: 1, instanceId: 'instance-1' }))
+    expect(store.current()?.observation.instanceId).toBe('instance-1')
+    expect(store.current()?.observation.connectionEpoch).toBe(1)
     store.dispose()
   })
 

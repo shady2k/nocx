@@ -1653,16 +1653,16 @@ export class PaneManager {
   private async adoptReplacementSession(
     paneId: string,
     sessionId: string,
-    like: SessionHandle | null,
   ): Promise<SessionHandle | null> {
     const listed = await this.client.listLiveSessions()
     const entry = listed.find((s) => s.paneId === paneId && s.sessionId === sessionId)
     if (entry === undefined) return null
-    // THE BACKEND OPENED IT ON THIS CONNECTION. A claim would take it from
-    // this very client ("already attached to this session"); the renderer's
-    // missing half is its own record, and the live entry has the identity it
-    // needs.
-    return this.client.adoptHeldSession(entry, like)
+    // THE EXISTING RE-ADOPTION PATH (the one a pane uses after a backend
+    // restart): the backend opened the replacement unowned, so this claim is
+    // valid, and the attach replays the session's screen and carries the
+    // facts the new shell was launched with — nothing is copied from the old
+    // one.
+    return this.reclaimLiveSession(paneId, entry)
   }
 
   /** Claim one listed session, or say what the failure was.
@@ -1909,8 +1909,7 @@ export class PaneManager {
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
         adoptSession,
-        adoptReplacement: (sessionId, like) =>
-          this.adoptReplacementSession(identity.paneId, sessionId, like),
+        adoptReplacement: (sessionId) => this.adoptReplacementSession(identity.paneId, sessionId),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),
         sessionHome: this.sessionHome,
@@ -2074,8 +2073,7 @@ export class PaneManager {
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
         adoptSession,
-        adoptReplacement: (sessionId, like) =>
-          this.adoptReplacementSession(identity.paneId, sessionId, like),
+        adoptReplacement: (sessionId) => this.adoptReplacementSession(identity.paneId, sessionId),
         onAdoptabilityChange: (adoptable: boolean) => {
           const pane = paneRef.current
           if (!pane) return

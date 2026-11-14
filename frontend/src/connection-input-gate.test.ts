@@ -64,11 +64,14 @@ async function mount(hooks: TerminalContentHooks = {}): Promise<void> {
     () => {},
     { profileId: 'p1', host: 'h' },
     {
-      adoptReplacement: (wanted: string) =>
-        Promise.resolve(
-          (client._sessions.find((candidate) => candidate.sessionId === wanted) ??
-            null) as unknown as SessionHandle | null,
-        ),
+      adoptReplacement: async (wanted: string) => {
+        // THE PRODUCTION ADOPTION PATH: the live inventory names the
+        // replacement, then the claim takes it back with replay.
+        const listed = await client.listLiveSessions()
+        const entry = listed.find((candidate) => candidate.sessionId === wanted)
+        if (entry === undefined) return null
+        return (await client.reclaimSession(entry)) as unknown as SessionHandle
+      },
       ...hooks,
     },
   )
@@ -195,23 +198,38 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
     // No session yet: the shell has not been adopted, but the transport is
     // already connected.
     ;(content as unknown as { session: unknown }).session = null
-    publish({ sessionId, transport: { state: 'opening', stage: 'shell', stateMs: 0 } })
+    publish({ transport: { state: 'opening', stage: 'shell', stateMs: 0 } })
     expect(press('x')).toBe(true)
     publish({ transport: { state: 'connected', stateMs: 10, plainShells: 1 } })
     expect(session.intent).not.toHaveBeenCalled()
 
     // The backend adopts the shell; the held key goes to the composer draft
     // because this pane is integrated.
-    const editor = (content as unknown as { editor: { show(): void; getDoc(): string } }).editor
+    const editor = (
+      content as unknown as { editor: { show(): void; getDoc(): string; isVisible: boolean } }
+    ).editor
     const replacement = makeSession({ awaitsIntegration: true })
     replacement.sessionId = 'replacement-shell'
     client._sessions.push(replacement)
+    client._addLiveSession({
+      sessionId: 'replacement-shell',
+      instanceId: 'instance-gate',
+      sessionEpoch: 1,
+      paneId: 'pane-gate',
+      replayFrom: 0,
+      attached: false,
+    })
     publish({ sessionId: 'replacement-shell' })
     await vi.waitFor(() =>
-      expect((content as unknown as { session: { sessionId: string } }).session.sessionId).toBe(
-        'replacement-shell',
-      ),
+      expect(
+        (content as unknown as { session: { sessionId: string } | null }).session?.sessionId,
+      ).toBe('replacement-shell'),
     )
+    // A further connected observation is NOT the shell's verdict: the session
+    // awaits integration, so the keys stay held through it.
+    publish({ sessionId: 'replacement-shell' })
+    expect(editor.getDoc()).toBe('')
+    expect(replacement.intent).not.toHaveBeenCalledWith('key', 'x')
     // The replacement shell proves itself integrated; only then do held keys
     // belong in the composer.
     lifecycleHandler(client)({
@@ -243,9 +261,9 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
     await vi.waitFor(() => expect(client._sessions.length).toBe(2))
     const replacement = client._sessions[1]
     await vi.waitFor(() =>
-      expect((content as unknown as { session: { sessionId: string } }).session.sessionId).toBe(
-        replacement.sessionId,
-      ),
+      expect(
+        (content as unknown as { session: { sessionId: string } | null }).session?.sessionId,
+      ).toBe(replacement.sessionId),
     )
     expect(tab.pane.querySelector('[data-reconnect-boundary]')).not.toBeNull()
   })
@@ -278,11 +296,19 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
     const automatic = makeSession()
     automatic.sessionId = 'automatic-shell'
     client._sessions.push(automatic)
+    client._addLiveSession({
+      sessionId: 'automatic-shell',
+      instanceId: 'instance-gate',
+      sessionEpoch: 1,
+      paneId: 'pane-gate',
+      replayFrom: 0,
+      attached: false,
+    })
     publish({ sessionId: 'automatic-shell' })
     await vi.waitFor(() =>
-      expect((content as unknown as { session: { sessionId: string } }).session.sessionId).toBe(
-        'automatic-shell',
-      ),
+      expect(
+        (content as unknown as { session: { sessionId: string } | null }).session?.sessionId,
+      ).toBe('automatic-shell'),
     )
     expect(tab.pane.querySelector('[data-reconnect-boundary]')).not.toBeNull()
   })

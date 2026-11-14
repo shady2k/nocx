@@ -292,12 +292,15 @@ export class ConnectionStore {
     // nothing is pinned — the first one to arrive may be a stale one.
     const backend = this.backendIdentity()
     if (backend !== null) {
-      if (this.observedBackend !== null && this.observedBackend !== backend) {
+      if (this.observedBackend !== backend) {
+        // BOTH A REPLACEMENT AND THE FIRST NAME. Observations accepted while
+        // the client knew no identity advanced a counter that belongs to an
+        // unknown backend; once the name arrives, that counter and its state
+        // are not this backend's, so the identified backend's epoch 1 must
+        // not be suppressed by an anonymous epoch 9.
         this.observedBackend = backend
         this.lastEpoch = 0
         this.state = null
-      } else {
-        this.observedBackend = backend
       }
       if (observation.instanceId !== backend) return
     }

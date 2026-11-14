@@ -1552,6 +1552,25 @@ export class WSClient {
     reported: SessionSize | null = null,
   ): void {
     this.backendInstance = identity.instanceId
+    // A SESSION CAN BE REGISTERED TWICE, AND THE SECOND TIME IT MAY ALREADY
+    // HAVE NEWS. An automatic replacement is observed through pane.connection
+    // before this pane claims it, so the claim's registration used to replace
+    // a live SessionState — wiping the integration fact the backend had
+    // already sent and the callbacks the pane had installed. Updating the one
+    // identity in place keeps what arrived between the observation and the
+    // claim.
+    const existing = this.sessions.get(sessionId)
+    if (existing) {
+      if (existing.sessionEpoch !== identity.sessionEpoch) {
+        existing.integrationFact = null
+        existing.recoveryRevision = null
+      }
+      existing.instanceId = identity.instanceId
+      existing.sessionEpoch = identity.sessionEpoch
+      existing.offset = offset
+      existing.reported = reported
+      return
+    }
     this.sessions.set(sessionId, {
       offset,
       reported,
@@ -1759,36 +1778,6 @@ export class WSClient {
    *
    *  A reset here is not a loss to report: this client has drawn nothing yet,
    *  so it simply starts at the offset the backend resumed from. */
-  /**
-   * Take a session THIS client already holds because the backend opened it on
-   * this connection — a reconnect's replacement shell (manual or automatic).
-   *
-   * It is not a claim: the backend's open attached the session to this very
-   * socket, so an `attach` would answer "already attached to this session".
-   * What is missing is only the renderer's record of it, and the live entry
-   * carries the identity and replay cursor that record needs. The bytes and
-   * screen frames arrive on the same socket they were always going to.
-   */
-  adoptHeldSession(entry: LiveSession, like: SessionHandle | null = null): SessionHandle {
-    this._registerSession(
-      entry.sessionId,
-      { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch },
-      entry.replayFrom,
-      null,
-    )
-    return new SessionHandle(
-      this,
-      entry.sessionId,
-      like?.cwd ?? '',
-      like?.desiredMode ?? 'script',
-      like?.parent ?? null,
-      like?.workspaceId ?? '',
-      null,
-      false,
-      like?.accessEpoch ?? null,
-    )
-  }
-
   reclaimSession(entry: LiveSession): Promise<SessionHandle> {
     const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
     const recoveryStatus = this.readSessionRecoveryStatus(entry.sessionId, identity).catch(

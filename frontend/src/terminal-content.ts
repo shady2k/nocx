@@ -833,10 +833,7 @@ export interface TerminalContentHooks {
   /** Take a session the BACKEND opened for this pane (a reconnect, manual or
    *  automatic) through the existing live-inventory + claim path. The pane
    *  never adopts by opening, closing or releasing anything itself. */
-  adoptReplacement?: (
-    sessionId: string,
-    previous: SessionHandle | null,
-  ) => Promise<SessionHandle | null>
+  adoptReplacement?: (sessionId: string) => Promise<SessionHandle | null>
   /** Where this pane reads "is what my session prints being written down"
    *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
    *  and the card has to be able to say both halves; the fact belongs to
@@ -2117,24 +2114,25 @@ export class TerminalContent extends BasePaneContent {
     const controller = new AbortController()
     this._adoptAbort = controller
     const hadSession = this.session !== null
-    void adopt(sessionId, this.session)
-      .then(async (handle) => {
-        if (handle === null) return
-        if (this._disposed || controller.signal.aborted) {
-          handle.close()
-          return
-        }
-        const current = this._connectionStore.current()?.observation.sessionId
-        if (current !== undefined && current !== sessionId) {
-          // A later observation names another shell; this one is already
-          // superseded, and adopting it would bind a session nobody is told
-          // about.
-          handle.close()
-          return
-        }
-        if (hadSession) this.scrollback?.blockManager.markReconnected()
-        await this._bindSession(controller.signal, 'rebind', handle)
-      })
+    if (hadSession) this.scrollback?.blockManager.markReconnected()
+    // THE CLAIM HAPPENS INSIDE THE BIND, AFTER ITS SUBSCRIPTIONS EXIST. A
+    // claim taken before _bindSession would attach and replay the session's
+    // lifecycle facts and initial screen to a pane that is not listening yet;
+    // the existing restore path claims at exactly this point for that reason.
+    void this._bindSession(controller.signal, 'rebind', async () => {
+      const handle = await adopt(sessionId)
+      if (handle === null) return null
+      if (this._disposed || controller.signal.aborted) {
+        handle.close()
+        return null
+      }
+      const current = this._connectionStore.current()?.observation.sessionId
+      if (current !== undefined && current !== sessionId) {
+        handle.close()
+        return null
+      }
+      return handle
+    })
       .catch((err: unknown) => {
         log.warn('nocx: the replacement session could not be adopted', {
           pane: this.pane.paneId,
@@ -2156,17 +2154,24 @@ export class TerminalContent extends BasePaneContent {
     const observation = this._connectionStore.current()?.observation
     const state = observation?.transport.state
     if (this._heldTypeAhead.length === 0) return
-    // A SHELL, NOT JUST A TRANSPORT. Transport can be connected before a
-    // shell is adopted (and backend adoption publishes before the open
-    // response returns); releasing into a pane with no handle silently lost
-    // every held key.
-    if ((state === 'connected' || state === 'plain') && this.session !== null) {
-      const held = this._heldTypeAhead
-      this._heldTypeAhead = []
-      this._releaseTypeAhead(held)
-      return
-    }
-    if (state === 'failed' || state === 'ended' || this._connectionCondition === 'lost') {
+    // THE INTENDED SHELL, NOT JUST A HANDLE, AND ITS OWN VERDICT. A further
+    // connected observation can arrive after a bind but before the shell has
+    // proved integration; a retained old handle during a replacement is not
+    // the session the observation names. Release only when the bound session
+    // IS the observed one, and either the shell was raw (no integration was
+    // awaited) or its own prompt has arrived.
+    const intended =
+      observation?.sessionId !== undefined &&
+      this.session !== null &&
+      this.session.sessionId === observation.sessionId
+    const verdictSettled =
+      !this._bind.awaitsIntegration || this.lifecycle.state.kind === 'prompt_ready'
+    if (
+      observation?.shellFailure !== undefined ||
+      state === 'failed' ||
+      state === 'ended' ||
+      this._connectionCondition === 'lost'
+    ) {
       this._heldTypeAhead = []
       showToast({
         level: 'warning',
@@ -2175,6 +2180,12 @@ export class TerminalContent extends BasePaneContent {
           'The connection ended before your keys could be sent. Nothing was delivered.',
         ),
       })
+      return
+    }
+    if ((state === 'connected' || state === 'plain') && intended && verdictSettled) {
+      const held = this._heldTypeAhead
+      this._heldTypeAhead = []
+      this._releaseTypeAhead(held)
       return
     }
     if (state === 'waiting_person' && previous !== 'lost') {
@@ -5300,10 +5311,12 @@ export class TerminalContent extends BasePaneContent {
   private async _bindSession(
     signal: AbortSignal,
     mode: 'first' | 'rebind',
-    /** The shell a reconnect already opened, when there is one. The backend's
-     *  reconnect answers with the open result, so the pane must ADOPT that
-     *  session rather than ask for a second shell (design §5.4). */
-    preset?: SessionHandle,
+    /** The shell this bind adopts instead of opening one: either a handle an
+     *  opener already produced, or the claim that produces it. A claim is a
+     *  thunk because it must run HERE, after the bind's subscriptions exist —
+     *  an attach replays lifecycle facts and the initial screen into the
+     *  pane that is listening. */
+    preset?: SessionHandle | (() => Promise<SessionHandle | null>),
   ): Promise<'bound' | 'uncertain' | 'aborted'> {
     // Bumped for every bind, including this one: the recovery-ack claim
     // further below (_recoveryAckClaim) reads this._bindGeneration directly
@@ -5563,7 +5576,11 @@ export class TerminalContent extends BasePaneContent {
       }),
     )
     let session: SessionHandle
-    if (preset !== undefined) {
+    if (typeof preset === 'function') {
+      const claimed = await preset()
+      if (claimed === null) return this._finishBind('uncertain')
+      session = claimed
+    } else if (preset !== undefined) {
       session = preset
     } else {
       try {
@@ -5630,6 +5647,11 @@ export class TerminalContent extends BasePaneContent {
     this.snapshotStore.reset()
     this.session = session
     this._boundSessionId = session.sessionId
+    // READ THE ACK'S OWN VERDICT THE MOMENT THE SESSION NAMES IT. A store
+    // observation can arrive between here and the integration subscription
+    // below; with the bind's default `false` the gate would read that as a
+    // raw shell and release held type-ahead before the session had a verdict.
+    this._awaitsIntegration = session.awaitsIntegration
     this._bind.sessionId = session.sessionId
     this._resetFrameMetadataSession(session.sessionId)
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's

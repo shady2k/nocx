@@ -16,6 +16,7 @@ import type {
   WSClient,
 } from '../ipc'
 import type { PaneConnection } from '../generated/pane.connection'
+import type { LiveSession } from '../generated/sessions.live'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
 import type { SessionEffect } from '../generated/session.effect'
@@ -572,7 +573,7 @@ export interface ClientFake {
    *  drawn (design D5). Answers an empty list by default, which is a cold
    *  backend and the ordinary case; a restore test that means to RECLAIM a
    *  pane overrides it with an entry naming that pane. */
-  listLiveSessions: ReturnType<typeof vi.fn>
+  listLiveSessions: Mock<() => Promise<LiveSession[]>>
   /** Helper-owned inventory returned to the overview reader. */
   listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
@@ -589,6 +590,9 @@ export interface ClientFake {
   /** Deliver one pane.connection observation to every subscriber — the
    *  connection store is the real one, so a pane test drives the real fold. */
   _firePaneConnection: (observation: PaneConnection) => void
+  /** Register a live session the fixture's backend is holding, as the
+   *  production `sessions.live` would list it. */
+  _addLiveSession: (entry: LiveSession) => void
   /** The backend identity the client currently knows, as WSClient reports it. */
   backendInstanceId: () => string | null
   /** Move the client to another backend instance, as a socket replacement
@@ -710,6 +714,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const notificationHandlers = new Map<string, Set<(params: unknown) => void>>()
   let backendInstance: string | null = null
   const connectionEpochs = new Map<string, number>()
+  const liveEntries: LiveSession[] = []
   const operationRowHandlers = new Set<
     (row: { callID: number; title: string; done: number; total: number; machine: string }) => void
   >()
@@ -725,10 +730,18 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     ),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
-    listLiveSessions: vi.fn(() => Promise.resolve([])),
+    listLiveSessions: vi.fn(() => Promise.resolve([...liveEntries])),
     reclaimSession: vi.fn<
       (entry: Parameters<WSClient['reclaimSession']>[0]) => Promise<SessionFake>
-    >(() => Promise.resolve(newSession())),
+    >((entry) => {
+      // THE PRODUCTION CLAIM PATH, in the fixture: the entry names a session
+      // the fake already holds; a claim answers that one, not a new shell.
+      const known = client._sessions.find((candidate) => candidate.sessionId === entry.sessionId)
+      if (known !== undefined) return Promise.resolve(known)
+      const created = newSession()
+      created.sessionId = entry.sessionId
+      return Promise.resolve(created)
+    }),
     listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
@@ -790,11 +803,25 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     // keeps that shape so a test that stated what its replacement open must
     // answer still states it. A test that wants a different answer overrides
     // this mock.
-    _reconnectPane: vi.fn(() => client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })),
+    _reconnectPane: vi.fn(async (paneId: string) => {
+      const created = await client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+      liveEntries.push({
+        sessionId: created.sessionId,
+        instanceId: backendInstance ?? 'instance-1',
+        sessionEpoch: 1,
+        paneId,
+        replayFrom: 0,
+        attached: false,
+      })
+      return created
+    }),
     // The fake's own open mock resolves the handle itself; the ack and the
     // handle are one object here, which is the identity this asserts.
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     adoptOpen: (result) => result as unknown as SessionHandle,
+    _addLiveSession: (entry) => {
+      liveEntries.push(entry)
+    },
     backendInstanceId: () => backendInstance,
     _setBackendInstance: (id) => {
       backendInstance = id

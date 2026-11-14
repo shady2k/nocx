@@ -55,13 +55,18 @@ func (m *SessionManager) Run(ctx context.Context, spec TurnSpec) (Turn, error) {
 
 func (m *SessionManager) CloseConversation(ctx context.Context, id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	s := m.sessions[id]
-	delete(m.sessions, id)
-	m.mu.Unlock()
 	if s == nil {
 		return nil
 	}
-	return s.close(ctx)
+	// Keep the incarnation registered until its bearer and process settle.
+	// A reconnect must not start another actor with the same generation.
+	if err := s.close(ctx); err != nil {
+		return err
+	}
+	delete(m.sessions, id)
+	return nil
 }
 
 func (m *SessionManager) Close(ctx context.Context) error {

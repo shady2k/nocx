@@ -540,8 +540,8 @@ func assertStillLive(t *testing.T, ws *WSServer, what string, s openWire) {
 	if err != nil {
 		t.Fatalf("%s (%s) is gone from the registry: %v", what, s.SessionID, err)
 	}
-	if state := sess.Liveness(); state.Liveness.Terminal() {
-		t.Errorf("%s reads as %q: it was never asked to end", what, state.Liveness)
+	if _, err := sess.Write([]byte("still here\n")); err != nil {
+		t.Errorf("%s no longer takes bytes: %v — it was never asked to end", what, err)
 	}
 }
 

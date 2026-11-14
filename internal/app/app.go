@@ -2230,7 +2230,6 @@ func New(opts ...Option) (*App, error) {
 	// transport decides who is told; without this line the ssh prober's
 	// knowledge that a host stopped answering would stop at the record, and
 	// the tab would go on looking alive until the connection finally died.
-	sess.SetLivenessObserver(tp.PublishLiveness)
 
 	// The vault's prompt carrier, bound post-construction for the same
 	// reason as the emitter above: the server is built here. The vault

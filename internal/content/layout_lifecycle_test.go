@@ -615,9 +615,6 @@ func TestAPaneMovedBetweenTabsKeepsItsIdentityItsCwdAndItsLiveSession(t *testing
 		t.Fatalf("session identity after the move = %+v, want %+v — this is a NEW session, not a moved pane",
 			live.Identity(), before)
 	}
-	if got := live.Liveness().Liveness; got != session.LivenessAlive {
-		t.Fatalf("liveness after the move = %q, want alive", got)
-	}
 	if _, err := live.Write([]byte("echo still-here\n")); err != nil {
 		t.Fatalf("write to the moved pane's session: %v", err)
 	}

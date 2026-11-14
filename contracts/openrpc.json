@@ -25907,9 +25907,6 @@
       "$ref": "https://nocx.local/contracts/session.intent.schema.json"
     },
     {
-      "$ref": "https://nocx.local/contracts/session.liveness.schema.json"
-    },
-    {
       "$ref": "https://nocx.local/contracts/session.observationChanged.schema.json"
     },
     {

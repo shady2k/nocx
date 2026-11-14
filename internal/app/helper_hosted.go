@@ -45,7 +45,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // remoteShellSetupTimeout is a deliberate spawn-to-first-PTY-output budget,
@@ -345,28 +344,6 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// pass between attachment and the adapter's transition to hello time.
 	if lifecycleAdapter != nil && cfg.Kind == session.KindRemote {
 		attached.OnFirstOutput(lifecycleAdapter.ObserveShellOutput)
-	}
-
-	// THE HELPER'S OWN PROBER, RELAYED (nocx-y6fh7 item 6, nocx-oalo1.4.4). A
-	// local pane has no far end to probe (cfg.Host is empty, by the same rule
-	// readopt's own comment states — a local carrier reports no destination),
-	// so the wire notification never arrives for one and this is a no-op
-	// registration rather than a local/remote branch to keep in step by hand.
-	//
-	// The finding is applied to THIS session, not fanned out over the host
-	// string: the helper probes a connection (endpoint, account, principal,
-	// route) and reports against the session that rides it, so a second
-	// connection to the same machine — another credential, another route — is
-	// not marked by this one's silence. Every other pane on the same
-	// connection is told by its own session's report.
-	livenessSid := session.ID(entry.HostSessionID.Session)
-	if cfg.Host != "" {
-		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
-			h.registry.ObserveSession(livenessSid, ssh.Reachability{
-				Responsive: responsive,
-				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
-			})
-		})
 	}
 
 	// THE SCREEN DRAIN'S PUBLISH (nocx-zg3k3.2.2): every full snapshot the

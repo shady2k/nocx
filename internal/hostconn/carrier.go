@@ -150,3 +150,18 @@ type Prober interface {
 type Looker interface {
 	Look(ctx context.Context) error
 }
+
+// LookParked is what a carrier offers when it can say whether the work its last
+// look started is still out there — a version read the context abandoned, or a
+// channel open the library is still waiting on.
+//
+// OPTIONAL, AND THE GUARD ASKS BEFORE EVERY LOOK. Look returns when its context
+// ends, which is what frees the guard's slot; the work it left behind ends when
+// the hop's connection does, and through a silent hop that is arbitrarily later.
+// A connection carrying a plain shell may stay stalled for hours at a fifteen
+// second look cadence, so without this bound each look would add one parked
+// goroutine and one open channel to the hop. A carrier that cannot answer never
+// reads as parked, and the guard behaves as it did before (design §5.3).
+type LookParked interface {
+	LookParked() bool
+}

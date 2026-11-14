@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,7 +70,10 @@ func closingStand(t *testing.T) (*Supervisor, *live, *stillLink) {
 		key:     Key{Host: "host.example", Port: 22, User: "dev", Identity: "key"},
 		carrier: stillCarrier{},
 		log:     logger,
-		clock:   &fixedClock{},
+		// A reading that is NOT zero, so zero keeps its "unset" meaning in the
+		// guard's arithmetic (hostconntest.New makes the same choice for the same
+		// reason).
+		clock:   &fixedClock{at: monoclock.Now()},
 		changed: make(chan struct{}),
 		state:   State{Kind: Connected},
 	}
@@ -200,5 +204,83 @@ func TestAWakeOlderThanTheReadingOfSilenceCannotClose(t *testing.T) {
 	}
 	if got := link.closeCount(); got != 0 {
 		t.Fatalf("the transport was closed %d time(s) on a stale wake signal", got)
+	}
+}
+
+// parkLink is a connection whose look answers at once and whose look WORK never
+// ends: the shape a routed look has through a hop that has gone quiet — the call
+// returns when its context ends, and the read it started waits for the hop's
+// connection to end.
+type parkLink struct {
+	stillLink
+	parked atomic.Bool
+	looks  atomic.Int32
+}
+
+func (l *parkLink) Look(context.Context) error {
+	l.looks.Add(1)
+	return errors.New("the hop is silent")
+}
+
+func (l *parkLink) LookParked() bool { return l.parked.Load() }
+
+// TestTheGuardsLookCadenceLeavesOneLookParkedAtMost drives the guard by hand
+// across several look intervals with the previous look's work still out there,
+// which is the state a long stall through a silent hop leaves: at a fifteen
+// second cadence an unbounded guard would add one parked goroutine and one open
+// channel per interval, for hours.
+func TestTheGuardsLookCadenceLeavesOneLookParkedAtMost(t *testing.T) {
+	sup, l, _ := closingStand(t)
+	clock, ok := sup.clock.(*fixedClock)
+	if !ok {
+		t.Fatalf("the stand's clock is %T", sup.clock)
+	}
+	link := &parkLink{}
+	l.link = link
+
+	now := clock.Now()
+	clock.at = now
+	seq := l.beginProbe()
+	g := &prober{
+		sup: sup, live: l, gen: sup.generation, clock: clock, looker: link,
+		st: guardState{
+			probeSent: true, probeSeq: seq,
+			probedAt: now, silentSince: now, silentSeen: now, nextLook: now,
+		},
+	}
+
+	// The previous look's work is still out there, and three intervals' worth of
+	// due moments pass.
+	link.parked.Store(true)
+	for i := 0; i < 3; i++ {
+		now += monoclock.Nanos(LookInterval)
+		clock.at = now
+		if g.due(now) {
+			t.Fatal("the guard ended on a look's due moment")
+		}
+		// The guard loop would take the look's result next; drain it so the
+		// look slot is free again, which is the state the bound exists for (the
+		// work behind it is still parked, and LookParked says so).
+		if g.st.lookOut != nil {
+			g.lookResult(<-g.st.lookOut)
+		}
+	}
+	if got := link.looks.Load(); got != 0 {
+		t.Fatalf("%d look(s) were started while the previous look's work was still parked, want 0", got)
+	}
+
+	// The work ends, and the next interval's look goes out.
+	link.parked.Store(false)
+	now += monoclock.Nanos(LookInterval)
+	clock.at = now
+	if g.due(now) {
+		t.Fatal("the guard ended on a look's due moment")
+	}
+	if g.st.lookOut == nil {
+		t.Fatal("no look was started once the previous look's work ended")
+	}
+	g.lookResult(<-g.st.lookOut)
+	if got := link.looks.Load(); got != 1 {
+		t.Fatalf("%d look(s) were started once the previous look's work ended, want 1", got)
 	}
 }

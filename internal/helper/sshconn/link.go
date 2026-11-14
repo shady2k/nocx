@@ -15,6 +15,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -41,7 +42,17 @@ type link struct {
 	// look is this connection's look-only dial, built by the carrier for the
 	// plan it dialled (a direct look, or one through the first hop of a
 	// route).
-	look func(ctx context.Context) error
+	// look is the look-only dial this carrier built for the connection. It
+	// reports when the work it started has ENDED through done, which is not the
+	// same moment as the call returning: a cancelled look leaves a read or a
+	// channel open parked on the hop.
+	look func(ctx context.Context, done func()) error
+	// lookBusy is true from the moment a look starts until that work has ended,
+	// abandoned reads and abandoned channel opens included. It is what the guard
+	// asks before starting another look (hostconn.LookParked): without the bound
+	// a connection stalled for an hour through a silent hop would leave a parked
+	// goroutine and an open channel every fifteen seconds.
+	lookBusy atomic.Bool
 
 	done chan struct{}
 	mu   sync.Mutex
@@ -55,7 +66,7 @@ type link struct {
 // that learns a transport died: x/crypto stores the read error and returns it
 // from every later write, so a connection whose peer is gone looks alive to
 // everyone who is not writing to it.
-func newLink(pool *ssh.PooledConn, look func(ctx context.Context) error) *link {
+func newLink(pool *ssh.PooledConn, look func(ctx context.Context, done func()) error) *link {
 	l := &link{pool: pool, look: look, done: make(chan struct{})}
 	go func() {
 		err := pool.Client().Wait()
@@ -149,12 +160,24 @@ func (l *link) Nudge() error {
 // direct connection's is TCP and the version exchange on a NEW connection (no
 // key exchange, no sign-in), and a routed connection's goes through the first
 // hop to the destination (design §5.3; review verification, finding 11).
+//
+// IT RETURNS WHEN THE CONTEXT ENDS, and the work it started may outlive it — see
+// LookBusy, which is how the guard keeps to one such look at a time.
 func (l *link) Look(ctx context.Context) error {
 	if l == nil || l.look == nil {
 		return errors.New("sshconn: no look-only dial is available for this connection")
 	}
-	return l.look(ctx)
+	l.lookBusy.Store(true)
+	return l.look(ctx, func() { l.lookBusy.Store(false) })
 }
+
+// LookBusy reports whether a look this connection made still has work parked on
+// the hop — an abandoned version read, or a channel open the library is still
+// waiting on. It is hostconn.LookParked, and the guard asks it before starting
+// another look: a connection that carries a plain shell may stay stalled for
+// hours, and each cancelled routed look leaves one parked goroutine and one open
+// channel behind, so ten looks a minute would accumulate.
+func (l *link) LookBusy() bool { return l != nil && l.lookBusy.Load() }
 
 // lookFor answers this connection's look-only dial.
 //
@@ -164,34 +187,36 @@ func (l *link) Look(ctx context.Context) error {
 // THROUGH the supervised bastion — a direct-tcpip channel to the destination,
 // whose version line the destination sends before any key exchange — and a
 // silent bastion makes the look fail, because the channel never opens.
-func lookFor(spec ssh.PooledSpec, hops []*ssh.PooledConn) func(ctx context.Context) error {
+func lookFor(spec ssh.PooledSpec, hops []*ssh.PooledConn) func(ctx context.Context, done func()) error {
 	dest := net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 	if len(spec.Route) == 0 {
-		return func(ctx context.Context) error { return lookDirect(ctx, dest) }
+		return func(ctx context.Context, done func()) error { return lookDirect(ctx, dest, done) }
 	}
-	return func(ctx context.Context) error {
+	return func(ctx context.Context, done func()) error {
 		if len(hops) == 0 {
+			done()
 			return errors.New("sshconn: this routed connection holds no first hop to look through")
 		}
-		return lookThrough(ctx, hops[0].Client(), dest)
+		return lookThrough(ctx, hops[0].Client(), dest, done)
 	}
 }
 
 // lookThrough opens one direct-tcpip channel through hop and reads the
 // DESTINATION's version line on it. The destination sends it before the key
 // exchange, so nothing here authenticates to the destination or signs in.
-func lookThrough(ctx context.Context, hop *gossh.Client, dest string) error {
+func lookThrough(ctx context.Context, hop *gossh.Client, dest string, done func()) error {
 	if hop == nil {
+		done()
 		return errors.New("sshconn: no hop connection to look through")
 	}
-	conn, err := hop.DialContext(ctx, "tcp", dest)
+	conn, err := dialThrough(ctx, hop, dest, done)
 	if err != nil {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
 	// THE READ IS THE PART A DEADLINE CANNOT REACH, and the helper below owns the
 	// connection because of it: it returns when the context ends and leaves the
 	// read to end with the channel (see its own comment).
-	line, err := readVersionLineWithin(ctx, conn)
+	line, err := readVersionLineWithin(ctx, conn, done)
 	if err != nil {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
@@ -201,15 +226,62 @@ func lookThrough(ctx context.Context, hop *gossh.Client, dest string) error {
 	return nil
 }
 
+// dialThrough opens the channel a routed look reads on, on a goroutine THIS side
+// owns.
+//
+// x/crypto's Client.DialContext is not enough here: it returns when the context
+// ends, and leaves its OWN goroutine parked inside OpenChannel until the hop
+// answers or the transport ends (ssh/tcpip.go:388). A cancelled look would
+// therefore add one parked dial per attempt that nothing on this side can see —
+// which is exactly the accumulation the one-look bound exists to stop. Here the
+// dial's end is observable, so done is called when the dial itself is over: at
+// once if it fails, or when a dial the context abandoned finally returns (and
+// the channel it hands over is closed without waiting for the packet).
+func dialThrough(ctx context.Context, hop channelOpener, dest string, done func()) (net.Conn, error) {
+	type dialled struct {
+		conn net.Conn
+		err  error
+	}
+	opened := make(chan dialled, 1)
+	go func() {
+		conn, err := hop.Dial("tcp", dest)
+		opened <- dialled{conn: conn, err: err}
+	}()
+	select {
+	case got := <-opened:
+		if got.err != nil {
+			done()
+			return nil, got.err
+		}
+		return got.conn, nil
+	case <-ctx.Done():
+		go func() {
+			got := <-opened
+			done()
+			if got.conn != nil {
+				go func() { _ = got.conn.Close() }()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+// channelOpener is the part of a hop's client a look dials with: the library's
+// client, or a test's.
+type channelOpener interface {
+	Dial(n, addr string) (net.Conn, error)
+}
+
 // lookDirect is a direct connection's look: TCP and the server's version line
 // on a new connection.
-func lookDirect(ctx context.Context, addr string) error {
+func lookDirect(ctx context.Context, addr string, done func()) error {
 	d := net.Dialer{Timeout: handshakeBound(ctx), KeepAlive: -1}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
+		done()
 		return fmt.Errorf("look %s: %w", addr, err)
 	}
-	line, err := readVersionLineWithin(ctx, conn)
+	line, err := readVersionLineWithin(ctx, conn, done)
 	if err != nil {
 		return fmt.Errorf("look %s: %w", addr, err)
 	}
@@ -237,7 +309,7 @@ func lookDirect(ctx context.Context, addr string) error {
 // The close packet is SENT AND NOT WAITED FOR: the case that gets here is a hop
 // that has gone quiet, where the packet has nowhere to go and the write itself
 // parks. It is the honest second half of "public cancellation, not a deadline".
-func readVersionLineWithin(ctx context.Context, conn io.ReadWriteCloser) ([]byte, error) {
+func readVersionLineWithin(ctx context.Context, conn io.ReadWriteCloser, done func()) ([]byte, error) {
 	type answer struct {
 		line []byte
 		err  error
@@ -245,6 +317,10 @@ func readVersionLineWithin(ctx context.Context, conn io.ReadWriteCloser) ([]byte
 	read := make(chan answer, 1)
 	go func() {
 		line, err := readVersionLine(conn)
+		// THE READ'S END IS THE LOOK'S END, and it is reported here rather than
+		// where the caller returned: a context that gave up on a parked read left
+		// work behind, and the guard's one-look bound is a bound on that work.
+		done()
 		read <- answer{line: line, err: err}
 	}()
 	select {

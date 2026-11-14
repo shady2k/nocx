@@ -367,6 +367,17 @@ func (g *prober) due(at monoclock.Nanos) bool {
 
 	// Stalled. A look, if one is due and none is in flight.
 	if st.lookOut == nil && !st.lookAnswered && now >= st.nextLook {
+		if g.lookParked() {
+			// ONE LOOK AT A TIME, AND ITS WORK COUNTS (nocx-oalo1.4.3). The
+			// previous look returned when its context ended, as it must, and may
+			// have left a read or a channel open parked on the hop; starting
+			// another every interval would accumulate them for as long as the
+			// stall lasts. The next look starts when that work ends — the person's
+			// evidence is unchanged either way, because a silent hop answers no
+			// look.
+			st.nextLook = now + span(LookInterval)
+			return false
+		}
 		g.startLook(at)
 		return false
 	}
@@ -549,6 +560,14 @@ func (g *prober) lookResult(err error) {
 			g.sup.log.Debug("hostconn: the post-look nudge failed", "connection", g.sup.key.String(), "error", err)
 		}
 	}()
+}
+
+// lookParked answers whether the work this connection's last look started is
+// still out there. A carrier that cannot say reads as free, which is the
+// behaviour before the bound existed (design §5.3).
+func (g *prober) lookParked() bool {
+	parked, ok := g.live.link.(LookParked)
+	return ok && parked.LookParked()
 }
 
 // silent reports the connection stalled, with how long it has gone unanswered.

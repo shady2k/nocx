@@ -70,7 +70,9 @@ func TestALookNeedsACompleteVersionLine(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			addr := ln.Addr().String()
-			err = (&link{look: func(ctx context.Context) error { return lookDirect(ctx, addr) }}).Look(ctx)
+			err = (&link{look: func(ctx context.Context, done func()) error {
+				return lookDirect(ctx, addr, done)
+			}}).Look(ctx)
 			if c.wantErr && err == nil {
 				t.Fatalf("a look over %q answered nil", c.payload)
 			}
@@ -92,7 +94,7 @@ func TestARoutedLookIsNotAvailableWithoutItsHop(t *testing.T) {
 		Route: []ssh.PooledHop{{Host: "bastion", Port: 2222, User: "jump"}},
 	}
 	look := lookFor(spec, nil)
-	if err := look(context.Background()); err == nil {
+	if err := look(context.Background(), func() {}); err == nil {
 		t.Fatal("a routed look with no hop answered nil")
 	}
 	// A direct connection needs no hop at all.

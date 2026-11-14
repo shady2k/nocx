@@ -244,6 +244,13 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 	if b != nil && b.connectionID != connectionID {
 		if old := d.conns[b.connectionID]; old != nil {
 			delete(old.panes, paneID)
+			// A PROVISIONAL BINDING LEAVES NO EMPTY CONNECTION BEHIND. The
+			// coordinator paints the pane's first frame before the helper has
+			// named the connection, then binds the real one; an empty entry
+			// kept by that first id would be a map that grows with every open.
+			if len(old.panes) == 0 {
+				delete(d.conns, b.connectionID)
+			}
 		}
 	}
 	if b == nil {
@@ -262,14 +269,16 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 		d.conns[connectionID] = c
 	}
 	c.panes[paneID] = struct{}{}
-	// NOTHING IS PUBLISHED FOR A CONNECTION WITH NO OBSERVATION YET. The
-	// helper's first observation of a fresh connection is `opening`, and it
-	// arrives on the subscription the spawner takes a moment later; inventing
-	// one here would be the coordinator saying what it does not know, and a
-	// zero-state notification is a shape the wire refuses anyway.
+	// THE FIRST OBSERVATION IS PUBLISHED HERE, BEFORE ANY NETWORK. A pane
+	// bound for an open has begun at `resolve`, and the renderer is owed that
+	// stage on the same frame the tab exists; waiting for the helper's own
+	// first observation left the pane with no pane.connection at all for as
+	// long as the probe took (measured ~1 s, and minutes on a struggling
+	// host). The state is cached like any other observation, so a second pane
+	// binding later still learns the truth the helper has since told. It is
+	// not invented per observation: it is the opening THIS BIND is.
 	if c.transport.State == "" {
-		d.mu.Unlock()
-		return generation
+		c.transport = Transport{State: proto.ConnectionOpening, Stage: "resolve"}
 	}
 	snap := d.snapshotLocked(paneID, b, c)
 	d.mu.Unlock()

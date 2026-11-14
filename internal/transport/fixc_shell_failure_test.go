@@ -104,6 +104,8 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 	initialBinding := driver.Bind(helperOpenPane, "conn-1")
 	ws.paneRecordOf(helperOpenPane).bindingGeneration = initialBinding
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionConnected})
+	// The bind's own opening (design §5.5) and then the connected observation.
+	_ = readNotification(t, conn, "pane.connection", wantWithin)
 	_ = readNotification(t, conn, "pane.connection", wantWithin)
 
 	// This is the real post-return shell action, not a constructed failure DTO.

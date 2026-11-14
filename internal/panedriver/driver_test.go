@@ -97,18 +97,32 @@ func TestABindTellsThePaneTheStateItsConnectionIsAlreadyIn(t *testing.T) {
 	}
 }
 
-// TestABindBeforeAnyObservationPublishesNothing: the coordinator binds the pane
-// a moment before the helper's first observation arrives, and it must not
-// invent a state it has not been told.
-func TestABindBeforeAnyObservationPublishesNothing(t *testing.T) {
+// TestABindBeforeAnyObservationPublishesTheOpening: the pane is painted before
+// any network. The bind IS the start of the open, so `opening/resolve` is what
+// the coordinator knows at that moment — and the renderer must not have to
+// invent the same stage to keep its first frame honest.
+func TestABindBeforeAnyObservationPublishesTheOpening(t *testing.T) {
 	d, out := newDriver(t)
 	d.Bind("pane-1", "conn-a")
-	if got := len(out.all()); got != 0 {
-		t.Fatalf("%d snapshot(s) published before any observation", got)
+	if got := len(out.all()); got != 1 {
+		t.Fatalf("%d snapshot(s) at bind, want the opening", got)
+	}
+	snap := out.last()
+	if snap.Transport.State != proto.ConnectionOpening || snap.Transport.Stage != "resolve" {
+		t.Fatalf("bind published %+v, want opening/resolve", snap.Transport)
+	}
+	if snap.Transport.StateMs != 0 {
+		t.Fatalf("stateMs = %d at the first frame, want 0", snap.Transport.StateMs)
+	}
+	if snap.SessionID != "" {
+		t.Fatalf("sessionId = %q before any shell exists", snap.SessionID)
+	}
+	if snap.ConnectionEpoch != 1 {
+		t.Fatalf("epoch = %d, want 1", snap.ConnectionEpoch)
 	}
 	apply(d, opening(1, "resolve"))
-	if got := len(out.all()); got != 1 {
-		t.Fatalf("%d snapshot(s) after the first observation, want 1", got)
+	if got := len(out.all()); got != 2 {
+		t.Fatalf("%d snapshot(s) after the first observation, want 2", got)
 	}
 }
 
@@ -289,14 +303,17 @@ func TestAReplacedHelperStartsItsOwnSequences(t *testing.T) {
 
 // TestABindAfterAHelperReplacementReplaysNothing: the cached state belonged to a
 // helper that is gone, so a pane binding before the replacement speaks is told
-// nothing rather than the previous helper's last observation.
+// the opening it is holding, never the previous helper's last observation.
 func TestABindAfterAHelperReplacementReplaysNothing(t *testing.T) {
 	d, out := newDriver(t)
 	d.ApplyFrom("helper-1", connected(4, 1))
 	d.SetSource("helper-2")
 	d.Bind("pane-1", "conn-a")
-	if got := len(out.all()); got != 0 {
-		t.Fatalf("a bind after the replacement replayed %d cached snapshot(s)", got)
+	if got := len(out.all()); got != 1 {
+		t.Fatalf("a bind after the replacement published %d snapshot(s), want this bind's opening", got)
+	}
+	if snap := out.last(); snap.Transport.State != proto.ConnectionOpening || snap.Transport.Stage != "resolve" {
+		t.Fatalf("bind published %+v, want this bind's opening/resolve", snap.Transport)
 	}
 }
 

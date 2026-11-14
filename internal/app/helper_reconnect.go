@@ -32,6 +32,16 @@ type paneConnectionOwner struct {
 	opener *localHelperOpener
 }
 
+// PaneOpening paints the pane's first observation before the opener is asked
+// anything. It binds a provisional connection id; the opener's real bind
+// replaces it before the spawn, and the provisional entry is dropped.
+func (o paneConnectionOwner) PaneOpening(paneID string) {
+	if o.Driver == nil || paneID == "" {
+		return
+	}
+	o.Driver.Bind(paneID, "pending:"+paneID)
+}
+
 func (o paneConnectionOwner) PaneClosed(paneID string) {
 	o.Driver.PaneClosed(paneID)
 	o.opener.mu.Lock()

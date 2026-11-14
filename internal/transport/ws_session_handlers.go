@@ -520,6 +520,13 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	}
 
 	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		// FIRST FRAME BEFORE THE OPENER IS ASKED ANYTHING (Q1). The owner's
+		// opening notice is the pane's own attempt at `resolve`; the real
+		// bind replaces it, with the helper's connection id, before a dial.
+		// A local pane has no connection to be opening.
+		if params.Kind == "ssh" && ctx.Value(paneReconnectOpenKey{}) == nil {
+			machine.notePaneOpening(params.PaneID)
+		}
 		bindCtx := ctx
 		ctx = context.WithValue(ctx, paneBindingKey{}, func(generation uint64) {
 			machine.paneMu.Lock()

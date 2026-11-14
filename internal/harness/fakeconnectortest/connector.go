@@ -1,7 +1,7 @@
 // Package fakeconnector is the connector the conformance suite proves the
 // shared base with. It speaks only the fake agent's JSON-lines protocol; every
 // process and lifetime fact it relies on comes from harness.Base.
-package fakeconnector
+package fakeconnectortest
 
 import (
 	"context"

@@ -649,29 +649,15 @@ type s14MCPClient struct {
 // "in flight" assertion exercises.
 func newS14MCPClient(t *testing.T, socket string) *s14MCPClient {
 	t.Helper()
-	return newS14MCPClientWithToken(t, socket, "")
-}
-
-// newS14MCPClientWithToken is the same bridge presenting a bearer, which is
-// what an assistant turn's bridge does: the token reaches mcpstdio through the
-// environment the mint handed back, and a test sets it the same way rather
-// than reaching past the bridge into the socket.
-func newS14MCPClientWithToken(t *testing.T, socket, token string) *s14MCPClient {
-	t.Helper()
-	return newS14MCPClientWithConfig(t, mcpstdio.Config{Socket: socket, TurnToken: token, Logger: logtest.Slog(t)})
-}
-
-func newS14MCPClientWithConfig(t *testing.T, cfg mcpstdio.Config) *s14MCPClient {
-	t.Helper()
-	server, err := mcpstdio.New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
+	srv, err := mcpstdio.New(mcpstdio.Config{Socket: socket})
+	if err != nil {
+		t.Fatalf("mcpstdio.New: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- server.Serve(ctx, inR, outW) }()
+	go func() { done <- srv.Serve(ctx, inR, outW) }()
 
 	c := &s14MCPClient{writer: inW, pending: make(map[string]chan s14MCPResult)}
 	go c.readLoop(outR)

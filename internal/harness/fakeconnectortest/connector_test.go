@@ -1,4 +1,4 @@
-package fakeconnector_test
+package fakeconnectortest_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
-	"github.com/shady2k/nocx/internal/harness/fakeconnector"
+	"github.com/shady2k/nocx/internal/harness/fakeconnectortest"
 	"github.com/shady2k/nocx/internal/harness/harnesstest"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -20,7 +20,7 @@ func TestConformance(t *testing.T) { harnesstest.Run(t, fakeDriver) }
 
 func TestFakeProcessChecks(t *testing.T) {
 	harnesstest.RunFakeProcessChecks(t, func(t *testing.T, s harnesstest.Setup) harness.Harness {
-		return fakeconnector.New(fakeconnector.Config{AgentPath: s.AgentPath, Script: s.Script, Base: s.Base})
+		return fakeconnectortest.New(fakeconnectortest.Config{AgentPath: s.AgentPath, Script: s.Script, Base: s.Base})
 	})
 }
 
@@ -58,7 +58,7 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 		waittest.WaitFor(t, "fixture "+name, func() bool { raw, err := os.ReadFile(path(name)); return err == nil && len(raw) > 0 })
 	}
 	return harnesstest.Fixture{
-		Harness: fakeconnector.New(fakeconnector.Config{AgentPath: setup.AgentPath, Script: script}), Model: "fake-model", ToolName: "probe",
+		Harness: fakeconnectortest.New(fakeconnectortest.Config{AgentPath: setup.AgentPath, Script: script}), Model: "fake-model", ToolName: "probe",
 		ChangeDefaultModel: func() string {
 			if err := os.WriteFile(script.DefaultModelFile, []byte("changed-model"), 0o600); err != nil {
 				t.Fatal(err)
@@ -115,7 +115,7 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 }
 
 func TestProtocolCommandsAndResponse(t *testing.T) {
-	c := fakeconnector.New(fakeconnector.Config{})
+	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
 	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7})
 	setup := codec.Setup()
@@ -178,7 +178,7 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 }
 
 func TestCodecsArePerIncarnation(t *testing.T) {
-	c := fakeconnector.New(fakeconnector.Config{})
+	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
 	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1})
 	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2})

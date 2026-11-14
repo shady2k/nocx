@@ -1,14 +1,12 @@
 package harness
 
-import (
-	"context"
+import "context"
 
-	"github.com/shady2k/nocx/internal/assistant"
-)
-
-// TurnAuthority is the assistant kernel bound to one turn. The session never
+// TurnAuthority is the run's authority bound to one turn — the assistant's
+// kernel for that run, supplied by the caller that starts the turn. The harness
+// carries it to the ToolSession and never looks inside it; the session never
 // rebinds authority already admitted by the endpoint.
-type TurnAuthority = assistant.TurnTools
+type TurnAuthority any
 
 // ToolSession owns a process generation's bearer and the settlement boundary
 // between its turns. EndTurn closes admission before waiting for accepted work.

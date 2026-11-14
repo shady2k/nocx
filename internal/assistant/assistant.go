@@ -296,8 +296,6 @@ type AskParams struct {
 	// the answer reaches this very call. Nil is a caller with no person to
 	// ask, where every ask is refused.
 	Questioner Questioner
-	// FreshGrant must return promptly: it reads a local policy snapshot, not
-	// external work or approval. Admission cannot interrupt this synchronous mint.
 	// FreshGrant mints the run's authority again from the policy as it stands
 	// NOW (ADR-anntnxdj §3, "refreshed after an answer"). The pipeline calls
 	// it after a person answers, and the guards and the capability of that

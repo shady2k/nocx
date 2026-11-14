@@ -19,19 +19,13 @@ package mcpstdio
 // asserted where the value enters the process rather than where it could leave.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
-	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 )
 
 // bearerDialer hands the bridge one end of an in-memory connection and READS
@@ -150,24 +144,24 @@ const testBearer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 
 func TestTheBridgePresentsTheBearerBeforeAnyRequest(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, endpointBearer{kind: paneBearer, token: testBearer}, discardLogger)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	if _, _, err := link.attach(context.Background()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	got := dialer.awaitBytes(t, panebind.TokenLen)
+	got := dialer.awaitBytes(t, len(testBearer)+1)
 	if !strings.HasPrefix(got, testBearer+"\n") {
 		t.Fatalf("the connection began with %q, want the bearer and nothing before it", got)
 	}
 	// AND IT IS FIRST: no attach may put a byte in front of it, so once the
 	// bearer has arrived the connection is quiet until the caller writes.
 	if got != testBearer+"\n" {
-		t.Fatalf("the bridge wrote %q after the bearer, before any request", got[panebind.TokenLen:])
+		t.Fatalf("the bridge wrote %q after the bearer, before any request", got[len(testBearer)+1:])
 	}
 }
 
 func TestTheBridgeWritesNoBearerWhenItHasNone(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, endpointBearer{}, discardLogger)
+	link := newEndpointLink("sock", dialer, "", discardLogger)
 	if _, _, err := link.attach(context.Background()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -189,12 +183,12 @@ func TestTheBridgeWritesNoBearerWhenItHasNone(t *testing.T) {
 // the bearer would be refused for a value that arrived a moment later.
 func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, endpointBearer{kind: paneBearer, token: testBearer}, discardLogger)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	conn, _, err := link.attach(context.Background())
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if got := dialer.awaitBytes(t, panebind.TokenLen); got != testBearer+"\n" {
+	if got := dialer.awaitBytes(t, len(testBearer)+1); got != testBearer+"\n" {
 		t.Fatalf("the connection began with %q, want the bearer alone", got)
 	}
 	// THE CALLER'S REQUEST, through the same send path the server uses, so what
@@ -203,15 +197,15 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := dialer.awaitBytes(t, panebind.TokenLen+1)
+	got := dialer.awaitBytes(t, len(testBearer)+1+1)
 	if !strings.HasPrefix(got, testBearer+"\n") {
 		t.Fatalf("the connection began with %q, want the bearer and nothing before it", got)
 	}
-	after := got[panebind.TokenLen:]
+	after := got[len(testBearer)+1:]
 	if !strings.Contains(after, "tools/list") {
 		t.Fatalf("the bearer was followed by %q, want the caller's request", after)
 	}
-	if strings.Index(got, "tools/list") < panebind.TokenLen {
+	if strings.Index(got, "tools/list") < len(testBearer)+1 {
 		t.Fatalf("the request overtook the bearer: %q", got)
 	}
 }
@@ -222,13 +216,13 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 // the bridge has to establish is a connection the endpoint has to admit.
 func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, endpointBearer{kind: paneBearer, token: testBearer}, discardLogger)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	ctx := context.Background()
 
 	if _, _, err := link.attach(ctx); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if got := dialer.awaitBytes(t, panebind.TokenLen); !strings.HasPrefix(got, testBearer+"\n") {
+	if got := dialer.awaitBytes(t, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
 		t.Fatalf("the first connection began with %q, want the bearer", got)
 	}
 
@@ -253,93 +247,7 @@ func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
 
 	// AND THE NEW CONNECTION CARRIES THE BEARER: its own bytes, not the first
 	// connection's continued.
-	if got := dialer.awaitBytesAt(t, 1, panebind.TokenLen); !strings.HasPrefix(got, testBearer+"\n") {
+	if got := dialer.awaitBytesAt(t, 1, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
 		t.Fatalf("the reconnected connection began with %q, want the bearer again", got)
-	}
-}
-
-func TestBridgeTurnBearerUsesDistinctFrame(t *testing.T) {
-	dialer := newBearerDialer()
-	server, err := New(Config{Socket: "sock", Dialer: dialer, TurnToken: testBearer})
-	if err != nil {
-		t.Fatal(err)
-	}
-	link := newEndpointLink(server.socket, server.dialer, server.bearer, server.logger)
-	defer link.close()
-	conn, _, err := link.attach(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := turnbind.TokenMagic + testBearer + "\n"
-	if got := dialer.awaitBytes(t, len(want)); got != want {
-		t.Fatalf("turn frame = %q, want %q", got, want)
-	}
-	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
-		t.Fatal(err)
-	}
-	got := dialer.awaitBytes(t, len(want)+1)
-	if !strings.HasPrefix(got, want) || !strings.Contains(got[len(want):], "tools/list") {
-		t.Fatalf("turn frame and request = %q", got)
-	}
-}
-
-func TestBridgeRejectsBothBearerKinds(t *testing.T) {
-	_, err := New(Config{Socket: "sock", Token: testBearer, TurnToken: testBearer})
-	if !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("New with both tokens: %v", err)
-	}
-	t.Setenv(panebind.TokenEnvVar, testBearer)
-	t.Setenv(turnbind.TokenEnvVar, testBearer)
-	err = Serve(context.Background(), strings.NewReader(""), &recordingWriter{}, "sock", nil)
-	if !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("Serve with both tokens: %v", err)
-	}
-}
-
-func TestServeSelectsBearerFrameFromEnvironment(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		env    string
-		prefix string
-	}{
-		{name: "pane", env: panebind.TokenEnvVar},
-		{name: "turn", env: turnbind.TokenEnvVar, prefix: turnbind.TokenMagic},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(panebind.TokenEnvVar, "")
-			t.Setenv(turnbind.TokenEnvVar, "")
-			t.Setenv(tc.env, testBearer)
-			listener := listenEndpoint(t)
-			t.Cleanup(func() { _ = listener.Close() })
-			saw := make(chan string, 1)
-			go func() {
-				conn, err := listener.Accept()
-				if err != nil {
-					return
-				}
-				defer func() { _ = conn.Close() }()
-				reader := bufio.NewReader(conn)
-				line, err := reader.ReadString('\n')
-				if err != nil {
-					return
-				}
-				saw <- line
-				request, err := readJSONLine(reader)
-				if err != nil {
-					return
-				}
-				writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"instructions":"ready"}`)})
-			}()
-			input := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}` + "\n"
-			runAdapter(t, listener.Addr().String(), input)
-			select {
-			case got := <-saw:
-				if want := tc.prefix + testBearer + "\n"; got != want {
-					t.Fatalf("environment bearer frame = %q, want %q", got, want)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("Serve never presented the environment bearer")
-			}
-		})
 	}
 }

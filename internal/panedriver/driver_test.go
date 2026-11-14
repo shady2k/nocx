@@ -317,6 +317,34 @@ func TestABindAfterAHelperReplacementReplaysNothing(t *testing.T) {
 	}
 }
 
+// TestFailOpeningSettlesOnlyTheProvisionalBinding: the opening the transport
+// publishes before the opener is asked anything must not outlive a failed
+// open, and a real connection's failure is its own.
+func TestFailOpeningSettlesOnlyTheProvisionalBinding(t *testing.T) {
+	d, out := newDriver(t)
+	d.Bind("pane-1", "pending:pane-1")
+	if snap := out.last(); snap.Transport.State != proto.ConnectionOpening {
+		t.Fatalf("provisional bind published %+v", snap.Transport)
+	}
+	d.FailOpening("pane-1")
+	snap := out.last()
+	if snap.Transport.State != proto.ConnectionEnded || snap.Transport.Cause != "lost-link" {
+		t.Fatalf("settle published %+v, want ended/lost-link", snap.Transport)
+	}
+	if snap.Reconnect == nil || snap.Reconnect.EndsShells != 0 {
+		t.Fatalf("ended opening offers %+v, want the shell-less reconnect offer", snap.Reconnect)
+	}
+
+	// A real binding is not the provisional one; its failure is the
+	// supervisor's to report and this must not overwrite it.
+	before := len(out.all())
+	d.Bind("pane-1", "conn-a")
+	d.FailOpening("pane-1")
+	if got := len(out.all()); got != before+1 {
+		t.Fatalf("settling a real binding published %d extra notification(s)", got-before-1)
+	}
+}
+
 // TestUnbindStopsThePaneBeingTold is finding 4's other half: with no binding,
 // an observation of a shared connection has nobody to be about.
 func TestUnbindStopsThePaneBeingTold(t *testing.T) {

@@ -19,3 +19,15 @@ func (s *WSServer) notePaneOpening(paneID string) {
 		owner.PaneOpening(paneID)
 	}
 }
+
+// settlePaneOpening closes the provisional opening when the opener failed
+// before its real bind. It is a no-op for a policy owner that never published
+// one.
+func (s *WSServer) settlePaneOpening(paneID string) {
+	if paneID == "" || s.paneConnectionPolicy == nil {
+		return
+	}
+	if owner, ok := s.paneConnectionPolicy.(interface{ PaneOpeningFailed(string) }); ok {
+		owner.PaneOpeningFailed(paneID)
+	}
+}

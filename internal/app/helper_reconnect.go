@@ -42,6 +42,14 @@ func (o paneConnectionOwner) PaneOpening(paneID string) {
 	o.Driver.Bind(paneID, "pending:"+paneID)
 }
 
+// PaneOpeningFailed settles a provisional opening whose opener failed before
+// the real bind, so the pane is not left counting "Connecting".
+func (o paneConnectionOwner) PaneOpeningFailed(paneID string) {
+	if o.Driver != nil {
+		o.Driver.FailOpening(paneID)
+	}
+}
+
 func (o paneConnectionOwner) PaneClosed(paneID string) {
 	o.Driver.PaneClosed(paneID)
 	o.opener.mu.Lock()

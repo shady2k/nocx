@@ -286,6 +286,33 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 	return generation
 }
 
+// FailOpening settles the provisional opening a bind published before the
+// opener was asked anything. If the opener fails before the real Bind — a
+// helper that will not answer, a destination that does not resolve, a
+// connection the helper will not name — the pane is left with the opening
+// forever unless somebody closes it here. Only the provisional binding is
+// settled: a real connection already owns its own failure.
+func (d *Driver) FailOpening(paneID string) {
+	if d == nil || paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	b := d.panes[paneID]
+	if b == nil || b.connectionID != "pending:"+paneID {
+		d.mu.Unlock()
+		return
+	}
+	c := d.conns[b.connectionID]
+	if c == nil {
+		d.mu.Unlock()
+		return
+	}
+	c.transport = Transport{State: proto.ConnectionEnded, Cause: "lost-link"}
+	snap := d.snapshotLocked(paneID, b, c)
+	d.mu.Unlock()
+	d.emit(snap)
+}
+
 // AdoptSession records a shell only if its open still owns the binding.
 // Connection identity alone is insufficient: overlapping opens and reconnects
 // can use the same connection id and complete in reverse order.

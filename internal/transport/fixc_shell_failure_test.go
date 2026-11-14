@@ -189,10 +189,13 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 		t.Fatal("shell recovery closed another pane on healthy connection")
 	}
 	state.mu.Lock()
-	retained := state.sessions[replacementID]
+	attached := state.sessions[replacementID]
 	state.mu.Unlock()
-	if retained == nil || retained.PaneID() != helperOpenPane {
-		t.Fatal("opened replacement never became pane-owned session")
+	if attached != nil {
+		// THE REPLACEMENT IS OPENED UNOWNED: the renderer claims it through
+		// the existing re-adoption path, which replays the screen. Attaching
+		// it here would refuse that claim.
+		t.Fatal("opened replacement was attached before the renderer's claim")
 	}
 }
 
@@ -275,7 +278,13 @@ func TestFailedFirstOpenRecoversToFirstOwnedShell(t *testing.T) {
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionFailed, Cause: "auth-rejected"})
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 2, State: proto.ConnectionOpening, Stage: "tcp"})
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 3, State: proto.ConnectionConnected})
-	waittest.WaitFor(t, "first recovered shell owned by pane", func() bool { state.mu.Lock(); defer state.mu.Unlock(); return state.sessions[firstID] != nil })
+	// The recovered shell is opened UNOWNED and belongs to the pane once a
+	// renderer claims it; this harness has no renderer to claim, so what it can
+	// watch is the shell the opener registered against the pane.
+	waittest.WaitFor(t, "first recovered shell opened for the pane", func() bool {
+		sessions := reg.List()
+		return len(sessions) == 1 && sessions[0].ID() == firstID && sessions[0].PaneID() == helperOpenPane
+	})
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}

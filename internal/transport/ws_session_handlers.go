@@ -538,6 +538,14 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	}
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
+		// THE PROVISIONAL OPENING IS SETTLED BY WHOEVER PUBLISHED IT. A real
+		// bind replaces it before the spawn; every failure before that leaves
+		// only this one, so the pane must be told the attempt ended instead of
+		// counting "Connecting" beside a startup error.
+		if machine, ok := h.sess.(*WSServer); ok && params.Kind == "ssh" &&
+			ctx.Value(paneReconnectOpenKey{}) == nil {
+			machine.settlePaneOpening(params.PaneID)
+		}
 		return openResult{}, err
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
@@ -665,20 +673,27 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// ago, so the displaced pair is discarded here rather than announced: the
 	// slot is empty by construction on this path, and a displacement that
 	// cannot happen must not be dressed up as one that did.
-	_, _ = rx.setSubscriber(wconn, state)
-	h.sess.replayLifecycleFacts(sess.ID())
-	// The axis was already entered above, before the ack — only the
-	// NOTIFICATION waits for AD-7. This is the first fact this session's
-	// subscriber can hear, so it runs once the subscriber above is attached.
-	h.sess.emitIntegration(sess.ID())
-	// The retained tool-surface state is replayed here too (nocx-2v80t.3.45),
-	// for the reason the lifecycle replay above is: a fact published after
-	// the session existed and before this subscriber was installed found
-	// nobody to tell and was only retained, and the attach path's replay
-	// never runs for the connection that opened the session. Measured: a
-	// broadcast right after the open result was lost 4 runs in 300 under
-	// -race.
-	h.sess.replayToolSurface(sess.ID())
+	if wconn != nil {
+		_, _ = rx.setSubscriber(wconn, state)
+		h.sess.replayLifecycleFacts(sess.ID())
+		// The axis was already entered above, before the ack — only the
+		// NOTIFICATION waits for AD-7. This is the first fact this session's
+		// subscriber can hear, so it runs once the subscriber above is
+		// attached.
+		h.sess.emitIntegration(sess.ID())
+		// The retained tool-surface state is replayed here too (nocx-2v80t.3.45),
+		// for the reason the lifecycle replay above is: a fact published after
+		// the session existed and before this subscriber was installed found
+		// nobody to tell and was only retained, and the attach path's replay
+		// never runs for the connection that opened the session. Measured: a
+		// broadcast right after the open result was lost 4 runs in 300 under
+		// -race.
+		h.sess.replayToolSurface(sess.ID())
+	}
+	// AN UNOWNED OPEN (a reconnect's replacement) has no subscriber to tell:
+	// the renderer claims it through attach, which replays all four retained
+	// projections and asks for the screen. Installing a nil subscriber here
+	// would instead race the claim and clobber it.
 	// The publish's own outcome, from the opener that attempted it
 	// (nocx-1kejz.4). After the ack and after the subscriber above, like every
 	// other session-scoped fact (AD-7); retained, so a renderer that attaches
@@ -735,7 +750,12 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	if conn, ok := connectionContext(ctx); ok {
 		pumpCtx = conn
 	}
-	go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
+	// No client, no pump: a reconnect's replacement is opened UNOWNED so the
+	// renderer can claim it through the attach path, and a pump aimed at a
+	// nil subscriber has nothing to write and must not be started.
+	if wconn != nil {
+		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
+	}
 
 	// The screen, for the window the lifecycle replay above covers
 	// (nocx-zg3k3.2.15): whatever the shell drew between the spawn and the
@@ -745,7 +765,9 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// replay — the runtime holds the latest one — so the frame this
 	// subscriber is owed is asked for. Last, so its round trip delays no
 	// PTY byte.
-	h.sess.resendScreen(ctx, sess.ID())
+	if wconn != nil {
+		h.sess.resendScreen(ctx, sess.ID())
+	}
 	return result, nil
 }
 

@@ -4016,7 +4016,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       expect(onExit).toBeDefined()
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       expect(replacement.sessionId).not.toBe(session.sessionId)
       replacement.intent.mockClear()
@@ -4086,7 +4086,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       replacement.intent.mockClear()
       replacement.send.mockClear()
@@ -4175,7 +4175,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       replacement.intent.mockClear()
       replacement.send.mockClear()
@@ -4249,7 +4249,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         return replacement
       })
       publishLost(client, content)
-      const reopening = content.reconnect()
+      const reopening = content.pressReconnect()
 
       // The person types into the composer that never left the screen. This is
       // after the generation moved and before the new handle exists.
@@ -4318,7 +4318,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         return defaultOpen!(size, anchor)
       })
       publishLost(client, content)
-      const reopening = content.reconnect()
+      const reopening = content.pressReconnect()
 
       // A reference line typed while the rebind is in flight, then withdrawn.
       editor.insertText('echo {{secret:x}}')
@@ -4382,7 +4382,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         return next
       })
       publishLost(client, content)
-      const reopening = content.reconnect()
+      const reopening = content.pressReconnect()
 
       // Typed while the rebind is in flight, into a session that will never
       // report a prompt: no integration verdict is coming.
@@ -4430,7 +4430,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         return replacement
       })
       publishLost(client, content)
-      const reopening = content.reconnect()
+      const reopening = content.pressReconnect()
 
       // NOTHING IS ACCEPTED WHILE THE CONNECTION IS NOT USABLE (task 5.1):
       // the line stays in the composer, so there is no held command for the
@@ -4496,7 +4496,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         return replacement
       })
       publishLost(client, content)
-      const reopening = content.reconnect()
+      const reopening = content.pressReconnect()
 
       editor.insertText('echo waits-for-the-new-verdict')
       view.contentDOM.dispatchEvent(
@@ -4567,7 +4567,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       client.openSession.mockResolvedValue(replacement)
       client._sessions.push(replacement)
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       replacement.intent.mockClear()
 
       // The replacement takes two more lines, which its own settle releases.
@@ -4685,7 +4685,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       client.openSession.mockResolvedValue(replacement)
       client._sessions.push(replacement)
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       replacement.intent.mockClear()
 
       // The person's next command, in the replacement, before the old
@@ -5779,7 +5779,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       if (!onExit) throw new Error('the first session did not register an exit handler')
       onExit({ sessionId: first.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
 
       const second = client._sessions[1]
       const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
@@ -7611,7 +7611,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           if (!onExit) throw new Error('the session did not register an exit handler')
           onExit({ sessionId: session.sessionId, cause: 'interrupted' })
           publishLost(pane.client, pane.content)
-          expect(await pane.content.reconnect()).toBe(true)
+          expect(await pane.content.pressReconnect()).toBe(true)
           const replacementRows = stored(
             {
               label: 'replacement',
@@ -15680,7 +15680,7 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
         transport: { state: 'stalled', stateMs: 10, plainShells: 1 },
       })
       expect(content.connectionCondition()).toBe('unreachable')
-      expect(await content.reconnect()).toBe(false)
+      expect(await content.pressReconnect()).toBe(false)
       expect(client._sessions).toHaveLength(1)
     } finally {
       teardown()
@@ -15705,7 +15705,7 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
       expect(content.connectionCondition()).toBe('lost')
 
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       // A SECOND session, not the first one revived.
       expect(client._sessions.length).toBe(2)
       publishConnected(client, content)
@@ -15729,7 +15729,7 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
     try {
       content.setVisible(true)
       publishLost(client, content)
-      await content.reconnect()
+      await content.pressReconnect()
       expect(document.querySelector('[data-reconnect-boundary]')).not.toBeNull()
     } finally {
       teardown()
@@ -23661,7 +23661,7 @@ describe('the pane screen mapping follows the session lifetime', () => {
       expect(onExit).toBeDefined()
       onExit!({ sessionId: first.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      await expect(content.reconnect()).resolves.toBe(true)
+      await expect(content.pressReconnect()).resolves.toBe(true)
 
       // Exercise the public renderer seam with the departed session identity.
       tab.pane.setAttribute('data-session-id', first.sessionId)
@@ -24648,7 +24648,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       }) => void
       onExit({ sessionId: session.sessionId, cause: 'interrupted' })
       publishLost(client, content)
-      expect(await content.reconnect()).toBe(true)
+      expect(await content.pressReconnect()).toBe(true)
       const replacement = sessionOf(content)
       replacement.intent.mockClear()
       applied()

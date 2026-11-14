@@ -1998,7 +1998,7 @@ export class TerminalContent extends BasePaneContent {
   // draw that answer. What remains here is the pane's own input gate: a person
   // typing into a connection that is not usable sends nothing, and the head
   // that says why is the notice.
-  private readonly _connection: ConnectionStore
+  private readonly _connectionStore: ConnectionStore
   private readonly _connectionClient: ConnectionClient
   private _connectionMark: ConnectionMark | null = null
   private _connectionHead: ConnectionHeadHandle | null = null
@@ -2057,9 +2057,9 @@ export class TerminalContent extends BasePaneContent {
    * so they cannot disagree about whether a host is answering.
    */
   private _publishConnectionState(): void {
-    const observation = this._connection.current()?.observation ?? null
+    const observation = this._connectionStore.current()?.observation ?? null
     const previous = this._connectionCondition
-    this._connectionCondition = this._connection.condition()
+    this._connectionCondition = this._connectionStore.condition()
     // A usable connection is a new loss's beginning, so the one refusal line
     // is available again.
     const state = observation?.transport.state
@@ -2075,7 +2075,7 @@ export class TerminalContent extends BasePaneContent {
    *  the connection fails first. Nothing is ever sent while a person is being
    *  asked for something — those keys belong to the prompt that asked. */
   private _applyTypeAhead(previous: ConnectionCondition): void {
-    const state = this._connection.current()?.observation.transport.state
+    const state = this._connectionStore.current()?.observation.transport.state
     if (this._heldTypeAhead.length === 0) return
     if (state === 'connected' || state === 'plain') {
       const held = this._heldTypeAhead
@@ -2104,7 +2104,7 @@ export class TerminalContent extends BasePaneContent {
   /** What an intent may do at this moment, from the backend's own state. */
   private _connectionGate(): 'send' | 'hold' | 'drop' {
     if (this.sshOpts === undefined) return 'send'
-    const state = this._connection.current()?.observation.transport.state
+    const state = this._connectionStore.current()?.observation.transport.state
     if (state === undefined) {
       // No observation yet. A pane with a handle has a shell the client is
       // attached to — the backend's first observation is on its way, and
@@ -2159,7 +2159,7 @@ export class TerminalContent extends BasePaneContent {
     // something they cannot currently talk to. A SLOW host says nothing here
     // at all — the corner mark says it, and a tab strip that warned about
     // latency would cry wolf.
-    const warning = connectionWarning(this._connection.current()?.observation ?? null)
+    const warning = connectionWarning(this._connectionStore.current()?.observation ?? null)
     if (warning !== null || this._connectionCondition === 'lost') {
       this.hooks.onWarningChange?.(true, warning?.label ?? 'Connection lost')
       return
@@ -2288,9 +2288,9 @@ export class TerminalContent extends BasePaneContent {
     // the contract is keyed by the pane's durable id and an observation about
     // another pane is not this pane's business; the dispatcher is shared, so
     // this costs one listener among many.
-    this._connection = new ConnectionStore(this.client.dispatcher, this.pane.paneId)
+    this._connectionStore = new ConnectionStore(this.client.dispatcher, this.pane.paneId)
     this._connectionClient = new ConnectionClient(this.client)
-    this._connectionUnsub = this._connection.onChange(() => this._publishConnectionState())
+    this._connectionUnsub = this._connectionStore.onChange(() => this._publishConnectionState())
   }
 
   /**
@@ -3436,7 +3436,7 @@ export class TerminalContent extends BasePaneContent {
       // connection to have a state about — so it is mounted only here.
       if (this.sshOpts !== undefined) {
         this._connectionHead = mountConnectionHead(target, {
-          store: this._connection,
+          store: this._connectionStore,
           onReconnect: () => void this.reconnectFromHead(),
         })
       }
@@ -5100,7 +5100,7 @@ export class TerminalContent extends BasePaneContent {
    */
   private async reconnectFromHead(): Promise<boolean> {
     if (this._disposed) return false
-    const offer = this._connection.offer()
+    const offer = this._connectionStore.offer()
     if (offer === null) {
       return false
     }
@@ -5144,7 +5144,7 @@ export class TerminalContent extends BasePaneContent {
    * from the backend, no press. The renderer decides nothing here — it asks
    * the owner and adopts the answer.
    */
-  async reconnect(): Promise<boolean> {
+  async pressReconnect(): Promise<boolean> {
     return this.reconnectFromHead()
   }
 
@@ -5961,7 +5961,7 @@ export class TerminalContent extends BasePaneContent {
       // the authoritative event, and an embedding that drives the handle
       // directly (a test, a host without the socket) must reach the same
       // owner rather than a second one.
-      this._connection.noteSessionEnd(exit.sessionId, exit.cause)
+      this._connectionStore.noteSessionEnd(exit.sessionId, exit.cause)
       log.info('nocx: session exited', {
         sid: exit.sessionId,
         cause: exit.cause,
@@ -10561,7 +10561,7 @@ export class TerminalContent extends BasePaneContent {
     this._connectionHead?.dispose()
     this._connectionHead = null
     this._connectionUnsub()
-    this._connection.dispose()
+    this._connectionStore.dispose()
     this._rebindAbort?.abort()
     this._rebindAbort = null
     // The painter dies before the input layer that sits above it: the

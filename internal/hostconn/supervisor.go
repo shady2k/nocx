@@ -370,6 +370,15 @@ func (l *live) beginProbe() uint64 {
 // under.
 func (l *live) recordAnswer(seq uint64, roundTrip time.Duration, err error) {
 	l.answerMu.Lock()
+	// A FENCED CONNECTION HAS DECIDED (nocx-oalo1.4.3): the connection is being
+	// closed for its silence, and the answer to a probe sent before that fence
+	// cannot change it. Recording it would let a later reader apply an answer to
+	// a connection that is gone — and, worse, would put the two facts back in a
+	// race with each other.
+	if l.closing.Load() {
+		l.answerMu.Unlock()
+		return
+	}
 	if l.answer.seq == seq {
 		l.answer.returned = true
 		l.answer.roundTrip = roundTrip

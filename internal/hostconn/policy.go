@@ -264,6 +264,35 @@ func (g *prober) next(now monoclock.Nanos) monoclock.Nanos {
 	return st.nextProbe
 }
 
+// closeAt answers the moment this connection may be closed for its silence: the
+// outer budget, spent from THIS GUARD'S FIRST READING of the silence.
+//
+// ONE ANCHOR DRIVES BOTH THE SCHEDULE AND THE CLOSE (nocx-oalo1.4.3). They were
+// two — probedAt here, silentSeen there — and in the gap between them the loop
+// kept taking its due branch for a move that was not due, never reaching the
+// select that watches stop, the answer and a caller's ask: a spin, for as long
+// as a clock jump had skipped.
+func (st *guardState) closeAt() monoclock.Nanos {
+	return st.silentSeen + span(SilenceCloseBudget)
+}
+
+// wakeCloseAt answers the moment the WAKE's own bound expires: thirty seconds
+// from the LATER of the signal and this guard's first reading of the silence.
+//
+// THE SIGNAL IN HAND MAY BE OLD (nocx-oalo1.4.3). A wake delivered late — a
+// frozen process, a clock jump — would otherwise put the guard past
+// wokeAt+30 s in the very pass that declared the silence, and close a
+// connection on evidence it had not yet had a chance to contradict. Spending
+// the bound from the judgement gives the answer that same later pass, exactly as
+// closeAt does for the outer budget.
+func (st *guardState) wakeCloseAt() monoclock.Nanos {
+	from := st.wokeAt
+	if st.silentSeen > from {
+		from = st.silentSeen
+	}
+	return from + span(WakeCloseAfter)
+}
+
 // nextStalled answers when the policy next has something to do on a connection
 // that has stopped answering.
 func (g *prober) nextStalled(now monoclock.Nanos) monoclock.Nanos {
@@ -279,9 +308,9 @@ func (g *prober) nextStalled(now monoclock.Nanos) monoclock.Nanos {
 		}
 		return now + span(SilenceCloseBudget)
 	}
-	next := st.silentSince + span(SilenceCloseBudget)
+	next := st.closeAt()
 	if st.wokeAt != 0 {
-		if due := st.wokeAt + span(WakeCloseAfter); due < next {
+		if due := st.wakeCloseAt(); due < next {
 			next = due
 		}
 	}
@@ -341,20 +370,20 @@ func (g *prober) due(at monoclock.Nanos) bool {
 	if g.sup.HoldsPlainShell() {
 		return false
 	}
-	if st.wokeAt != 0 && now >= st.wokeAt+span(WakeCloseAfter) {
+	if st.wokeAt != 0 && now >= st.wakeCloseAt() {
 		return g.sup.endForSilence(g.live, g.gen, "did not answer after the wake")
 	}
 	if st.lookAnswered && now >= st.lookAt+span(LookGrace) {
 		return g.sup.endForSilence(g.live, g.gen, "the host answers new connections and this one has been silent past the grace")
 	}
-	// THE BUDGET IS SPENT FROM THE JUDGEMENT, NOT FROM THE SEND (nocx-oalo1.4.3).
-	// A clock that jumps puts the guard at the deadline and at the end of this
-	// budget in the same pass, and a close taken there would rest on one
-	// reading: the answer may be recorded a microsecond later. Spending the
-	// budget from the moment this guard FIRST judged the connection silent
-	// makes the close need a later pass — one in which a recorded answer is
-	// read and clears the stall, which is what a healthy link always has.
-	if st.silentSeen != 0 && now >= st.silentSeen+span(SilenceCloseBudget) {
+	// THE BUDGET IS SPENT FROM THE JUDGEMENT, NOT FROM THE SEND (nocx-oalo1.4.3),
+	// and closeAt is the same moment the schedule above is built from: a clock
+	// that jumps puts the guard at the deadline and at the end of this budget in
+	// the same pass, and a close taken there would rest on one reading the
+	// answer may contradict a microsecond later. Spending it from the judgement
+	// makes the close need a later pass — one in which a recorded answer is read
+	// and clears the stall, which is what a healthy link always has.
+	if st.silentSeen != 0 && now >= st.closeAt() {
 		return g.sup.endForSilence(g.live, g.gen, "silent past the close budget")
 	}
 	return false
@@ -540,13 +569,29 @@ func (s *Supervisor) answered(l *live, gen uint64) {
 // THE PLAIN-SHELL RECHECK IS UNDER THIS LOCK, with the close decision: a lease
 // that declares a shell between the policy's look and this call must not be
 // closed for silence, and only the same critical section can promise that.
+//
+// AND SO IS THE ANSWER (nocx-oalo1.4.3). A probe's answer is recorded under the
+// connection's answer lock, so a fence that takes that lock decides the order of
+// the two facts: an answer already recorded is evidence against the close and
+// the close is refused; a fence already taken makes the answer moot, and
+// recordAnswer drops it. There is no window between "the far side answered" and
+// "the connection was closed for its silence" — no clock, no grace, no
+// scheduler.
 func (s *Supervisor) endForSilence(l *live, gen uint64, why string) bool {
 	s.mu.Lock()
 	// ONE HOLD: the holder recheck and the fence are the same critical
 	// section, so a shell (or a rider) acquired between them cannot exist —
 	// an acquire reads `closing` under this same mutex before it increments
 	// anything.
-	if s.live != l || s.generation != gen || s.holdsPlainShellLocked() || !s.fenceLocked(l) {
+	if s.live != l || s.generation != gen || s.holdsPlainShellLocked() {
+		s.mu.Unlock()
+		return false
+	}
+	l.answerMu.Lock()
+	answered := l.answer.returned && !l.answer.taken
+	fenced := !answered && s.fenceLocked(l)
+	l.answerMu.Unlock()
+	if !fenced {
 		s.mu.Unlock()
 		return false
 	}

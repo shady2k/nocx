@@ -49,14 +49,15 @@ func (b *synchronizedBuffer) String() string {
 // askHarness is a full transport env for the ask flow: real content store,
 // real vault, real profile store, and a subprocess agent.
 type askHarness struct {
-	t      *testing.T
-	v      *vault.Vault
-	db     content.ContentDB
-	ws     *WSServer
-	conn   *websocket.Conn
-	logs   *synchronizedBuffer
-	agent  *scriptedAgentFixture
-	script protocol.Script
+	t        *testing.T
+	v        *vault.Vault
+	db       content.ContentDB
+	profiles storage.DocumentStore
+	ws       *WSServer
+	conn     *websocket.Conn
+	logs     *synchronizedBuffer
+	agent    *scriptedAgentFixture
+	script   protocol.Script
 }
 
 func newAskHarness(t *testing.T, script protocol.Script) *askHarness {
@@ -155,7 +156,7 @@ func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServ
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &askHarness{t: t, v: v, db: db, ws: ws, conn: conn, logs: serverLogs, agent: agent, script: agent.script}
+	return &askHarness{t: t, v: v, db: db, profiles: docStore, ws: ws, conn: conn, logs: serverLogs, agent: agent, script: agent.script}
 }
 
 // createEndpoint makes one endpoint with a resolvable key.
@@ -171,15 +172,20 @@ func (h *askHarness) createEndpoint() {
 	if code != 0 {
 		h.t.Fatalf("endpoints.create: code %d", code)
 	}
-	// Keep a complete legacy endpoint/role row for compatibility assertions.
-	// The harness ask path does not resolve this assignment.
-	assign := jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
-		"role":       "answering",
-		"endpointId": e.ID,
-		"model":      "qwen3",
-	})
-	if isErrorResponse(h.t, assign) {
-		h.t.Fatalf("roles.assign: %s", assign)
+	h.seedLegacyRole(e.ID, "qwen3")
+}
+
+// seedLegacyRole writes the endpoint-based format left by older installs.
+// It is deliberately not sent to roles.assign: new writes require an agentId.
+func (h *askHarness) seedLegacyRole(endpointID, model string) {
+	h.t.Helper()
+	var document map[string]any
+	if found, err := h.profiles.Read("p.json", &document); err != nil || !found {
+		h.t.Fatalf("read legacy profile document: found %v, err %v", found, err)
+	}
+	document["roles"] = []map[string]any{{"role": "answering", "endpointId": endpointID, "model": model}}
+	if err := h.profiles.Write("p.json", document); err != nil {
+		h.t.Fatalf("write legacy role assignment: %v", err)
 	}
 }
 
@@ -558,11 +564,7 @@ func TestAgentAsk_HarnessDefaultIgnoresLegacyRoleAssignment(t *testing.T) {
 		"key": "sk-2", "models": []map[string]any{{"name": "gpt-4o"}, {"name": "gpt-4o-mini"}},
 	})
 	second, _ := decodeEndpointResult(t, secondRaw)
-	if err := isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": second.ID, "model": "gpt-4o",
-	})); err {
-		t.Fatal("roles.assign refused")
-	}
+	h.seedLegacyRole(second.ID, "gpt-4o")
 	_ = first
 
 	sid := openLocalSession(t, h.conn)
@@ -599,11 +601,7 @@ func TestAgentAsk_LegacyReassignmentDoesNotOverrideHarness(t *testing.T) {
 		"key": "sk", "models": []map[string]any{{"name": "gpt-4o"}},
 	})
 	other, _ := decodeEndpointResult(t, otherRaw)
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": other.ID, "model": "gpt-4o",
-	})) {
-		t.Fatal("reassign refused")
-	}
+	h.seedLegacyRole(other.ID, "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-re", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -628,11 +626,7 @@ func TestAgentAsk_DeletedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("endpoints.create: code %d", code)
 	}
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": created.ID, "model": "qwen3",
-	})) {
-		t.Fatal("assign refused")
-	}
+	h.seedLegacyRole(created.ID, "qwen3")
 	if isErrorResponse(t, jsonrpcCall(t, h.conn, "endpoints.delete", map[string]any{"id": created.ID})) {
 		t.Fatal("delete refused")
 	}
@@ -658,11 +652,7 @@ func TestAgentAsk_RemovedLegacyModelDoesNotBlockHarness(t *testing.T) {
 		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}, {"name": "gpt-4o"}},
 	})
 	created, _ := decodeEndpointResult(t, raw)
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": created.ID, "model": "gpt-4o",
-	})) {
-		t.Fatal("assign refused")
-	}
+	h.seedLegacyRole(created.ID, "gpt-4o")
 	// The update drops gpt-4o from the model list — "qwen3" remains, and
 	// must NOT be silently substituted.
 	up := jsonrpcCall(t, h.conn, "endpoints.update", map[string]any{

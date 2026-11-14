@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentharness "github.com/shady2k/nocx/internal/harness"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
 func (*fakeAgentService) ConversationModel(context.Context, string, string) (string, error) {
@@ -15,10 +16,21 @@ func (*fakeAgentService) ConversationModel(context.Context, string, string) (str
 }
 
 type modelPinHarness struct {
-	answeringHarness
+	agentharness.Harness
 	mu     sync.Mutex
 	specs  []agentharness.TurnSpec
 	models []agentharness.Model
+}
+
+func newModelPinHarness(t *testing.T, models ...string) *modelPinHarness {
+	t.Helper()
+	askHarnessParallel(t)
+	actor := newScriptedAgent(t, protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepEnd, Model: models[0]}}})
+	h := &modelPinHarness{Harness: actor.harness}
+	for _, id := range models {
+		h.models = append(h.models, agentharness.Model{ID: id})
+	}
+	return h
 }
 
 func (h *modelPinHarness) Models(context.Context) ([]agentharness.Model, error) {
@@ -31,7 +43,7 @@ func (h *modelPinHarness) Run(ctx context.Context, spec agentharness.TurnSpec) (
 	h.mu.Lock()
 	h.specs = append(h.specs, spec)
 	h.mu.Unlock()
-	return h.answeringHarness.Run(ctx, spec)
+	return h.Harness.Run(ctx, spec)
 }
 
 func (h *modelPinHarness) modelAt(i int) string {
@@ -41,8 +53,8 @@ func (h *modelPinHarness) modelAt(i int) string {
 }
 
 func TestConversationRolePinsActualDefaultOverTheWire(t *testing.T) {
-	backend := &modelPinHarness{models: []agentharness.Model{{ID: "actual-model"}, {ID: "changed-role"}}}
-	h := newAskHarnessWithOpts(t, nil, WithAgentHarness("test", backend))
+	backend := newModelPinHarness(t, "actual-model", "changed-role")
+	h := newAskHarnessWithOpts(t, answerScript("unused"), WithAgentHarness("test", backend))
 	sid := openLocalSession(t, h.conn)
 	ask := func(id string) {
 		t.Helper()
@@ -74,8 +86,8 @@ func TestConversationRolePinsActualDefaultOverTheWire(t *testing.T) {
 }
 
 func TestConversationRoleChosenAndRemovedModelOverTheWire(t *testing.T) {
-	backend := &modelPinHarness{models: []agentharness.Model{{ID: "chosen"}}}
-	h := newAskHarnessWithOpts(t, nil, WithAgentHarness("test", backend))
+	backend := newModelPinHarness(t, "chosen")
+	h := newAskHarnessWithOpts(t, answerScript("unused"), WithAgentHarness("test", backend))
 	sid := openLocalSession(t, h.conn)
 	raw := jsonrpcCall(t, h.conn, "roles.assign", map[string]any{"agentId": "test", "role": "answering", "model": "chosen"})
 	if isErrorResponse(t, raw) {
@@ -100,7 +112,7 @@ func TestConversationRoleChosenAndRemovedModelOverTheWire(t *testing.T) {
 	}
 }
 
-type modelReadyHarness struct{ modelPinHarness }
+type modelReadyHarness struct{ *modelPinHarness }
 
 func (*modelReadyHarness) Readiness(context.Context) agentharness.Readiness {
 	return agentharness.Readiness{State: agentharness.NotConfigured, Message: "native default unavailable"}
@@ -114,8 +126,8 @@ func (*modelReadyHarness) ReadinessForModel(_ context.Context, model string) age
 }
 
 func TestConversationRoleChosenDoesNotRequireNativeDefault(t *testing.T) {
-	backend := &modelReadyHarness{modelPinHarness: modelPinHarness{models: []agentharness.Model{{ID: "chosen"}}}}
-	h := newAskHarnessWithOpts(t, nil, WithAgentHarness("test", backend))
+	backend := &modelReadyHarness{modelPinHarness: newModelPinHarness(t, "chosen")}
+	h := newAskHarnessWithOpts(t, answerScript("unused"), WithAgentHarness("test", backend))
 	raw := jsonrpcCall(t, h.conn, "roles.assign", map[string]any{"agentId": "test", "role": "answering", "model": "chosen"})
 	if isErrorResponse(t, raw) {
 		t.Fatalf("assign: %s", raw)
@@ -131,7 +143,7 @@ func TestConversationRoleChosenDoesNotRequireNativeDefault(t *testing.T) {
 func TestConversationRoleMissingReportedModelIsVisible(t *testing.T) {
 	svc := &fakeAgentService{}
 	h := newGapHandlers(svc, nil, nil)
-	h.harness = &answeringHarness{}
+	h.harness = newScriptedAgent(t, answerScript("unused")).harness
 	rc := gapRunContext()
 	r := &gapResponder{}
 	h.terminalize(t.Context(), rc, "completed", "completed", "", r)

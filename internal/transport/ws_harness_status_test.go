@@ -11,8 +11,9 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 )
 
+// statusHarness supplies only the capabilities exercised by agent.status.
 type statusHarness struct {
-	answeringHarness
+	agentharness.Harness
 	readiness agentharness.Readiness
 	models    []agentharness.Model
 }

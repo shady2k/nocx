@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,12 +73,10 @@ func TestLogAgentStreamEnded_CarriesTheRunsOwnCounts(t *testing.T) {
 func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	svc := &fakeAgentService{sealErr: errors.New("seal failed")}
 	logger := &instrumentLogger{}
-	root := t.TempDir()
-	target := filepath.Join(root, "input.txt")
-	if err := os.WriteFile(target, []byte("read me"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "before"}, {Kind: protocol.StepTool, Name: "files.read", Arguments: map[string]any{"path": target}}, {Kind: protocol.StepEnd}}}
+	// Named-file tools refuse before the kernel on an unavailable session.
+	// Use the own-pane read so the admitted call reaches the prose seal;
+	// the seal must fail before the kernel can execute the read.
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "before"}, {Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{}}, {Kind: protocol.StepEnd}}}
 	h := newGapHandlers(svc, newScriptedAgent(t, script).harness, assistant.NewApprovalStore())
 	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
@@ -95,7 +92,7 @@ func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	h.knownMaterial = adapterKnownMaterial(adapterVault(t))
 	rc := gapRunContext()
 	rc.sessionID = "instrument-session"
-	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
+	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: string(rc.sessionID)}})
 	rc.grant = &grant
 	h.grantFor = func(string) *content.Grant { return &grant }
 
@@ -104,6 +101,15 @@ func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	r := &gapResponder{}
 	h.runAskStream(context.Background(), rc, r)
 
+	if svc.finishState() != content.RunFailed {
+		t.Fatalf("run state = %q, want failed after seal failure", svc.finishState())
+	}
+	svc.mu.Lock()
+	sealed := append([]string(nil), svc.sealed...)
+	svc.mu.Unlock()
+	if len(sealed) != 1 || sealed[0] != "turn-1/text-1" {
+		t.Fatalf("sealed prose = %v, want the pre-call prose seal attempt", sealed)
+	}
 	if logger.record.message != "agent ask: the stream ended" {
 		t.Fatalf("message = %q, want stream-ended record", logger.record.message)
 	}

@@ -476,11 +476,11 @@ func (h *runLeaseHarness) openSession(t *testing.T) string {
 	return sid
 }
 
-// createEndpointAt makes one answering-role endpoint against the fake
-// provider (the same shape the run wire tests use).
+// createEndpointAt installs an independent endpoint credential. The subprocess
+// harness owns its native model; endpoints no longer assign answering roles.
 func (h *runLeaseHarness) createEndpointAt() {
 	h.t.Helper()
-	e, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
+	_, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
 		"name":    "Local",
 		"baseUrl": "http://127.0.0.1:11434/v1",
 		"schema":  "openai-compatible",
@@ -489,13 +489,6 @@ func (h *runLeaseHarness) createEndpointAt() {
 	}))
 	if code != 0 {
 		h.t.Fatalf("endpoints.create: code %d", code)
-	}
-	if isErrorResponse(h.t, jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
-		"role":       "answering",
-		"endpointId": e.ID,
-		"model":      "qwen3",
-	})) {
-		h.t.Fatalf("roles.assign refused")
 	}
 }
 

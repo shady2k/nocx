@@ -68,6 +68,10 @@
     {
       "test": "e2e:e2e/load-no-busy.spec.ts › a person never sees busy under load",
       "bead": "nocx-l5b5f"
+    },
+    {
+      "test": "e2e:e2e/block-right-click.spec.ts › a running block offers its own menu — Stop — and the program is sent no paste",
+      "bead": "nocx-agwul"
     }
   ]
 }

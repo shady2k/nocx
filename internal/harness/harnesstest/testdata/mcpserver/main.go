@@ -44,6 +44,8 @@ func main() {
 				},
 			})
 		case "notifications/initialized":
+		case "tools/list":
+			_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"tools": []map[string]any{{"name": "probe", "description": "Probe bridge environment", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"note": map[string]any{"type": "string"}}}}}}})
 		case "tools/call":
 			if os.Getenv("MCP_BLOCK") == "1" {
 				_ = os.WriteFile(os.Getenv("MCP_BLOCKEDFILE"), []byte("tools/call"), 0o600)

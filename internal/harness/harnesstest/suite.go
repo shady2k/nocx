@@ -1,23 +1,16 @@
-// Package harnesstest is the conformance suite every connector runs. It is
-// exported so a connector's own test can call Run with a factory that builds
-// that connector, and the assertions are about the contract rather than about
-// any one agent's wire.
-//
-// The suite runs on a scripted fake agent. A connector that cannot pass it is
-// not supported (ADR-anntnxdj decision 1); the same suite runs against a real
-// agent at release.
+// Package harnesstest runs the shared semantic conformance suite against
+// connector-specific scenario drivers. It also exposes synthetic process fault
+// checks for the fake agent; those checks are not a real connector's acceptance.
 package harnesstest
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,37 +39,12 @@ type Setup struct {
 // check's script is the agent's whole behaviour for that check.
 type Factory func(t *testing.T, setup Setup) harness.Harness
 
-// Run runs every conformance check against the connector factory.
-func Run(t *testing.T, factory Factory) {
-	if runHost(t, factory) {
-		return
-	}
+// RunFakeProcessChecks exercises synthetic EOF, exit-status and orphan faults.
+func RunFakeProcessChecks(t *testing.T, factory Factory) {
 	t.Helper()
-
-	callerName := t.Name()
 	bin := t.TempDir()
 	agentPath := build(t, bin, "fakeagent", fakeAgentPackage)
 	serverPath := build(t, bin, "mcpserver", mcpServerPackage)
-
-	t.Run("declares supported connector facts", func(t *testing.T) {
-		h := factory(t, Setup{AgentPath: agentPath, ToolServerPath: serverPath})
-		facts := h.Facts()
-		if facts.ToolBoundary != harness.NocxToolsOnly && facts.ToolBoundary != harness.NocxToolsByInstruction {
-			t.Fatalf("unsupported tool boundary: %q", facts.ToolBoundary)
-		}
-	})
-	t.Run("streams answer, reasoning and end in order", func(t *testing.T) {
-		testOrderedStream(t, factory, agentPath, serverPath)
-	})
-	t.Run("a tool call reaches the bridge and its environment stays there", func(t *testing.T) {
-		testToolBridge(t, factory, agentPath, serverPath)
-	})
-	t.Run("Cancel during a stream ends the turn with no event after", func(t *testing.T) {
-		testCancelDuringStream(t, factory, agentPath, serverPath)
-	})
-	t.Run("Cancel during a blocked tool call ends the turn with no event after", func(t *testing.T) {
-		testCancelDuringTool(t, factory, agentPath, serverPath)
-	})
 	t.Run("successful RPC completion closes stdin", func(t *testing.T) {
 		script := protocol.Script{CompleteOnEOF: true, Steps: []protocol.Step{
 			{Kind: protocol.StepEnd, Model: "fake-model"}, {Kind: protocol.StepHang},
@@ -89,126 +57,22 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("a failure is reported as a failure", func(t *testing.T) {
-		testFailures(t, factory, agentPath, serverPath)
-	})
-	t.Run("Wait leaves no process of the turn", func(t *testing.T) {
-		testNoProcessAfterWait(t, factory, agentPath, serverPath)
-	})
-	t.Run("SIGKILL of the parent ends the agent and its bridge", func(t *testing.T) {
-		testParentDeath(t, agentPath, serverPath, callerName)
-	})
+	t.Run("synthetic failures", func(t *testing.T) { testFailures(t, factory, agentPath, serverPath) })
+	t.Run("Wait leaves no orphan child", func(t *testing.T) { testNoProcessAfterWait(t, factory, agentPath, serverPath) })
 }
 
-// runHost reenters the caller's test and invokes the same factory before Run
-// starts any ordinary checks. Helper-only environment is removed before launch.
-func runHost(t *testing.T, factory Factory) bool {
-	if os.Getenv("HARNESS_TEST_HOST") != "1" {
-		return false
-	}
-	var script protocol.Script
-	var tools harness.ToolBridge
-	if err := json.Unmarshal([]byte(os.Getenv("HOST_SCRIPT")), &script); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(os.Getenv("HOST_TOOLS")), &tools); err != nil {
-		t.Fatal(err)
-	}
-	agent, dir := os.Getenv("HOST_AGENT"), os.Getenv("HOST_DIR")
-	for _, name := range []string{"HARNESS_TEST_HOST", "HOST_SCRIPT", "HOST_TOOLS", "HOST_AGENT", "HOST_DIR"} {
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h := factory(t, Setup{AgentPath: agent, Script: script})
-	turn, err := h.Run(context.Background(), harness.TurnSpec{Text: "host", Dir: dir, Tools: tools})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range turn.Events() {
-	}
-	_, _ = turn.Wait(context.Background())
-	return true
-}
-
-func testOrderedStream(t *testing.T, factory Factory, agentPath, serverPath string) {
+// ReleaseGate lets a fixture continue only after the shared suite saw a delta.
+func ReleaseGate(t *testing.T, path string) {
 	t.Helper()
-	target, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(t.TempDir(), "working-directory")
-	if err = os.Symlink(target, dir); err != nil {
-		t.Fatal(err)
-	}
-	gate := filepath.Join(dir, "gate")
-	if err = syscall.Mkfifo(gate, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	promptFile := filepath.Join(dir, "prompt")
-	script := protocol.Script{Gate: gate, PromptFile: promptFile, Steps: []protocol.Step{
-		{Kind: protocol.StepAnswer, Text: "Hel"},
-		{Kind: protocol.StepGate},
-		{Kind: protocol.StepReasoning, Text: "thinking"},
-		{Kind: protocol.StepAnswer, Text: "lo"},
-		{Kind: protocol.StepEnd, Model: "fake-model", Usage: &protocol.Usage{
-			InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2,
-		}},
-	}}
-	turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "hello", Model: "chosen-model", SystemPrompt: "system",
-		Dir: dir,
-	})
-	first := nextEvent(t, turn.Events(), 5*time.Second)
-	// The process cannot finish until the consumer has observed its delta.
-	if first.Kind != harness.EventAnswerDelta {
-		t.Fatalf("first event = %+v, want answer delta", first)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	writer, err := openGate(ctx, gate)
+	gate, err := openGate(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = writer.Write([]byte("x"))
-	_ = writer.Close()
-	events := append([]harness.Event{first}, collect(t, turn)...)
-	raw, err := os.ReadFile(promptFile) //nolint:gosec // test TempDir
-	if err != nil {
+	defer func() { _ = gate.Close() }()
+	if _, err := gate.Write([]byte("x")); err != nil {
 		t.Fatal(err)
-	}
-	var prompt protocol.Prompt
-	if err = json.Unmarshal(raw, &prompt); err != nil {
-		t.Fatal(err)
-	}
-	if prompt.ConversationID != "conversation-1" || prompt.Text != "hello" || prompt.SystemPrompt != "system" || prompt.Model != "chosen-model" || prompt.Dir != target {
-		t.Fatalf("forwarded prompt = %+v", prompt)
-	}
-
-	want := []harness.EventKind{
-		harness.EventAnswerDelta, harness.EventReasoningDelta,
-		harness.EventAnswerDelta, harness.EventEnd,
-	}
-	if got := kinds(events); fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("event kinds = %v, want %v", got, want)
-	}
-	if events[0].Text != "Hel" || events[1].Text != "thinking" || events[2].Text != "lo" {
-		t.Fatalf("deltas = %q %q %q", events[0].Text, events[1].Text, events[2].Text)
-	}
-	if events[3].End == nil || events[3].End.Model != "fake-model" {
-		t.Fatalf("end = %+v, want the model that answered", events[3].End)
-	}
-	if events[3].End.Usage == nil || events[3].End.Usage.InputTokens != 3 ||
-		events[3].End.Usage.OutputTokens != 5 || events[3].End.Usage.CacheReadTokens != 2 {
-		t.Fatalf("usage = %+v", events[3].End.Usage)
-	}
-
-	outcome, err := turn.Wait(context.Background())
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if outcome.Model != "fake-model" || outcome.Usage == nil || outcome.Usage.OutputTokens != 5 {
-		t.Fatalf("outcome = %+v", outcome)
 	}
 }
 
@@ -226,134 +90,6 @@ func openGate(ctx context.Context, path string) (*os.File, error) {
 		case <-ticker.C:
 		}
 	}
-}
-
-func testToolBridge(t *testing.T, factory Factory, agentPath, serverPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	resultFile := filepath.Join(dir, "tool-result")
-	serverPIDFile := filepath.Join(dir, "server.pid")
-	secret := "bridge-only-secret"
-	script := protocol.Script{
-		ResultFile: resultFile,
-		Steps: []protocol.Step{
-			{Kind: protocol.StepTool, Name: "probe", Arguments: map[string]any{"note": "hello"}},
-			{Kind: protocol.StepEnd, Model: "fake-model"},
-		},
-	}
-	tools := harness.ToolBridge{
-		Command: []string{serverPath},
-		Env:     []string{"NOCX_TEST_SECRET=" + secret, "MCP_PIDFILE=" + serverPIDFile},
-	}
-	turn := start(t, factory, agentPath, serverPath, script, tools, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "use the tool", Dir: dir,
-	})
-	events := collect(t, turn)
-
-	var started, finished *harness.ToolCall
-	for _, ev := range events {
-		switch ev.Kind {
-		case harness.EventToolStarted:
-			started = ev.Tool
-		case harness.EventToolFinished:
-			finished = ev.Tool
-		}
-	}
-	if started == nil || finished == nil {
-		t.Fatalf("tool events missing: %v", kinds(events))
-	}
-	if started.Name != "probe" || started.ID == "" {
-		t.Fatalf("tool started = %+v", started)
-	}
-	if finished.Name != started.Name || finished.ID != started.ID {
-		t.Fatalf("tool finished = %+v, started = %+v", finished, started)
-	}
-
-	if _, err := turn.Wait(context.Background()); err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	result, err := os.ReadFile(resultFile) //nolint:gosec // test TempDir
-	if err != nil {
-		t.Fatalf("the tool result: %v", err)
-	}
-	if !strings.Contains(string(result), "server_secret="+secret) {
-		t.Fatalf("the bridge did not see its own environment: %q", result)
-	}
-	if strings.Contains(strings.SplitN(string(result), ";agent_environment=", 2)[1], secret) {
-		t.Fatal("the agent environment contains the bridge secret")
-	}
-	serverPID := readPID(t, serverPIDFile)
-	assertGone(t, serverPID, "the tool bridge")
-}
-
-func testCancelDuringStream(t *testing.T, factory Factory, agentPath, serverPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	agentPIDFile := filepath.Join(dir, "agent.pid")
-	script := protocol.Script{
-		PIDFile:        agentPIDFile,
-		HangFile:       filepath.Join(dir, "hang"),
-		IgnoreStdinEOF: true,
-		Steps: []protocol.Step{
-			{Kind: protocol.StepAnswer, Text: "first"},
-			{Kind: protocol.StepHang},
-		},
-	}
-	turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "stream", Dir: dir,
-	})
-
-	events := []harness.Event{nextEvent(t, turn.Events(), 5*time.Second)}
-	if events[0].Kind != harness.EventAnswerDelta {
-		t.Fatalf("first event = %+v, want an answer delta", events[0])
-	}
-	waitFile(t, filepath.Join(dir, "hang"))
-	if err := turn.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel: %v", err)
-	}
-	events = append(events, collectWithin(t, turn.Events(), 2*time.Second)...)
-	assertCancelled(t, turn, events)
-	assertGone(t, readPID(t, agentPIDFile), "the agent")
-}
-
-func testCancelDuringTool(t *testing.T, factory Factory, agentPath, serverPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	agentPIDFile := filepath.Join(dir, "agent.pid")
-	serverPIDFile := filepath.Join(dir, "server.pid")
-	script := protocol.Script{
-		PIDFile:        agentPIDFile,
-		IgnoreStdinEOF: true,
-		Steps: []protocol.Step{
-			{Kind: protocol.StepTool, Name: "probe"},
-			{Kind: protocol.StepEnd},
-		},
-	}
-	tools := harness.ToolBridge{
-		Command: []string{serverPath},
-		Env: []string{
-			"NOCX_TEST_SECRET=bridge-only-secret",
-			"MCP_PIDFILE=" + serverPIDFile,
-			"MCP_BLOCK=1",
-			"MCP_BLOCKEDFILE=" + filepath.Join(dir, "blocked"),
-		},
-	}
-	turn := start(t, factory, agentPath, serverPath, script, tools, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "block", Dir: dir,
-	})
-
-	events := []harness.Event{nextEvent(t, turn.Events(), 5*time.Second)}
-	if events[0].Kind != harness.EventToolStarted {
-		t.Fatalf("first event = %+v, want the tool call", events[0])
-	}
-	waitFile(t, filepath.Join(dir, "blocked"))
-	if err := turn.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel: %v", err)
-	}
-	events = append(events, collectWithin(t, turn.Events(), 2*time.Second)...)
-	assertCancelled(t, turn, events)
-	assertGone(t, readPID(t, agentPIDFile), "the agent")
-	assertGone(t, readPID(t, serverPIDFile), "the blocked tool bridge")
 }
 
 func assertCancelled(t *testing.T, turn harness.Turn, events []harness.Event) {
@@ -479,130 +215,6 @@ func testNoProcessAfterWait(t *testing.T, factory Factory, agentPath, serverPath
 	assertGone(t, readPID(t, agentPIDFile), "the agent")
 	assertGone(t, readPID(t, childPIDFile), "the child the agent left")
 	collect(t, turn)
-}
-
-func testParentDeath(t *testing.T, agentPath, serverPath, callerName string) {
-	t.Helper()
-	for _, state := range []string{"idle", "stream", "tool"} {
-		t.Run(state, func(t *testing.T) { testParentDeathState(t, agentPath, serverPath, callerName, state) })
-	}
-}
-
-func testParentDeathState(t *testing.T, agentPath, serverPath, callerName, state string) {
-	t.Helper()
-	dir := t.TempDir()
-	agentPIDFile := filepath.Join(dir, "agent.pid")
-	serverPIDFile := filepath.Join(dir, "server.pid")
-	script := protocol.Script{
-		CleanupGate:     filepath.Join(dir, "cleanup"),
-		EnvironmentFile: filepath.Join(dir, "environment"),
-		HangFile:        filepath.Join(dir, "hang"),
-		PIDFile:         agentPIDFile,
-		Steps: []protocol.Step{
-			{Kind: protocol.StepTool, Name: "probe"},
-			{Kind: protocol.StepEnd},
-		},
-	}
-	if err := syscall.Mkfifo(script.CleanupGate, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if state != "tool" {
-		script.Steps = []protocol.Step{{Kind: protocol.StepBridge}, {Kind: protocol.StepHang}}
-		if state == "stream" {
-			script.Steps = append([]protocol.Step{{Kind: protocol.StepAnswer, Text: "streaming"}}, script.Steps...)
-		}
-	}
-
-	tools := harness.ToolBridge{
-		Command: []string{serverPath},
-		Env: []string{
-			"NOCX_TEST_SECRET=bridge-only-secret",
-			"MCP_PIDFILE=" + serverPIDFile,
-			"MCP_BLOCK=1",
-			"MCP_BLOCKEDFILE=" + filepath.Join(dir, "blocked"),
-		},
-	}
-	scriptJSON, err := json.Marshal(script)
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolsJSON, err := json.Marshal(tools)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hostPath, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Reenter this exact test, so the helper cannot choose a different factory.
-	names := strings.Split(callerName, "/")
-	for i, name := range names {
-		names[i] = "^" + regexp.QuoteMeta(name) + "$"
-	}
-	host := exec.Command(hostPath, "-test.run="+strings.Join(names, "/")) //nolint:gosec // this test binary
-	host.Env = append(os.Environ(),
-		"HARNESS_TEST_HOST=1",
-		"HOST_AGENT="+agentPath,
-		"HOST_SCRIPT="+string(scriptJSON),
-		"HOST_TOOLS="+string(toolsJSON),
-		"HOST_DIR="+dir,
-	)
-	host.Stdout = nil
-	host.Stderr = nil
-	if err = host.Start(); err != nil {
-		t.Fatalf("the helper process: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = host.Process.Kill()
-		_, _ = host.Process.Wait()
-	})
-
-	waitFile(t, agentPIDFile)
-	waitFile(t, serverPIDFile)
-	if state == "tool" {
-		waitFile(t, filepath.Join(dir, "blocked"))
-	} else {
-		waitFile(t, filepath.Join(dir, "hang"))
-	}
-	agentPID := readPID(t, agentPIDFile)
-	serverPID := readPID(t, serverPIDFile)
-	t.Cleanup(func() {
-		if !alive(agentPID) {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		gate, gateErr := openGate(ctx, script.CleanupGate)
-		if gateErr != nil {
-			t.Errorf("fixture cleanup gate: %v", gateErr)
-			return
-		}
-		_, _ = gate.Write([]byte("x"))
-		_ = gate.Close()
-		waittest.WaitForTimeout(t, "failed fixture cleanup", time.Second, func() bool {
-			return !alive(agentPID) && !alive(serverPID)
-		})
-	})
-
-	environment, err := os.ReadFile(script.EnvironmentFile) //nolint:gosec // test TempDir
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(environment), "bridge-only-secret") || strings.Contains(string(environment), "HOST_TOOLS=") {
-		t.Fatal("parent-death agent inherited bridge configuration")
-	}
-
-	// The backend is gone: no Cancel, no Wait, just the process that held
-	// the pipes. The agent must see stdin close and take its bridge with it.
-	if err := host.Process.Kill(); err != nil {
-		t.Fatalf("kill the parent: %v", err)
-	}
-	_, _ = host.Process.Wait()
-
-	waittest.WaitForTimeout(t, "the agent and its bridge to be gone", time.Second, func() bool {
-		return !alive(agentPID) && (serverPID == 0 || !alive(serverPID))
-	})
 }
 
 func start(t *testing.T, factory Factory, agentPath, serverPath string, script protocol.Script, tools harness.ToolBridge, spec harness.TurnSpec) harness.Turn {

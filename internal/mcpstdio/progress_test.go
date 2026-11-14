@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -26,8 +27,8 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/toolendpoint"
+	"github.com/shady2k/nocx/internal/workers"
 )
 
 // progressClock is the clock a long call's progress is sent on, in the test's
@@ -229,113 +230,102 @@ func TestACancelledCallStopsProgressAtOnce(t *testing.T) {
 	}
 }
 
-// lifetimeDispatcher observes the real operation catalogue's non-renewable
-// lifetime. Only its clock is replaced; no timeout is reimplemented here.
-type lifetimeDispatcher struct {
-	clock    *notify.ManualClock
-	started  chan *catalog.Scope
-	advanced chan struct{}
-	ended    chan error
-}
-type lifetimeClock struct{ *notify.ManualClock }
-
-func (c lifetimeClock) AfterFunc(d time.Duration, fn func()) catalog.Timer {
-	return c.ManualClock.AfterFunc(d, fn)
+// lifetimeWorkerRecord blocks only at the real holdings executor's storage
+// boundary. The dispatcher, capability, and execution deadline stay production.
+type lifetimeWorkerRecord struct {
+	assistant.WorkerRecord
+	started chan context.Context
+	ended   chan error
 }
 
-func (d *lifetimeDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) {
-	if inv.Method != "alpha.lifetime" {
-		return `{"screen":true}`, nil
-	}
-	scope := catalog.BeginWithClock(inv.Context, catalog.OpInternalAgentRun, catalog.Invocation{}, lifetimeClock{d.clock})
-	defer scope.Close()
-	scope.StartWork()
-	d.started <- scope
-	select {
-	case <-d.advanced:
-	case <-inv.Context.Done():
-		return "", inv.Context.Err()
-	}
-	outcome, done := scope.Outcome()
-	if !done || outcome != catalog.OutcomeExpired {
-		return "", errors.New("operation did not expire at declared max")
-	}
-	d.ended <- context.DeadlineExceeded
-	return "", context.DeadlineExceeded
+func (r *lifetimeWorkerRecord) Undispatched() []workers.Fact { return nil }
+
+func (r *lifetimeWorkerRecord) HeldBy(ctx context.Context, _ string) ([]workers.Participant, error) {
+	r.started <- ctx
+	<-ctx.Done()
+	r.ended <- ctx.Err()
+	return nil, ctx.Err()
 }
 
-func (d *lifetimeDispatcher) Catalogue(content.Grant) []agenttools.Tool {
-	return []agenttools.Tool{
-		{
-			Declaration:  agenttools.Declaration{Name: "alpha.lifetime", Description: "runs until its declared lifetime ends"},
-			ParamsSchema: json.RawMessage(`{"type":"object"}`),
-			ResultSchema: json.RawMessage(`{"type":"object"}`),
-		},
-		{
-			Declaration:  agenttools.Declaration{Name: "alpha.screen", Description: "answers at once"},
-			ParamsSchema: json.RawMessage(`{"type":"object"}`),
-			ResultSchema: json.RawMessage(`{"type":"object"}`),
-		},
-	}
+type lifetimeAuthorizer struct{ slotAuthorizer }
+
+func (a *lifetimeAuthorizer) Admit(peer toolendpoint.Peer, publish func(string, toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
+	inv, release, err := a.slotAuthorizer.Admit(peer, publish)
+	inv.Grant = content.EffectPolicy{
+		Observe: content.EffectRow{Decision: content.DecisionPermit},
+	}.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: "session"}})
+	return inv, release, err
 }
 
-// TestACallEndingAtItsDeclaredLifetimeKeepsItsBoundUnderProgress is the fourth
-// assertion, ADR-8eej3e66's "progress never renews a lifetime": the call's own
-// bound still ends it while progress is being sent, the adapter reports that
-// ending rather than a result, and nothing is written for the call afterwards.
+// TestACallEndingAtItsDeclaredLifetimeKeepsItsBoundUnderProgress exercises
+// runDeclaredTool's execution deadline through the real endpoint and dispatcher.
+// Only the declared duration is shortened; progress ticks cannot renew it.
 func TestACallEndingAtItsDeclaredLifetimeKeepsItsBoundUnderProgress(t *testing.T) {
-	dispatcher := &lifetimeDispatcher{
-		clock: notify.NewManualClock(), started: make(chan *catalog.Scope, 1),
-		advanced: make(chan struct{}), ended: make(chan error, 1),
+	registry, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
 	}
-	endpoint := startRealEndpoint(t, &slotAuthorizer{}, dispatcher)
+	const lifetime = time.Second
+	// All returns this registry's declaration rows. Change only this test's
+	// assembled copy, retaining the shipped schema and capability constructor.
+	allTools := registry.All()
+	for i := range allTools {
+		if allTools[i].Name == "workers.holdings" {
+			allTools[i].Deadline = lifetime
+		}
+	}
+	record := &lifetimeWorkerRecord{started: make(chan context.Context, 1), ended: make(chan error, 1)}
+	dispatcher, err := assistant.NewToolDispatcher(registry, record, content.EnvironmentIDFor(content.EnvLocal, ""))
+	if err != nil {
+		t.Fatalf("new tool dispatcher: %v", err)
+	}
+	endpoint := startRealEndpoint(t, &lifetimeAuthorizer{}, dispatcher)
 	clock := newProgressClock()
 	driver := startStdioWithProgressClock(t, endpoint.SocketPath(), clock)
 	initialization(driver)
 
-	driver.send(2, "tools/call", `{"name":"alpha.lifetime","_meta":{"progressToken":7}}`)
-	scope := <-dispatcher.started
-	originalDeadline := scope.Deadline()
-	max := scope.Declaration().Max.Duration()
-	dispatcher.clock.Advance(max / 3)
-	clock.tick()
-	if count := progressFrame(t, driver, "7"); count != 1 {
-		t.Fatalf("the first interval reported progress %d, want 1", count)
-	}
-	dispatcher.clock.Advance(max / 3)
-	clock.tick()
-	if count := progressFrame(t, driver, "7"); count != 2 {
-		t.Fatalf("the second interval reported progress %d, want 2", count)
-	}
-
-	if !scope.Deadline().Equal(originalDeadline) {
-		t.Fatal("progress renewed operation deadline")
-	}
-	dispatcher.clock.Advance(max - 2*(max/3))
-	close(dispatcher.advanced)
+	driver.send(2, "tools/call", `{"name":"workers.holdings","arguments":{},"_meta":{"progressToken":7}}`)
+	var execution context.Context
 	select {
-	case err := <-dispatcher.ended:
+	case execution = <-record.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holdings never reached its storage boundary")
+	}
+	originalDeadline, bounded := execution.Deadline()
+	if !bounded {
+		t.Fatal("the production executor context has no declared deadline")
+	}
+	for count := int64(1); count <= 2; count++ {
+		if err := execution.Err(); err != nil {
+			t.Fatalf("execution ended before progress event %d: %v", count, err)
+		}
+		clock.tick()
+		if got := progressFrame(t, driver, "7"); got != count {
+			t.Fatalf("progress = %d, want %d", got, count)
+		}
+		if deadline, ok := execution.Deadline(); !ok || !deadline.Equal(originalDeadline) {
+			t.Fatal("progress renewed the execution deadline")
+		}
+	}
+	select {
+	case err := <-record.ended:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("the call ended with %v, want its own declared lifetime", err)
+			t.Fatalf("the executor ended with %v, want its own declared lifetime", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the call never ended at its declared lifetime: progress held it open")
 	}
-	// THE ADAPTER REPORTS THE ENDING, not a result: a call whose bound ran out
-	// was abandoned, and the sentence says so (the endpoint's own
-	// classification of a deadline).
 	reason := toolRefusal(t, driver.nextID(2))
 	if !strings.Contains(reason, "ran past its own bound") {
 		t.Fatalf("the ended call reached the caller as %q, want its bound named", reason)
 	}
 
-	// AND PROGRESS STOPPED WITH THE CALL. A tick after the answer may write
-	// nothing, and the fence proves it.
 	clock.waitStopped(t)
 	clock.tick()
-	driver.send(3, "tools/call", `{"name":"alpha.screen"}`)
-	if text := toolText(t, driver.nextID(3)); text != `{"screen":true}` {
-		t.Fatalf("the fence call answered %s, want nothing between it and the ended call", text)
+	// A catalogue request fences the output without another blocking execution.
+	driver.send(3, "tools/list", `{}`)
+	if response := driver.nextID(3); response["error"] != nil || response["result"] == nil {
+		t.Fatalf("catalogue fence failed: %v", response)
 	}
 }
 

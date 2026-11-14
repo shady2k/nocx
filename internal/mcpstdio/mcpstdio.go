@@ -248,6 +248,9 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.WriteClos
 			owner := active.add(request.ID, cancel, flight)
 			if owner == nil {
 				cancel()
+				if err := writer.errorResponse(request.ID, -32600, "invalid request", "request id is already active"); err != nil {
+					return err
+				}
 				continue
 			}
 			requests.Add(1)
@@ -273,6 +276,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.WriteClos
 				}
 				defer leave(true)
 				callWriter := writer.forCall(callCtx, flight)
+				callWriter.retire = func() { active.remove(request.ID, owner) }
 				if err := s.handle(callCtx, callWriter, state, link, request); err != nil && callCtx.Err() == nil {
 					reason := fmt.Sprint(err)
 					_ = callWriter.errorResponse(request.ID, -32603, "internal error", reason)
@@ -1440,6 +1444,7 @@ type lineWriter struct {
 	ctx          context.Context
 	interruptCtx context.Context
 	flight       *callFlight
+	retire       func()
 }
 
 func (w *lineWriter) forCall(ctx context.Context, flight *callFlight) *lineWriter {
@@ -1474,9 +1479,19 @@ func (w *lineWriter) writeFrame(value any, terminal bool) error {
 		if terminal {
 			w.flight.terminal = true
 		}
-		w.flight.mu.Unlock()
+		// Progress publication and cancellation election share this interval.
+		// Cancellation signals its context first so a blocked Write can leave.
+		if terminal {
+			w.flight.mu.Unlock()
+		} else {
+			defer w.flight.mu.Unlock()
+		}
 	} else if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if terminal && w.retire != nil {
+		// Retire before the client can observe bytes, not in handler cleanup.
+		w.retire()
 	}
 	frame := append(data, '\n')
 	finished := make(chan struct{})
@@ -1500,7 +1515,12 @@ func (w *lineWriter) writeFrame(value any, terminal bool) error {
 		stopCall = context.AfterFunc(interruptCtx, func() { cancel() })
 	}
 	stop := context.AfterFunc(writeCtx, interrupt)
-	n, err := owner.output.Write(frame)
+	var n int
+	if !terminal && ctx.Err() != nil {
+		err = ctx.Err()
+	} else {
+		n, err = owner.output.Write(frame)
+	}
 	stopCall()
 	if !stop() {
 		<-finished
@@ -1614,6 +1634,9 @@ func (c *activeCalls) cancel(id string) {
 	if call == nil {
 		return
 	}
+	// Interrupt progress before waiting for its publication guard. Terminal
+	// writes already admitted deliberately ignore this late cancellation.
+	call.cancel()
 	if call.flight != nil {
 		call.flight.mu.Lock()
 		if call.flight.terminal || call.flight.cancelled {
@@ -1623,7 +1646,6 @@ func (c *activeCalls) cancel(id string) {
 		call.flight.cancelled = true
 		call.flight.mu.Unlock()
 	}
-	call.cancel()
 	if call.flight == nil {
 		return
 	}

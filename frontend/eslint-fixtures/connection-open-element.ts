@@ -1,19 +1,17 @@
-// Negative fixture for nocx/no-connection-open (ADR-ba6xet1b,
-// nocx-oalo1.3.5): an element access is decided by its key's TYPE, not by the
-// spelling the rule can read. `client[`openSSHSession`]` (a substitution-free
-// template) and `client[BY_NAME]` (a const) name the entry; `client[key]` with
-// a `string` key could name ANY entry, and an unknown access to the client is
-// refused rather than waved through.
+// Negative fixture for nocx/no-connection-open, computed-key half
+// (ADR-ba6xet1b, nocx-oalo1.3.5; the entry moved to the connection owner in
+// stage 5). An element access is decided by its KEY'S TYPE: a literal, a
+// const and a substitution-free template name the same entry; a key typed
+// `string` names any of them and is refused rather than skipped.
 //
-// The SAME source is linted inside src/connection/ by the fixture gate, where
-// the owner is allowed the access.
+// The SAME source is linted inside src/connection/, where the owner may reach
+// the client.
 
-import type { WSClient } from './ipc'
+import type { ConnectionClient } from './connection/connection-client'
 
-const BY_NAME = 'openSSHSession'
-
-export function openByKey(client: WSClient, key: string): void {
-  void client[`openSSHSession`]
-  void client[BY_NAME]
-  void client[key]
+export function reconnect(client: ConnectionClient, dynamicKey: string): void {
+  const literalKey = 'reconnectPane'
+  client['openProfile']()
+  client[literalKey]()
+  client[dynamicKey]()
 }

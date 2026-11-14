@@ -88,26 +88,13 @@ import {
 import type { SessionPublishFailed } from './generated/session.publishFailed'
 import type { SessionEffect } from './generated/session.effect'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
-import { mountConnectionMark } from './connection-mark'
-import {
-  mountReconnectOffer,
-  mountAttachOffer,
-  type ReconnectOfferHandle,
-  type AttachOfferHandle,
-} from './reconnect-offer'
+import { mountConnectionMark, type ConnectionMark } from './connection-mark'
 import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from './opening-card'
-import {
-  autoReconnectDelayMs,
-  AUTO_RECONNECT_ATTEMPTS,
-  sshReconnectPolicy,
-} from './reconnect-setting'
 import type { WakeObservation } from './wake-report'
-import {
-  connectionCondition,
-  type ConnectionCondition,
-  type ConnectionFacts,
-} from './connection-condition'
-import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
+import { connectionWarning, type ConnectionCondition } from './connection-condition'
+import { ConnectionClient } from './connection/connection-client'
+import { ConnectionStore } from './connection/connection-store'
+import { mountConnectionHead, type ConnectionHeadHandle } from './connection/connection-head'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import { connectionLabel } from './connection-label'
@@ -198,7 +185,6 @@ import {
   type SessionHandle,
   type OpenAnchor,
   type SessionSize,
-  type SessionAttachment,
 } from './ipc'
 import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
@@ -1128,8 +1114,6 @@ export class TerminalContent extends BasePaneContent {
     return this._bind.callQueue
   }
   private _sessionCallSending = false
-  /** Only a local not-attached rejection proves that no bytes were sent. */
-  private _sessionCallHeld = false
   private _sessionCallEpoch = 0
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
@@ -1743,13 +1727,6 @@ export class TerminalContent extends BasePaneContent {
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
-  /** True once the session ended in a loss (an interrupted exit: the channel
-   *  is gone, the host unreachable, a handshake expired, a reattach failed).
-   *  The tab stays open and marked, and this flag owns the warning state for
-   *  the rest of the tab's life: a late integration fact — the last status
-   *  the backend emitted before the session died — must not clear it
-   *  (nocx-ictcq). */
-  private _sessionLost = false
   private _host = ''
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
@@ -2013,184 +1990,30 @@ export class TerminalContent extends BasePaneContent {
    *  the reader (ADR-0078) — is seen by the one watcher frames flow
    *  through. */
   private _paintedCols: number | null = null
-  // The last thing the backend said about REACHING this pane's host, and the
-  // corner mark drawn from it. Null liveness is the ordinary state of a local
-  // pane: this machine is never probed, so there is nothing to say about
-  // reaching it (connection-condition.ts).
-  private _liveness: SessionLivenessFact | null = null
-  private _connectionMark: { set(f: ConnectionFacts): void; dispose(): void } | null = null
-  private _connection: ConnectionCondition = 'reachable'
-  private _reconnecting = false
-  private _reconnectAbort: AbortController | null = null
-  private _offer: ReconnectOfferHandle | null = null
-  private _attachment: SessionAttachment = { kind: 'attached' }
-  private _attachOffer: AttachOfferHandle | null = null
-  private _autoAttempts = 0
-  private _autoTimer: number | undefined
-
-  /** Spend an automatic attempt, if the person asked for automatic ones.
-   *
-   *  `ask` and `never` both do nothing here, and they are the same code path
-   *  for a reason: what `never` means is "the tab keeps the offer and nothing
-   *  happens by itself", which is exactly what `ask` looks like before the
-   *  button is pressed. The difference between them is only whether the
-   *  attempts would ever have been spent, so it is expressed once, here.
-   *
-   *  The attempts are bounded and backed off (reconnect-setting.ts). When they
-   *  are spent the pane is left in the state every policy ends in: lost, with
-   *  the offer on it, which is the honest end and not a failure to report. */
-  private _maybeAutoReconnect(): void {
-    if (sshReconnectPolicy() !== 'auto') return
-    if (this._autoAttempts >= AUTO_RECONNECT_ATTEMPTS) return
-    this._autoAttempts++
-    const attempt = this._autoAttempts
-    clearTimeout(this._autoTimer)
-    this._autoTimer = window.setTimeout(() => {
-      if (this._disposed || !this._sessionLost) return
-      void this.reconnect().then((ok) => {
-        // A failed automatic attempt schedules the next one; the guard above
-        // is what stops it. A SUCCESSFUL one resets the budget, so a
-        // connection that drops again tomorrow gets its own three tries
-        // rather than inheriting yesterday's spent ones.
-        if (ok) this._autoAttempts = 0
-        else this._maybeAutoReconnect()
-      })
-    }, autoReconnectDelayMs(attempt))
-  }
-
-  /** Raise, update or drop the offer, from the same place that publishes the
-   *  condition — so the card and the corner mark can never disagree about
-   *  whether this pane has a session. */
-  private _syncReconnectOffer(): void {
-    const target = this._paneTarget
-    if (!target) return
-    const wanted = this._sessionLost || this._reconnecting
-    if (!wanted) {
-      this._offer?.dispose()
-      this._offer = null
-      return
-    }
-    const auto = sshReconnectPolicy() === 'auto' && this._autoAttempts > 0
-    const props = {
-      host: this.sshOpts?.host ?? '',
-      attempting: this._reconnecting,
-      attempt: auto ? { spent: this._autoAttempts, of: AUTO_RECONNECT_ATTEMPTS } : undefined,
-      onReconnect: () => void this.reconnect(),
-    }
-    if (this._offer) this._offer.set(props)
-    else this._offer = mountReconnectOffer(target, props)
-    // The card takes height at the tail of the pane, so the grid fitted to
-    // the old box is now taller than the space it has — the same re-measure
-    // the integration card and the editor already go through.
-    this.scheduleLiveResize()
-  }
-
-  /** ONE place a pane's attachment state becomes the pane's surface.
-   *
-   *  A session's own `onAttachment` and the uncertain-adoption path both land
-   *  here (nocx-3an1s.1.5), so "what an unattached pane looks like" is not
-   *  written twice: input is disabled, deferred submissions are dropped, the
-   *  card follows the state, and the tab mark says the same thing the card
-   *  does. */
-  private _applyAttachment(attachment: SessionAttachment): void {
-    const changed = this._attachment.kind !== attachment.kind
-    this._attachment = attachment
-    if (this._intentInput) this._intentInput.element.disabled = attachment.kind !== 'attached'
-    if (attachment.kind !== 'attached') {
-      this._cancelDeferredShellSubmissions()
-      // A PANE THAT IS NOT ATTACHED HAS NO LIVE SCREEN (nocx-djx1u). Frames
-      // stop at the moment the attachment does, and the last one painted is a
-      // screen that will never pass another row — so the generation ends here,
-      // in the step that installs this state, and the running block's held
-      // rows come back with it. The count is refused by the generation check
-      // from now on, so a delivery that lands while the pane is off the session
-      // cannot hold its rows for a screen nobody is painting.
-      this._screenGeneration++
-      this.scrollback?.blockManager.releaseHeldRows()
-    } else {
-      // THE SESSION IS USABLE, SO A LINE HELD ACROSS ITS BIND CAN GO (review
-      // round 7). A bind finishes before its handle is attached, and a session
-      // that will never send `prompt_ready` (raw, or local) has no other event
-      // to release on: the attachment is its own. `_releaseDeferredShellSubmissions`
-      // decides whether the startup interval is really over — this only offers
-      // the moment.
-      this._releaseDeferredShellSubmissions()
-      // Only locally refused input waits for this same handle's attachment.
-      this._resumeHeldSessionCalls()
-    }
-    this._syncAttachOffer()
-    if (changed) this._syncLifecycleOwnership()
-    this._publishTabMark()
-  }
-
-  private _syncAttachOffer(): void {
-    const target = this._paneTarget
-    if (!target) return
-    // A pane with NO session still has something to retry when its adoption
-    // could not be decided (nocx-3an1s.1.5): the same card, the same words,
-    // and a retry that asks the unanswered question again rather than opening
-    // a second shell.
-    const recoverable = this.session !== null || this._pendingAdoption
-    if (
-      this._attachment.kind === 'attached' ||
-      !recoverable ||
-      this._sessionLost ||
-      this._sessionExited
-    ) {
-      if (!this._attachOffer) return
-      this._attachOffer?.dispose()
-      this._attachOffer = null
-    } else if (this._attachOffer) {
-      this._attachOffer.set(this._attachment)
-    } else {
-      this._attachOffer = mountAttachOffer(target, this._attachment, () => {
-        if (this.session !== null) void this.session.retryAttach()
-        else void this.retryPendingAdoption()
-      })
-    }
-    this.scheduleLiveResize()
-  }
-
-  /** The attach card's retry for a pane whose adoption was never decided.
-   *
-   *  The question is asked again from the top — the live inventory, then the
-   *  claim — because that is the question that went unanswered. It is the
-   *  person's own act, so it is the one thing that re-arms the once-per-bind
-   *  attempt; nothing here retries on a timer, and a second failure leaves the
-   *  same card standing rather than escalating to a replacement shell. */
-  private async retryPendingAdoption(): Promise<void> {
-    if (!this._pendingAdoption || this._disposed) return
-    const signal = this.mountAbortController?.signal
-    if (!signal) return
-    this._adoptAttempted = false
-    this._attachment = { kind: 'attaching' }
-    this._syncAttachOffer()
-    this._publishTabMark()
-    try {
-      const outcome = await this._bindSession(signal, 'recover')
-      if (outcome === 'bound') this._publishConnectionCondition()
-    } catch (err) {
-      // The retry got an ANSWER and the answer was a refusal — a fresh open
-      // this pane was allowed to make, or a host that refused it. That is not
-      // the uncertainty this card is for, so the card says what happened
-      // rather than pretending the question is still open.
-      const message = err instanceof Error ? err.message : String(err)
-      log.warn('nocx: the recovery attempt for this pane failed', {
-        pane: this.pane.paneId,
-        error: message,
-      })
-      this._applyAttachment({
-        kind: 'unavailable',
-        message: t(
-          'app.restore.couldNotRestore',
-          'This tab’s session could not be restored ({error}).',
-          {
-            error: message,
-          },
-        ),
-      })
-    }
-  }
+  // ── The connection, from its one owner (ADR-ba6xet1b) ────────────────
+  //
+  // The pane DRIVES nothing about its connection. The store receives the
+  // backend's pane.connection observations, folds them (connection-condition)
+  // and answers the condition, the offer and the state; the mark and the head
+  // draw that answer. What remains here is the pane's own input gate: a person
+  // typing into a connection that is not usable sends nothing, and the head
+  // that says why is the notice.
+  private readonly _connection: ConnectionStore
+  private readonly _connectionClient: ConnectionClient
+  private _connectionMark: ConnectionMark | null = null
+  private _connectionHead: ConnectionHeadHandle | null = null
+  private _connectionUnsub: () => void = () => undefined
+  private _connectionCondition: ConnectionCondition = 'reachable'
+  /** The bind a head press is waiting on, so a pane disposed mid-reconnect
+   *  leaves nothing running behind it. */
+  private _rebindAbort: AbortController | null = null
+  /** Keys pressed while the connection is opening. They are held, not sent:
+   *  the shell they belong to does not exist yet. On the first usable state
+   *  they go in order; on a failure they are dropped with one line saying so
+   *  (design §5.8, "Type-ahead"). */
+  private _heldTypeAhead: SessionIntent[] = []
+  /** One refusal line per loss, not one per keystroke (nocx-oalo1.5.1). */
+  private _inputRefusalAnnounced = false
 
   /** What this pane looks like right now, for the wake diagnostic
    *  (wake-report.ts). Measurements only — nothing here decides or repairs,
@@ -2207,36 +2030,109 @@ export class TerminalContent extends BasePaneContent {
       height: Math.round(box?.height ?? 0),
       editorPresent: this.editor !== null,
       editorVisible: this.editor?.isVisible === true,
-      connection: this._connection,
+      connection: this._connectionCondition,
     }
   }
 
   /** What this pane currently says about reaching its host. Read-only, and
    *  the same value every surface draws — connection-condition.ts owns the
-   *  derivation and this is the pane's answer from it. */
+   *  derivation over the one observation, and this is the pane's answer from
+   *  it. */
   connectionCondition(): ConnectionCondition {
-    return this._connection
+    return this._connectionCondition
   }
 
-  /** Whether this pane's session has ended. Read-only: the offer and the
-   *  reconnect path are the only things that may change it. */
+  /** Whether this pane's connection is in the terminal `lost` state. */
   sessionLost(): boolean {
-    return this._sessionLost
+    return this._connectionCondition === 'lost'
   }
 
-  /** Restate the pane's connection condition to every surface that draws it.
+  /**
+   * Restate the one observation to every surface that draws it (design §5.1's
+   * "status fold").
    *
-   *  ONE derivation, in connection-condition.ts, read from here and from
-   *  nowhere else. The corner mark and the tab must not be able to disagree
-   *  about whether a host is answering. */
-  private _publishConnectionCondition(): void {
-    const facts: ConnectionFacts = { sessionLost: this._sessionLost, liveness: this._liveness }
-    this._connectionMark?.set(facts)
-    this._connection = connectionCondition(facts)
-    this._syncReconnectOffer()
-    this._syncAttachOffer()
-    this.hooks.onConnectionConditionChange?.(this._connection)
+   * The store is the only subscriber; this is the pane's reaction to a new
+   * observation, and it touches no fact of its own. The corner mark, the tab,
+   * the pane's own agent indicator and the input gate all read the same fold,
+   * so they cannot disagree about whether a host is answering.
+   */
+  private _publishConnectionState(): void {
+    const observation = this._connection.current()?.observation ?? null
+    const previous = this._connectionCondition
+    this._connectionCondition = this._connection.condition()
+    // A usable connection is a new loss's beginning, so the one refusal line
+    // is available again.
+    const state = observation?.transport.state
+    if (state === 'connected' || state === 'plain') this._inputRefusalAnnounced = false
+    this._connectionMark?.set(observation, this._connectionCondition)
+    this.hooks.onConnectionConditionChange?.(this._connectionCondition)
     this._publishTabMark()
+    this._applyTypeAhead(previous)
+  }
+
+  /** The type-ahead rule (design §5.8): held while the connection opens, sent
+   *  in the order typed once a shell is usable, and dropped with one line if
+   *  the connection fails first. Nothing is ever sent while a person is being
+   *  asked for something — those keys belong to the prompt that asked. */
+  private _applyTypeAhead(previous: ConnectionCondition): void {
+    const state = this._connection.current()?.observation.transport.state
+    if (this._heldTypeAhead.length === 0) return
+    if (state === 'connected' || state === 'plain') {
+      const held = this._heldTypeAhead
+      this._heldTypeAhead = []
+      for (const intent of held) this.sendIntent(intent)
+      return
+    }
+    if (state === 'failed' || state === 'ended' || this._connectionCondition === 'lost') {
+      this._heldTypeAhead = []
+      showToast({
+        level: 'warning',
+        message: t(
+          'connection.typedNotSent',
+          'The connection ended before your keys could be sent. Nothing was delivered.',
+        ),
+      })
+      return
+    }
+    if (state === 'waiting_person' && previous !== 'lost') {
+      // Keys never go to a password dialog from a buffer. The prompt that
+      // asked has the keyboard; this is the same "said once" surface.
+      this._heldTypeAhead = []
+    }
+  }
+
+  /** What an intent may do at this moment, from the backend's own state. */
+  private _connectionGate(): 'send' | 'hold' | 'drop' {
+    if (this.sshOpts === undefined) return 'send'
+    const state = this._connection.current()?.observation.transport.state
+    if (state === undefined) {
+      // No observation yet. A pane with a handle has a shell the client is
+      // attached to — the backend's first observation is on its way, and
+      // holding keystrokes until it lands would type into a buffer nobody
+      // asked for. A pane with NO handle is still opening: keys are held.
+      return this.session === null ? 'hold' : 'send'
+    }
+    switch (state) {
+      case 'connected':
+      case 'plain':
+      case 'stalled':
+        return 'send'
+      case 'opening':
+        return 'hold'
+      case 'waiting_person':
+      case 'reconnecting':
+      case 'failed':
+      case 'ended':
+        return 'drop'
+    }
+  }
+
+  /** Whether this pane has a session it may send to. The attachment card is
+   *  gone (task 5.5): a session exists or it does not, and the connection's own
+   *  state says whether it is usable. */
+  private get _hasUsableSession(): boolean {
+    if (this.session === null) return false
+    return this._connectionGate() !== 'drop'
   }
 
   /** The tab's warning mark, from ONE place.
@@ -2257,16 +2153,15 @@ export class TerminalContent extends BasePaneContent {
    *  nothing here at all — the corner mark says it, and a tab strip that
    *  warned about latency would cry wolf. */
   private _publishTabMark(): void {
-    if (this._sessionLost) {
-      this.hooks.onWarningChange?.(true, 'Connection lost')
-      return
-    }
-    if (this._attachment.kind !== 'attached') {
-      this.hooks.onWarningChange?.(true, 'Session not attached')
-      return
-    }
-    if (this._connection === 'unreachable') {
-      this.hooks.onWarningChange?.(true, 'Host not answering')
+    // THE CONNECTION'S MARK COMES FROM ITS ONE FOLD, and it outranks the
+    // integration axis: a shell whose host is gone is not degraded, it is
+    // lost, and offering an integration remedy would send a person to fix
+    // something they cannot currently talk to. A SLOW host says nothing here
+    // at all — the corner mark says it, and a tab strip that warned about
+    // latency would cry wolf.
+    const warning = connectionWarning(this._connection.current()?.observation ?? null)
+    if (warning !== null || this._connectionCondition === 'lost') {
+      this.hooks.onWarningChange?.(true, warning?.label ?? 'Connection lost')
       return
     }
     this.hooks.onWarningChange?.(this._degraded, this._degradedLabel)
@@ -2336,7 +2231,6 @@ export class TerminalContent extends BasePaneContent {
    *  decided (LiveSessionUncertainError). It is what tells the attach card's
    *  retry which question to ask again — and what keeps the pane from opening
    *  a replacement shell. */
-  private _pendingAdoption = false
   /** This pane's files binding, opened on the FIRST upload and reused. A
    *  terminal does not need one to run, so it is not opened at mount: a
    *  binding is a provider, a pooled SSH reference and a watch set, and a
@@ -2390,6 +2284,13 @@ export class TerminalContent extends BasePaneContent {
     // exists; a block hears none of them (see `_onBranchChanged`).
     this.branchSource = hooks.createBranchSource?.() ?? null
     this.branchSource?.subscribe((branch) => this._onBranchChanged(branch))
+    // The one subscriber of pane.connection (ADR-ba6xet1b). Per pane, because
+    // the contract is keyed by the pane's durable id and an observation about
+    // another pane is not this pane's business; the dispatcher is shared, so
+    // this costs one listener among many.
+    this._connection = new ConnectionStore(this.client.dispatcher, this.pane.paneId)
+    this._connectionClient = new ConnectionClient(this.client)
+    this._connectionUnsub = this._connection.onChange(() => this._publishConnectionState())
   }
 
   /**
@@ -3099,14 +3000,14 @@ export class TerminalContent extends BasePaneContent {
         return await this.client.openSession(this._reportedSize(), anchor, this._watchOpeningCall)
       }
       if (this.sshOpts.profileId) {
-        return await this.client.openSSHSession(
+        return await this._connectionClient.openProfile(
           this._reportedSize(),
           this.sshOpts.profileId,
           anchor,
           this._watchOpeningCall,
         )
       }
-      return await this.client.openSSHSessionByHost(
+      return await this._connectionClient.openByHost(
         this._reportedSize(),
         this.sshOpts.host,
         this.sshOpts.user,
@@ -3528,6 +3429,19 @@ export class TerminalContent extends BasePaneContent {
       this.paneContext.hidden = true
       target.insertBefore(this.paneContext, this.scrollback.scrollbackLayout)
 
+      // ── The connection's head (design §5.8, task 5.5) ────────────────────
+      // An SSH pane carries one line of what its connection is doing, painted
+      // before any network: the first frame of an SSH tab is never an empty
+      // screen (Q1). It is a LOCAL pane's absence — a local pane has no
+      // connection to have a state about — so it is mounted only here.
+      if (this.sshOpts !== undefined) {
+        this._connectionHead = mountConnectionHead(target, {
+          store: this._connection,
+          onReconnect: () => void this.reconnectFromHead(),
+        })
+      }
+      this._publishConnectionState()
+
       if (signal.aborted) {
         this.scrollback.dispose()
         this.paneContext?.remove()
@@ -3662,7 +3576,7 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (intent) => this.sendIntent(intent, true),
+        (intent) => this.sendIntent(intent),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
@@ -3940,7 +3854,7 @@ export class TerminalContent extends BasePaneContent {
           // masked row is refused first: the draft stays and resolution
           // opens on the first chip (ADR-0021's consequence).
           beforeSubmit: (doc) => {
-            if (this._attachment.kind !== 'attached') return false
+            if (!this._hasUsableSession) return false
             if (this.promptVault?.openResolution()) return false
             // THE ENTER DECIDES WHOSE LINE THIS IS (review round 6). Taken
             // here, synchronously, before any step that can wait — the vault's
@@ -5167,113 +5081,118 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * Get this pane a shell again, after the one it had was lost.
+   * The head's one action: carry the backend's Reconnect out, and adopt the
+   * shell it answers with.
    *
-   * WHAT THIS IS NOT, and the surface must never imply otherwise: a
-   * resurrection. The old shell is gone and the process it was running may
-   * still be alive on the far host, holding its own file descriptors and its
-   * own cwd. What comes back is a NEW shell at the same endpoint, and the
-   * divider drawn above it says so, because a person who reads their
-   * scrollback as one continuous session will be wrong about which machine
-   * state their earlier commands left behind.
+   * WHAT THIS IS NOT: a resurrection. The old shell is gone and the process
+   * it was running may still be alive on the far host. What comes back is a
+   * NEW shell at the same endpoint, and the divider drawn above it says so,
+   * because a person who reads their scrollback as one continuous session
+   * will be wrong about which machine state their earlier commands left
+   * behind. What survives is the scrollback, in full, above the divider — the
+   * work, and the reason the tab was never closed.
    *
-   * WHAT SURVIVES: the scrollback, in full, above the divider. It is the work,
-   * and not losing it is the entire reason the tab was never closed. The
-   * terminal grid, the editor and the pane's chrome survive with it — they
-   * belong to the pane, and only what belonged to the session is rebuilt
-   * (_bindSession draws that line).
-   *
-   * ONLY FROM `lost`. A pane whose host is merely unreachable is NOT offered
-   * this and must not take it: the session may still be alive on the far side,
-   * and replacing it would kill work that was never in danger. The guard is
-   * here as well as in the surface, because a surface is a promise and this is
-   * the enforcement.
+   * WHERE THE DECISION LIVES. The offer's presence is the backend's answer to
+   * "may this person press"; the epoch is the observation they were looking
+   * at. This method sends intent (`pane.reconnect`) and adopts the answer. It
+   * does not retry, does not back off, and has no policy: `ssh.reconnect` is
+   * the backend's to apply by itself, and every value leaves the button here.
    */
-  async reconnect(): Promise<boolean> {
-    if (this._disposed || this._reconnecting) return false
-    if (!this._sessionLost) return false
+  private async reconnectFromHead(): Promise<boolean> {
+    if (this._disposed) return false
+    const offer = this._connection.offer()
+    if (offer === null) {
+      return false
+    }
+    this._releaseSessionForRebind()
+    // The divider, drawn BEFORE the attempt rather than after it. A person
+    // watching a reconnect should see where the old session ended even if the
+    // new one never arrives — and if it fails, the mark is the honest record
+    // that something was tried here.
+    this.scrollback?.blockManager.markReconnected()
 
-    this._reconnecting = true
-    this._publishConnectionCondition()
+    const controller = new AbortController()
+    this._rebindAbort = controller
     try {
-      // The old session's SUBSCRIPTIONS, which are the only things that leak.
-      // The handle's own callbacks (onData, onExit, …) live on the handle and
-      // die with it; these two are on the shared dispatcher and would go on
-      // delivering facts about a dead session into a live pane.
-      this._lifecycleUnsub?.()
-      this._lifecycleUnsub = null
-      this._historyRecordedUnsub?.()
-      this._historyRecordedUnsub = null
-      this._integrationUnsub?.()
-      this._integrationUnsub = null
-      this._signalUndeliveredUnsub?.()
-      this._signalUndeliveredUnsub = null
-      this._toolSurfaceUnsub?.()
-      this._toolSurfaceUnsub = null
-      this._dropToolSurfaceNotice()
-      this._toolSurface = null
-      this._publishFailureUnsub?.()
-      this._publishFailureUnsub = null
-      this._dropPublishNotice()
-      // The dismissal belonged to the session that is going away: the new one
-      // either copied the bundle or has its own failure to report.
-      this._publishNoticeDismissed = false
-      // The old session's seam reader goes with it: the new bind registers
-      // its own under the new session id, and a stale one would read the
-      // pane's CURRENT model for a session that no longer exists.
-      if (this.session) {
-        paneScreenReaders.delete(this.session.sessionId)
-        // The companion coordinate map closes over the same pane's cell model
-        // and must leave with the screen reader, or every closed session
-        // keeps renderer state reachable from the module-level seam.
-        paneScreenMappings.delete(this.session.sessionId)
+      const handle = await this._connectionClient.reconnectPane(
+        this._reportedSize(),
+        this.pane.paneId,
+        offer.connectionEpoch,
+      )
+      const outcome = await this._bindSession(controller.signal, 'rebind', handle)
+      if (outcome !== 'bound') {
+        handle.close()
       }
-      this.session?.close()
-      this.session = null
-
-      // The state that DESCRIBES the shell that is gone. The kernel's domains,
-      // the markers that point into a stream nobody is writing any more.
-      // Left standing, each of them would answer a question about the new
-      // shell with a fact about the old one.
-      this._recoveryAcking = false
-      this._recoveryAckClaim = null
-      this._projections?.reset()
-      this.lifecycle.reset()
-      this._recovery = null
-      this._sessionExited = false
-      this._sessionLost = false
-      this._liveness = null
-
-      // The divider, drawn BEFORE the attempt rather than after it. A person
-      // watching a reconnect should see where the old session ended even if
-      // the new one never arrives — and if it fails, the mark is the honest
-      // record that something was tried here.
-      this.scrollback?.blockManager.markReconnected()
-
-      const controller = new AbortController()
-      this._reconnectAbort = controller
-      const bound = (await this._bindSession(controller.signal, 'rebind')) === 'bound'
-      if (!bound) {
-        // The attempt failed and the pane goes back to being lost — which is
-        // a state it can be offered a way out of again. Restoring it here
-        // rather than leaving the pane in limbo is what makes a second press
-        // meaningful.
-        this._sessionLost = true
-      }
-      return bound
+      return outcome === 'bound'
     } catch (err) {
-      log.warn('nocx: reconnect failed', {
+      // A refusal here is news for the head, not for a toast: the backend's
+      // next observation says what the connection is doing, and the offer
+      // stands again if it still should.
+      log.warn('nocx: the reconnect did not open a shell', {
+        pane: this.pane.paneId,
         error: err instanceof Error ? err.message : String(err),
       })
-      this._sessionLost = true
       return false
     } finally {
-      this._reconnecting = false
-      this._reconnectAbort = null
-      clearTimeout(this._autoTimer)
-      this._publishConnectionCondition()
-      this._publishTabMark()
+      if (this._rebindAbort === controller) this._rebindAbort = null
     }
+  }
+
+  /**
+   * The head's press, for a caller that holds the pane rather than the screen
+   * (a test, an embedding). It refuses exactly as the button does: no offer
+   * from the backend, no press. The renderer decides nothing here — it asks
+   * the owner and adopts the answer.
+   */
+  async reconnect(): Promise<boolean> {
+    return this.reconnectFromHead()
+  }
+
+  /** Let go of everything that belongs to the session a rebind replaces.
+   *
+   * The handle's own callbacks die with it; these are on the shared
+   * dispatcher and would go on delivering facts about a dead session into a
+   * live pane. The state below DESCRIBES the shell that is gone — the
+   * kernel's domains, the markers that point into a stream nobody is writing
+   * any more — so each is reset here rather than left to answer a question
+   * about the new shell with a fact about the old one. */
+  private _releaseSessionForRebind(): void {
+    this._lifecycleUnsub?.()
+    this._lifecycleUnsub = null
+    this._historyRecordedUnsub?.()
+    this._historyRecordedUnsub = null
+    this._integrationUnsub?.()
+    this._integrationUnsub = null
+    this._signalUndeliveredUnsub?.()
+    this._signalUndeliveredUnsub = null
+    this._toolSurfaceUnsub?.()
+    this._toolSurfaceUnsub = null
+    this._dropToolSurfaceNotice()
+    this._toolSurface = null
+    this._publishFailureUnsub?.()
+    this._publishFailureUnsub = null
+    this._dropPublishNotice()
+    // The dismissal belonged to the session that is going away: the new one
+    // either copied the bundle or has its own failure to report.
+    this._publishNoticeDismissed = false
+    // The old session's seam reader goes with it: the new bind registers its
+    // own under the new session id, and a stale one would read the pane's
+    // CURRENT model for a session that no longer exists.
+    if (this.session) {
+      paneScreenReaders.delete(this.session.sessionId)
+      // The companion coordinate map closes over the same pane's cell model
+      // and must leave with the screen reader, or every closed session keeps
+      // renderer state reachable from the module-level seam.
+      paneScreenMappings.delete(this.session.sessionId)
+    }
+    this.session?.close()
+    this.session = null
+    this._recoveryAcking = false
+    this._recoveryAckClaim = null
+    this._projections?.reset()
+    this.lifecycle.reset()
+    this._recovery = null
+    this._sessionExited = false
   }
 
   /**
@@ -5297,9 +5216,8 @@ export class TerminalContent extends BasePaneContent {
    * difference matters: a first bind that is abandoned takes the pane down, a
    * rebind that is abandoned must leave the pane as it was, holding the
    * scrollback the person did not want to lose. A RECOVERY bind is the same
-   * leaving-alone applied to a pane that never held a session — it is the
-   * attach card's retry (retryPendingAdoption), and it draws no reconnection
-   * divider because no connection ended here.
+   * leaving-alone applied to a pane that never held a session; it draws no
+   * reconnection divider because no connection ended here.
    *
    * Returns 'bound' when a session is attached, 'uncertain' when the backend
    * could not say whether this pane's session exists (the pane keeps its
@@ -5308,7 +5226,11 @@ export class TerminalContent extends BasePaneContent {
    */
   private async _bindSession(
     signal: AbortSignal,
-    mode: 'first' | 'rebind' | 'recover',
+    mode: 'first' | 'rebind',
+    /** The shell a reconnect already opened, when there is one. The backend's
+     *  reconnect answers with the open result, so the pane must ADOPT that
+     *  session rather than ask for a second shell (design §5.4). */
+    preset?: SessionHandle,
   ): Promise<'bound' | 'uncertain' | 'aborted'> {
     // Bumped for every bind, including this one: the recovery-ack claim
     // further below (_recoveryAckClaim) reads this._bindGeneration directly
@@ -5562,40 +5484,46 @@ export class TerminalContent extends BasePaneContent {
       }),
     )
     let session: SessionHandle
-    try {
-      session = await this.openSessionWithHostKeyRecovery(signal)
-    } catch (err) {
-      // A PERSON'S CANCEL IS AN END, NOT A FAILURE (ADR-8eej3e66 §8). The
-      // Operations row's Cancel withdraws the open by its request id, and
-      // the dispatcher rejects the call with AbortError — the same
-      // outcome this method already has for a mount nobody wants any
-      // more. A first bind takes the tab with it (the person cancelled
-      // the connection they asked for, so the tab they were waiting on
-      // has nothing left to show), and a rebind or a recovery leaves the
-      // pane exactly as it was.
-      if (err instanceof Error && err.name === 'AbortError') {
-        if (mode === 'first') {
-          editor.dispose()
-          scrollback.dispose()
-          this._readyResolve(false)
-          host.requestClose()
+    if (preset !== undefined) {
+      session = preset
+    } else {
+      try {
+        session = await this.openSessionWithHostKeyRecovery(signal)
+      } catch (err) {
+        // A PERSON'S CANCEL IS AN END, NOT A FAILURE (ADR-8eej3e66 §8). The
+        // Operations row's Cancel withdraws the open by its request id, and
+        // the dispatcher rejects the call with AbortError — the same
+        // outcome this method already has for a mount nobody wants any
+        // more. A first bind takes the tab with it (the person cancelled
+        // the connection they asked for, so the tab they were waiting on
+        // has nothing left to show), and a rebind or a recovery leaves the
+        // pane exactly as it was.
+        if (err instanceof Error && err.name === 'AbortError') {
+          if (mode === 'first') {
+            editor.dispose()
+            scrollback.dispose()
+            this._readyResolve(false)
+            host.requestClose()
+          }
+          return this._finishBind('aborted')
         }
-        return this._finishBind('aborted')
+        if (!(err instanceof LiveSessionUncertainError)) throw err
+        // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
+        // (nocx-3an1s.1.5). This pane keeps its surface and its scrollback and
+        // offers the SAME retry a failed reattach offers; the retry re-asks the
+        // inventory and the claim. The alternative — the fallback this replaces
+        // — put a second shell beside every live one on a single transient
+        // failure and exhausted the helper's window budget doing it.
+        log.warn('nocx: this pane\u2019s session could not be established or ruled out', {
+          pane: this.pane.paneId,
+          error: err.message,
+        })
+        // NOT AN ABSENCE, so nothing is opened in its place. There is no
+        // retry card any more (task 5.5): the connection owner says what the
+        // pane's connection is doing, and a new open is the head's offer when
+        // the backend provides one.
+        return this._finishBind('uncertain')
       }
-      if (!(err instanceof LiveSessionUncertainError)) throw err
-      // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
-      // (nocx-3an1s.1.5). This pane keeps its surface and its scrollback and
-      // offers the SAME retry a failed reattach offers; the retry re-asks the
-      // inventory and the claim. The alternative — the fallback this replaces
-      // — put a second shell beside every live one on a single transient
-      // failure and exhausted the helper's window budget doing it.
-      this._pendingAdoption = true
-      this._applyAttachment({ kind: 'unavailable', message: err.message })
-      log.warn('nocx: this pane\u2019s session could not be established or ruled out', {
-        pane: this.pane.paneId,
-        error: err.message,
-      })
-      return this._finishBind('uncertain')
     }
 
     if (signal.aborted) {
@@ -5623,9 +5551,6 @@ export class TerminalContent extends BasePaneContent {
     this.snapshotStore.reset()
     this.session = session
     this._bind.sessionId = session.sessionId
-    // The question that was open is answered; the card's retry no longer has
-    // anything to re-ask (nocx-3an1s.1.5).
-    this._pendingAdoption = false
     this._resetFrameMetadataSession(session.sessionId)
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
@@ -5646,10 +5571,6 @@ export class TerminalContent extends BasePaneContent {
     // behind it — a full-screen program's redraws above all — has nothing
     // to say in a scrollback.
     session.onProtocolError((message) => showToast({ level: 'danger', message }))
-    session.onAttachment((attachment) => {
-      if (this._disposed || this.session !== session) return
-      this._applyAttachment(attachment)
-    })
     historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
@@ -6035,6 +5956,12 @@ export class TerminalContent extends BasePaneContent {
       this.hooks.onPaneObservationChange?.(observation.state, observation.children ?? [])
     })
     session.onExit((exit) => {
+      // The connection store's one fact about an end comes through here as
+      // well as through its own `exit` subscription: the pane already holds
+      // the authoritative event, and an embedding that drives the handle
+      // directly (a test, a host without the socket) must reach the same
+      // owner rather than a second one.
+      this._connection.noteSessionEnd(exit.sessionId, exit.cause)
       log.info('nocx: session exited', {
         sid: exit.sessionId,
         cause: exit.cause,
@@ -6061,17 +5988,13 @@ export class TerminalContent extends BasePaneContent {
         // cut mid-command left nine of forty-one rows out of the block for the
         // rest of it.
         this.scrollback?.blockManager.releaseHeldRows()
-        // A loss is not a close (nocx-ictcq): the channel is gone, the
-        // host unreachable, a handshake expired, or a reattach failed —
-        // the work in the tab and the evidence of what happened must
-        // survive. The tab stays in both strips with the scrollback
-        // readable and a warning mark that says what the state is; the
-        // user closes it themselves. `_sessionLost` owns the mark for the
-        // rest of the tab's life, so a late integration fact cannot clear
-        // it (the lost state is terminal for this tab).
-        this._sessionLost = true
-        this._publishConnectionCondition()
-        this._publishTabMark()
+        // A loss is not a close (nocx-ictcq): the channel is gone, the host
+        // unreachable, a handshake expired, or a reattach failed — the work
+        // in the tab and the evidence of what happened must survive. The tab
+        // stays with its scrollback readable, and WHICH state it is in is the
+        // connection owner's answer: this handler releases what belonged to
+        // the screen and lets the head say why. The renderer no longer owns a
+        // `lost` flag of its own (task 5.5, ADR-ba6xet1b).
         return
       }
       // A clean exit closes the tab exactly as it always did.
@@ -6086,26 +6009,6 @@ export class TerminalContent extends BasePaneContent {
         level: 'danger',
         message: 'This connection has stopped accepting input — keystrokes are being dropped.',
       })
-    })
-    session.onLiveness((liveness) => {
-      // The backend has revised what it believes about REACHING this
-      // session's host: it has stopped answering, it is answering late, or
-      // it is answering again. Nothing has ENDED — that is the exit
-      // notification's news and it has its own path above.
-      //
-      // This used to be a toast, twice, and that was the wrong shape: the
-      // product's own words are "a persistent condition ... is not a toast
-      // (a toast fades whether or not the condition has come back)"
-      // (connection-notice.tsx). A condition needs a mark that lasts exactly
-      // as long as the condition, so it is the pane's corner indicator now,
-      // and it clears itself when the host answers again.
-      //
-      // A tab whose session is already lost says nothing here: the loss is
-      // terminal and outranks every reachability statement, including a
-      // stale one that arrived before it died.
-      if (this._sessionLost) return
-      this._liveness = liveness
-      this._publishConnectionCondition()
     })
     session.onReset(() => {
       reportedBufferKind = null
@@ -6400,7 +6303,7 @@ export class TerminalContent extends BasePaneContent {
     // painted screen (nocx-4y82c.1.1).
     const start = rec?.outputStart ?? rec?.outputAnchor?.row
     if (rec === null || start === undefined) return null
-    if (this._attachment.kind !== 'attached' || this._sessionExited) return null
+    if (!this._hasUsableSession || this._sessionExited) return null
     // The generation the anchor ARRIVED in is the one its row belongs to; the
     // placed frame's generation is the same one once it lands.
     if ((rec.outputScreen ?? rec.outputAnchorScreen) !== this._screenGeneration) return null
@@ -7466,10 +7369,6 @@ export class TerminalContent extends BasePaneContent {
    *  presentation fact — what the user sees. Nothing stream-derived reaches
    *  either axis. */
   private _updateCapability(): void {
-    // The lost state owns the warning mark: a loss is terminal for this tab,
-    // and nothing the integration axis reports afterwards may clear it
-    // (nocx-ictcq). The mark was set by the exit path with its own wording.
-    if (this._sessionLost) return
     const shellState: ShellState = shellStateFromLifecycle(
       this.lifecycle.state,
       this.lifecycle.domainStack,
@@ -7691,7 +7590,7 @@ export class TerminalContent extends BasePaneContent {
      *  startup that settles while its reference resolves cannot send it. */
     startupAtEnter = false,
   ): SubmitPlan | false | 'held' {
-    if (this._attachment.kind !== 'attached') return false
+    if (!this._hasUsableSession) return false
     const target = this.inputTargets?.active()
     if (target === undefined || target.routesToShell !== true) return plan
     // THE BIND MOVED WHILE THE VERDICT WAS IN FLIGHT: the line belongs to the
@@ -7829,7 +7728,7 @@ export class TerminalContent extends BasePaneContent {
         // The session this chain belongs to is gone: stop, and touch nothing
         // — not the new bind's queue, not its flag.
         if (this._bind !== bind) break
-        if (this._attachment.kind !== 'attached') break
+        if (!this._hasUsableSession) break
         if (!this._startupCanHold(bind)) break
         // Taken before it is submitted: a cancel that lands during the await
         // clears whatever is still queued, and this line's own outcome is the
@@ -9902,7 +9801,6 @@ export class TerminalContent extends BasePaneContent {
    *  whatever the person does next arrives on its own and is delivered on its
    *  own. That was the point of the tail, and it is preserved by construction. */
   private onSessionIntent(intent: SessionIntent): boolean {
-    if (this._attachment.kind !== 'attached') return false
     // The GRID's way in, and the one that must survive the refusal below: while
     // the shell is proving itself this function drops every keystroke, and a
     // Ctrl-C must still flush what the person typed ahead (see sendIntent for
@@ -9911,6 +9809,16 @@ export class TerminalContent extends BasePaneContent {
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
     }
+    // THE SAME GATE AS sendIntent (design §5.8, task 5.1), asked here so a key
+    // pressed before the shell exists is HELD rather than refused by a missing
+    // handle. A dropped connection returns false and the head is the notice.
+    const gate = this._connectionGate()
+    if (gate === 'hold') {
+      this._heldTypeAhead.push(intent)
+      return true
+    }
+    if (gate === 'drop') return false
+    if (!this._hasUsableSession) return false
     // A restored startup draft remains the shell input owner until it is
     // submitted or cleared. A grid click must not bypass that draft.
     if (
@@ -9961,10 +9869,9 @@ export class TerminalContent extends BasePaneContent {
     return this.sendIntent(intent)
   }
 
-  /** Hand one intent to the session in order. Only the already-accepted
-   *  composer's submit may queue while detached. Raw input still requires an
-   *  attachment; a failed RPC is handled by drainSessionCallQueue. */
-  private sendIntent(intent: SessionIntent, submitted = false): boolean {
+  /** Hand one intent to the session in order, or hold/drop it at the
+   *  connection gate. A failed RPC is handled by drainSessionCallQueue. */
+  private sendIntent(intent: SessionIntent): boolean {
     // AN INTERRUPT FLUSHES THE HELD COMMANDS (review rounds 2 and 9). A real
     // tty discards type-ahead on SIGINT, and every Ctrl-C the person makes
     // passes THIS function, whichever surface produced it: the grid's key
@@ -9986,14 +9893,20 @@ export class TerminalContent extends BasePaneContent {
       // answer ends) left two races, so there is no window left to chase.
       return this.sendInterrupt(intent)
     }
-    const attached = this._attachment.kind === 'attached'
-    if (!attached && !submitted) return false
+    // THE CONNECTION GATE (task 5.1, design §5.8): a pane sends nothing into a
+    // connection that is not usable. Before the first shell, keys are HELD;
+    // while a person is being asked for something, or after the connection
+    // failed, they are DROPPED and the head is the one notice. The old path
+    // sent them anyway and raised a danger toast per refused keystroke — the
+    // flood the owner saw on 2026-11-13.
+    const gate = this._connectionGate()
+    if (gate === 'hold') {
+      this._heldTypeAhead.push(intent)
+      return true
+    }
+    if (gate === 'drop') return false
     const session = this.session
     if (!session) return false
-    // The composer accepted this submit before its attempt RPC. If the
-    // connection changed during that round trip, none of its intents went out.
-    // Keep them for this handle's attachment, not for a replacement shell.
-    if (!attached) this._sessionCallHeld = true
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
     if (
       intent.kind === 'text' &&
@@ -10025,7 +9938,7 @@ export class TerminalContent extends BasePaneContent {
   private sendInterrupt(intent: SessionIntent): boolean {
     this._discardQueuedIntents()
     const session = this.session
-    if (this._attachment.kind !== 'attached' || !session) return false
+    if (!this._hasUsableSession || !session) return false
     session.cancelPendingIntents()
     void session.intent(intent.kind, intent.payload).catch((err: unknown) => {
       log.warn('nocx: the interrupt did not reach the session', { error: String(err) })
@@ -10055,14 +9968,17 @@ export class TerminalContent extends BasePaneContent {
   private _discardQueuedIntents(): void {
     this._sessionCallEpoch++
     this._sessionCallQueue.length = 0
-    // A queue that was discarded owes the session nothing — including the
-    // call an unattached session was holding (nocx-evj4b.1.14). The hold is
-    // the queue's, so it ends with it.
-    this._sessionCallHeld = false
   }
 
   private _discardFailedSessionInput(refusal?: string): void {
     this._discardQueuedIntents()
+    // THE HEAD IS THE NOTICE FOR A CONNECTION THAT IS NOT USABLE (task 5.1):
+    // input to a pane the backend has declared gone is gated before it is
+    // sent, and a refusal that still arrives is reported once — not once per
+    // keystroke, which is what buried the window on 2026-11-13.
+    if (this._connectionGate() !== 'send' || this._connectionCondition === 'lost') return
+    if (this._inputRefusalAnnounced) return
+    this._inputRefusalAnnounced = true
     const message =
       refusal !== undefined
         ? t(
@@ -10074,11 +9990,11 @@ export class TerminalContent extends BasePaneContent {
             'terminal.input.uncertain',
             'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
           )
-    showToast({ message, level: 'danger', duration: 0 })
+    showToast({ message, level: 'danger' })
   }
 
   private async drainSessionCallQueue(): Promise<void> {
-    if (this._sessionCallSending || this._sessionCallHeld) return
+    if (this._sessionCallSending) return
     this._sessionCallSending = true
     const queue = this._sessionCallQueue
     const epoch = this._sessionCallEpoch
@@ -10118,8 +10034,12 @@ export class TerminalContent extends BasePaneContent {
             continue
           }
           if (err instanceof SessionNotAttachedError) {
-            queue.unshift(call)
-            this._sessionCallHeld = true
+            // There is no attachment to wait for any more (task 5.5): the
+            // connection owner says whether this pane has a usable session.
+            // A local not-attached rejection still proves no bytes were
+            // written, so the line is not replayed; it is discarded with the
+            // one refusal line below.
+            this._discardFailedSessionInput('no session')
             return
           }
           // A lost answer does not prove the bytes were not written. Never
@@ -10132,20 +10052,10 @@ export class TerminalContent extends BasePaneContent {
       }
     } finally {
       this._sessionCallSending = false
-      if (this._sessionCallQueue.length > 0 && !this._sessionCallHeld) {
+      if (this._sessionCallQueue.length > 0) {
         void this.drainSessionCallQueue()
       }
     }
-  }
-
-  /** Present what the session could not take, now that it can
-   *  (nocx-evj4b.1.14). Called from the one step that installs an attached
-   *  session — the same entrance that releases the held submits — so the
-   *  release is a fact about the session, never a duration. */
-  private _resumeHeldSessionCalls(): void {
-    if (!this._sessionCallHeld) return
-    this._sessionCallHeld = false
-    if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
   }
 
   /** Start holding, and hand back the window being held in: from here until
@@ -10269,7 +10179,7 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
-    if (this._attachment.kind !== 'attached') {
+    if (!this._hasUsableSession) {
       // A box that was waiting for a submitted command's length has nobody
       // left to wait for: the session it belonged to is gone (ADR-tqjt5rkk).
       this._endDeparture()
@@ -10648,11 +10558,12 @@ export class TerminalContent extends BasePaneContent {
     this._selectionGesture = null
     this._connectionMark?.dispose()
     this._connectionMark = null
-    this._reconnectAbort?.abort()
-    this._offer?.dispose()
-    this._offer = null
-    this._attachOffer?.dispose()
-    this._attachOffer = null
+    this._connectionHead?.dispose()
+    this._connectionHead = null
+    this._connectionUnsub()
+    this._connection.dispose()
+    this._rebindAbort?.abort()
+    this._rebindAbort = null
     // The painter dies before the input layer that sits above it: the
     // batch's pending frame is cancelled (a callback landing on a disposed
     // pane is a leak, not a paint), the fit's probe and font listener leave
@@ -10984,8 +10895,8 @@ export class TerminalContent extends BasePaneContent {
      *  means the caller submitted synchronously, so now IS the moment. */
     origin?: BindIdentity
   }): { ledgerId: number | null; submitId: string | null } {
-    if (this._attachment.kind !== 'attached') {
-      throw new Error('Session is not attached. Retry attachment before submitting a command.')
+    if (!this._hasUsableSession) {
+      throw new Error('This pane has no usable session; the command was not sent.')
     }
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
     // THE SESSION THIS COMMAND BELONGS TO (review rounds 4 and 6): the bind

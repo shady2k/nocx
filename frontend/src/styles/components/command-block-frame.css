@@ -249,3 +249,80 @@
   flex: none;
   opacity: 1;
 }
+
+/* ── The connection head variance (design §5.8, nocx-oalo1.5.5) ─────────────
+
+   One line of what a pane's connection is doing, above the transcript. The
+   frame is the block header's own identity with the anatomy stated as a typed
+   variance: the surface places it and the stylesheet owns the whole look, so a
+   connection status cannot drift from the block heads it stands above. It is
+   chrome, not a transcript row, so it does not scroll. */
+.ui-command-block-frame[data-variant='connection'] {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--terminal-context-height);
+  padding: 0 var(--pane-inline-padding);
+  background: var(--color-terminal-chrome);
+  border-bottom: 1px solid var(--color-divider);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+  line-height: var(--terminal-ui-line-height);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ui-connection-head__line {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.ui-connection-head__mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.ui-connection-head__icon svg {
+  display: block;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.ui-connection-head__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-command-block-frame[data-variant='connection'][data-tone='ok'] .ui-connection-head__icon,
+.ui-command-block-frame[data-variant='connection'][data-tone='ok'] .ui-connection-head__text {
+  color: var(--color-text-muted);
+}
+
+.ui-command-block-frame[data-variant='connection'][data-tone='warn'] .ui-connection-head__icon,
+.ui-command-block-frame[data-variant='connection'][data-tone='warn'] .ui-connection-head__text,
+.ui-command-block-frame[data-variant='connection'][data-tone='busy'] .ui-connection-head__text {
+  color: var(--color-warning);
+}
+
+.ui-command-block-frame[data-variant='connection'][data-tone='bad'] .ui-connection-head__icon,
+.ui-command-block-frame[data-variant='connection'][data-tone='bad'] .ui-connection-head__text {
+  color: var(--color-danger);
+}
+
+.ui-command-block-frame[data-variant='connection'][data-tone='muted'] .ui-connection-head__text {
+  color: var(--color-text-muted);
+}
+
+.ui-command-block-frame[data-variant='connection'] > .ui-connection-head__action {
+  flex: none;
+  display: flex;
+  align-items: center;
+}

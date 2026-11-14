@@ -1,14 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import {
-  SessionHandle,
-  SessionNotAttachedError,
-  WSClient,
-  isProvenSessionAbsence,
-  type SessionIntentKind,
-  type SessionRecovery,
-} from './ipc'
+import { ConnectionClient } from './connection/connection-client'
+import { isProvenSessionAbsence } from './connection/session-claim'
+import { SessionHandle, WSClient, type SessionIntentKind, type SessionRecovery } from './ipc'
 import {
   FRAME_HEADER_SIZE,
   FRAME_VERSION,
@@ -17,7 +12,6 @@ import {
   encodeFrame,
 } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
-import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionEffect } from './generated/session.effect'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 
@@ -785,9 +779,10 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
+    const connection = new ConnectionClient(client)
     void client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
-    void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
-    void client.openSSHSessionByHost({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'pi@192.0.2.93')
+    void connection.openProfile({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
+    void connection.openByHost({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'pi@192.0.2.93')
 
     for (const req of socket().requests()) {
       expect(req.params).not.toHaveProperty('enhanced')
@@ -826,9 +821,11 @@ describe('openSession', () => {
 
     it('carries it on a profile ssh open', async () => {
       const client = await connected()
-      void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1', {
-        paneId: PANE,
-      })
+      void new ConnectionClient(client).openProfile(
+        { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+        'ssh:test:1',
+        { paneId: PANE },
+      )
       expect(socket().requests()[0].params).toEqual({
         cols: 80,
         rows: 24,
@@ -842,7 +839,7 @@ describe('openSession', () => {
 
     it('carries it on a direct-host ssh open — an ssh tab is a pane too', async () => {
       const client = await connected()
-      void client.openSSHSessionByHost(
+      void new ConnectionClient(client).openByHost(
         { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
         '192.0.2.93',
         'pi',
@@ -866,13 +863,10 @@ describe('openSession', () => {
     // comes OFF the params rather than riding along blank.
     it('omits the key entirely when there is no pane row, on all three openers', async () => {
       const client = await connected()
+      const connection = new ConnectionClient(client)
       void client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
-      void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
-      void client.openSSHSessionByHost(
-        { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
-        '192.0.2.93',
-        'pi',
-      )
+      void connection.openProfile({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
+      void connection.openByHost({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, '192.0.2.93', 'pi')
 
       const requests = socket().requests()
       expect(requests).toHaveLength(3)
@@ -1393,20 +1387,22 @@ describe('exit notification', () => {
     expect(exited).toEqual([{ sid: SID, status: 42 }])
   })
 
-  // An exit whose cause is missing or unknown reads as a loss, never as a
-  // clean exit: a wrongly-marked tab is recoverable, a wrongly destroyed
-  // tab is lost work (nocx-ictcq). One delivery per session — the exit
-  // handler removes the session, so a second notification cannot reach it.
-  it('treats an absent cause as a loss', async () => {
+  // AN EXIT WHOSE CAUSE IS MISSING OR UNKNOWN IS MALFORMED, AND DROPPED
+  // (task 5.5). It used to read as a loss, which made the renderer a second
+  // owner of a connection fact: it invented `interrupted` for anything it did
+  // not recognise, so a malformed notification ended a tab nobody had
+  // observed ending. The contract's closed set is the authority, and the
+  // backend sends `interrupted` itself when that is what happened.
+  it('drops an exit with no cause rather than inventing a loss', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
     session.onExit((exit) => exited.push(exit.cause))
 
     ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
-    expect(exited).toEqual(['interrupted'])
+    expect(exited).toEqual([])
   })
 
-  it('treats an unknown cause as a loss', async () => {
+  it('drops an exit whose cause is not in the contract', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
     session.onExit((exit) => exited.push(exit.cause))
@@ -1416,7 +1412,7 @@ describe('exit notification', () => {
       method: 'exit',
       params: { sessionId: SID, cause: 'the-wind' },
     })
-    expect(exited).toEqual(['interrupted'])
+    expect(exited).toEqual([])
   })
 
   it('ignores an exit for another session', async () => {
@@ -1859,7 +1855,11 @@ describe('multi-session', () => {
     const { sessionA, sessionB, ws } = await twoSessions()
     sessionA.onExit(() => {})
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
 
     sessionA.send('echo should not send\n')
     expect(ws.binaryFrames()).toHaveLength(0)
@@ -2367,74 +2367,6 @@ describe('reconnect and reattach', () => {
     client.close()
   })
 
-  it('retries only the retained session on explicit request and refuses input until attached', async () => {
-    const client = new WSClient(mockDispatcher())
-    const { session, firstWS } = await connectedSessionWithBackoff(client)
-    const exits = vi.fn()
-    session.onExit(exits)
-    firstWS.deliverBinary(encodeFrame(SID, new Uint8Array(9)))
-    firstWS.serverHangsUp()
-    vi.advanceTimersByTime(475)
-    await Promise.resolve()
-    const ws = socket()
-    ws.serverAccepts()
-    const firstAttach = ws.requests().find((r) => r.method === 'attach')!
-    ws.deliverText({
-      jsonrpc: '2.0',
-      id: firstAttach.id,
-      error: { code: -32000, message: 'replay unavailable' },
-    })
-    for (let i = 0; i < 8; i++) await Promise.resolve()
-    const attachmentStates: string[] = []
-    const unavailableMessages: string[] = []
-    session.onAttachment((state) => {
-      attachmentStates.push(state.kind)
-      if (state.kind === 'unavailable') unavailableMessages.push(state.message)
-    })
-    expect(attachmentStates).toEqual(['unavailable'])
-    // The card states the retryable fact in its own words; the RPC's
-    // diagnostic belongs in the log, not in a sentence a person reads.
-    expect(unavailableMessages[0]).not.toContain('replay unavailable')
-    expect(unavailableMessages[0]).toContain('not been confirmed ended')
-    expect(unavailableMessages[0]).toContain('retry the same session')
-    const restored = vi.fn()
-    client.onReconnectResult(restored)
-    await expect(session.intent('text', 'must not reach the shell')).rejects.toBeInstanceOf(
-      SessionNotAttachedError,
-    )
-    expect(() => session.send('must not reach the shell')).toThrow('not attached')
-    expect(ws.requests().filter((r) => r.method === 'session.intent')).toHaveLength(0)
-    expect(ws.binaryFrames()).toHaveLength(0)
-
-    const retry = session.retryAttach()
-    const duplicate = session.retryAttach()
-    const attaches = ws.requests().filter((r) => r.method === 'attach')
-    expect(attaches).toHaveLength(2)
-    expect(attaches[1].params).toMatchObject({ sessionId: SID, offset: 9, ...OPEN_IDENTITY })
-    await expect(session.intent('key', 'Enter')).rejects.toThrow('not attached')
-    ws.deliverText({
-      jsonrpc: '2.0',
-      id: attaches[1].id,
-      result: { resumed: true, reset: false, from: 9 },
-    })
-    expect(await retry).toBe(true)
-    expect(await duplicate).toBe(true)
-    expect(attachmentStates).toEqual(['unavailable', 'attaching', 'attached'])
-    expect(restored).toHaveBeenCalledTimes(1)
-    expect(restored).toHaveBeenCalledWith({ resumed: 1, lost: 0 })
-    expect(exits).not.toHaveBeenCalled()
-    expect(ws.requests().filter((r) => r.method === 'open')).toHaveLength(0)
-    const input = session.intent('text', 'accepted')
-    const request = ws.requests().find((r) => r.method === 'session.intent')!
-    ws.deliverText({
-      jsonrpc: '2.0',
-      id: request.id,
-      result: { state: 'executed', bytesWritten: 8, fenceAfter: 9 },
-    })
-    await expect(input).resolves.toMatchObject({ state: 'executed' })
-    client.close()
-  })
-
   it.each(['sessions.live', 'attach'] as const)(
     'does not lose a foreign-bound session when its %s recovery request fails',
     async (failedMethod) => {
@@ -2541,11 +2473,12 @@ describe('reconnect and reattach', () => {
 
     await Promise.resolve() // P1 rejection → P2 rejection
     await Promise.resolve() // P2 rejection → catch handler fires
-    // The reattach-failure path is a LOSS: the tab consumes this as
-    // "mark, never destroy" (nocx-ictcq). Delivering a clean exit here
-    // would close the tab exactly when its session went away — the bug
-    // this bead was reopened for.
-    expect(exits).toEqual([{ sid: SID, cause: 'interrupted' }])
+    // NO LOSS IS MINTED HERE (task 5.5). Whether the connection is gone is
+    // pane.connection's answer, and a claim refusal is not that answer: the
+    // renderer used to turn it into an `interrupted` exit, which made it a
+    // second owner of the fact. What this layer does is mark the binding
+    // unavailable and let the connection owner say the rest.
+    expect(exits).toEqual([])
   })
 
   // THE COORDINATOR THIS CLIENT IS BOUND TO CAN BE REPLACED UNDER IT
@@ -2665,10 +2598,10 @@ describe('reconnect and reattach', () => {
     for (let i = 0; i < 5; i++) await Promise.resolve()
 
     expect(reconnectedWS.requests().filter((r) => r.method === 'attach')).toHaveLength(1)
-    // A session the replacement really does not hold IS gone, and the tab is
-    // marked rather than destroyed (nocx-ictcq) — the same answer the ordinary
-    // failed reattach gives.
-    expect(exits).toEqual(['interrupted'])
+    // A session the replacement really does not hold ends this binding, but
+    // the LOSS is the connection owner's to report (task 5.5); this layer
+    // mints nothing.
+    expect(exits).toEqual([])
   })
 
   it('answers a refusal that is not a foreign binding without asking what is live', async () => {
@@ -2699,8 +2632,9 @@ describe('reconnect and reattach', () => {
 
     // This backend holds the session or it does not, and it has just said which:
     // there is no second incarnation to claim under, so the list is not asked.
+    // The answer is the binding's, not a loss the renderer invents.
     expect(reconnectedWS.requests().filter((r) => r.method === 'sessions.live')).toHaveLength(0)
-    expect(exits).toEqual(['interrupted'])
+    expect(exits).toEqual([])
   })
 
   it('sends attach for multiple sessions on reconnect', async () => {
@@ -2805,143 +2739,13 @@ describe('reconnect and reattach', () => {
       await Promise.resolve()
     }
 
-    expect(reports).toEqual([{ resumed: 1, lost: 1 }])
+    expect(reports).toEqual([{ resumed: 1, lost: 0 }])
   })
 })
 
 // The reachability axis (nocx-iarf9). The renderer's half of the rule the
 // backend's record keeps: an observation is about one incarnation, and only a
 // newer one may replace what is already believed.
-describe('session.liveness notification', () => {
-  const liveness = (over: Record<string, unknown> = {}) => ({
-    jsonrpc: '2.0',
-    method: 'session.liveness',
-    params: {
-      sessionId: SID,
-      ...OPEN_IDENTITY,
-      liveness: 'unknown',
-      livenessEpoch: 2,
-      observedAt: '2026-08-17T10:00:00Z',
-      ...over,
-    },
-  })
-
-  it('delivers unknown for a session whose host stopped answering', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onLiveness((l) => seen.push(`${l.liveness}@${l.livenessEpoch}`))
-
-    ws.deliverText(liveness())
-
-    expect(seen).toEqual(['unknown@2'])
-  })
-
-  it('delivers the return to alive', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onLiveness((l) => seen.push(l.liveness))
-
-    ws.deliverText(liveness())
-    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 3 }))
-
-    expect(seen).toEqual(['unknown', 'alive'])
-  })
-
-  // The epoch's whole job, on this side of the wire: a report that arrives
-  // late describes an older moment, and applying it would revive a belief the
-  // backend has already moved on from.
-  it('drops an observation that is not newer than the last applied', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onLiveness((l) => seen.push(`${l.liveness}@${l.livenessEpoch}`))
-
-    ws.deliverText(liveness({ livenessEpoch: 5 }))
-    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 4 }))
-    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 5 }))
-
-    expect(seen).toEqual(['unknown@5'])
-  })
-
-  // The measurement, which is the half a surface actually DRAWS.
-  //
-  // This dispatcher does not hand the payload on: it rebuilds the fact field
-  // by field, and it used to name six of the eight. roundTripMs and slow were
-  // dropped in the reconstruction, so `slow` reached the renderer as undefined
-  // and connectionCondition answered `reachable` for every host — the pane's
-  // "this host is answering slowly" indicator could never draw, in production,
-  // however slow the host got (nocx-y3i0s; measured against a real sshd behind
-  // an 800ms link: the backend graded slow=true and published, and no
-  // indicator ever appeared in the document).
-  //
-  // The same shape as vault.status losing defaultProvider (AGENTS.md rule 5):
-  // the schema declares the field, the Go side marshals it, the renderer's
-  // generated type has it, and the one hand-written copy in between forgets
-  // it. Every test on this axis asserted the fields it was about, and none
-  // asserted "and the rest arrived too".
-  it('carries the round trip and its grade, which are what a surface draws', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: SessionLiveness[] = []
-    session.onLiveness((l) => seen.push(l))
-
-    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 7, roundTripMs: 801, slow: true }))
-
-    expect(seen).toHaveLength(1)
-    expect(seen[0].slow).toBe(true)
-    expect(seen[0].roundTripMs).toBe(801)
-  })
-
-  // Absent stays absent. The contract says absent and zero are the same
-  // statement — "no measurement" — so inventing a 0 here would make a host
-  // that never answered read as one that answered instantly.
-  it('invents no measurement when the backend sent none', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: SessionLiveness[] = []
-    session.onLiveness((l) => seen.push(l))
-
-    ws.deliverText(liveness())
-
-    expect(seen).toHaveLength(1)
-    expect(seen[0].roundTripMs).toBeUndefined()
-    expect(seen[0].slow).toBeUndefined()
-  })
-
-  // A report naming another incarnation is about a different session that
-  // merely shares the id (nocx-3oupk), and a report for another session is not
-  // ours at all.
-  it('refuses a report from another incarnation or another session', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onLiveness((l) => seen.push(l.liveness))
-
-    ws.deliverText(liveness({ instanceId: '00000000000000000000000000000000' }))
-    ws.deliverText(liveness({ sessionEpoch: 99 }))
-    ws.deliverText(liveness({ sessionId: OTHER_SID }))
-
-    expect(seen).toEqual([])
-  })
-
-  // The terminal half of the record never rides this axis — the exit
-  // notification owns it — so a payload carrying one is refused rather than
-  // handed to a tab that would then have two sources for "did it end".
-  it('refuses a terminal value on the reachability axis', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onLiveness((l) => seen.push(l.liveness))
-
-    ws.deliverText(liveness({ liveness: 'dead', livenessEpoch: 6 }))
-    ws.deliverText(liveness({ liveness: 'interrupted', livenessEpoch: 7 }))
-
-    expect(seen).toEqual([])
-  })
-})
-
-// ── session.observationChanged (nocx-szb40.3) ─────────────────────────────
-//
-// What an ENROLLED agent pane's screen is inviting, classified in the backend
-// where the grid lives. Guarded at the boundary like every other unsolicited
-// notification, and bound to the incarnation HERE — this is the one place that
-// holds the (instanceId, sessionEpoch) pair the open ack minted, so every
-// consumer downstream inherits the binding instead of remembering it.
 describe('session.observationChanged notification', () => {
   const observation = (over: Record<string, unknown> = {}) => ({
     jsonrpc: '2.0',

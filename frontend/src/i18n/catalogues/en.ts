@@ -471,6 +471,24 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'terminal.connection.saveFailed': 'Could not save connection:',
 
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
+  'connection.lost': 'Connection lost',
+  'connection.notAnswering': 'Host not answering',
+  'connection.endsShells': 'ends {n} shell(s)',
+  'connection.connecting': 'Connecting',
+  'connection.waiting': 'Waiting for you',
+  'connection.connected': 'Connected',
+  'connection.answersNew': 'the server answers new connections',
+  'connection.noAnswer': 'No answer for',
+  'connection.waitingServer': 'Waiting for the server',
+  'connection.attempt': 'attempt {n}',
+  'connection.failed': 'Failed',
+  'connection.ended': 'Connection ended',
+  'connection.busy': 'Connecting',
+  'connection.reconnect': 'Reconnect',
+  'connection.reconnectTitle': 'Reconnect this connection',
+  'connection.reconnectEnds': 'Reconnect ends {n} shell(s) on this connection',
+  'connection.typedNotSent':
+    'The connection ended before your keys could be sent. Nothing was delivered.',
   'connections.load.failedHead': 'Could not load connections:',
   'connections.load.failedTail': '. The list may be out of date',
   'connections.password.bindingFailedHead':

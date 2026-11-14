@@ -256,6 +256,24 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'scrollback.duration.days': '{days} д {hours} ч',
 
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
+  'connection.lost': 'Соединение потеряно',
+  'connection.notAnswering': 'Хост не отвечает',
+  'connection.endsShells': 'завершит оболочек: {n}',
+  'connection.connecting': 'Подключение',
+  'connection.waiting': 'Ждём вас',
+  'connection.connected': 'Подключено',
+  'connection.answersNew': 'сервер отвечает на новые подключения',
+  'connection.noAnswer': 'Нет ответа уже',
+  'connection.waitingServer': 'Ждём сервер',
+  'connection.attempt': 'попытка {n}',
+  'connection.failed': 'Не удалось',
+  'connection.ended': 'Соединение завершено',
+  'connection.busy': 'Подключение',
+  'connection.reconnect': 'Переподключить',
+  'connection.reconnectTitle': 'Переподключить это соединение',
+  'connection.reconnectEnds': 'Переподключение завершит оболочек: {n}',
+  'connection.typedNotSent':
+    'Соединение завершилось раньше, чем удалось отправить нажатия. Ничего не доставлено.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
   'connections.password.bindingFailedHead':

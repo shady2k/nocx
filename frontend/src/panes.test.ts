@@ -3502,7 +3502,9 @@ describe('a restored pane and the session the backend still holds', () => {
 
     expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
     expect(returning.openSession).not.toHaveBeenCalled()
-    expect(mounted.panes.querySelector('.nocx-attach-offer')).not.toBeNull()
+    // The retry card belonged to the renderer's attachment state, which is
+    // gone (task 5.5). Nothing opened and nothing claimed is the truth.
+    expect(mounted.panes.querySelector('.nocx-attach-offer')).toBeNull()
   })
 
   it('does not ask the backend twice for one pane', async () => {
@@ -3557,7 +3559,6 @@ describe('a restored pane and the session the backend still holds', () => {
   it('keeps a restored pane recoverable, and opens nothing, while the inventory stays unavailable', async () => {
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
-    const paneId = chain.backend.rows().panes[0].id
 
     const returning = makeClient()
     returning.listLiveSessions.mockRejectedValue(new Error('the connection dropped'))
@@ -3570,17 +3571,12 @@ describe('a restored pane and the session the backend still holds', () => {
     )
 
     // Nothing is opened on a question that was never answered, and the pane
-    // is not declared lost either — its shell may still be running.
+    // is not declared lost either — its shell may still be running. There is
+    // no second recovery surface: the attach card was the renderer's own
+    // attachment state and went with it (task 5.5).
     expect(returning.openSession).not.toHaveBeenCalled()
-    const card = mounted.panes.querySelector('.nocx-attach-offer')
-    expect(card).not.toBeNull()
-
-    // Once the plane answers, the person's retry takes the SAME session back.
-    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
-    card!.querySelector<HTMLButtonElement>('button')!.click()
-    await vi.waitFor(() => expect(returning.reclaimSession).toHaveBeenCalledTimes(1))
-    expect(returning.reclaimSession.mock.calls[0][0]).toMatchObject({ paneId })
-    expect(returning.openSession).not.toHaveBeenCalled()
+    expect(mounted.panes.querySelector('.nocx-attach-offer')).toBeNull()
+    expect(returning.reclaimSession).not.toHaveBeenCalled()
   })
 })
 
@@ -4060,12 +4056,14 @@ describe('a worker participant tab leaves when its worker is closed (nocx-xn63t.
         expect(workerSession.onExit.mock.calls.length).toBe(1)
       })
 
-      // The worker's turn ends and its session is lost, which is the state the
-      // person was looking at: the tab stayed, with the card over its pane.
+      // The worker's turn ends and its session is lost, which is the state
+      // the person was looking at: the tab stays, and the connection's own
+      // head (not a renderer card) is where a loss is drawn.
       fireLostSession(workerSession)
       await vi.waitFor(() => {
-        expect(document.querySelector('.nocx-reconnect-offer')).not.toBeNull()
+        expect(stripPaneIDs(bar).length).toBe(before + 1)
       })
+      expect(document.querySelector('.nocx-reconnect-offer')).toBeNull()
 
       // THE CLOSE ITSELF: workers.close wrote the tab out of the content store
       // and told this window — the frame the backend sends, on the socket this

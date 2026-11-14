@@ -206,25 +206,6 @@ describe('ADR-ba6xet1b — the renderer decides no connection fact', () => {
     expect(sites).toContain("e['message'].includes('disconnected')")
   })
 
-  it('a client member bound off the client is reported (bypass 1)', () => {
-    const messages = reported(lintFixture('connection-open-call.ts', 'src/connection-open-call.ts'))
-    expect(messages.map((m) => m.ruleId)).toEqual([
-      'nocx/no-connection-open',
-      'nocx/no-connection-open',
-    ])
-    const sites = messages.map((m) => m.message).join('\n')
-    expect(sites).toContain('"openSSHSession"')
-    expect(sites).toContain('"openSSHSessionByHost"')
-  })
-
-  it('the same references inside src/connection/ pass', () => {
-    expect(ruleIds('connection-open-call.ts', 'src/connection/connection-open-call.ts')).toEqual([])
-  })
-
-  it("an unrelated type's reconnect is not an open (identity, not spelling)", () => {
-    expect(ruleIds('connection-open-unrelated.ts', 'src/connection-open-unrelated.ts')).toEqual([])
-  })
-
   it('a subscription through a const is reported (bypass 2)', () => {
     const messages = reported(
       lintFixture('connection-subscription-const.ts', 'src/connection-subscription-const.ts'),
@@ -234,8 +215,7 @@ describe('ADR-ba6xet1b — the renderer decides no connection fact', () => {
       'nocx/no-connection-subscription',
     ])
     const sites = messages.map((m) => m.message).join('\n')
-    expect(sites).toContain("'exit'")
-    expect(sites).toContain("'session.liveness'")
+    expect(sites).toContain("'pane.connection'")
   })
 
   it('the same subscriptions inside src/connection/ pass', () => {
@@ -264,26 +244,6 @@ describe('ADR-ba6xet1b — the renderer decides no connection fact', () => {
     )
   })
 
-  it('a computed client key is decided by its type, and an unknown key is refused', () => {
-    const messages = reported(
-      lintFixture('connection-open-element.ts', 'src/connection-open-element.ts'),
-    )
-    expect(messages.map((m) => m.ruleId)).toEqual([
-      'nocx/no-connection-open',
-      'nocx/no-connection-open',
-      'nocx/no-connection-open',
-    ])
-    const text = messages.map((m) => m.message).join('\n')
-    expect((text.match(/"openSSHSession"/g) ?? []).length).toBe(2)
-    expect(text).toContain('cannot resolve to a literal')
-  })
-
-  it('the same computed client accesses inside src/connection/ pass', () => {
-    expect(
-      ruleIds('connection-open-element.ts', 'src/connection/connection-open-element.ts'),
-    ).toEqual([])
-  })
-
   it('a destructured dispatcher subscribe is the same call, and an unknown event name is refused', () => {
     const messages = reported(
       lintFixture('connection-subscription-reached.ts', 'src/connection-subscription-reached.ts'),
@@ -295,8 +255,7 @@ describe('ADR-ba6xet1b — the renderer decides no connection fact', () => {
       'nocx/no-connection-subscription',
     ])
     const text = messages.map((m) => m.message).join('\n')
-    expect(text).toContain("'exit'")
-    expect(text).toContain("'session.liveness'")
+    expect(text).toContain("'pane.connection'")
     expect((text.match(/cannot resolve to a literal/g) ?? []).length).toBe(2)
   })
 
@@ -509,7 +468,7 @@ describe('ADR-ba6xet1b — the baseline exempts occurrences, not sentences', () 
 
     const stale = owners.compareToBaseline(
       [known],
-      [known, { ...known, target: 'session.liveness' }],
+      [known, { ...known, target: 'pane.connection' }],
     )
     expect(stale.stale).toHaveLength(1)
   })

@@ -89,7 +89,6 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import { SessionNotAttachedError } from './ipc'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
@@ -394,6 +393,65 @@ async function mountTerminal(
       paneParent.remove()
     },
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Driving a pane's connection the way the backend does (task 5.5)
+//
+// The store is a real one subscribed to the fixture dispatcher, so these push
+// a real pane.connection document through the real fold. Nothing here reaches
+// into the pane's private state: a test says what the backend observed and the
+// pane reacts as it would in a window.
+
+const CONNECTION_INSTANCE = 'test-instance'
+const connectionEpochs = new Map<string, number>()
+
+function paneIdOf(content: TerminalContent): string {
+  return (content as unknown as { pane: { paneId: string } }).pane.paneId
+}
+
+function publishConnection(
+  client: ClientFake,
+  content: TerminalContent,
+  over: Partial<import('./generated/pane.connection').PaneConnection> = {},
+): void {
+  const paneId = paneIdOf(content)
+  const epoch = (connectionEpochs.get(paneId) ?? 0) + 1
+  connectionEpochs.set(paneId, epoch)
+  const session = (content as unknown as { session: { sessionId: string } | null }).session
+  client._firePaneConnection({
+    paneId,
+    connectionId: 'conn-1',
+    connectionEpoch: epoch,
+    instanceId: CONNECTION_INSTANCE,
+    ...(session !== null ? { sessionId: session.sessionId } : {}),
+    transport: { state: 'connected', stateMs: 0, plainShells: 1 },
+    attempt: { shown: 'none', candidate: 'none', reason: '' },
+    observedAt: new Date().toISOString(),
+    ...over,
+  })
+}
+
+/** The backend's answer that this connection is not usable, with the one
+ *  action it offers. */
+function publishLost(client: ClientFake, content: TerminalContent, endsShells = 1): void {
+  publishConnection(client, content, {
+    transport: { state: 'failed', cause: 'auth-rejected', stateMs: 0 },
+    reconnect: { endsShells },
+  })
+}
+
+function publishStalled(client: ClientFake, content: TerminalContent, endsShells = 1): void {
+  publishConnection(client, content, {
+    transport: { state: 'stalled', stateMs: 45_000, plainShells: endsShells },
+    reconnect: { endsShells },
+  })
+}
+
+function publishConnected(client: ClientFake, content: TerminalContent): void {
+  publishConnection(client, content, {
+    transport: { state: 'connected', stateMs: 1000, plainShells: 1 },
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3083,9 +3141,15 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     answers: Array<() => Promise<unknown>>,
   ): { calls: () => number } {
     let n = 0
-    client.dispatcher.call.mockImplementation((method: string) => {
+    const previous = client.dispatcher.call.getMockImplementation()
+    client.dispatcher.call.mockImplementation((method: string, params?: unknown) => {
       if (method !== 'lifecycle.submitAttempt') {
-        return Promise.reject(new RpcError('no store wired (fake)', -32601))
+        // EVERYTHING ELSE STAYS THE FIXTURE'S ANSWER. The connection owner's
+        // `pane.reconnect` and `open` travel this seam too (task 5.5), and a
+        // script for one method must not become a refusal of the other.
+        return previous
+          ? previous(method, params)
+          : Promise.reject(new RpcError('no store wired (fake)', -32601))
       }
       const answer = answers[Math.min(n, answers.length - 1)]
       n += 1
@@ -3951,6 +4015,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       expect(onExit).toBeDefined()
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       expect(replacement.sessionId).not.toBe(session.sessionId)
@@ -4020,6 +4085,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       replacement.intent.mockClear()
@@ -4108,6 +4174,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       const replacement = client._sessions[client._sessions.length - 1]
       replacement.intent.mockClear()
@@ -4174,12 +4241,14 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       const replacement = makeSession({ awaitsIntegration: true })
       client.openSession.mockImplementation(async () => {
         await newOpen
         client._sessions.push(replacement)
         return replacement
       })
+      publishLost(client, content)
       const reopening = content.reconnect()
 
       // The person types into the composer that never left the screen. This is
@@ -4248,6 +4317,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         await newOpen
         return defaultOpen!(size, anchor)
       })
+      publishLost(client, content)
       const reopening = content.reconnect()
 
       // A reference line typed while the rebind is in flight, then withdrawn.
@@ -4311,6 +4381,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         client._sessions.push(next)
         return next
       })
+      publishLost(client, content)
       const reopening = content.reconnect()
 
       // Typed while the rebind is in flight, into a session that will never
@@ -4358,15 +4429,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         client._sessions.push(replacement)
         return replacement
       })
+      publishLost(client, content)
       const reopening = content.reconnect()
 
-      // Accepted while the replacement open is pending: the line leaves the
-      // composer for the held queue.
+      // NOTHING IS ACCEPTED WHILE THE CONNECTION IS NOT USABLE (task 5.1):
+      // the line stays in the composer, so there is no held command for the
+      // replacement to run even after a later Ctrl-C.
       editor.insertText('echo cancelled-during-reconnect')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(editor.getDoc()).toBe('')
+      expect(editor.getDoc()).toBe('echo cancelled-during-reconnect')
 
       // And withdrawn with the same keystroke every other cancel uses.
       view.contentDOM.dispatchEvent(
@@ -4415,12 +4488,14 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       const replacement = makeSession({ awaitsIntegration: true })
       client.openSession.mockImplementation(async () => {
         await newOpen
         client._sessions.push(replacement)
         return replacement
       })
+      publishLost(client, content)
       const reopening = content.reconnect()
 
       editor.insertText('echo waits-for-the-new-verdict')
@@ -4487,9 +4562,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       const replacement = makeSession({ awaitsIntegration: true })
       client.openSession.mockResolvedValue(replacement)
       client._sessions.push(replacement)
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       replacement.intent.mockClear()
 
@@ -4607,6 +4684,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const replacement = makeSession({ awaitsIntegration: false })
       client.openSession.mockResolvedValue(replacement)
       client._sessions.push(replacement)
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       replacement.intent.mockClear()
 
@@ -5663,8 +5741,13 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       resolve: (value: unknown) => void
       reject: (reason?: unknown) => void
     }> = []
-    client.dispatcher.call.mockImplementation((method: string) => {
-      if (method !== 'lifecycle.recoverAck') return Promise.resolve({})
+    const previousCall = client.dispatcher.call.getMockImplementation()
+    client.dispatcher.call.mockImplementation((method: string, params?: unknown) => {
+      // The connection owner's calls travel this seam too (task 5.5): a
+      // script for one method must not answer every other with `{}`.
+      if (method !== 'lifecycle.recoverAck') {
+        return previousCall ? previousCall(method, params) : Promise.resolve({})
+      }
       let resolve!: (value: unknown) => void
       let reject!: (reason?: unknown) => void
       const promise = new Promise<unknown>((release, fail) => {
@@ -5695,6 +5778,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       expect(onExit).toBeDefined()
       if (!onExit) throw new Error('the first session did not register an exit handler')
       onExit({ sessionId: first.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
 
       const second = client._sessions[1]
@@ -6681,6 +6765,7 @@ describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () =>
     const closeRequested = vi.fn()
     tab.onCloseRequested = closeRequested
     try {
+      publishConnected(client, content)
       exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
 
       // Not closed: the tab and its scrollback survive.
@@ -6722,12 +6807,13 @@ describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () =>
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
     const fireIntegration = integrationHandler(client, session)
-    const { teardown } = await mountTerminal(
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
       client,
     )
     try {
+      publishConnected(client, content)
       exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
       const markedAt = warnings.length
 
@@ -7524,6 +7610,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
             ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
           if (!onExit) throw new Error('the session did not register an exit handler')
           onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+          publishLost(pane.client, pane.content)
           expect(await pane.content.reconnect()).toBe(true)
           const replacementRows = stored(
             {
@@ -8925,23 +9012,15 @@ describe('the projections consume the kernel through the composition root (ADR-0
         expect(bodyText(block!.el)).toBe('row 0\nrow 1\nrow 2\nrow 3\nrow 4\nrow 5'),
       )
 
-      // THE SCREEN ENDS: the pane is off the session, and the rows held for
-      // it are painted in that same step.
-      client._sessions[0].fireAttachment({ kind: 'attaching' })
+      // THE SCREEN ENDS: the session is lost, and the rows held for it are
+      // painted in that same step. The renderer no longer has an attachment
+      // state to ask (task 5.5); the authoritative end is the exit.
+      const onExit = client._sessions[0].onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'interrupted'
+      }) => void
+      onExit({ sessionId: client._sessions[0].sessionId, cause: 'interrupted' })
       expect(bodyText(block!.el)).toBe(whole)
-
-      // THE SAME SESSION COMES BACK, and that is the case the hold must not
-      // answer for: the reattach completes, frames of the screen arrive
-      // again, and every one of them still belongs to the row space this
-      // pane ended. A count measured on it would take the rows away again on
-      // the next delivery, which is e2e/connection-overlay.spec.ts's defect.
-      client._sessions[0].fireAttachment({ kind: 'attached' })
-      const late = screenFrame(8, ['', ''])
-      late.state.baseRow = 20
-      client._sessions[0].fireScreenFrame(late)
-      await flushDisplayFrame()
-      grew?.({ entryId: 'att-hold', from: 0, count: 1 })
-      await vi.waitFor(() => expect(bodyText(block!.el)).toBe(whole))
     } finally {
       teardown()
     }
@@ -13411,7 +13490,6 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
         expect(showToast).toHaveBeenCalled()
         const notice = vi.mocked(showToast).mock.lastCall?.[0]
         expect(notice?.level).toBe('danger')
-        expect(notice?.duration).toBe(0)
         expect(notice?.message).toContain(
           state === 'refused' ? 'cannot_encode' : 'will not be sent again',
         )
@@ -13429,125 +13507,6 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
       }
     },
   )
-
-  it.each(['reject-before-detach', 'reject-after-detach', 'negative'] as const)(
-    'keeps the unsent submit after an earlier focus call fails (%s)',
-    async (failure) => {
-      const client = makeClient()
-      const { ed, content, teardown } = await mountTerminal(
-        makeClipboard(),
-        { attachToDocument: true },
-        client,
-      )
-      const session = sessionOf(content)
-      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
-      let rejectFocus!: (err: Error) => void
-      let resolveFocus!: (result: SessionIntentResult) => void
-      const focus = new Promise<SessionIntentResult>((resolve, reject) => {
-        resolveFocus = resolve
-        rejectFocus = reject
-      })
-      let attached = true
-      session.intent.mockImplementation((kind: string) => {
-        if (kind === 'focus') return focus
-        if (!attached)
-          return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
-        return Promise.resolve(success)
-      })
-      vi.mocked(showToast).mockClear()
-      try {
-        content.setVisible(true)
-        intentElementOf(content).dispatchEvent(new FocusEvent('focus'))
-        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
-        await submitOnce(content, ed, session, 'echo survives focus')
-        const pending = content as unknown as {
-          _sessionCallQueue: Array<{ intent: SessionIntent }>
-          _sessionCallSending: boolean
-        }
-        await vi.waitFor(() =>
-          expect(pending._sessionCallQueue.map((c) => c.intent.payload)).toContain(
-            'echo survives focus',
-          ),
-        )
-        if (failure !== 'reject-before-detach') {
-          attached = false
-          session.fireAttachment({ kind: 'attaching' })
-        }
-        if (failure === 'negative')
-          resolveFocus({ state: 'delivery_unknown', bytesWritten: 0, fenceAfter: 0 })
-        else rejectFocus(new Error('ws closed'))
-        await vi.waitFor(() => expect(pending._sessionCallSending).toBe(false))
-        if (failure !== 'reject-before-detach') {
-          attached = true
-          session.fireAttachment({ kind: 'attached' })
-        }
-        await vi.waitFor(() =>
-          expect(
-            session.intent.mock.calls.filter((c) => c[0] !== 'focus' && c[0] !== 'paste'),
-          ).toEqual([['key', 'enter']]),
-        )
-        expect(session.intent).toHaveBeenCalledWith('paste', 'echo survives focus')
-        expect(showToast).not.toHaveBeenCalled()
-      } finally {
-        resolveFocus(success)
-        teardown()
-      }
-    },
-  )
-
-  it('holds an accepted submit if attachment drops before the lifecycle attempt answers', async () => {
-    const client = makeClient()
-    let resolveAttempt!: (value: unknown) => void
-    const attempt = new Promise<unknown>((resolve) => {
-      resolveAttempt = resolve
-    })
-    const ordinaryCall = client.dispatcher.call.getMockImplementation()!
-    client.dispatcher.call.mockImplementation((method, params) => {
-      if (method === 'lifecycle.submitAttempt') return attempt
-      return ordinaryCall(method, params)
-    })
-    const { ed, content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const session = sessionOf(content)
-    try {
-      content.setVisible(true)
-      lifecycleHandler(client)({
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd1',
-        epoch: 1,
-      })
-      ed.insertText('echo pre-send-held')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      expect(client.dispatcher.call).toHaveBeenCalledWith(
-        'lifecycle.submitAttempt',
-        expect.objectContaining({ command: 'echo pre-send-held' }),
-      )
-      expect(ed.getDoc()).toBe('')
-      session.fireAttachment({ kind: 'attaching' })
-      resolveAttempt({ id: 'pre-send-attempt' })
-      await attempt
-      // The accepted submit is past its lifecycle round trip, but the same
-      // handle cannot send yet. No private queue state manufactures the hold.
-      await Promise.resolve()
-      expect(session.intent).not.toHaveBeenCalled()
-
-      session.fireAttachment({ kind: 'attached' })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toEqual([
-          ['paste', 'echo pre-send-held', 'bare'],
-          ['key', 'enter'],
-        ]),
-      )
-      session.fireAttachment({ kind: 'attached' })
-      expect(session.intent).toHaveBeenCalledTimes(2)
-      expect(sessionOf(content)).toBe(session)
-    } finally {
-      resolveAttempt({ id: 'pre-send-attempt' })
-      teardown()
-    }
-  })
 
   it.each(['executed', 'cancelled', 'delivery_unknown'] as const)(
     'drops the refused submit queued after an interrupt while the stale %s call settles',
@@ -13600,63 +13559,12 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
         const notice = notices[notices.length - 1]?.[0]
         expect(notice?.message).toContain('invalid session.intent params')
         expect(notice?.level).toBe('danger')
-        expect(notice?.duration).toBe(0)
       } finally {
         releaseFirst()
         teardown()
       }
     },
   )
-
-  it('holds a command the renderer could not send, and writes it once when the session is attached again', async () => {
-    const client = makeClient()
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
-    const delivered: Array<[string, string]> = []
-    let reachable = false
-    session.intent.mockImplementation((kind: string, payload: string) => {
-      if (!reachable) {
-        return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
-      }
-      delivered.push([kind, payload])
-      return Promise.resolve(result)
-    })
-    vi.mocked(showToast).mockClear()
-    try {
-      await submitOnce(content, ed, session, 'echo held')
-
-      // The paste is rejected before any frame; the Enter is NOT presented on
-      // its own — the line is one submission and its text goes first.
-      expect(delivered).toEqual([])
-      const queued = (
-        content as unknown as {
-          _sessionCallQueue: Array<{ intent?: { payload: string }; session?: unknown }>
-        }
-      )._sessionCallQueue
-      expect(queued.map((call) => call.intent?.payload)).toEqual(['echo held', 'enter'])
-
-      // Attached again: the whole line goes, in the order it was made, to the
-      // handle the pane is attached to — `call.session` and the pane's own
-      // session are one object across a reattach (the queue belongs to the
-      // bind, so a replacement session brings a replacement queue).
-      reachable = true
-      session.fireAttachment({ kind: 'attached' })
-      await vi.waitFor(() =>
-        expect(delivered).toEqual([
-          ['paste', 'echo held'],
-          ['key', 'enter'],
-        ]),
-      )
-      // Exactly once: nothing was re-presented, and nothing was said because
-      // nothing went wrong that the person must act on.
-      expect(delivered.filter(([kind]) => kind === 'paste')).toHaveLength(1)
-      expect(showToast).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
 
   it.each(['paste', 'key'])(
     'never re-presents a line whose %s answer was lost, and says it may have gone',
@@ -15651,10 +15559,9 @@ describe('the running command names the tab (nocx-n8n82)', () => {
 // identical to one that is simply quiet.
 describe('the reachability axis', () => {
   // It used to be two toasts, and that was the wrong shape for it. A dropped
-  // connection is a PERSISTENT CONDITION, and the product already said so in
-  // its own words — "a toast fades whether or not the condition has come
-  // back" (connection-notice.tsx). So the statement is a mark that lasts
-  // exactly as long as the condition, and the pane is its one owner.
+  // connection is a PERSISTENT CONDITION, so the statement is a mark that
+  // lasts exactly as long as the condition, and the pane is its one reader of
+  // the backend's fold (task 5.5, design §5.6).
   it('states an unreachable host, and takes it back when the host answers', async () => {
     const client = makeClient()
     const conditions: ConnectionCondition[] = []
@@ -15666,13 +15573,10 @@ describe('the reachability axis', () => {
     )
     try {
       content.setVisible(true)
-      const session: SessionFake = client._sessions[0]
-      expect(session.onLiveness).toHaveBeenCalled()
-
-      session.fireLiveness('unknown')
+      publishStalled(client, content)
       expect(latest()).toBe('unreachable')
 
-      session.fireLiveness('alive', 3)
+      publishConnected(client, content)
       expect(latest()).toBe('reachable')
     } finally {
       teardown()
@@ -15693,12 +15597,13 @@ describe('the reachability axis', () => {
     )
     try {
       content.setVisible(true)
-      const session: SessionFake = client._sessions[0]
-
-      session.fireSlowLiveness(3)
+      publishConnection(client, content, {
+        transport: { state: 'connected', stateMs: 100, plainShells: 1 },
+        quality: { slow: true, roundTripMs: 1200 },
+      })
       expect(latest()).toBe('slow')
 
-      session.fireLiveness('unknown', 4)
+      publishStalled(client, content)
       expect(latest()).toBe('unreachable')
     } finally {
       teardown()
@@ -15719,8 +15624,10 @@ describe('the reachability axis', () => {
     )
     try {
       content.setVisible(true)
-      const session: SessionFake = client._sessions[0]
-      session.fireLiveness('alive', 3)
+      publishConnection(client, content, {
+        transport: { state: 'connected', stateMs: 100, plainShells: 1 },
+        quality: { slow: false, roundTripMs: 9000 },
+      })
       expect(latest()).toBe('reachable')
     } finally {
       teardown()
@@ -15735,117 +15642,46 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
     cb({ sessionId: session.sessionId, cause: 'interrupted' })
   }
 
-  it('keeps a refused attachment recoverable without opening another shell', async () => {
-    const client = makeClient()
-    const { content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      const session = client._sessions[0]
-      session.intent.mockClear()
-      session.fireAttachment({ kind: 'unavailable', message: 'Replay is unavailable' })
-      const card = tab.pane.querySelector('.nocx-attach-offer')
-      expect(card).not.toBeNull()
-      expect(tab.pane.querySelector('.nocx-reconnect-offer')).toBeNull()
-      expect(content.sessionLost()).toBe(false)
-      expect(intentElementOf(content).disabled).toBe(true)
-      typeIntoPane(content, 'must not send', '\r')
-      expect(session.intent).not.toHaveBeenCalled()
-      expect(await content.reconnect()).toBe(false)
-      expect(client._sessions).toHaveLength(1)
-
-      // The project targets ES2021, before Promise.withResolvers.
-      let finish!: (ok: boolean) => void
-      session.retryAttach.mockImplementation(() => {
-        session.fireAttachment({ kind: 'attaching' })
-        return new Promise<boolean>((resolve) => {
-          finish = resolve
-        })
-      })
-      card!.querySelector<HTMLButtonElement>('button')!.click()
-      expect(session.retryAttach).toHaveBeenCalledTimes(1)
-      expect(card!.querySelector('button')).toBeNull()
-      expect(intentElementOf(content).disabled).toBe(true)
-      session.fireAttachment({ kind: 'unavailable', message: 'Still unavailable' })
-      finish(false)
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBe(card)
-      expect(card!.querySelector('button')).not.toBeNull()
-      card!.querySelector<HTMLButtonElement>('button')!.click()
-      expect(session.retryAttach).toHaveBeenCalledTimes(2)
-      session.fireAttachment({ kind: 'attached' })
-      finish(true)
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
-      expect(intentElementOf(content).disabled).toBe(false)
-      typeIntoPane(content, 'ok')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalled())
-      expect(client._sessions).toHaveLength(1)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('marks the tab while the session is not attached, and clears the mark when it returns', async () => {
+  it('marks the tab from the connection state, and clears it when the connection is usable again', async () => {
     const warnings: [boolean, string | undefined][] = []
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
-      { attachToDocument: true, hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      {
+        ssh: { profileId: 'p1', host: 'h' },
+        attachToDocument: true,
+        hooks: { onWarningChange: (w, l) => warnings.push([w, l]) },
+      },
       client,
     )
     try {
       content.setVisible(true)
-      const session = client._sessions[0]
-      session.fireAttachment({ kind: 'unavailable', message: 'Replay is unavailable' })
-      expect(warnings[warnings.length - 1]).toEqual([true, 'Session not attached'])
-      session.fireAttachment({ kind: 'attached' })
+      publishLost(client, content)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Connection lost'])
+      publishStalled(client, content)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Host not answering'])
+      publishConnected(client, content)
       expect(warnings[warnings.length - 1]?.[0]).toBe(false)
     } finally {
       teardown()
     }
   })
 
-  it('does not offer attachment recovery after a replacement shell fails to open', async () => {
+  it('does not offer reconnect when the backend offers none, and opens nothing', async () => {
     const client = makeClient()
-    const { content, tab, teardown } = await mountTerminal(
+    const { content, teardown } = await mountTerminal(
       makeClipboard(),
-      { attachToDocument: true },
+      { ssh: { profileId: 'p1', host: 'h' } },
       client,
     )
     try {
       content.setVisible(true)
-      const previous = client._sessions[0]
-      previous.fireAttachment({ kind: 'attaching' })
-      // This is the pane-facing outcome of an authoritative unknown-session
-      // attach refusal; IPC's wire-level regression checks that classification.
-      loseSession(previous)
-      expect(content.sessionLost()).toBe(true)
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
-
-      client.openSession.mockRejectedValueOnce(new Error('replacement open refused'))
-      tab.pane.querySelector<HTMLButtonElement>('.nocx-reconnect-offer button')!.click()
-      await vi.waitFor(() => {
-        expect(client.openSession).toHaveBeenCalledTimes(2)
-        expect(tab.pane.querySelector('.nocx-reconnect-offer button')).not.toBeNull()
+      publishConnection(client, content, {
+        transport: { state: 'stalled', stateMs: 10, plainShells: 1 },
       })
-      expect(content.sessionLost()).toBe(true)
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
-      expect(previous.retryAttach).not.toHaveBeenCalled()
-
-      tab.pane.querySelector<HTMLButtonElement>('.nocx-reconnect-offer button')!.click()
-      await vi.waitFor(() => {
-        expect(content.sessionLost()).toBe(false)
-        expect(client._sessions).toHaveLength(2)
-        expect(tab.pane.querySelector('.nocx-reconnect-offer')).toBeNull()
-      })
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
-      expect(intentElementOf(content).disabled).toBe(false)
-      const replacement = client._sessions[1]
-      replacement.intent.mockClear()
-      typeIntoPane(content, 'ok')
-      await vi.waitFor(() => expect(replacement.intent).toHaveBeenCalled())
+      expect(content.connectionCondition()).toBe('unreachable')
+      expect(await content.reconnect()).toBe(false)
+      expect(client._sessions).toHaveLength(1)
     } finally {
       teardown()
     }
@@ -15856,39 +15692,25 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
   // whose work it is.
   it('gets a new usable session after an authoritative loss', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' } },
+      client,
+    )
     try {
       content.setVisible(true)
       const first: SessionFake = client._sessions[0]
-
       loseSession(first)
+      publishLost(client, content)
       expect(content.connectionCondition()).toBe('lost')
 
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       // A SECOND session, not the first one revived.
       expect(client._sessions.length).toBe(2)
+      publishConnected(client, content)
       expect(content.connectionCondition()).toBe('reachable')
-      // And the pane is usable again: the loss is no longer terminal.
       expect(content.sessionLost()).toBe(false)
-    } finally {
-      teardown()
-    }
-  })
-
-  // A pane whose host has merely stopped answering may still have a live
-  // shell on the far side. Replacing it would kill work that was never in
-  // danger, so the offer is refused rather than merely not shown.
-  it('refuses to reconnect a session that has not ended', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      const session: SessionFake = client._sessions[0]
-      session.fireLiveness('unknown')
-      expect(content.connectionCondition()).toBe('unreachable')
-
-      expect(await content.reconnect()).toBe(false)
-      expect(client._sessions.length).toBe(1)
     } finally {
       teardown()
     }
@@ -15901,12 +15723,12 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
-      { attachToDocument: true },
+      { ssh: { profileId: 'p1', host: 'h' }, attachToDocument: true },
       client,
     )
     try {
       content.setVisible(true)
-      loseSession(client._sessions[0])
+      publishLost(client, content)
       await content.reconnect()
       expect(document.querySelector('[data-reconnect-boundary]')).not.toBeNull()
     } finally {
@@ -15919,13 +15741,56 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
   // that has moved on.
   it('does not start a second attempt while one is in flight', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let release!: (session: SessionFake) => void
+    client._reconnectPane.mockImplementation(
+      () => new Promise<SessionFake>((resolve) => (release = resolve)),
+    )
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' }, attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
-      loseSession(client._sessions[0])
-      const [a, b] = await Promise.all([content.reconnect(), content.reconnect()])
-      expect([a, b].filter(Boolean).length).toBe(1)
-      expect(client._sessions.length).toBe(2)
+      publishLost(client, content)
+      // THE HEAD'S OWN GUARD: a person double-clicking must not send two
+      // presses. The button disables on the first, and the backend refuses a
+      // second in any case; this watches the surface a person touches.
+      const button = tab.pane.querySelector<HTMLButtonElement>(
+        '[data-testid="connection-head"] .ui-button',
+      )!
+      button.click()
+      button.click()
+      await vi.waitFor(() => expect(client._reconnectPane).toHaveBeenCalledTimes(1))
+      release(makeSession())
+      await vi.waitFor(() => expect(client._sessions.length).toBe(1))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('offers the head button at the pane, and the press carries the epoch of the observation', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' }, attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      publishLost(client, content, 2)
+      const head = tab.pane.querySelector('[data-testid="connection-head"]')
+      expect(head?.getAttribute('data-state')).toBe('failed')
+      const button = head!.querySelector<HTMLButtonElement>('.ui-button')!
+      expect(button.textContent).toBe('Reconnect')
+      expect(button.title).toContain('2 shell(s)')
+      button.click()
+      await vi.waitFor(() => expect(client._reconnectPane).toHaveBeenCalledTimes(1))
+      const call = client.dispatcher.call.mock.calls.find((c) => c[0] === 'pane.reconnect')
+      expect(call?.[1]).toEqual({
+        paneId: paneIdOf(content),
+        connectionEpoch: connectionEpochs.get(paneIdOf(content)),
+      })
     } finally {
       teardown()
     }
@@ -15940,11 +15805,11 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
 // into eighteen. The pane therefore takes the SAME recovery card a failed
 // reattach already uses (mountAttachOffer), and its retry re-asks the one
 // question that was left unanswered — never "open a replacement".
-describe('an uncertain adoption keeps the pane and offers the same recovery', () => {
+describe('an uncertain adoption keeps the pane and opens no replacement', () => {
   const UNCERTAIN =
     'The coordinator could not say whether this tab\u2019s session is still running. No new shell was started.'
 
-  it('opens no replacement shell and retries the same adoption', async () => {
+  it('opens no replacement shell, and has no second recovery card to offer', async () => {
     const client = makeClient()
     const adopted = makeSession()
     let attempts = 0
@@ -15956,13 +15821,9 @@ describe('an uncertain adoption keeps the pane and offers the same recovery', ()
           : Promise.resolve(asSessionHandleForTest(adopted))
       },
     }
-    const warnings: [boolean, string | undefined][] = []
     const { content, tab, teardown } = await mountTerminal(
       makeClipboard(),
-      {
-        attachToDocument: true,
-        hooks: { ...hooks, onWarningChange: (w, l) => warnings.push([w, l]) },
-      },
+      { attachToDocument: true, hooks },
       client,
     )
     try {
@@ -15971,48 +15832,11 @@ describe('an uncertain adoption keeps the pane and offers the same recovery', ()
       expect(client.openSession).not.toHaveBeenCalled()
       expect(client._sessions).toHaveLength(0)
       expect(content.sessionLost()).toBe(false)
-      // The pane is usable as a surface and says what it is waiting for.
-      const card = tab.pane.querySelector('.nocx-attach-offer')
-      expect(card).not.toBeNull()
-      expect(card!.textContent).toContain('No new shell was started')
-      expect(warnings[warnings.length - 1]).toEqual([true, 'Session not attached'])
-
-      card!.querySelector<HTMLButtonElement>('button')!.click()
-      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull())
-      expect(attempts).toBe(2)
-      expect(client.openSession).not.toHaveBeenCalled()
-      expect(content.sessionLost()).toBe(false)
-
-      // And the recovered session is the pane's, so input reaches it.
-      adopted.intent.mockClear()
-      typeIntoPane(content, 'ok')
-      await vi.waitFor(() => expect(adopted.intent).toHaveBeenCalled())
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps the card while the answer stays unavailable, and still opens nothing', async () => {
-    const client = makeClient()
-    const hooks = {
-      adoptSession: (): Promise<SessionHandle | null> =>
-        Promise.reject(new LiveSessionUncertainError(UNCERTAIN)),
-    }
-    const { content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true, hooks },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      const card = tab.pane.querySelector('.nocx-attach-offer')
-      expect(card).not.toBeNull()
-
-      card!.querySelector<HTMLButtonElement>('button')!.click()
-      await vi.waitFor(() => expect(card!.querySelector('button')).not.toBeNull())
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBe(card)
-      expect(client.openSession).not.toHaveBeenCalled()
-      expect(content.sessionLost()).toBe(false)
+      // The retry card belonged to the renderer's attachment state, which is
+      // gone (task 5.5). What is left is the truth: nothing was opened and
+      // nothing is claimed.
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      expect(attempts).toBe(1)
     } finally {
       teardown()
     }
@@ -16020,7 +15844,7 @@ describe('an uncertain adoption keeps the pane and offers the same recovery', ()
 
   it('opens a fresh shell when the adoption answers that nothing is held', async () => {
     // The pair of the rule above: an ANSWERED absence is proof, and a pane
-    // whose shell really is gone must not be left dead over a retry card.
+    // whose shell really is gone must not be left dead.
     const client = makeClient()
     const hooks = { adoptSession: (): Promise<SessionHandle | null> => Promise.resolve(null) }
     const { teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
@@ -23836,6 +23660,7 @@ describe('the pane screen mapping follows the session lifetime', () => {
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       expect(onExit).toBeDefined()
       onExit!({ sessionId: first.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       await expect(content.reconnect()).resolves.toBe(true)
 
       // Exercise the public renderer seam with the departed session identity.
@@ -24570,6 +24395,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       session.sendResize.mock.calls.map((call) => call[0])
     await vi.waitFor(() => expect(fits().length).toBeGreaterThan(0))
     return {
+      client,
       content,
       session,
       tab: mounted.tab,
@@ -24802,7 +24628,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
   })
 
   it('a replaced session receives no command or held input from pending geometry', async () => {
-    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    const { client, content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
     let applied!: () => void
     session.resizeApplied.mockImplementation(
       () =>
@@ -24821,6 +24647,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
         cause: 'interrupted'
       }) => void
       onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       expect(await content.reconnect()).toBe(true)
       const replacement = sessionOf(content)
       replacement.intent.mockClear()

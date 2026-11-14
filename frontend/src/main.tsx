@@ -128,7 +128,6 @@ import { applyTerminalFont, TERMINAL_FONT_KEY } from './terminal-font'
 import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expanded'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
-import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -2141,7 +2140,6 @@ function main(): void {
         applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
         applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
-        applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
         applyPetsSettings(
           snap.values[PETS_ENABLED_KEY],
           snap.values[PETS_SIZE_KEY],

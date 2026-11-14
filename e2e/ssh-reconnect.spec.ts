@@ -78,7 +78,8 @@ import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
-const OFFER = '.pane.active .nocx-reconnect-offer'
+const HEAD = '.pane.active [data-testid="connection-head"]'
+const RECONNECT = `${HEAD} .ui-button`
 const INDICATOR = '.pane.active .ui-connection-indicator'
 const BOUNDARY = '[data-reconnect-boundary="true"]'
 const RECONNECT_SETTING = '.ui-settings-row[data-key="ssh.reconnect"] select'
@@ -266,13 +267,14 @@ test('a silently dead connection is reported to the pane, and the shell is not t
     // notice, and the one the design says may not end a plain shell.
     w.proxy.blackhole()
 
-    // Nothing is offered while nothing has ended. The offer is the pane's
-    // statement that this session is GONE, and this session is not: it may be
-    // alive on the far side with whatever the person was running on it.
-    await expect(page.locator(OFFER)).toHaveCount(0)
+    // Nothing claims the session is gone while nothing has ended: the head is
+    // still a head, and no divider has been drawn.
+    await expect(page.locator(BOUNDARY)).toHaveCount(0)
+    await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
 
-    // Then the prober gives up and the pane says so — the mark, and the tab's
-    // own word for the same fact. One wait on the whole statement rather than
+    // Then the prober gives up and the pane says so — the mark, the tab's own
+    // word for the same fact, and the head stating the silence with the
+    // backend's offer to end it. One wait on the whole statement rather than
     // the badge alone, so a red run says which part the pane failed to make.
     // The poll's budget is the design's worst case (30 s) with room, and it is
     // a state arrived at, never a duration waited out.
@@ -285,12 +287,22 @@ test('a silently dead connection is reported to the pane, and the shell is not t
             .getAttribute('data-condition')
             .catch(() => null),
           tabWarnings: await page.locator('.nocx-tab-warning').count(),
-          offers: await page.locator(OFFER).count(),
+          headState: await page
+            .locator(HEAD)
+            .getAttribute('data-state')
+            .catch(() => null),
+          reconnect: await page.locator(RECONNECT).count(),
           boundaries: await page.locator(BOUNDARY).count(),
         }),
         { timeout: 60_000 },
       )
-      .toEqual({ condition: 'unreachable', tabWarnings: 1, offers: 0, boundaries: 0 })
+      .toEqual({
+        condition: 'unreachable',
+        tabWarnings: 1,
+        headState: 'stalled',
+        reconnect: 1,
+        boundaries: 0,
+      })
     await expect(page.locator(`${TAB}[aria-selected="true"] .nocx-tab-warning`)).toHaveAttribute(
       'aria-label',
       'Host not answering',
@@ -304,8 +316,8 @@ test('a silently dead connection is reported to the pane, and the shell is not t
     await expect(
       page.locator('.pane.active .cmd-block', { hasText: 'before-the-loss' }).first(),
     ).toBeVisible()
-    await expect(page.locator(`${OFFER} .ui-status-card[data-tone="danger"]`)).toHaveCount(0)
     await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
+    await expect(page.locator(HEAD)).toContainText('No answer')
   } finally {
     await unwire(page, w)
   }
@@ -337,23 +349,30 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     w.proxy.cut()
 
     // The pane says this session is GONE and offers the one action that can
-    // act — the mark, the card and the divider are one claim, so a red run
+    // act — the mark, the head and the divider are one claim, so a red run
     // says which part of it the pane failed to make. The tab's own word for it
     // is the loss, not the reachability mark.
     await expect
       .poll(
-        async () => ({
-          condition: await page
-            .locator(INDICATOR)
-            .first()
-            .getAttribute('data-condition')
-            .catch(() => null),
-          offers: await page.locator(OFFER).count(),
-          boundaries: await page.locator(BOUNDARY).count(),
-        }),
+        async () => {
+          const state = await page
+            .locator(HEAD)
+            .getAttribute('data-state')
+            .catch(() => null)
+          return {
+            condition: await page
+              .locator(INDICATOR)
+              .first()
+              .getAttribute('data-condition')
+              .catch(() => null),
+            gone: state === 'failed' || state === 'ended' || state === 'reconnecting',
+            reconnect: await page.locator(RECONNECT).count(),
+            boundaries: await page.locator(BOUNDARY).count(),
+          }
+        },
         { timeout: 60_000 },
       )
-      .toEqual({ condition: 'lost', offers: 1, boundaries: 0 })
+      .toEqual({ condition: 'lost', gone: true, reconnect: 1, boundaries: 0 })
 
     // The tab is marked and NOT closed — a lost session is still a place the
     // person was working, and closing it would throw away the scrollback this
@@ -369,11 +388,10 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
       'Connection lost',
     )
 
-    // The card says what a reconnect actually is. This is the product's
+    // The head says what a reconnect actually is. This is the product's
     // promise and it is deliberately not a resurrection: a NEW shell, and
     // whatever the old one was running may still be going on the host.
-    await expect(page.locator(`${OFFER} .ui-status-card[data-tone="danger"]`)).toBeVisible()
-    await expect(page.locator(`${OFFER} .ui-status-card__title`)).toContainText('is gone')
+    await expect(page.locator(HEAD)).toContainText(/Waiting for the server|Failed|Connection ended/)
 
     // The network is whole again — the relay is still listening, and only the
     // sockets it carried were destroyed. Without a working relay the reconnect
@@ -395,8 +413,9 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     await expect(
       page.locator('.pane.active .cmd-block', { hasText: 'before-the-loss' }).first(),
     ).toBeVisible()
-    // The mark is gone: the pane has a session again.
-    await expect(page.locator(OFFER)).toHaveCount(0)
+    // The head says connected and the mark is gone: the pane has a session
+    // again.
+    await expect(page.locator(HEAD)).toHaveAttribute('data-state', 'connected')
     await expect(page.locator(INDICATOR)).toHaveCount(0)
   } finally {
     await unwire(page, w)
@@ -430,7 +449,7 @@ test('a host that is merely answering late is marked slow and offered nothing', 
     // The promise this test exists for. The host is struggling, the session is
     // alive, and the product must not offer to replace it — nor mark the tab
     // as lost.
-    await expect(page.locator(OFFER)).toHaveCount(0)
+    await expect(page.locator(RECONNECT)).toHaveCount(0)
     await expect(page.locator(BOUNDARY)).toHaveCount(0)
     await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
 

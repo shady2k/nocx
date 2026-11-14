@@ -731,8 +731,22 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	if o == nil || (cfg.Kind != session.KindLocal && cfg.Kind != session.KindRemote) {
 		return transport.HostedSessionOpen{}, false, nil
 	}
+	return o.openHostedReusing(ctx, cfg, claim, false)
+}
+
+// ReopenHosted is the reconnect's open: the same path with the instruction to
+// close the destination's connection before it dials (design §5.3). It is the
+// local helper's own, because the offer that asks for it exists only for panes
+// this machine's helper dialed — a pane hosted by a far host's own helper has
+// no connection here to reconnect.
+func (o *localHelperOpener) ReopenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
+	return o.openHostedReusing(ctx, cfg, claim, true)
+}
+
+// openHostedReusing is OpenHosted with the one fact a reconnect adds.
+func (o *localHelperOpener) openHostedReusing(ctx context.Context, cfg session.Config, claim string, reconnect bool) (transport.HostedSessionOpen, bool, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		opened, selected, client, err := o.openHostedOnce(ctx, cfg, claim)
+		opened, selected, client, err := o.openHostedOnce(ctx, cfg, claim, reconnect)
 		if err == nil || attempt == 1 || !retryableLocalHelperOpen(err) {
 			return opened, selected, err
 		}
@@ -743,7 +757,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	return transport.HostedSessionOpen{}, true, errors.New("local helper open retry exhausted")
 }
 
-func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, *helperclient.Client, error) {
+func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Config, claim string, reconnect bool) (transport.HostedSessionOpen, bool, *helperclient.Client, error) {
 	if o == nil || (cfg.Kind != session.KindLocal && cfg.Kind != session.KindRemote) {
 		return transport.HostedSessionOpen{}, false, nil, nil
 	}
@@ -769,6 +783,7 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		// back to a conventional terminal is a product decision, and this is
 		// the composition root.
 		helloTimeout: lifecycle.HelloTimeout,
+		reconnect:    reconnect,
 		log:          o.log,
 	}
 	var res hostedSpawnResult
@@ -1207,10 +1222,14 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// default does (AD-8, one owner for that question).
 		Shell:       proto.SSHShellKind(cfg.Remote.Shell),
 		DesiredMode: proto.SSHMode(cfg.Remote.DesiredMode),
-		Cols:        cfg.Cols,
-		Rows:        cfg.Rows,
-		XPixel:      cfg.XPixel,
-		YPixel:      cfg.YPixel,
+		// THE RECONNECT'S ONE EXTRA INSTRUCTION (design §5.3): close the
+		// destination's connection before opening the shell, because a stalled
+		// one is still pooled and this shell would join it and park.
+		Reconnect: spawn.reconnect,
+		Cols:      cfg.Cols,
+		Rows:      cfg.Rows,
+		XPixel:    cfg.XPixel,
+		YPixel:    cfg.YPixel,
 		// NO Cwd, and the absence is the wire's rule rather than an omission:
 		// this generation cannot move a far login shell, so `spawn-ssh` refuses a
 		// non-empty cwd by name instead of accepting a value nothing acts on. The
@@ -2053,6 +2072,14 @@ type hostedOpeners struct {
 // hold is nil whenever no lease was taken (a local destination never reaches
 // here, and a refusal to hand one out returns no hold), and release is safe on
 // nil and idempotent — so no arm below tests for either.
+// ReopenHosted is the reconnect's door (design §5.3). It goes to THIS
+// machine's helper rather than through the dispatch, and that is the offer's own
+// scope: pane.connection exists for panes a local connection rides, so a pane
+// whose shell a far host's helper hosts never has a reconnect to press.
+func (h *hostedOpeners) ReopenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
+	return h.local.ReopenHosted(ctx, cfg, claim)
+}
+
 func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
 	if cfg.Kind == session.KindLocal {
 		return h.local.OpenHosted(ctx, cfg, claim)

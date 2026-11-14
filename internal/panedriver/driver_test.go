@@ -41,8 +41,14 @@ func (s *sent) last() panedriver.Snapshot {
 
 func newDriver(t *testing.T) (*panedriver.Driver, *sent) {
 	t.Helper()
+	return newDriverWith(t)
+}
+
+// newDriverWith is newDriver with options (a policy, a scheduler, an action).
+func newDriverWith(t *testing.T, opts ...panedriver.Option) (*panedriver.Driver, *sent) {
+	t.Helper()
 	out := &sent{}
-	d := panedriver.New("instance-1", log.NewSlogAdapter(nil))
+	d := panedriver.New("instance-1", log.NewSlogAdapter(nil), opts...)
 	d.SetPublisher(out.add)
 	return d, out
 }
@@ -249,4 +255,74 @@ func TestAStateWithoutItsCompanionIsRefused(t *testing.T) {
 	waittest.WaitFor(t, "the later observation", func() bool {
 		return out.last().Transport.State == proto.ConnectionConnected
 	})
+}
+
+// ── the reconnect offer and the policy (nocx-oalo1.5.4) ──────────────────
+
+func stalled(seq uint64, shells int) proto.ConnectionStateEvent {
+	at := time.Now().Add(-45 * time.Second).UTC().Format(time.RFC3339)
+	return proto.ConnectionStateEvent{
+		ConnectionID: "conn-a", Seq: seq, State: proto.ConnectionStalled,
+		StateMs: 45000, PlainShells: shells, LookAnsweredAt: at,
+	}
+}
+
+func reconnecting(seq uint64, attempt int, cause string) proto.ConnectionStateEvent {
+	return proto.ConnectionStateEvent{
+		ConnectionID: "conn-a", Seq: seq, State: proto.ConnectionReconnecting,
+		Attempt: attempt, Cause: cause, StateMs: 100,
+	}
+}
+
+// TestAHealthyPaneIsOfferedNothing is the ordinary case: a connected pane has
+// no button, because there is nothing to reconnect.
+func TestAHealthyPaneIsOfferedNothing(t *testing.T) {
+	d, out := newDriver(t)
+	d.Apply(connected(1, 1))
+	d.Bind("pane-1", "conn-a")
+	if snap := out.last(); snap.Reconnect != nil {
+		t.Fatalf("a connected pane offers %+v", snap.Reconnect)
+	}
+}
+
+// TestAStalledPlainShellOffersAReconnectNamingItsShells is Q3's other half and
+// design 5.4: the flow stopped answering, closing it would end the person's
+// work, so the person decides — and is told how many shells that is.
+func TestAStalledPlainShellOffersAReconnectNamingItsShells(t *testing.T) {
+	d, out := newDriver(t)
+	d.Apply(stalled(1, 1))
+	d.Bind("pane-1", "conn-a")
+	snap := out.last()
+	if snap.Reconnect == nil {
+		t.Fatal("a stalled plain-shell connection offers no reconnect")
+	}
+	if snap.Reconnect.EndsShells != 1 {
+		t.Fatalf("endsShells = %d, want 1", snap.Reconnect.EndsShells)
+	}
+}
+
+// TestStalledWithNoPlainShellOffersNothing: a helper-owned connection is the
+// supervisor's to put back; there is no work of the person's to end.
+func TestStalledWithNoPlainShellOffersNothing(t *testing.T) {
+	d, out := newDriver(t)
+	d.Apply(stalled(1, 0))
+	d.Bind("pane-1", "conn-a")
+	if snap := out.last(); snap.Reconnect != nil {
+		t.Fatalf("a stalled connection with no shell offers %+v", snap.Reconnect)
+	}
+}
+
+// TestADroppedPaneOffersTheButtonUnderEveryPolicy: ssh.reconnect decides what
+// the BACKEND does by itself, not whether a person may choose (design 5.4).
+func TestADroppedPaneOffersTheButtonUnderEveryPolicy(t *testing.T) {
+	for _, policy := range []string{panedriver.PolicyAuto, panedriver.PolicyAsk, panedriver.PolicyNever} {
+		t.Run(policy, func(t *testing.T) {
+			d, out := newDriverWith(t, panedriver.WithPolicy(func() string { return policy }))
+			d.Apply(reconnecting(1, 1, "lost-link"))
+			d.Bind("pane-1", "conn-a")
+			if snap := out.last(); snap.Reconnect == nil {
+				t.Fatalf("policy %q leaves a dropped pane with no button", policy)
+			}
+		})
+	}
 }

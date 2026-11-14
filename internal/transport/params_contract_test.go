@@ -720,6 +720,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"panes.setCwd": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006","cwd":"/tmp"}`),
 		},
+		// A press names the pane and the observation that offered the button
+		// (nocx-oalo1.5.4). Both are required: a press with no epoch is about
+		// a state nobody named, and the epoch is minted from 1.
+		"pane.reconnect": {
+			[]byte(`{"paneId":"pane-1","connectionEpoch":1}`),
+			[]byte(`{"paneId":"pane-1","connectionEpoch":9007199254740993}`),
+		},
 		"panes.close": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006"}`),
 		},

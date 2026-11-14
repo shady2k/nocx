@@ -13563,6 +13563,133 @@
       }
     },
     {
+      "name": "pane.reconnect",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/pane.reconnect.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "pane.reconnect",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [
+              {
+                "kind": "session",
+                "name": "",
+                "mode": "key"
+              }
+            ],
+            "dependencies": [
+              "session",
+              "helper",
+              "ssh",
+              "config",
+              "vault"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 300000,
+          "basis": "read",
+          "note": "read: the reconnect closes a connection, dials, installs and launches a shell — the same work `open` declares and with no explicit bound today"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "deadline",
+          "millis": 10000,
+          "basis": "read",
+          "note": "read: a reconnect that produced no shell must release the session it retired, like the open's own rollback"
+        },
+        "merge": "none",
+        "waiting": "Reconnecting your pane",
+        "row": "past-wait",
+        "expired": "outcome-unknown",
+        "resources": [
+          {
+            "kind": "session",
+            "name": "",
+            "mode": "key"
+          }
+        ],
+        "dependencies": [
+          "session",
+          "helper",
+          "ssh",
+          "config",
+          "vault"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "pane.reconnectResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/open.schema.json"
+        }
+      }
+    },
+    {
       "name": "panes.close",
       "params": [
         {

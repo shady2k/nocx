@@ -76,7 +76,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.tab.placement.option.vertical': 'Vertical',
   'settings.ssh.reconnect.label': 'When an SSH connection is lost',
   'settings.ssh.reconnect.description':
-    'Ask offers a button on the tab. Automatically opens a new shell at the same endpoint by itself, and falls back to the button when the attempts are spent. Never leaves the tab alone with the button. In every case the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.',
+    'Automatically opens a new shell at the same endpoint by itself, retrying with a backoff that caps at fifteen seconds. Ask offers a button on the tab instead. Never leaves the tab alone with the button. In every case the button is still there, the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.',
   'settings.ssh.reconnect.option.ask': 'Ask',
   'settings.ssh.reconnect.option.auto': 'Automatically',
   'settings.ssh.reconnect.option.never': 'Never',

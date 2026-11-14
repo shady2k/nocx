@@ -7,6 +7,8 @@ package app
 // absence of the count on an opening one.
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,4 +74,38 @@ func TestPaneConnectionWireKeepsThePresenceRulesOfTheState(t *testing.T) {
 	if stalled.Quality == nil || stalled.Quality.RoundTripMS != 620 || !stalled.Quality.Slow {
 		t.Fatalf("quality = %+v", stalled.Quality)
 	}
+	if stalled.Reconnect != nil {
+		t.Fatalf("a pane with no offer carried %+v", stalled.Reconnect)
+	}
+}
+
+// TestPaneConnectionWireCarriesTheOfferOnlyWhenThereIsOne: the object's
+// PRESENCE is the button (design §5.8), so nil and an empty object are not the
+// same statement.
+func TestPaneConnectionWireCarriesTheOfferOnlyWhenThereIsOne(t *testing.T) {
+	offered := paneConnectionWire(panedriver.Snapshot{
+		PaneID: "pane-1", ConnectionID: "conn-1", ConnectionEpoch: 2,
+		InstanceID: "instance-1",
+		Transport:  panedriver.Transport{State: "stalled", StateMs: 45000, PlainShells: 1, HasPlainShells: true},
+		Reconnect:  &panedriver.Reconnect{EndsShells: 1},
+		Attempt:    panedriver.Attempt{Shown: "none", Candidate: "none"},
+		ObservedAt: time.Now(),
+	})
+	if offered.Reconnect == nil || offered.Reconnect.EndsShells != 1 {
+		t.Fatalf("offer = %+v, want endsShells 1", offered.Reconnect)
+	}
+	if !strings.Contains(mustJSON(t, offered), `"reconnect":{"endsShells":1}`) {
+		t.Fatalf("the offer does not marshal as the contract's shape: %s", mustJSON(t, offered))
+	}
+}
+
+// mustJSON renders a payload the way the wire would, for the shape assertion
+// above: a pointer to zero must be present, not omitted.
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(raw)
 }

@@ -49,12 +49,17 @@ func paneConnectionStates() map[string]PaneConnection {
 	stalled.Transport.StateMs = 45000
 	stalled.Transport.LookAnsweredAt = "2026-11-14T07:00:20Z"
 	stalled.Quality = &PaneConnectionQuality{Slow: true, RoundTripMS: 620}
+	// The offer, naming the two shells a press would end (nocx-oalo1.5.4).
+	stalled.Reconnect = &PaneConnectionReconnect{EndsShells: 2}
 
 	reconnecting := base(5, "reconnecting")
 	reconnecting.Transport.Attempt = 3
 
 	failed := base(6, "failed")
 	failed.Transport.Cause = "host-key-changed"
+	// A dropped connection whose shells already ended: the button is there and
+	// ENDS NOTHING, which is a real answer and not an absent one.
+	failed.Reconnect = &PaneConnectionReconnect{EndsShells: 0}
 
 	ended := base(7, "ended")
 	ended.Transport.Cause = "released"
@@ -109,7 +114,7 @@ func TestPaneConnectionOverTheWireConformsToContract(t *testing.T) {
 	defer stop()
 	conn := connectWS(t, ws)
 	wc := soleWSConn(t, ws)
-	ws.bindPane("pane-1", wc)
+	ws.bindPane("pane-1", wc, newConnState(), openParams{PaneID: "pane-1", Cols: 80, Rows: 24})
 
 	// ONE EPOCH PER OBSERVATION, in a fixed order: the publisher refuses a
 	// sequence that is not newer, and a map's order would make the first
@@ -144,7 +149,7 @@ func TestPaneConnectionRefusesAnEpochItHasAlreadyPassed(t *testing.T) {
 	defer stop()
 	conn := connectWS(t, ws)
 	wc := soleWSConn(t, ws)
-	ws.bindPane("pane-1", wc)
+	ws.bindPane("pane-1", wc, newConnState(), openParams{PaneID: "pane-1", Cols: 80, Rows: 24})
 
 	state := paneConnectionStates()["opening"]
 	for _, epoch := range []uint64{1, 2, 1, 3} {

@@ -50,6 +50,12 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 			RoundTripMS: s.Quality.RoundTripMs,
 		}
 	}
+	// THE OFFER'S PRESENCE IS THE BUTTON (design §5.8): a nil object means no
+	// action is shown, so an empty one could never stand for "offered, ends
+	// nothing".
+	if s.Reconnect != nil {
+		p.Reconnect = &transport.PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
+	}
 	return p
 }
 

@@ -28,7 +28,9 @@
 package panedriver
 
 import (
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -57,6 +59,38 @@ type Quality struct {
 	Slow        bool
 }
 
+// Reconnect is the one action a person may take on this pane (design §5.6,
+// §5.8). Its PRESENCE is the offer; EndsShells is how many shells would end if
+// it is pressed, hops included (design §5.4).
+type Reconnect struct {
+	EndsShells int
+}
+
+// Reconnect policies, spelling settings.SSHReconnect's values. They are restated
+// here rather than imported because this package must not depend on the settings
+// store: the policy is a value the composition root reads, not a store this
+// package queries.
+const (
+	PolicyAuto  = "auto"
+	PolicyAsk   = "ask"
+	PolicyNever = "never"
+)
+
+// The refusals a press can meet, each a different sentence for the surface that
+// sent it (the transport maps them to wire refusals).
+var (
+	// ErrUnknownPane is a reconnect for a pane this driver was never told about.
+	ErrUnknownPane = errors.New("panedriver: no such pane")
+	// ErrStaleEpoch is a press about a connection state that has moved on.
+	ErrStaleEpoch = errors.New("panedriver: the connection epoch is stale")
+	// ErrNoOffer means nothing on this pane can be pressed: a healthy
+	// connection has no button, and a withdrawn one is not offered again by an
+	// old frame.
+	ErrNoOffer = errors.New("panedriver: no reconnect is offered for this pane")
+	// ErrReconnecting is a second press while one reconnect is running.
+	ErrReconnecting = errors.New("panedriver: a reconnect is already running for this pane")
+)
+
 // Attempt is the open order's state. Until the open order lands every member is
 // `none`, and the values are carried so a later stage needs no new shape.
 type Attempt struct {
@@ -75,7 +109,10 @@ type Snapshot struct {
 	Transport       Transport
 	Quality         *Quality
 	Attempt         Attempt
-	ObservedAt      time.Time
+	// Reconnect is present exactly when the backend offers the person the
+	// action on this observation.
+	Reconnect  *Reconnect
+	ObservedAt time.Time
 }
 
 // Driver maps connection observations to the panes bound to them.
@@ -93,6 +130,28 @@ type Driver struct {
 	// the state the connection is already in — the ordinary case for a second
 	// pane on a host that is already connected.
 	conns map[string]*connection
+
+	// policy answers ssh.reconnect's value. Nil is never, the conservative
+	// answer: nothing reconnects by itself until the composition root says so.
+	policy func() string
+	// action carries a reconnect out. It is the transport's one path, and this
+	// package decides WHEN it is called — that is the whole split.
+	action func(paneID string, epoch uint64) error
+	// schedule runs fn after d, answering a cancel. It is injected so the
+	// fault harness's clock is the test's, never a sleep's.
+	schedule func(d time.Duration, fn func()) (cancel func())
+	// jitter perturbs a backoff, so a hundred panes dropped by one router
+	// restart do not all redial in the same millisecond.
+	jitter func(time.Duration) time.Duration
+	// inFlight is the panes a reconnect is being carried out for, whoever
+	// asked. The automatic retry must not start beside a person's press.
+	inFlight map[string]bool
+	// autos is the pending automatic retry of each pane, so a newer
+	// observation can cancel it, and autoSeq identifies the one that is live:
+	// a timer cancelled as it fired may still run, and only the newest may
+	// act.
+	autos   map[string]func()
+	autoSeq map[string]uint64
 }
 
 // binding is one pane's side: which connection it rides, how many observations
@@ -113,17 +172,81 @@ type connection struct {
 	panes     map[string]struct{}
 }
 
+// Option configures a Driver.
+type Option func(*Driver)
+
+// WithPolicy is the value of ssh.reconnect, read per decision rather than
+// captured at construction: a person who changes it must change what happens
+// to the NEXT dropped pane.
+func WithPolicy(policy func() string) Option {
+	return func(d *Driver) {
+		if policy != nil {
+			d.policy = policy
+		}
+	}
+}
+
 // New builds the driver over one backend instance.
-func New(instanceID string, logger log.Logger) *Driver {
+func New(instanceID string, logger log.Logger, opts ...Option) *Driver {
 	if logger == nil {
 		logger = log.NewSlogAdapter(nil)
 	}
-	return &Driver{
+	d := &Driver{
 		log:      logger,
 		instance: instanceID,
 		panes:    make(map[string]*binding),
 		conns:    make(map[string]*connection),
+		schedule: func(delay time.Duration, fn func()) func() {
+			return afterFunc(delay, fn)
+		},
+		jitter:   jitterBy20Percent,
+		inFlight: make(map[string]bool),
+		autos:    make(map[string]func()),
+		autoSeq:  make(map[string]uint64),
 	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
+}
+
+// SetAction installs the one function that carries a reconnect out. It is a
+// setter because the transport is built after the opener that opens panes, the
+// same late-binding the publisher uses; until it is set, a reconnect is not
+// attempted by itself.
+func (d *Driver) SetAction(fn func(paneID string, epoch uint64) error) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.action = fn
+	d.mu.Unlock()
+}
+
+// ReconnectStarted and ReconnectFinished bracket an action somebody else is
+// carrying out — the transport's answer to a person's press — so the automatic
+// retry does not start beside it.
+func (d *Driver) ReconnectStarted(paneID string) {
+	if d == nil || paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	d.inFlight[paneID] = true
+	if cancel := d.autos[paneID]; cancel != nil {
+		cancel()
+		delete(d.autos, paneID)
+	}
+	d.mu.Unlock()
+}
+
+// ReconnectFinished ends the interval ReconnectStarted opened.
+func (d *Driver) ReconnectFinished(paneID string) {
+	if d == nil || paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	delete(d.inFlight, paneID)
+	d.mu.Unlock()
 }
 
 // SetPublisher installs the one function snapshots leave through. It is a
@@ -179,6 +302,7 @@ func (d *Driver) Bind(paneID, connectionID string) {
 		return
 	}
 	snap := d.snapshotLocked(paneID, b, c)
+	d.autoLocked(paneID)
 	d.mu.Unlock()
 	d.emit(snap)
 }
@@ -216,6 +340,7 @@ func (d *Driver) AdoptSession(paneID, sessionID, instanceID string) {
 		return
 	}
 	snap := d.snapshotLocked(paneID, b, c)
+	d.autoLocked(paneID)
 	d.mu.Unlock()
 	d.emit(snap)
 }
@@ -252,6 +377,7 @@ func (d *Driver) Apply(ev proto.ConnectionStateEvent) {
 	for paneID := range c.panes {
 		if b := d.panes[paneID]; b != nil {
 			snaps = append(snaps, d.snapshotLocked(paneID, b, c))
+			d.autoLocked(paneID)
 		}
 	}
 	d.mu.Unlock()
@@ -274,6 +400,7 @@ func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapsh
 		Transport:       c.transport,
 		Quality:         c.quality,
 		Attempt:         Attempt{Shown: "none", Candidate: "none"},
+		Reconnect:       offerFor(c.transport),
 		ObservedAt:      time.Now(),
 	}
 }
@@ -287,6 +414,163 @@ func (d *Driver) emit(s Snapshot) {
 	if publish != nil {
 		publish(s)
 	}
+}
+
+// offerFor answers whether this observation offers the person a Reconnect, and
+// what pressing it would end.
+//
+// THE OFFER DOES NOT DEPEND ON THE POLICY (design §5.4, §5.8). `ask` and
+// `never` differ in what the backend does BY ITSELF, not in whether a person
+// may choose; `auto` reconnects without asking and still shows the button while
+// an attempt is in flight. So the rule is about the connection's state only:
+//
+//   - stalled with a plain shell: the flow has stopped answering and closing it
+//     would end work, so the person is the one who decides (§5.3), and the
+//     number they are told is the shells the connection carries, hops included.
+//   - reconnecting, failed, ended: the connection is not usable; pressing is
+//     the way out (§5.3, "Reconnect is the way out").
+//   - opening, waiting_person, connected: nothing to reconnect.
+func offerFor(t Transport) *Reconnect {
+	switch t.State {
+	case proto.ConnectionStalled:
+		if t.HasPlainShells && t.PlainShells > 0 {
+			return &Reconnect{EndsShells: t.PlainShells}
+		}
+		return nil
+	case proto.ConnectionReconnecting, proto.ConnectionFailed, proto.ConnectionEnded:
+		ends := 0
+		if t.HasPlainShells {
+			ends = t.PlainShells
+		}
+		return &Reconnect{EndsShells: ends}
+	}
+	return nil
+}
+
+// The automatic retry's backoff (design §5.3): capped at fifteen seconds of
+// waiting between attempts, with no attempt limit — the cap replaced the old
+// three-attempt one.
+const (
+	autoBackoffBase = 500 * time.Millisecond
+	autoBackoffCap  = 15 * time.Second
+)
+
+// autoLocked cancels this pane's pending automatic retry and, when the state
+// still warrants one, schedules it. Called with the mutex held, after the
+// pane's observation was produced.
+func (d *Driver) autoLocked(paneID string) {
+	if cancel := d.autos[paneID]; cancel != nil {
+		cancel()
+		delete(d.autos, paneID)
+	}
+	if d.action == nil || d.policy == nil || d.policy() != PolicyAuto {
+		return
+	}
+	b := d.panes[paneID]
+	if b == nil || d.inFlight[paneID] {
+		return
+	}
+	c := d.conns[b.connectionID]
+	if c == nil || !retryable(c.transport) {
+		return
+	}
+	attempt := c.transport.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
+	d.autoSeq[paneID]++
+	seq := d.autoSeq[paneID]
+	d.autos[paneID] = d.schedule(d.backoff(attempt), func() {
+		d.mu.Lock()
+		live := d.autoSeq[paneID] == seq
+		if live {
+			delete(d.autos, paneID)
+		}
+		d.mu.Unlock()
+		if live {
+			d.runAuto(paneID)
+		}
+	})
+}
+
+// afterFunc is the production scheduler: one timer, cancellable.
+func afterFunc(delay time.Duration, fn func()) func() {
+	timer := time.AfterFunc(delay, fn)
+	return func() { timer.Stop() }
+}
+
+// jitterBy20Percent spreads a backoff by up to a fifth either way. A hundred
+// panes dropped by one router restart must not redial in the same millisecond,
+// and a retry storm is the one thing a reconnect policy can make worse.
+func jitterBy20Percent(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return delay
+	}
+	spread := int64(delay) / 5
+	if spread <= 0 {
+		return delay
+	}
+	//nolint:gosec // a retry delay is not a secret: predictability here only spreads one host's retries
+	return delay + time.Duration(rand.Int64N(2*spread+1)-spread)
+}
+
+// retryable says whether the backend may put this connection back by itself:
+// the transport ended under a held connection (network-class), and not a
+// refusal a retry cannot change, nor the policy's own silence close.
+func retryable(t Transport) bool {
+	return t.State == proto.ConnectionReconnecting && t.Cause == causeLostLink
+}
+
+// causeLostLink is hostconn.CauseLostLink's spelling on the wire; restated here
+// rather than imported for the same reason the state names are.
+const causeLostLink = "lost-link"
+
+// backoff is the wait before the next automatic attempt: exponential from half
+// a second, capped at fifteen seconds, then jittered.
+func (d *Driver) backoff(attempt int) time.Duration {
+	delay := autoBackoffBase
+	for i := 1; i < attempt && delay < autoBackoffCap; i++ {
+		delay *= 2
+	}
+	if delay > autoBackoffCap {
+		delay = autoBackoffCap
+	}
+	return d.jitter(delay)
+}
+
+// runAuto carries one automatic attempt out, if it is still warranted when the
+// timer fires. An observation that replaced the timer has advanced the pane's
+// sequence and that older closure never reaches here.
+func (d *Driver) runAuto(paneID string) {
+	d.mu.Lock()
+	if d.inFlight[paneID] || d.action == nil || d.policy == nil || d.policy() != PolicyAuto {
+		d.mu.Unlock()
+		return
+	}
+	b := d.panes[paneID]
+	if b == nil {
+		d.mu.Unlock()
+		return
+	}
+	c := d.conns[b.connectionID]
+	if c == nil || !retryable(c.transport) {
+		d.mu.Unlock()
+		return
+	}
+	// The epoch at the moment of the attempt is what a press would have
+	// carried; the transport does not re-check it on the automatic path.
+	epoch := b.epoch
+	d.inFlight[paneID] = true
+	action := d.action
+	d.mu.Unlock()
+
+	err := action(paneID, epoch)
+	if err != nil {
+		d.log.Debug("panedriver: the automatic reconnect did not open a shell", "pane", paneID, "error", err)
+	}
+	d.mu.Lock()
+	delete(d.inFlight, paneID)
+	d.mu.Unlock()
 }
 
 // fromEvent converts the helper protocol's event into this package's neutral

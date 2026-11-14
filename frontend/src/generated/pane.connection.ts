@@ -131,4 +131,13 @@ export interface PaneConnection {
    * When the backend observed this, RFC3339 in UTC. The projection's freshness, which is a different question from its order: connectionEpoch decides which of two observations is newer, and this says how old the belief is when it is displayed.
    */
   observedAt: string
+  /**
+   * The one action a person may take on this pane (design §5.4, §5.6; nocx-oalo1.5.4). Its PRESENCE is the offer: an object means Reconnect is shown, and its absence means nothing is offered. It does not depend on ssh.reconnect — that setting decides what the BACKEND does by itself, and every value leaves the person a way out. endsShells is how many shells would end if it is pressed, from the connection's plain-shell count, hops included; 0 is a real answer (a connection carrying only helper-owned work), and it is what makes 'Reconnect ends 2 shells' sayable.
+   */
+  reconnect?: {
+    /**
+     * How many plain shells would end if the action is taken: the connection's own, plus those of every connection dialled through it. A pane whose connection is already gone reports 0 — those shells already ended.
+     */
+    endsShells: number
+  }
 }

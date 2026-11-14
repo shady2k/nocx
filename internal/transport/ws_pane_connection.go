@@ -38,15 +38,16 @@ package transport
 // plain shell says plainShells 0, while an opening connection must not carry the
 // key at all. A value with omitempty cannot express the first.
 type PaneConnection struct {
-	PaneID          string                  `json:"paneId"`
-	ConnectionID    string                  `json:"connectionId"`
-	ConnectionEpoch uint64                  `json:"connectionEpoch"`
-	InstanceID      string                  `json:"instanceId"`
-	SessionID       string                  `json:"sessionId,omitempty"`
-	Transport       PaneConnectionTransport `json:"transport"`
-	Quality         *PaneConnectionQuality  `json:"quality,omitempty"`
-	Attempt         PaneConnectionAttempt   `json:"attempt"`
-	ObservedAt      string                  `json:"observedAt"`
+	PaneID          string                   `json:"paneId"`
+	ConnectionID    string                   `json:"connectionId"`
+	ConnectionEpoch uint64                   `json:"connectionEpoch"`
+	InstanceID      string                   `json:"instanceId"`
+	SessionID       string                   `json:"sessionId,omitempty"`
+	Transport       PaneConnectionTransport  `json:"transport"`
+	Quality         *PaneConnectionQuality   `json:"quality,omitempty"`
+	Attempt         PaneConnectionAttempt    `json:"attempt"`
+	Reconnect       *PaneConnectionReconnect `json:"reconnect,omitempty"`
+	ObservedAt      string                   `json:"observedAt"`
 }
 
 // PaneConnectionTransport is the state, with exactly the fields that state
@@ -80,20 +81,58 @@ type PaneConnectionAttempt struct {
 	Reason    string `json:"reason"`
 }
 
+// PaneConnectionReconnect is the one action a person may take on this pane
+// (design §5.6, §5.8). Its PRESENCE is the offer: an object means Reconnect is
+// shown, and its absence means nothing is offered on this pane.
+//
+// EndsShells is how many shells would end if it is pressed — the connection's
+// plain shells, hops included (design §5.4: "it asks first, naming how many
+// plain shells end"). Zero is a real answer: a pane whose connection carries
+// only helper-owned work ends nothing a person was using.
+type PaneConnectionReconnect struct {
+	EndsShells int `json:"endsShells"`
+}
+
+// paneRecord is what the backend keeps about one pane it opened: who is told
+// about it, the open that made it (which a reconnect replays), and whether the
+// last notification offered the person a Reconnect.
+//
+// The PARAMS are here and not on the driver because they are the wire's own
+// open request, and a reconnect is the same open run again: the pane's profile,
+// host, size and shell are facts the open stated, and nothing can re-derive
+// them once the pane's session is gone.
+type paneRecord struct {
+	wconn  *wsConn
+	state  *connState
+	params openParams
+	// offer is the last published answer to "may this person press Reconnect".
+	// The RPC refuses unless an offer stands, and it is the SAME value the
+	// renderer was told, so the button and the call cannot disagree.
+	offer bool
+}
+
 // bindPane records that this connection is the one a pane's notifications go
-// to. It is called before the open's own work starts: the first observation can
-// arrive while the dial is still running, and a subscription installed after
-// the ack would miss exactly the stage the pane exists for.
-func (s *WSServer) bindPane(paneID string, wconn *wsConn) {
+// to, and the open that created it. It is called before the open's own work
+// starts: the first observation can arrive while the dial is still running, and
+// a subscription installed after the ack would miss exactly the stage the pane
+// exists for.
+func (s *WSServer) bindPane(paneID string, wconn *wsConn, state *connState, params openParams) {
 	if paneID == "" || wconn == nil {
 		return
 	}
 	s.paneMu.Lock()
-	if s.paneSubs == nil {
-		s.paneSubs = make(map[string]*wsConn)
+	if s.paneRecords == nil {
+		s.paneRecords = make(map[string]*paneRecord)
 	}
-	s.paneSubs[paneID] = wconn
+	s.paneRecords[paneID] = &paneRecord{wconn: wconn, state: state, params: params}
 	s.paneMu.Unlock()
+}
+
+// paneRecordOf answers one pane's backend record, or nil.
+func (s *WSServer) paneRecordOf(paneID string) *paneRecord {
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	return s.paneRecords[paneID]
 }
 
 // unbindPanesFor drops every pane this connection opened. A pane's state lives
@@ -104,9 +143,9 @@ func (s *WSServer) unbindPanesFor(wconn *wsConn) {
 	}
 	s.paneMu.Lock()
 	defer s.paneMu.Unlock()
-	for paneID, sub := range s.paneSubs {
-		if sub == wconn {
-			delete(s.paneSubs, paneID)
+	for paneID, rec := range s.paneRecords {
+		if rec.wconn == wconn {
+			delete(s.paneRecords, paneID)
 		}
 	}
 }
@@ -131,7 +170,12 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 		s.paneEpochs = make(map[string]uint64)
 	}
 	s.paneEpochs[p.PaneID] = p.ConnectionEpoch
-	wconn := s.paneSubs[p.PaneID]
+	rec := s.paneRecords[p.PaneID]
+	var wconn *wsConn
+	if rec != nil {
+		rec.offer = p.Reconnect != nil
+		wconn = rec.wconn
+	}
 	s.paneMu.Unlock()
 	if wconn == nil {
 		return

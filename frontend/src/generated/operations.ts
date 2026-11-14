@@ -1175,6 +1175,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 1000,
     answerMs: null,
   },
+  'pane.reconnect': {
+    waiting: 'Reconnecting your pane',
+    row: 'past-wait',
+    expired: 'outcome-unknown',
+    merge: 'none',
+    domain: 'session',
+    turnMs: 30000,
+    maxMs: 300000,
+    answerMs: null,
+  },
   'panes.close': {
     waiting: 'Changing the pane layout',
     row: 'past-wait',

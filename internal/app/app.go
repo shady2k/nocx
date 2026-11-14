@@ -828,13 +828,6 @@ func New(opts ...Option) (*App, error) {
 	// Reg.Open says so by name when something asks it for a local session
 	// anyway, in the same words it has always used for a missing ssh factory.
 	sess := session.New(logger, nil)
-	// THE PANE'S CONNECTION MAP, built with the registry so its instance id is
-	// the one every notification carries (design §5.6). The publisher is bound
-	// later, when the transport exists — the same late-binding the opener's
-	// other transport halves get — and until then nothing is attached to hear
-	// an observation.
-	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger))
-	localOpener.paneConns = paneConns
 
 	// SSH config resolver: shared by both the SSH client and the profile
 	// resolver so the authorization comparison matches canonical hostnames.
@@ -1121,6 +1114,25 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
+	// THE PANE'S CONNECTION MAP (design §5.6, §5.3): built once the settings
+	// it consults exist, because ssh.reconnect is read per decision — a person
+	// who changes it must change what happens to the NEXT dropped pane. The
+	// publisher and the action are bound later, when the transport exists, the
+	// same late-binding the opener's other transport halves get; until then
+	// nothing is attached to hear an observation and nothing reconnects by
+	// itself.
+	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger),
+		panedriver.WithPolicy(func() string {
+			value, readErr := settingsRegistry.GetSelect(settings.SSHReconnect)
+			if readErr != nil {
+				// A registry that cannot answer is the CONSERVATIVE answer:
+				// nothing reconnects without a person. `auto` is the default
+				// VALUE, not a default for a failed read.
+				return panedriver.PolicyNever
+			}
+			return value
+		}))
+	localOpener.paneConns = paneConns
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -2123,6 +2135,10 @@ func New(opts ...Option) (*App, error) {
 		// enroller closes the same interval by lane on the shell's own
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
+	// The policy owner's in-flight notice (design §5.1.1: transport declares the
+	// seam it calls, the root adapts). It is how a person's press tells the
+	// automatic retry not to start beside it.
+	tpOpts = append(tpOpts, transport.WithPaneReconnections(paneConns))
 	tpOpts = append(tpOpts, transport.WithDiagnostics(diag, appDiagnosticsProvider{
 		opener: localOpener, logPath: logFilePath,
 	}))
@@ -2139,6 +2155,14 @@ func New(opts ...Option) (*App, error) {
 	// refuses an epoch it has already moved past.
 	paneConns.SetPublisher(func(snapshot panedriver.Snapshot) {
 		tp.PublishPaneConnection(paneConnectionWire(snapshot))
+	})
+	// THE OTHER DIRECTION, and the reason the policy has one owner: under
+	// `auto` the driver decides a pane should come back and asks the transport
+	// to do it, through the SAME path a person's press takes. The context is
+	// the server's, not the request's: an automatic reconnect must outlive the
+	// frame that caused it.
+	paneConns.SetAction(func(paneID string, _ uint64) error {
+		return tp.ReconnectPane(context.Background(), paneID)
 	})
 	helperReg.publishEffect = tp.PublishSessionEffect
 	helperReg.blockRows = tp

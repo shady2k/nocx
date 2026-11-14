@@ -97,6 +97,15 @@ type OpenSpec struct {
 	// pane beside an existing one reads it from that owner. This field
 	// carries the answer; it does not decide it.
 	Cwd string
+	// Reconnect says this open is a REOPEN of a pane whose shell died: close
+	// the pane's existing connection before anything dials (design §5.3:
+	// "Reconnect closes the socket first"). A stalled connection is still
+	// pooled, so without it the new shell joins the dead flow and parks.
+	//
+	// It is a fact about the REQUEST and not about the session: the config a
+	// reconnect produces is an ordinary session's, and the next open of this
+	// pane joins connections as every other open does.
+	Reconnect bool
 }
 
 // OpenedSession is a session that exists, together with the facts a caller
@@ -340,7 +349,7 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSessio
 	dialErr := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		// THE HELPER IS ASKED FIRST, for both kinds of destination.
 		if o.helper != nil {
-			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
+			openedHosted, selected, oerr := o.openThroughHelper(ctx, cfg, claim, spec.Reconnect)
 			if selected {
 				if oerr != nil {
 					return oerr
@@ -441,6 +450,31 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSessio
 		OwnedProcessPID: ownedPID,
 		WorkspaceID:     workspaceID,
 	}, nil
+}
+
+// helperSessionReopener is the helper opener's reconnect door: the same open,
+// asked for a pane whose shell died, with the instruction to end the
+// destination's existing connection first (design §5.3).
+//
+// It is a CAPABILITY and not a parameter because the flag is a fact about this
+// request alone. Putting it on session.Config would write a per-open instruction
+// into the record that outlives the open and means nothing on the session it
+// produced; an opener that cannot reopen keeps the ordinary path, and the one
+// implementation here is the local helper's.
+type helperSessionReopener interface {
+	ReopenHosted(ctx context.Context, cfg session.Config, claim string) (HostedSessionOpen, bool, error)
+}
+
+// openThroughHelper asks the helper for a session, by the one path that matches
+// the request: a reconnect must close the old connection first, and an open
+// must join what is there.
+func (o *sessionOpener) openThroughHelper(ctx context.Context, cfg session.Config, claim string, reconnect bool) (HostedSessionOpen, bool, error) {
+	if reconnect {
+		if reopener, ok := o.helper.(helperSessionReopener); ok {
+			return reopener.ReopenHosted(ctx, cfg, claim)
+		}
+	}
+	return o.helper.OpenHosted(ctx, cfg, claim)
 }
 
 // resolveRemote fills cfg's remote half. It is phase one's whole ssh body and

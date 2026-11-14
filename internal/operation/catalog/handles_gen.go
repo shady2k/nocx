@@ -151,6 +151,7 @@ var (
 	OpNotifyRaise                     = methodHandle("notify.raise")
 	OpOpen                            = methodHandle("open")
 	OpOperationOutcome                = methodHandle("operation.outcome")
+	OpPaneReconnect                   = methodHandle("pane.reconnect")
 	OpPanesClose                      = methodHandle("panes.close")
 	OpPanesCreate                     = methodHandle("panes.create")
 	OpPanesMove                       = methodHandle("panes.move")

@@ -107,7 +107,12 @@ type hostedSpawn struct {
 	cursors lifecycleCursorStore
 	// stopping is the coordinator's stopping signal. Nil never stops.
 	stopping *atomic.Bool
-	log      *slog.Logger
+	// reconnect asks the helper to close the destination's existing connection
+	// before it opens the shell (design §5.3: "Reconnect closes the socket
+	// first"). It is this REQUEST's fact, never the session's: the same pane
+	// opened normally joins whatever connection exists.
+	reconnect bool
+	log       *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a

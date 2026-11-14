@@ -142,7 +142,7 @@ type openMachine interface {
 	// the first observation can arrive while the dial is still opening, and a
 	// binding installed after the ack would miss the stage the pane exists
 	// for.
-	bindPane(paneID string, wconn *wsConn)
+	bindPane(paneID string, wconn *wsConn, state *connState, params openParams)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -317,7 +317,16 @@ func isLineageRefusal(err error) bool {
 // are the same answer to the caller, which asked for a terminal and did not
 // get one — so the mapping lives in one place rather than being written
 // twice and drifting once.
+// errOpenShuttingDown is the open path's own refusal when the server began
+// stopping between the dial and the ring: the session exists and cannot be
+// given to a subscriber, so it is closed and named.
+var errOpenShuttingDown = errors.New("server shutting down")
+
 func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req jsonrpcRequest, err error) {
+	if errors.Is(err, errOpenShuttingDown) {
+		_ = respond(r, newJSONRPCError(req.ID, -32603, "Internal error: server shutting down"))
+		return
+	}
 	// A refusal the open path produced itself carries the sentence a person
 	// reads, and it is answered FIRST so nothing below can flatten it. The
 	// ssh taxonomy two paragraphs down would turn "SSH sessions not
@@ -424,6 +433,8 @@ func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req js
 // request id serves as the correlation-id — we do NOT add a second
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
+// handleOpen answers the `open` method: parse, run the one open path, and answer
+// with its result or its refusal.
 func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
@@ -448,6 +459,25 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		defer reporter.End()
 	}
 
+	_, err := h.openInto(ctx, wconn, state, params, false, func(result openResult) {
+		resultJSON, _ := json.Marshal(result)
+		_ = respond(r, newJSONRPCResult(req.ID, resultJSON))
+	})
+	if err != nil {
+		h.answerOpenFailure(ctx, r, req, err)
+	}
+}
+
+// openInto is THE ONE OPEN PATH: a session is created for a pane and every fact
+// that hangs off it is wired, with the acknowledgement at the point the wire
+// requires it (AD-7: before any session-scoped notification). `open` answers
+// its ack through ack; `pane.reconnect` does the same work for a pane whose
+// shell died, which is why this is one function and not a second beside it.
+//
+// reconnect asks the opener to close the pane's existing connection before it
+// dials (design §5.3: "Reconnect closes the socket first"); nothing else about
+// the path differs, and nothing about a reconnect re-runs a command.
+func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, reconnect bool, ack func(openResult)) (openResult, error) {
 	spec := OpenSpec{
 		PaneID: params.PaneID,
 		Kind:   params.Kind,
@@ -462,6 +492,10 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		DesiredMode: params.DesiredMode,
 		Shell:       params.Shell,
 		Cwd:         params.Cwd,
+		// A RECONNECT IS THE SAME OPEN WITH ONE EXTRA INSTRUCTION (design
+		// §5.3): close the pane's connection first, because a stalled one is
+		// still pooled and a new shell would join it rather than dial.
+		Reconnect: reconnect,
 	}
 	if params.Parent != nil {
 		spec.Parent = &session.Ref{
@@ -477,12 +511,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// The connection's first observation is opening, and it is the pane's
 	// first news; binding after the open returned would deliver it to nobody.
 	// A pane with no id has no renderer to address and is not bound.
-	h.sess.bindPane(params.PaneID, wconn)
+	h.sess.bindPane(params.PaneID, wconn, state, params)
 
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
-		h.answerOpenFailure(ctx, r, req, err)
-		return
+		return openResult{}, err
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
 
@@ -502,9 +535,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 		state.remove(sess.ID())
 		h.opener.close(ctx, sess.ID())
-		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = respond(r, resp)
-		return
+		return openResult{}, errOpenShuttingDown
 	}
 
 	// Port discovery (nocx-wzc4.2): only now, once the session's ring
@@ -577,9 +608,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		AwaitsIntegration: awaitsIntegration,
 		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
 	}
-	resultJSON, _ := json.Marshal(result)
-	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = respond(r, resp)
+	ack(result)
 	if hosted != nil && hosted.StartLifecycle != nil {
 		hosted.StartLifecycle()
 	}
@@ -675,6 +704,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// subscriber is owed is asked for. Last, so its round trip delays no
 	// PTY byte.
 	h.sess.resendScreen(ctx, sess.ID())
+	return result, nil
 }
 
 // sessionOpsHandlers answers resize, close and attach: the per-session
@@ -1303,6 +1333,13 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
+		// THE ONE ACTION A PERSON TAKES ON A CONNECTION (design §5.3, §5.6;
+		// nocx-oalo1.5.4). It runs on the same submission as `open`, because it
+		// IS an open: the one open path, with the old connection closed first.
+		reg(openSub, catalog.OpPaneReconnect, params(validatePaneReconnectRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := paneReconnectHandlers{machine: s, r: r, w: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		keyedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
@@ -1370,6 +1407,29 @@ const maxShellPinRunes = 32
 // a target. profileId and host are optional (a local open carries neither);
 // when present they are held to the same bounds the seam methods apply, and
 // host/user reach the ssh subprocess, so control characters are refused.
+// validatePaneReconnectRaw is `pane.reconnect`'s shape: the pane and the epoch
+// the offer carried, and nothing else. Both are required — a press with no
+// epoch is a press about a state nobody named — and neither may be null.
+func validatePaneReconnectRaw(raw json.RawMessage) string {
+	var p paneReconnectParams
+	if msg := decodeObject(raw, &p, "paneId", "connectionEpoch"); msg != "" {
+		return msg
+	}
+	if msg := requireFields(raw, "paneId", "connectionEpoch"); msg != "" {
+		return msg
+	}
+	if p.PaneID == "" {
+		return "paneId is required"
+	}
+	if msg := validateStringBound("paneId", p.PaneID, maxIDRunes); msg != "" {
+		return msg
+	}
+	if p.ConnectionEpoch < 1 {
+		return "connectionEpoch must be at least 1"
+	}
+	return ""
+}
+
 func validateOpenRaw(raw json.RawMessage) string {
 	var p openParams
 	if msg := decodeObject(raw, &p, "cols", "rows"); msg != "" {

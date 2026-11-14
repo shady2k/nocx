@@ -1073,9 +1073,13 @@ type WSServer struct {
 	// (ws_pane_connection.go). It is separate from connsMu because a
 	// notification is written per observation, while connsMu is taken at
 	// accept and teardown.
-	paneMu     sync.Mutex
-	paneSubs   map[string]*wsConn
-	paneEpochs map[string]uint64
+	paneMu      sync.Mutex
+	paneRecords map[string]*paneRecord
+	paneEpochs  map[string]uint64
+	// paneReconnections is the connection policy's notice that a reconnect is
+	// being carried out (ws_pane_reconnect.go). Nil is a server with no
+	// connection policy wired; no offer exists then.
+	paneReconnections PaneReconnections
 
 	// connsMu protects conns and connsRegistered. One entry per active
 	// WebSocket connection.
@@ -4924,21 +4928,15 @@ func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
 	if len(paneIDs) == 0 {
 		return
 	}
-	for _, sess := range s.registry.List() {
-		pane := sess.PaneID()
-		if pane == "" {
-			continue
-		}
-		if _, ok := paneIDs[pane]; !ok {
-			continue
-		}
-		sid := sess.ID()
-		s.closeLane(sid)
-		s.markCloseRequested(sid)
-		if err := s.registry.EndSession(sid); err != nil {
-			s.log.Warn("closing a session whose pane left the layout", "session_id", string(sid), "error", err)
-		}
-		s.closeSession(sid, sess)
+	// ONE CLOSER FOR BOTH CALLERS: a pane leaving the layout and a pane being
+	// reconnected must tear their session down the same way, or one of them
+	// grows a difference nobody meant.
+	panes := make(map[string]struct{}, len(paneIDs))
+	for pane := range paneIDs {
+		panes[pane] = struct{}{}
+	}
+	for pane := range panes {
+		s.closePaneSessions(pane)
 	}
 }
 

@@ -156,9 +156,11 @@ test('an SSH tab shows a stage within a second and never an empty screen (Q1)', 
   let w: Wired | null = null
   try {
     w = await wire(page, home)
-    // A relay that accepts the socket and forwards nothing: the dial reaches
-    // `ssh-version` and stays there. The first second is therefore real.
-    w.proxy.blackhole()
+    // A relay that forwards every byte LATE. The dial cannot finish inside the
+    // first second, so the head has to say what it is doing before any answer
+    // arrives — and the same connection then finishes, which a blackhole could
+    // not do (its discarded banner cannot be replayed).
+    w.proxy.slow(1500)
     await startConnection(page, w.profileName)
 
     const head = page.locator(HEAD)
@@ -175,21 +177,13 @@ test('an SSH tab shows a stage within a second and never an empty screen (Q1)', 
       /resolving the route|waiting for the SSH answer|reaching the host/,
     )
 
-    // The network returns and a FRESH tab opens on it. The first attempt is
-    // not reused: its SSH version exchange was the bytes the blackhole threw
-    // away, and replaying them is not something a relay can do. What a person
-    // does after a closed lid is open the tab again — and that is the healthy
-    // case this test also owes: Connected, and a shell.
+    // The link recovers and THE SAME tab reaches its shell: a healthy open on
+    // a healthy host ends at Connected, with a shell that runs a command.
     w.proxy.pass()
-    // Back to the local shell's editor for the chord, exactly as a person
-    // would: the stuck tab has no composer to type into yet.
-    await page.locator(TAB).first().click()
-    await openConnection(page, w.profileName)
-    const fresh = page.locator(HEAD)
-    await expect(fresh).toHaveAttribute('data-state', 'connected', { timeout: 60_000 })
+    await expect(head).toHaveAttribute('data-state', 'connected', { timeout: 60_000 })
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 45_000 })
     await runCommand(page, 'echo after-the-open')
-    await expect(fresh).toContainText('Connected')
+    await expect(head).toContainText('Connected')
   } finally {
     await unwire(page, w)
   }

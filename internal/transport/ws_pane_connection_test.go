@@ -286,3 +286,27 @@ func soleWSConn(t *testing.T, ws *WSServer) *wsConn {
 	})
 	return only
 }
+
+func TestShellRetryContractKeepsFailureSeparateFromConnection(t *testing.T) {
+	schema := loadSchema(t, "pane.connection.schema.json")
+	p := paneConnectionStates()["connected"]
+	p.SessionID = ""
+	p.Reconnect = &PaneConnectionReconnect{EndsShells: 0}
+	raw, _ := json.Marshal(p)
+	if validateJSONErr(schema, raw) == nil {
+		t.Fatal("healthy connection offered reconnect without shell failure")
+	}
+	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault", Data: map[string]any{"reason": "vault-sealed"}}
+	raw, _ = json.Marshal(p)
+	validateJSON(t, schema, raw, "connected shell refusal")
+	p.Reconnect.EndsShells = 1
+	raw, _ = json.Marshal(p)
+	if validateJSONErr(schema, raw) == nil {
+		t.Fatal("shell-only retry claimed to close shared transport shells")
+	}
+	// A pane-local refusal may persist across a subsequent transport loss.
+	p = paneConnectionStates()["failed"]
+	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault"}
+	raw, _ = json.Marshal(p)
+	validateJSON(t, schema, raw, "retained shell refusal after transport failure")
+}

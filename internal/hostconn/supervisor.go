@@ -398,6 +398,8 @@ type Supervisor struct {
 	reconnectPolicy string
 	retryCancel     context.CancelFunc
 	retryScheduled  bool
+	retryWake       chan struct{}
+	retryManual     bool
 	keep            *Lease
 	attemptRunner   AttemptRunner
 	// state is the current point of the machine.

@@ -89,8 +89,16 @@ type Attempt struct {
 	Reason    string
 }
 
+// ShellFailure is the actionable refusal of a pane shell, not its connection.
+type ShellFailure struct {
+	Code    int
+	Message string
+	Data    any
+}
+
 // Snapshot is one pane's observation, ready to be carried to the renderer.
 type Snapshot struct {
+	ShellFailure       *ShellFailure
 	PaneID             string
 	ConnectionID       string
 	ConnectionEpoch    uint64
@@ -141,6 +149,8 @@ type binding struct {
 	sessionID    string
 	generation   uint64
 	lost         bool
+	replacing    bool
+	shellFailure *ShellFailure
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -244,7 +254,6 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 	d.nextGeneration++
 	b.generation = d.nextGeneration
 	b.sessionID = ""
-	b.lost = false
 	generation := b.generation
 	c := d.conns[connectionID]
 	if c == nil {
@@ -283,6 +292,9 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 		return
 	}
 	b.sessionID = sessionID
+	b.shellFailure = nil
+	b.lost = false
+	b.replacing = false
 	c := d.conns[b.connectionID]
 	if c == nil {
 		c = &connection{panes: map[string]struct{}{paneID: {}}}
@@ -295,6 +307,27 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 		d.mu.Unlock()
 		return
 	}
+	snap := d.snapshotLocked(paneID, b, c)
+	d.mu.Unlock()
+	d.emit(snap)
+}
+
+// ShellFailed records the pane-local refusal without changing connection truth.
+func (d *Driver) ShellFailed(ctx context.Context, paneID string, code int, message string, data any) {
+	d.mu.Lock()
+	b := d.panes[paneID]
+	if b == nil || ctx.Err() != nil {
+		d.mu.Unlock()
+		return
+	}
+	c := d.conns[b.connectionID]
+	if c == nil {
+		d.mu.Unlock()
+		return
+	}
+	b.sessionID = ""
+	b.replacing = false
+	b.shellFailure = &ShellFailure{Code: code, Message: message, Data: data}
 	snap := d.snapshotLocked(paneID, b, c)
 	d.mu.Unlock()
 	d.emit(snap)
@@ -382,10 +415,10 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 		if b := d.panes[paneID]; b != nil {
 			snaps = append(snaps, d.snapshotLocked(paneID, b, c))
 			if ev.State == proto.ConnectionReconnecting || ev.State == proto.ConnectionEnded || ev.State == proto.ConnectionFailed {
-				b.lost = b.lost || b.sessionID != ""
+				b.lost = true
 			}
-			if ev.State == proto.ConnectionConnected && b.lost {
-				b.lost = false
+			if ev.State == proto.ConnectionConnected && b.lost && !b.replacing && b.shellFailure == nil {
+				b.replacing = true
 				replacements = append(replacements, replacement{paneID, b.epoch, b, b.ctx, b.generation})
 			}
 		}
@@ -397,13 +430,50 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	}
 	if action != nil {
 		for _, r := range replacements {
-			d.mu.Lock()
-			live := d.panes[r.pane] == r.binding && r.binding.generation == r.generation && r.ctx.Err() == nil
-			d.mu.Unlock()
-			if live {
-				go func() { _ = action(r.ctx, r.pane, r.epoch) }()
-			}
+			d.launchAction(r.ctx, r.pane, r.binding, r.generation, r.epoch, action)
 		}
+	}
+}
+
+// RequestShellRetry claims the same pane-owned action used after transport return.
+func (d *Driver) RequestShellRetry(ctx context.Context, paneID string, epoch uint64) error {
+	d.mu.Lock()
+	b := d.panes[paneID]
+	if b == nil || ctx.Err() != nil || b.ctx.Err() != nil {
+		d.mu.Unlock()
+		return ErrUnknownPane
+	}
+	if b.epoch != epoch {
+		d.mu.Unlock()
+		return ErrStaleEpoch
+	}
+	c := d.conns[b.connectionID]
+	if b.shellFailure == nil || c == nil || c.transport.State != proto.ConnectionConnected {
+		d.mu.Unlock()
+		return ErrNoOffer
+	}
+	if b.replacing {
+		d.mu.Unlock()
+		return ErrReconnecting
+	}
+	action := d.action
+	if action == nil {
+		d.mu.Unlock()
+		return ErrNoOffer
+	}
+	b.replacing = true
+	generation := b.generation
+	d.mu.Unlock()
+	d.launchAction(b.ctx, paneID, b, generation, epoch, action)
+	return nil
+}
+
+func (d *Driver) launchAction(ctx context.Context, pane string, b *binding, generation, epoch uint64, action func(context.Context, string, uint64) error) {
+	d.mu.Lock()
+	live := d.panes[pane] == b && b.generation == generation && ctx.Err() == nil
+	d.mu.Unlock()
+	if live {
+		go func() { _ = action(ctx, pane, epoch) }()
 	}
 }
 
@@ -412,7 +482,12 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 // transport and the renderer refuse an older one.
 func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapshot {
 	b.epoch++
+	offer := offerFor(c.transport)
+	if b.shellFailure != nil && c.transport.State == proto.ConnectionConnected {
+		offer = &Reconnect{EndsShells: 0}
+	}
 	return Snapshot{
+		ShellFailure:       b.shellFailure,
 		PaneID:             paneID,
 		ConnectionID:       b.connectionID,
 		ConnectionEpoch:    b.epoch,
@@ -422,7 +497,7 @@ func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapsh
 		Transport:          c.transport,
 		Quality:            c.quality,
 		Attempt:            Attempt{Shown: "none", Candidate: "none"},
-		Reconnect:          offerFor(c.transport),
+		Reconnect:          offer,
 		ObservedAt:         time.Now(),
 	}
 }

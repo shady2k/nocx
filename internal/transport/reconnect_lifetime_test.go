@@ -100,14 +100,19 @@ func TestCanceledReconnectCannotReplaceNewPaneBinding(t *testing.T) {
 	state := newConnState()
 	params := openParams{PaneID: "reused-pane"}
 	oldCtx, cancel := context.WithCancel(context.Background())
-	ws.bindPaneForOpen(oldCtx, params.PaneID, wc, state, params)
+	if _, err := ws.bindPaneForOpen(oldCtx, params.PaneID, wc, state, params); err != nil {
+		t.Fatal(err)
+	}
 	ws.unbindPane(params.PaneID)
 	cancel()
-	current := ws.bindPaneForOpen(context.Background(), params.PaneID, wc, state, params)
+	current, err := ws.bindPaneForOpen(context.Background(), params.PaneID, wc, state, params)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if current == nil {
 		t.Fatal("new lifetime did not bind")
 	}
-	if stale := ws.bindPaneForOpen(oldCtx, params.PaneID, wc, state, params); stale != nil {
+	if stale, err := ws.bindPaneForOpen(oldCtx, params.PaneID, wc, state, params); stale != nil || !errors.Is(err, context.Canceled) {
 		t.Fatal("canceled old reconnect acquired binding")
 	}
 	if ws.paneRecordOf(params.PaneID) != current || current.ctx.Err() != nil {

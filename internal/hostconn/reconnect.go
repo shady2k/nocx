@@ -69,6 +69,13 @@ func (s *Supervisor) RequestReconnect(expectedSeq uint64) error {
 		return ErrNoReconnect
 	}
 	if s.retryCancel != nil {
+		if s.retryScheduled || s.dialing == nil {
+			s.retryManual = true
+			select {
+			case s.retryWake <- struct{}{}:
+			default:
+			}
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -109,6 +116,9 @@ func (s *Supervisor) startRetryLocked(immediate bool) {
 	}
 	ctx, cancel := context.WithCancel(s.planContext)
 	s.retryCancel = cancel
+	s.retryWake = make(chan struct{}, 1)
+	// Backoff is pending from registration, including before its goroutine runs.
+	s.retryScheduled = !immediate
 	go s.retry(ctx, immediate)
 }
 
@@ -130,8 +140,14 @@ func (s *Supervisor) retry(ctx context.Context, immediate bool) {
 	defer func() {
 		s.mu.Lock()
 		s.retryCancel = nil
+		s.retryWake = nil
 		s.retryScheduled = false
-		s.scheduleRetryLocked()
+		if s.retryManual {
+			s.retryManual = false
+			s.startRetryLocked(true)
+		} else {
+			s.scheduleRetryLocked()
+		}
 		s.mu.Unlock()
 	}()
 	for {
@@ -140,7 +156,13 @@ func (s *Supervisor) retry(ctx context.Context, immediate bool) {
 			s.mu.Unlock()
 			return
 		}
+		if s.retryManual {
+			immediate = true
+			s.retryManual = false
+		}
 		state, plan := s.state, s.plan
+		plan.Holds &^= HoldsPlainShell
+		wake := s.retryWake
 		if !immediate && (state.Kind != Reconnecting || s.reconnectPolicy != "auto") {
 			s.mu.Unlock()
 			return
@@ -154,12 +176,18 @@ func (s *Supervisor) retry(ctx context.Context, immediate bool) {
 		if due != nil {
 			select {
 			case <-due:
+			case <-wake:
 			case <-ctx.Done():
 				return
 			}
 		}
 		s.mu.Lock()
 		s.retryScheduled = false
+		s.retryManual = false
+		select {
+		case <-wake:
+		default:
+		}
 		s.mu.Unlock()
 		lease, err := s.Acquire(ctx, plan)
 		if err == nil {

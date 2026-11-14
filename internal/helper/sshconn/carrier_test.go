@@ -14,12 +14,16 @@ package sshconn
 // only place the mapping exists.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 func TestDialFailureMapsTheLibrarysErrors(t *testing.T) {
@@ -108,5 +112,52 @@ func TestThePlanKeyIsThePoolsOwnDerivation(t *testing.T) {
 	routed.Route = spec.Route[:1]
 	if routed.Key() == spec.Key() {
 		t.Fatal("two routes to one endpoint derive one key: a connection would be shared across bastions")
+	}
+}
+
+func TestPreparationFailureReportsItsConnectionState(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want hostconn.Event
+	}{
+		{"network", errors.New("route unavailable"), hostconn.Event{Kind: hostconn.Lost, Cause: hostconn.CauseLostLink}},
+		{"authentication", &ssh.ErrAuthFailed{User: "dev", Host: "target", Err: errors.New("rejected")}, hostconn.Event{Kind: hostconn.Refused, Cause: hostconn.CauseAuthRejected}},
+		{"host key question", &ssh.ErrUnknownHostKey{Addr: "target:22", Fingerprint: "SHA256:x"}, hostconn.Event{Kind: hostconn.NeedsPerson, Wait: hostconn.WaitHostKey}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := ssh.PooledSpec{Host: "target", Port: 22, User: "dev", Prepare: func(context.Context) (*gossh.ClientConfig, []ssh.PooledHop, error) { return nil, nil, tc.err }}
+			var events []hostconn.Event
+			_, err := new(Carrier).Dial(context.Background(), PlanFor(spec), func(ev hostconn.Event) { events = append(events, ev) })
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("Dial error=%v, want %v", err, tc.err)
+			}
+			if len(events) != 1 || events[0] != tc.want {
+				t.Fatalf("Prepare failure events=%v, want [%v]", events, tc.want)
+			}
+			carrier := NewWithOptions(nil, log.NewSlogAdapter(nil), Options{Clock: hostconntest.New()})
+			release := carrier.RetainConnection(spec.Key(), "auto")
+			defer release()
+			_, err = carrier.Acquire(context.Background(), spec)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("Acquire error=%v, want %v", err, tc.err)
+			}
+			got := carrier.conns.Supervisor(spec.Key()).Current()
+			switch tc.want.Kind {
+			case hostconn.Lost:
+				if got.Kind != hostconn.Reconnecting {
+					t.Fatalf("network preparation failure left %v, want reconnecting", got)
+				}
+			case hostconn.Refused:
+				if got.Kind != hostconn.Failed {
+					t.Fatalf("terminal preparation failure left %v, want failed", got)
+				}
+			case hostconn.NeedsPerson:
+				if got.Kind != hostconn.WaitingPerson {
+					t.Fatalf("question preparation failure left %v, want waiting_person", got)
+				}
+			}
+		})
 	}
 }

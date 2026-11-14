@@ -12,7 +12,9 @@
 /**
  * The pane.connection JSON-RPC notification: what a pane's SSH connection is doing, from the moment the pane opens (design §5.6, nocx-oalo1.5.3). Server-initiated and unsolicited, so the same three checks every notification gets apply. It is keyed by paneId and not sessionId because NO SESSION ID EXISTS WHILE OPENING (AD-7): the pane is the renderer's identity from its first frame, and the session id arrives later, in this same notification, when a shell is adopted. connectionEpoch is monotonic per pane and minted at observation, so a receiver can refuse a late observation; it is distinct from sessionEpoch, which names an incarnation, and from livenessEpoch. The transport object is a oneOf discriminated by state: a shape that cannot exist — a stage on a connected connection, a cause on an opening one — is not admitted. `plain` is in the set for the system's own ssh process, which only sees a process and its exit status; no producer in this stage emits it, and the enum is the contract the later carrier fills.
  */
-export interface PaneConnection {
+export type PaneConnection = {
+  [k: string]: unknown
+} & {
   /**
    * The pane this observation belongs to (AD-7). It is the durable identity the renderer minted, and it is what makes the first observation expressible before any session exists. A receiver routes by this and never by the session id.
    */
@@ -110,6 +112,14 @@ export interface PaneConnection {
         stateMs: number
       }
   /**
+   * The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted.
+   */
+  shellFailure?: {
+    code: number
+    message: string
+    data?: unknown
+  }
+  /**
    * The newest round-trip measurement and its grade, exactly as session.liveness carries them. ABSENT when nothing measured one: an unanswered probe has no duration, and absent and zero are the same statement — no measurement, never instant. slow is the backend's grade with hysteresis; a reader holding only the milliseconds cannot reproduce it.
    */
   quality?: {
@@ -132,7 +142,7 @@ export interface PaneConnection {
    */
   observedAt: string
   /**
-   * The one action a person may take on this pane (design §5.4, §5.6; nocx-oalo1.5.4). Its PRESENCE is the offer: an object means Reconnect is shown, and its absence means nothing is offered. It does not depend on ssh.reconnect — that setting decides what the BACKEND does by itself, and every value leaves the person a way out. endsShells is how many shells would end if it is pressed, from the connection's plain-shell count, hops included; 0 is a real answer (a connection carrying only helper-owned work), and it is what makes 'Reconnect ends 2 shells' sayable.
+   * The one action a person may take on this pane (design §5.4, §5.6; nocx-oalo1.5.4). Its PRESENCE is the offer: an object means Reconnect is shown, and its absence means nothing is offered. It does not depend on ssh.reconnect — that setting decides what the BACKEND does by itself, and every value leaves the person a way out. endsShells is how many shells would end if it is pressed, from the connection's plain-shell count, hops included; 0 is a real answer (a connection carrying only helper-owned work), and it is what makes 'Reconnect ends 2 shells' sayable For connected transport with shellFailure, this action retries only the pane shell and endsShells is 0; it does not disconnect the shared transport.
    */
   reconnect?: {
     /**

@@ -156,6 +156,7 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 		var err error
 		spec.Config, spec.Route, err = spec.Prepare(ctx)
 		if err != nil {
+			sink(dialFailure(err))
 			return nil, err
 		}
 	}

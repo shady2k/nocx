@@ -47,6 +47,9 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		},
 		ObservedAt: s.ObservedAt.UTC().Format(time.RFC3339),
 	}
+	if s.ShellFailure != nil {
+		p.ShellFailure = &transport.PaneShellFailure{Code: s.ShellFailure.Code, Message: s.ShellFailure.Message, Data: s.ShellFailure.Data}
+	}
 	if s.Transport.HasLook {
 		p.Transport.LookAnsweredAt = s.Transport.LookAnsweredAt.UTC().Format(time.RFC3339)
 	}

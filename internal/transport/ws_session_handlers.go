@@ -510,9 +510,10 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	}
 	var paneRecord *paneRecord
 	if machine, ok := h.sess.(*WSServer); ok && params.PaneID != "" && wconn != nil {
-		paneRecord = machine.bindPaneForOpen(ctx, params.PaneID, wconn, state, params)
-		if paneRecord == nil {
-			return openResult{}, context.Canceled
+		var bindErr error
+		paneRecord, bindErr = machine.bindPaneForOpen(ctx, params.PaneID, wconn, state, params)
+		if bindErr != nil {
+			return openResult{}, bindErr
 		}
 	} else {
 		h.sess.bindPane(params.PaneID, wconn, state, params)

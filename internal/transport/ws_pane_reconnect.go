@@ -23,6 +23,12 @@ type PaneConnectionPolicy interface {
 	PaneClosed(paneID string)
 }
 
+// paneShellPolicy is the pane action owner's failure and retry boundary.
+type paneShellPolicy interface {
+	ShellFailed(context.Context, string, int, string, any)
+	RequestShellRetry(context.Context, string, uint64) error
+}
+
 // WithPaneConnectionPolicy wires the connection policy's notices.
 func WithPaneConnectionPolicy(p PaneConnectionPolicy) WSServerOption {
 	return func(s *WSServer) { s.paneConnectionPolicy = p }
@@ -73,7 +79,7 @@ func (s *WSServer) closePaneSessions(paneID string) {
 }
 
 // ReconnectPane replaces a held shell after the supervisor restores transport.
-func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) error {
+func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) (resultErr error) {
 	s.paneMu.Lock()
 	rec := s.paneRecords[paneID]
 	if rec == nil {
@@ -105,6 +111,22 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) error {
 		s.paneMu.Unlock()
 		return context.Canceled
 	}
+	defer func() {
+		if resultErr == nil || ctx.Err() != nil || rec.ctx.Err() != nil {
+			return
+		}
+		s.paneMu.Lock()
+		live := s.paneRecords[paneID] == rec
+		s.paneMu.Unlock()
+		if !live {
+			return
+		}
+		if policy, ok := s.paneConnectionPolicy.(paneShellPolicy); ok {
+			capture := &openFailureCapture{}
+			(openHandlers{}).answerOpenFailure(ctx, capture, jsonrpcRequest{}, resultErr)
+			policy.ShellFailed(rec.ctx, paneID, capture.failure.Code, capture.failure.Message, capture.failure.Data)
+		}
+	}()
 	var replaced []session.Session
 	for _, sess := range s.registry.List() {
 		if sess.PaneID() == paneID {
@@ -132,7 +154,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) error {
 	openCtx, cancel := context.WithCancel(rec.ctx)
 	stop := context.AfterFunc(ctx, cancel)
 	defer func() { stop(); cancel() }()
-	_, err := h.openInto(openCtx, rec.wconn, rec.state, rec.params, func(openResult) {})
+	_, err := h.openInto(context.WithValue(openCtx, paneReconnectOpenKey{}, rec), rec.wconn, rec.state, rec.params, func(openResult) {})
 	return err
 }
 
@@ -191,6 +213,7 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	h.machine.paneMu.Lock()
 	rec := h.machine.paneRecords[params.PaneID]
 	var sequence uint64
+	var shellOnly bool
 	var refusal string
 	switch {
 	case rec == nil || rec.wconn != h.w:
@@ -202,6 +225,7 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	case rec.busy:
 		refusal = "a reconnect is already running for this pane"
 	default:
+		shellOnly = rec.shellFailure
 		rec.busy = true
 		rec.registering = make(chan struct{})
 		sequence = rec.connectionSequence
@@ -218,6 +242,20 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		rec.registering = nil
 		h.machine.paneMu.Unlock()
 	}()
+	if shellOnly {
+		policy, ok := h.machine.paneConnectionPolicy.(paneShellPolicy)
+		if !ok {
+			(openHandlers{}).answerOpenFailure(ctx, h.r, req, refuse(-32603, "Shell retry is unavailable (no pane driver wired)"))
+			return
+		}
+		if err := policy.RequestShellRetry(rec.ctx, params.PaneID, params.ConnectionEpoch); err != nil {
+			(openHandlers{}).answerOpenFailure(ctx, h.r, req, err)
+			return
+		}
+		raw, _ := json.Marshal(paneReconnectResult{params.PaneID, true})
+		_ = respond(h.r, newJSONRPCResult(req.ID, raw))
+		return
+	}
 	if h.machine.opener == nil {
 		(openHandlers{}).answerOpenFailure(ctx, h.r, req, errOpenShuttingDown)
 		return
@@ -232,3 +270,10 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	raw, _ := json.Marshal(paneReconnectResult{params.PaneID, true})
 	_ = respond(h.r, newJSONRPCResult(req.ID, raw))
 }
+
+// openFailureCapture reuses the synchronous open's actionable error mapping.
+type openFailureCapture struct{ failure RPCError }
+
+func (c *openFailureCapture) TryResult(json.RawMessage, json.RawMessage) error { return nil }
+func (c *openFailureCapture) TryNotify(string, json.RawMessage) error          { return nil }
+func (c *openFailureCapture) TryError(_ json.RawMessage, e RPCError) error     { c.failure = e; return nil }

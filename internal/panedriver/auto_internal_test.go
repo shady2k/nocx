@@ -88,3 +88,43 @@ func TestCloseWhileReturnPublishesSuppressesReplacement(t *testing.T) {
 	})
 	apply(d, connected(3, 0))
 }
+
+func TestFailedFirstOpenCreatesFirstShellWhenReconnectReturns(t *testing.T) {
+	d, _ := newDriver(t)
+	actions := make(chan string, 1)
+	d.SetAction(func(_ context.Context, pane string, _ uint64) error { actions <- pane; return nil })
+	d.Bind("pane", "conn-a")
+	apply(d, proto.ConnectionStateEvent{ConnectionID: "conn-a", Seq: 1, State: proto.ConnectionFailed, Cause: "auth-rejected"})
+	apply(d, opening(2, "sign-in"))
+	apply(d, connected(3, 0))
+	waittest.WaitFor(t, "first shell creation after authentication recovery", func() bool { return len(actions) == 1 })
+	if got := <-actions; got != "pane" {
+		t.Fatalf("action pane=%q", got)
+	}
+}
+
+func TestShellFailurePreservesConnectionAndOffersShellRetryUntilAdopted(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, connected(1, 0))
+	generation := d.Bind("pane", "conn-a")
+	reporter, ok := any(d).(interface {
+		ShellFailed(context.Context, string, int, string, any)
+	})
+	if !ok {
+		t.Fatal("driver cannot publish shell failures")
+	}
+	reporter.ShellFailed(context.Background(), "pane", -32001, "Unlock the vault", map[string]any{"reason": "vault-sealed"})
+	snap := out.last()
+	if snap.Transport.State != proto.ConnectionConnected || snap.Reconnect == nil || snap.Reconnect.EndsShells != 0 {
+		t.Fatalf("failure did not offer shell-only retry: %+v", snap)
+	}
+	d.Bind("pane", "conn-a")
+	if out.last().Reconnect == nil {
+		t.Fatal("retry binding cleared failure before adoption")
+	}
+	// Only this replacement's generation may clear the refusal.
+	d.AdoptSession("pane", "conn-a", "stale", "instance", generation)
+	if out.last().Reconnect == nil {
+		t.Fatal("stale adoption cleared failure")
+	}
+}

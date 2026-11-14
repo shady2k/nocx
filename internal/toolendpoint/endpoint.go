@@ -26,6 +26,7 @@ import (
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -153,8 +154,8 @@ type Endpoint struct {
 	// happens to end. The epoch is what makes the closing exact: a session can
 	// hold two intervals with identical approval, and only the epoch says which
 	// of them a live connection belongs to.
-	admitted map[string]map[*net.UnixConn]AdmissionEpoch
-	// retired is the highest epoch per session whose interval has ENDED, and
+	admitted map[string]map[*net.UnixConn]*admission
+	// retired is the highest epoch per pane whose interval has ENDED, and
 	// it only ever moves forward. A publication naming an epoch at or below it
 	// is refused: the interval that decided the admission is over, so a
 	// connection arriving late from it must not be recorded. It is the one
@@ -164,6 +165,15 @@ type Endpoint struct {
 	// then published", which refuses it.
 	retired map[string]AdmissionEpoch
 	wait    sync.WaitGroup
+}
+
+// admission stays registered until every accepted call and the authorizer's
+// release have completed. All fields except done are protected by Endpoint.mu.
+type admission struct {
+	epoch    AdmissionEpoch
+	pending  int
+	stopping bool
+	done     chan struct{}
 }
 
 // New validates the endpoint configuration and computes its socket path. It
@@ -199,7 +209,7 @@ func New(cfg Config) (*Endpoint, error) {
 		cfg:      cfg,
 		socket:   filepath.Join(cfg.Dir, toolSocketName),
 		conns:    make(map[*net.UnixConn]struct{}),
-		admitted: make(map[string]map[*net.UnixConn]AdmissionEpoch),
+		admitted: make(map[string]map[*net.UnixConn]*admission),
 		retired:  make(map[string]AdmissionEpoch),
 	}
 	// An authorizer whose own authority can end while a connection is open
@@ -220,7 +230,9 @@ type SessionAdmissions interface {
 	// RetireAdmissions ends the authority an interval carried. Every live
 	// connection admitted for the session under an epoch at or before epoch is
 	// closed — which cancels the request contexts in flight on it — and every
-	// later publication naming one of those epochs is refused. It returns how
+	// later pane publication naming one of those epochs is refused. Turn
+	// authorizers must hold their live-authority guard across publication and
+	// mark it inactive before calling RetireAdmissions. It returns how
 	// many connections it closed.
 	//
 	// It is idempotent in the sense that matters: retiring an epoch that was
@@ -265,16 +277,22 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 		return 0
 	}
 	e.mu.Lock()
-	if epoch > e.retired[session] {
+	// Turn authority guards publication until retirement has made it inactive.
+	// Its unique scopes need no permanent endpoint tombstones; pane intervals do.
+	if !strings.HasPrefix(session, TurnScope("")) && epoch > e.retired[session] {
 		e.retired[session] = epoch
 	}
 	// The floor, not the argument, decides what is closed: an epoch retired
 	// earlier has already been refused, and a connection stamped with it
 	// cannot exist. Reading it back keeps the two in one place.
-	floor := e.retired[session]
+	floor := epoch
+	if retired := e.retired[session]; retired > floor {
+		floor = retired
+	}
 	var connections []*net.UnixConn
 	for conn, admitted := range e.admitted[session] {
-		if admitted <= floor {
+		if admitted.epoch <= floor {
+			admitted.stopping = true
 			connections = append(connections, conn)
 		}
 	}
@@ -283,6 +301,65 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 		_ = conn.Close()
 	}
 	return len(connections)
+}
+
+// SettleAdmissions closes connections at or before epoch and waits for their
+// accepted calls and authorizer releases. The authority owner must prevent new
+// publications for this interval before calling it, as with RetireAdmissions.
+func (e *Endpoint) SettleAdmissions(scope string, epoch AdmissionEpoch) {
+	_ = e.SettleAdmissionsContext(context.Background(), scope, epoch)
+}
+
+// SettleAdmissionsContext closes admission connections and waits for accepted
+// work. A caller deadline does not reopen admissions or forget pending work.
+func (e *Endpoint) SettleAdmissionsContext(ctx context.Context, scope string, epoch AdmissionEpoch) error {
+	e.RetireAdmissions(scope, epoch)
+	e.mu.Lock()
+	var waiting []<-chan struct{}
+	for _, a := range e.admitted[scope] {
+		if a.epoch <= epoch {
+			waiting = append(waiting, a.done)
+		}
+	}
+	e.mu.Unlock()
+	for _, done := range waiting {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// PendingAdmissions reports accepted calls, including calls waiting for an
+// approval or still unwinding cancellation. Idle connections do not count.
+func (e *Endpoint) PendingAdmissions(scope string, epoch AdmissionEpoch) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, a := range e.admitted[scope] {
+		if a.epoch <= epoch && a.pending > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Endpoint) acceptRequest(scope string, conn *net.UnixConn) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a := e.admitted[scope][conn]
+	if e.closed || a == nil || a.stopping {
+		return false
+	}
+	a.pending++
+	return true
+}
+
+func (e *Endpoint) finishRequest(scope string, conn *net.UnixConn) {
+	e.mu.Lock()
+	e.admitted[scope][conn].pending--
+	e.mu.Unlock()
 }
 
 func isNilDependency(value any) bool {
@@ -469,12 +546,12 @@ func (e *Endpoint) publishAdmission(session string, epoch AdmissionEpoch, conn *
 		return false
 	}
 	if e.admitted == nil {
-		e.admitted = make(map[string]map[*net.UnixConn]AdmissionEpoch)
+		e.admitted = make(map[string]map[*net.UnixConn]*admission)
 	}
 	if e.admitted[session] == nil {
-		e.admitted[session] = make(map[*net.UnixConn]AdmissionEpoch)
+		e.admitted[session] = make(map[*net.UnixConn]*admission)
 	}
-	e.admitted[session][conn] = epoch
+	e.admitted[session][conn] = &admission{epoch: epoch, done: make(chan struct{})}
 	return true
 }
 
@@ -483,6 +560,9 @@ func (e *Endpoint) forgetSession(session string, conn *net.UnixConn) {
 		return
 	}
 	e.mu.Lock()
+	if a := e.admitted[session][conn]; a != nil {
+		close(a.done)
+	}
 	delete(e.admitted[session], conn)
 	if len(e.admitted[session]) == 0 {
 		delete(e.admitted, session)
@@ -541,9 +621,40 @@ func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, string, error) {
 	return "", "", err
 }
 
+// readPresentedToken distinguishes an explicit turn preamble from JSON.
+// Local admission has already happened; no local request is dispatched until
+// this first-byte check completes. A partial preamble has one absolute limit.
+func (e *Endpoint) readPresentedToken(conn *net.UnixConn, reader *bufio.Reader) (string, error) {
+	first, err := reader.Peek(1)
+	if err != nil {
+		return "", nil
+	}
+	if first[0] != turnbind.TokenMagic[0] {
+		return "", nil
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	return turnbind.ReadToken(reader)
+}
+
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
-	defer e.untrack(conn)
-	defer func() { _ = conn.Close() }()
+	var release func()
+	published := false
+	publishedSession := ""
+	// Settlement observes completion only after requests, socket tracking and
+	// the authorizer's slot have all ended, including on admission refusal.
+	defer func() {
+		_ = conn.Close()
+		e.untrack(conn)
+		if release != nil {
+			release()
+		}
+		if published {
+			e.forgetSession(publishedSession, conn)
+		}
+	}()
 
 	// THE PANE RECORD, and it is read FIRST: before the decision, before any
 	// request byte, and only on the lane. A far agent's connection is the
@@ -551,6 +662,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// authorizer decides on — and a failure to produce one is a refusal with a
 	// sentence, never a fall back to the local rule (which would admit the
 	// connection as whatever tree the kernel happened to match).
+	var reader *bufio.Reader
 	if onLane {
 		pane, token, err := e.readPaneRecord(conn)
 		if err != nil {
@@ -567,16 +679,49 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// it did not publish: an authorizer that returns a grant without publishing
 	// has produced a connection the interval cannot close, which is refused
 	// rather than served.
-	published := false
-	publishedSession := ""
-	invocation, release, err := e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
-		if !e.publishAdmission(session, epoch, conn) {
-			return false
+	admit := func() (assistant.ToolInvocation, func(), error) {
+		return e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
+			if !e.publishAdmission(session, epoch, conn) {
+				return false
+			}
+			published = true
+			publishedSession = session
+			return true
+		})
+	}
+	var invocation assistant.ToolInvocation
+	var err error
+	invocation, release, err = admit()
+	if !onLane {
+		if admitter, ok := e.cfg.Auth.(TurnBearerAdmitter); ok && admitter.AdmitsTurnBearer() {
+			reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
+			// A refused local peer may still present a turn bearer, but cannot
+			// reserve a serve goroutine forever without sending its claim.
+			if err != nil {
+				_ = conn.SetReadDeadline(time.Now().Add(paneRecordTimeout))
+			}
+			token, readErr := e.readPresentedToken(conn, reader)
+			_ = conn.SetReadDeadline(time.Time{})
+			if readErr != nil || token != "" {
+				if release != nil {
+					release()
+					release = nil
+				}
+				if published {
+					e.forgetSession(publishedSession, conn)
+					published = false
+					publishedSession = ""
+				}
+				if readErr != nil {
+					err = readErr
+				} else {
+					peer.Token = token
+					invocation, release, err = admit()
+				}
+			}
 		}
-		published = true
-		publishedSession = session
-		return true
-	})
+	}
+
 	if err == nil && !published {
 		err = errUnpublishedAdmission
 	}
@@ -586,9 +731,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		// never starts, so nothing else would remove it, and the endpoint would
 		// report a session as admitted with no connection behind it until some
 		// later retirement closed an interval that has nothing to close.
-		if published {
-			e.forgetSession(publishedSession, conn)
-		}
 		code, message, reason := rpcErrorFor(err)
 		e.observePeerRefusal(peer, reason)
 		e.writeError(conn, nil, code, message, reason)
@@ -598,25 +740,19 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	if base == nil {
 		base = context.Background()
 	}
-	// The book is keyed by what the endpoint RECORDED and not by what the
-	// invocation says: a connection is forgotten from exactly where it was
-	// admitted, so an authorizer whose two answers disagree cannot leave an
-	// entry nothing removes.
-	defer e.forgetSession(publishedSession, conn)
 	e.observe(Observation{
 		SessionID: invocation.RunContext.Session,
 		Kind:      ObservationAdmitted,
 	})
 	connectionCtx, cancel := context.WithCancel(base)
 
-	reader := bufio.NewReaderSize(conn, maxEnvelopeBytes)
+	if reader == nil {
+		reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
+	}
 	var requests sync.WaitGroup
 	defer func() {
 		cancel()
 		requests.Wait()
-		if release != nil {
-			release()
-		}
 	}()
 	// THE CALLS IN FLIGHT ON THIS CONNECTION, by the id the caller gave each.
 	// A cancel notification is read by the loop below, so a call has to be in
@@ -686,10 +822,16 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			e.writeError(conn, request.ID, rpcInvalidRequest, "invalid request", "request id is already in flight; use a distinct id")
 			continue
 		}
+		if !e.acceptRequest(publishedSession, conn) {
+			cancels.remove(request.ID, entry)
+			requestCancel()
+			return
+		}
 		requests.Add(1)
 		inFlight.Add(1)
 		go func(request rpcRequest, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer requests.Done()
+			defer e.finishRequest(publishedSession, conn)
 			defer func() {
 				if inFlight.Add(-1) == 0 {
 					_ = conn.SetReadDeadline(time.Now().Add(requestReadWindow))
@@ -721,6 +863,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			requestInvocation.Terminal = terminal
 			requestInvocation.Method = request.Method
 			requestInvocation.RawParams = append(json.RawMessage(nil), request.Params...)
+			dispatch := e.cfg.Dispatch
+			if requestInvocation.Dispatcher != nil {
+				dispatch = requestInvocation.Dispatcher
+			}
 			var result string
 			var dispatchErr error
 			// TWO ANSWERS COME FROM THE GRANT RATHER THAN FROM THE
@@ -734,10 +880,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 				result = string(instructions)
 			} else if request.Method == "tools.catalogue" {
 				var catalogueResult []byte
-				catalogueResult, dispatchErr = buildCatalogue(e.cfg.Dispatch, requestInvocation.Grant)
+				catalogueResult, dispatchErr = buildCatalogue(dispatch, requestInvocation.Grant)
 				result = string(catalogueResult)
 			} else {
-				result, dispatchErr = e.cfg.Dispatch.Dispatch(requestInvocation)
+				result, dispatchErr = dispatch.Dispatch(requestInvocation)
 			}
 			dispatchErr = terminal.Delivery(requestCtx, dispatchErr)
 			// Retire before publishing any answer: its recipient may reuse the id
@@ -1031,6 +1177,14 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// has to present the value the pane actually holds.
 		return rpcPeerRefused, "worker caller refused",
 			"this connection did not present the bearer nocx holds for the pane it arrived on, so nothing it asked for was run. A bearer belongs to one pane and one interval: one from another pane, an earlier launch, or an interval that has been replaced is refused here. Tell the person to restart the agent in that pane."
+	case errors.Is(err, ErrTurnBearerRefused):
+		// THE TURN'S BEARER, off the helper's lane (ADR-anntnxdj decision 3).
+		// The caller is the assistant's bridge, which nocx-server started, so
+		// the repair is not the pane's: either the value is not the one nocx
+		// handed this bridge, or the turn it belonged to has ended and its
+		// bearer is retired with it.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection presented a bearer that does not belong to a live assistant turn, so nothing it asked for was run. A turn's bearer lives only for that turn: a wrong value, a value from another turn, or one retired when its turn ended is refused here. Tell the person the assistant turn is over."
 	case errors.Is(err, panebind.ErrShortRecord):
 		// THE HELPER'S REPORT DID NOT ARRIVE WHOLE. Nothing of the call ran,
 		// and retrying on this connection is not possible — but the fact is

@@ -207,6 +207,14 @@ func TestACancelledCallStopsProgressAtOnce(t *testing.T) {
 		t.Fatalf("the first interval reported progress %d, want 1", count)
 	}
 
+	// A received pipe line does not prove the writer has returned. A sibling
+	// answer takes the same output lock, proving the progress write completed
+	// before this test cancels (cancelling a blocked write retires the stream).
+	driver.send(4, "tools/call", `{"name":"alpha.screen"}`)
+	if text := toolText(t, driver.nextID(4)); text != `{"screen":true}` {
+		t.Fatalf("pre-cancel fence: %s", text)
+	}
+
 	driver.notify("notifications/cancelled", `{"requestId":2,"reason":"no longer needed"}`)
 	select {
 	case <-dispatcher.stopped:

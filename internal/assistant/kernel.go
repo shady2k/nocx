@@ -1891,6 +1891,11 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 }
 
 func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
+	return k.invokeInvocation(ToolInvocation{Context: ctx, Method: name, RunContext: k.runCtx, Grant: k.currentGrant(), RawParams: []byte(rawArgs)}, callID)
+}
+
+func (k *effectKernel) invokeInvocation(request ToolInvocation, callID string) (modelResult, error) {
+	ctx, name := request.Context, request.Method
 	// The call runs through the authority pipeline (nocx-a62cl.3.2). What the
 	// kernel used to do in one gate closure is the chain's points now:
 	// command classification is a fact preparation derived, the matrix,
@@ -1915,19 +1920,13 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 		return modelResult{text: reason, kind: modelNocxMessage}, nil
 	}
+	request.Grant = k.currentGrant()
 	state := &kernelCall{kernel: k}
 	chain := k.authorityChain(state)
 	// The kernel retains the slot through outcome recording, beyond run.
 	pipeline, pipelineErr := NewPipeline(k.dispatcher, chain)
 	if pipelineErr != nil {
 		return modelResult{}, pipelineErr
-	}
-	request := ToolInvocation{
-		Context:    ctx,
-		Method:     name,
-		RunContext: k.runCtx,
-		Grant:      k.grant,
-		RawParams:  []byte(rawArgs),
 	}
 	outcome, dispatchErr := pipeline.runOrdered(request, k.attempt, callID, true)
 	if dispatchErr != nil {

@@ -82,6 +82,12 @@ export function observedAgo(observedAt: string | undefined, now = Date.now()): s
  *  has nothing to warn about. The two words are the vocabulary the tab strip
  *  already speaks. */
 export function connectionWarning(observation: PaneConnection | null): { label: string } | null {
+  // A healthy transport whose shell failed is not a connection loss; it is a
+  // shell the person can retry from the head. The mark says which, so a tab
+  // never reports "Connection lost" for a connection that is answering.
+  if (observation?.shellFailure !== undefined) {
+    return { label: t('connection.shellFailed', 'Shell failed') }
+  }
   const condition = connectionCondition(observation)
   if (condition === 'lost') return { label: t('connection.lost', 'Connection lost') }
   if (condition === 'unreachable') {

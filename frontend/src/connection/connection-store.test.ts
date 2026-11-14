@@ -64,6 +64,15 @@ describe('parsePaneConnection', () => {
     }
   })
 
+  it('admits a connected transport whose shell failed with its retry offer', () => {
+    const value = observation({
+      transport: { state: 'connected', stateMs: 10, plainShells: 0 },
+      shellFailure: { code: -32603, message: 'no builtin' },
+      reconnect: { endsShells: 0 },
+    })
+    expect(parsePaneConnection(value)).not.toBeNull()
+  })
+
   it('refuses a shape the contract could not have sent', () => {
     const bad = [
       // A stage on a connected connection, a cause on an opening one.
@@ -80,6 +89,23 @@ describe('parsePaneConnection', () => {
       observation({ observedAt: 'not a time' }),
       observation({ attempt: { shown: 'typed', candidate: 'none', reason: '' } as never }),
       observation({ reconnect: { endsShells: -1 } }),
+      // The cross-field rules: a shell-only retry that would end shells, a
+      // failure without an offer, and a failed shell carrying a session id.
+      observation({
+        transport: { state: 'connected', stateMs: 1, plainShells: 1 },
+        shellFailure: { code: 1, message: 'x' },
+        reconnect: { endsShells: 2 },
+      }),
+      observation({
+        transport: { state: 'connected', stateMs: 1, plainShells: 1 },
+        shellFailure: { code: 1, message: 'x' },
+      }),
+      observation({
+        transport: { state: 'connected', stateMs: 1, plainShells: 0 },
+        sessionId: 's',
+        shellFailure: { code: 1, message: 'x' },
+        reconnect: { endsShells: 0 },
+      }),
       // An unknown extra key: additionalProperties is false in the schema.
       { ...observation(), extra: true },
     ]
@@ -103,16 +129,37 @@ describe('ConnectionStore', () => {
     store.dispose()
   })
 
-  it('ignores another pane and another backend instance', () => {
+  it("compares against the client's identity and resets when the backend changes", () => {
     const wire = source()
-    const store = new ConnectionStore(wire, 'pane-1')
+    let backend: string | null = 'instance-1'
+    const store = new ConnectionStore(wire, 'pane-1', () => backend)
 
     wire.deliver('pane.connection', observation({ paneId: 'pane-2' }))
     expect(store.current()).toBeNull()
 
     wire.deliver('pane.connection', observation({ connectionEpoch: 2 }))
+    // A stale observation from another backend is refused even though its
+    // epoch is higher: epochs belong to a backend, not to the pane.
     wire.deliver('pane.connection', observation({ connectionEpoch: 3, instanceId: 'instance-2' }))
     expect(store.current()?.observation.connectionEpoch).toBe(2)
+
+    // The client learns it is talking to a replacement backend: the epoch
+    // counter belongs to the old one, so the replacement's epoch 1 is applied.
+    backend = 'instance-2'
+    wire.deliver('pane.connection', observation({ connectionEpoch: 1, instanceId: 'instance-2' }))
+    expect(store.current()?.observation.instanceId).toBe('instance-2')
+    expect(store.current()?.observation.connectionEpoch).toBe(1)
+    store.dispose()
+  })
+
+  it('never pins an identity from the first observation', () => {
+    const wire = source()
+    // The client has not named a backend yet: a stale first observation must
+    // be accepted (there is nothing to compare), and must not become the
+    // identity a later one is refused against.
+    const store = new ConnectionStore(wire, 'pane-1', () => null)
+    wire.deliver('pane.connection', observation({ connectionEpoch: 9, instanceId: 'stale' }))
+    expect(store.current()?.observation.instanceId).toBe('stale')
     store.dispose()
   })
 
@@ -134,7 +181,7 @@ describe('ConnectionStore', () => {
     store.dispose()
   })
 
-  it('turns the session exit into the lost condition, and a new session clears it', () => {
+  it('does not turn a session exit into a connection verdict', () => {
     const wire = source()
     const store = new ConnectionStore(wire, 'pane-1')
     wire.deliver(
@@ -147,30 +194,28 @@ describe('ConnectionStore', () => {
     )
     expect(store.condition()).toBe('reachable')
 
+    // The exit is the session's end; the connection's verdict is the next
+    // pane.connection's to state.
     wire.deliver('exit', { sessionId: 'session-a', cause: 'interrupted' })
-    expect(store.condition()).toBe('lost')
+    expect(store.condition()).toBe('reachable')
+    expect(store.current()?.observation.transport.state).toBe('connected')
+    store.dispose()
+  })
 
-    // A `connected` observation minted before the channel died does not
-    // resurrect it.
+  it('keeps a connected transport with a shell failure and its shell-only offer', () => {
+    const wire = source()
+    const store = new ConnectionStore(wire, 'pane-1')
     wire.deliver(
       'pane.connection',
       observation({
         connectionEpoch: 2,
-        sessionId: 'session-a',
-        transport: { state: 'connected', stateMs: 200, plainShells: 1 },
+        transport: { state: 'connected', stateMs: 500, plainShells: 0 },
+        shellFailure: { code: -32603, message: 'the shell could not start' },
+        reconnect: { endsShells: 0 },
       }),
     )
-    expect(store.condition()).toBe('lost')
-
-    // A NEW shell is the end of the loss.
-    wire.deliver(
-      'pane.connection',
-      observation({
-        connectionEpoch: 3,
-        sessionId: 'session-b',
-        transport: { state: 'connected', stateMs: 10, plainShells: 1 },
-      }),
-    )
+    expect(store.current()?.observation.shellFailure?.message).toBe('the shell could not start')
+    expect(store.offer()).toEqual({ connectionEpoch: 2, endsShells: 0 })
     expect(store.condition()).toBe('reachable')
     store.dispose()
   })

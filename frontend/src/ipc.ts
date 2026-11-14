@@ -822,6 +822,11 @@ export class SessionHandle {
 
 export class WSClient {
   private sessions = new Map<string, SessionState>()
+  /** The backend instance this client currently knows, learned from the
+   *  session acks it has taken and cleared when the socket is replaced. It is
+   *  the identity pane.connection observations are compared against; nothing
+   *  is pinned from an observation itself. */
+  private backendInstance: string | null = null
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
   // Reattach-outcome subscribers (nocx-gbhwh): the notice consumes the
@@ -918,6 +923,12 @@ export class WSClient {
       for (const state of this.sessions.values()) {
         this._setAttachment(state, { kind: 'attaching' })
       }
+    })
+    this.dispatcher.onConnectionStateChange((state) => {
+      // A REPLACED BACKEND MAY HAVE A NEW INSTANCE. Until an ack names it,
+      // the client knows none, and the connection store accepts the first
+      // observation instead of refusing it against the old instance's id.
+      if (state.kind !== 'online') this.backendInstance = null
     })
 
     // Handle server-initiated exit notifications. The cause is the closed
@@ -1493,6 +1504,13 @@ export class WSClient {
     return this._registerHandle(result, reported)
   }
 
+  /** The backend instance this client currently knows, or null before an ack
+   *  names one (and after a socket replacement). The connection store compares
+   *  pane.connection against this. */
+  backendInstanceId(): string | null {
+    return this.backendInstance
+  }
+
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
    *  local, profile SSH, direct-host SSH — carries the resolved launch
    *  policy and the refusal reason alongside the id and cwd. */
@@ -1533,6 +1551,7 @@ export class WSClient {
     offset: number,
     reported: SessionSize | null = null,
   ): void {
+    this.backendInstance = identity.instanceId
     this.sessions.set(sessionId, {
       offset,
       reported,
@@ -1740,6 +1759,36 @@ export class WSClient {
    *
    *  A reset here is not a loss to report: this client has drawn nothing yet,
    *  so it simply starts at the offset the backend resumed from. */
+  /**
+   * Take a session THIS client already holds because the backend opened it on
+   * this connection — a reconnect's replacement shell (manual or automatic).
+   *
+   * It is not a claim: the backend's open attached the session to this very
+   * socket, so an `attach` would answer "already attached to this session".
+   * What is missing is only the renderer's record of it, and the live entry
+   * carries the identity and replay cursor that record needs. The bytes and
+   * screen frames arrive on the same socket they were always going to.
+   */
+  adoptHeldSession(entry: LiveSession, like: SessionHandle | null = null): SessionHandle {
+    this._registerSession(
+      entry.sessionId,
+      { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch },
+      entry.replayFrom,
+      null,
+    )
+    return new SessionHandle(
+      this,
+      entry.sessionId,
+      like?.cwd ?? '',
+      like?.desiredMode ?? 'script',
+      like?.parent ?? null,
+      like?.workspaceId ?? '',
+      null,
+      false,
+      like?.accessEpoch ?? null,
+    )
+  }
+
   reclaimSession(entry: LiveSession): Promise<SessionHandle> {
     const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
     const recoveryStatus = this.readSessionRecoveryStatus(entry.sessionId, identity).catch(

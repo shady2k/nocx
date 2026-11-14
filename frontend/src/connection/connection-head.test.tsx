@@ -83,13 +83,13 @@ describe('the connection head', () => {
   it('says it is connecting before the first observation, and never renders nothing', () => {
     mount()
     expect(target.querySelector('[data-testid="connection-head"]')).not.toBeNull()
-    expect(line()).toBe('Connecting · 0:00 · resolving the route')
+    expect(line()).toBe('Connecting')
     expect(
       target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-state'),
-    ).toBe('opening')
+    ).toBe('starting')
     expect(
       target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-stage'),
-    ).toBe('resolve')
+    ).toBeNull()
   })
 
   it('names the stage and ticks the clock locally', () => {
@@ -156,6 +156,25 @@ describe('the connection head', () => {
     )
     expect(target.querySelector('.ui-button')).toBeNull()
     expect(line()).toBe('Connected · 1.4 s')
+  })
+
+  it('says a healthy transport whose shell failed is not Connected, and offers the shell-only retry', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 500, plainShells: 0 },
+        shellFailure: { code: -32603, message: 'the shell could not start' },
+        reconnect: { endsShells: 0 },
+      }),
+    )
+    expect(line()).toBe('Shell failed · the shell could not start')
+    const button = target.querySelector('.ui-button')
+    expect(button?.textContent).toBe('Retry shell')
+    expect(button?.getAttribute('title')).toBe('Open a new shell on this connection')
+    expect(
+      target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-shell-failure'),
+    ).toBe('true')
   })
 
   it('calls the press once and stays disabled until the next observation', () => {

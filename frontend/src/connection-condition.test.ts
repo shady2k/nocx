@@ -58,6 +58,18 @@ describe('connectionCondition', () => {
     expect(connectionWarning(stalled)).toEqual({ label: 'Host not answering' })
   })
 
+  it('marks a healthy transport whose shell failed without calling the connection lost', () => {
+    const failedShell = observation(
+      { state: 'connected', stateMs: 10, plainShells: 0 },
+      {
+        shellFailure: { code: 1, message: 'no shell' },
+        reconnect: { endsShells: 0 },
+      },
+    )
+    expect(connectionCondition(failedShell)).toBe('reachable')
+    expect(connectionWarning(failedShell)).toEqual({ label: 'Shell failed' })
+  })
+
   it('lets failed and ended outrank everything else', () => {
     const failed = observation({
       state: 'failed',

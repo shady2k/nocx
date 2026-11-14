@@ -10,10 +10,12 @@
 //
 // RECONNECT IS NOT A SECOND OPEN. The renderer sends one call — `pane.reconnect`
 // with the pane and the epoch of the observation that offered the button — and
-// the backend closes the old connection, opens a new shell and answers with the
-// open result. Nothing here retries, backs off or decides whether an attempt
-// is allowed: the offer's presence already decided that, and the epoch refuses
-// a press that is about a state the person is no longer looking at.
+// the backend REGISTERS the work and answers {paneId, registered}. The dial and
+// the replacement shell follow on pane.connection, and the session is taken
+// through the existing adoption path there. Nothing here retries, back offs or
+// decides whether an attempt is allowed: the offer's presence already decided
+// that, and the epoch refuses a press that is about a state the person is no
+// longer looking at.
 
 import type {
   OpenAnchor,
@@ -23,6 +25,7 @@ import type {
   SessionSize,
   WSClient,
 } from '../ipc'
+import type { PaneReconnect } from '../generated/pane.reconnect'
 
 /** The `paneId` an open names, when the pane's row exists. Absent is the
  *  ordinary state of a pane the chain has not registered yet. */
@@ -82,20 +85,30 @@ export class ConnectionClient {
   }
 
   /**
-   * The person's one action on a connection that is not usable: carry the
-   * reconnect out in the backend and adopt the shell it answers with.
+   * The person's one action on a connection that is not usable: register the
+   * reconnect with the backend.
+   *
+   * The answer is an ACKNOWLEDGEMENT, not a session: `{paneId, registered}`.
+   * The dial and the replacement shell arrive on pane.connection, and that
+   * observation is where the pane adopts it. Treating this result as an open
+   * ack (the branch's first defect) adopted nothing and threw on every press.
    *
    * The epoch is the observation's own — the one whose button was pressed.
    * A press carrying anything else is about a state the person is no longer
    * looking at, and the backend refuses it with `stale connectionEpoch`.
    */
-  reconnectPane(
-    size: SessionSize,
-    paneId: string,
-    connectionEpoch: number,
-  ): Promise<SessionHandle> {
-    return this.client.dispatcher
-      .call<OpenResult>('pane.reconnect', { paneId, connectionEpoch })
-      .then((result) => this.client.adoptOpen(result, size))
+  async reconnectPane(paneId: string, connectionEpoch: number): Promise<void> {
+    const result = await this.client.dispatcher.call<PaneReconnect>('pane.reconnect', {
+      paneId,
+      connectionEpoch,
+    })
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      result.paneId !== paneId ||
+      result.registered !== true
+    ) {
+      throw new Error('nocx: pane.reconnect did not register this pane')
+    }
   }
 }

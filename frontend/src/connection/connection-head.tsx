@@ -38,21 +38,24 @@ import { Spinner } from '../ui/spinner'
 import { t } from '../i18n/locale-model'
 
 export interface ConnectionHeadHandle {
+  /** The strip itself, so the pane can place it once its scrollback exists. */
+  readonly element: HTMLElement
   dispose(): void
 }
 
 type Tone = 'busy' | 'ok' | 'warn' | 'bad' | 'muted'
 
 interface HeadFacts {
-  state: PaneConnection['transport']['state']
+  /** `starting` is the absence of an observation, not a connection state: the
+   *  head is painted on the first frame but claims nothing until the backend
+   *  speaks. */
+  state: PaneConnection['transport']['state'] | 'starting'
   text: string
   tone: Tone
   busy: boolean
-  offer: { endsShells: number } | null
-  /** The stage word, when the state is one that has stages. The pane's own
-   *  attempt before the first observation is `resolve` — where the backend
-   *  begins — so Q1's stage is present in the first frame, not only once a
-   *  helper has answered (the helper probe may take a second). */
+  offer: { endsShells: number; shellOnly: boolean } | null
+  /** The stage word, when the state is one that has stages. It comes from the
+   *  observation and nowhere else. */
   stage?: string
 }
 
@@ -107,12 +110,11 @@ function factsFor(
   offerEnds: number | null,
 ): HeadFacts {
   if (observation === null) {
+    // NOTHING TOLD, NOTHING CLAIMED (ADR-ba6xet1b): no stage and no clock
+    // until the backend publishes its first observation.
     return {
-      state: 'opening',
-      stage: 'resolve',
-      text: `${t('connection.connecting', 'Connecting')} \u00b7 ${clock(now - startedAt)} \u00b7 ${
-        STAGE_WORDS.resolve
-      }`,
+      state: 'starting',
+      text: t('connection.connecting', 'Connecting'),
       tone: 'busy',
       busy: true,
       offer: null,
@@ -121,7 +123,10 @@ function factsFor(
   const transport = observation.transport
   const observed = Date.parse(observation.observedAt)
   const elapsed = transport.stateMs + (Number.isFinite(observed) ? now - observed : 0)
-  const offer = observation.reconnect === undefined ? null : { endsShells: offerEnds ?? 0 }
+  const offer =
+    observation.reconnect === undefined
+      ? null
+      : { endsShells: offerEnds ?? 0, shellOnly: observation.shellFailure !== undefined }
   const ends =
     offer !== null && offer.endsShells > 0
       ? ` \u00b7 ${t('connection.endsShells', 'ends {n} shell(s)', { n: offer.endsShells })}`
@@ -147,6 +152,21 @@ function factsFor(
         offer,
       }
     case 'connected':
+      // A HEALTHY TRANSPORT WITH A FAILED SHELL IS NOT "CONNECTED". The
+      // refusal is the backend's own message and the offer beside it retries
+      // only the shell; saying "Connected" here would hide the pane's one
+      // problem behind a green word.
+      if (observation.shellFailure !== undefined) {
+        return {
+          state: 'connected',
+          text: `${t('connection.shellFailed', 'Shell failed')} \u00b7 ${
+            observation.shellFailure.message
+          }`,
+          tone: 'bad',
+          busy: false,
+          offer,
+        }
+      }
       return {
         state: 'connected',
         text: `${t('connection.connected', 'Connected')} \u00b7 ${(elapsed / 1000).toFixed(1)} s`,
@@ -322,11 +342,11 @@ export function mountConnectionHead(
           variant="primary"
           size="sm"
           disabled={pressed()}
-          title={offerTitle(facts().offer?.endsShells ?? 0)}
-          ariaLabel={t('connection.reconnect', 'Reconnect')}
+          title={offerTitle(facts().offer)}
+          ariaLabel={offerLabel(facts().offer)}
           onClick={press}
         >
-          {t('connection.reconnect', 'Reconnect')}
+          {offerLabel(facts().offer)}
         </Button>
       </Show>
     ),
@@ -344,6 +364,11 @@ export function mountConnectionHead(
     frame.header.dataset.condition = connectionCondition(observation())
     if (current.stage === undefined) delete frame.header.dataset.stage
     else frame.header.dataset.stage = current.stage
+    if (observation()?.shellFailure !== undefined) {
+      frame.header.dataset.shellFailure = 'true'
+    } else {
+      delete frame.header.dataset.shellFailure
+    }
   }
   const disposeState = createRoot((dispose) => {
     createEffect(applyState)
@@ -353,6 +378,7 @@ export function mountConnectionHead(
   target.insertBefore(frame.header, target.firstChild)
 
   return {
+    element: frame.header,
     dispose(): void {
       window.clearInterval(tick)
       unsubscribe()
@@ -365,9 +391,19 @@ export function mountConnectionHead(
   }
 }
 
-function offerTitle(endsShells: number): string {
-  if (endsShells === 0) return t('connection.reconnectTitle', 'Reconnect this connection')
+function offerLabel(offer: HeadFacts['offer']): string {
+  if (offer?.shellOnly === true) return t('connection.retryShell', 'Retry shell')
+  return t('connection.reconnect', 'Reconnect')
+}
+
+function offerTitle(offer: HeadFacts['offer']): string {
+  if (offer?.shellOnly === true) {
+    return t('connection.retryShellTitle', 'Open a new shell on this connection')
+  }
+  if (offer === null || offer.endsShells === 0) {
+    return t('connection.reconnectTitle', 'Reconnect this connection')
+  }
   return t('connection.reconnectEnds', 'Reconnect ends {n} shell(s) on this connection', {
-    n: endsShells,
+    n: offer.endsShells,
   })
 }

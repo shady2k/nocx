@@ -156,6 +156,12 @@ test('an SSH tab shows a stage within a second and never an empty screen (Q1)', 
   let w: Wired | null = null
   try {
     w = await wire(page, home)
+    // WARM THE HELPER FIRST. The first SSH open of a cold stand starts the
+    // helper process, and that one-time cost is not the connection's dial; Q1
+    // is about the tab's first second on a stand that is already serving.
+    w.proxy.pass()
+    await openConnection(page, w.profileName)
+
     // A relay that forwards every byte LATE. The dial cannot finish inside the
     // first second, so the head has to say what it is doing before any answer
     // arrives — and the same connection then finishes, which a blackhole could

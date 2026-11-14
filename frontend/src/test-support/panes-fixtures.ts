@@ -589,6 +589,11 @@ export interface ClientFake {
   /** Deliver one pane.connection observation to every subscriber — the
    *  connection store is the real one, so a pane test drives the real fold. */
   _firePaneConnection: (observation: PaneConnection) => void
+  /** The backend identity the client currently knows, as WSClient reports it. */
+  backendInstanceId: () => string | null
+  /** Move the client to another backend instance, as a socket replacement
+   *  followed by a new ack does. */
+  _setBackendInstance: (id: string | null) => void
 }
 /** The handler a surface registered for one server-initiated method, so a
  *  test can deliver a published fact through the REAL subscription seam
@@ -703,6 +708,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
   const blockOutputStartHandlers = new Set<(anchor: BlockOutputStart) => void>()
   const notificationHandlers = new Map<string, Set<(params: unknown) => void>>()
+  let backendInstance: string | null = null
+  const connectionEpochs = new Map<string, number>()
   const operationRowHandlers = new Set<
     (row: { callID: number; title: string; done: number; total: number; machine: string }) => void
   >()
@@ -788,10 +795,18 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     // handle are one object here, which is the identity this asserts.
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     adoptOpen: (result) => result as unknown as SessionHandle,
+    backendInstanceId: () => backendInstance,
+    _setBackendInstance: (id) => {
+      backendInstance = id
+    },
     _fireNotification: (method, params) => {
       for (const handler of [...(notificationHandlers.get(method) ?? [])]) handler(params)
     },
     _firePaneConnection: (observation) => {
+      const last = connectionEpochs.get(observation.paneId) ?? 0
+      if (observation.connectionEpoch > last) {
+        connectionEpochs.set(observation.paneId, observation.connectionEpoch)
+      }
       for (const handler of [...(notificationHandlers.get('pane.connection') ?? [])]) {
         handler(observation)
       }
@@ -834,7 +849,23 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
           ) as never
         }
         if (method === 'pane.reconnect') {
-          return (await client._reconnectPane(text(record.paneId))) as never
+          // THE BACKEND'S SHAPE (review finding C): an acknowledgement, then
+          // the replacement shell on pane.connection. The fixture opens a new
+          // session so the pane's ordinary adoption path has one to claim.
+          const paneId = text(record.paneId)
+          const replacement = await client._reconnectPane(paneId)
+          const epoch = (connectionEpochs.get(paneId) ?? 0) + 1
+          client._firePaneConnection({
+            paneId,
+            connectionId: 'conn-1',
+            connectionEpoch: epoch,
+            instanceId: backendInstance ?? 'test-instance',
+            sessionId: replacement.sessionId,
+            transport: { state: 'connected', stateMs: 0, plainShells: 1 },
+            attempt: { shown: 'none', candidate: 'none', reason: '' },
+            observedAt: new Date().toISOString(),
+          })
+          return { paneId, registered: true } as never
         }
         if (method === 'agent.status') {
           return {

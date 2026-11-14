@@ -471,6 +471,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'terminal.connection.saveFailed': 'Could not save connection:',
 
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
+  'connection.retryShell': 'Retry shell',
+  'connection.retryShellTitle': 'Open a new shell on this connection',
+  'connection.shellFailed': 'Shell failed',
   'connection.lost': 'Connection lost',
   'connection.notAnswering': 'Host not answering',
   'connection.endsShells': 'ends {n} shell(s)',

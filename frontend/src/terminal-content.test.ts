@@ -352,7 +352,16 @@ async function mountTerminal(
     profileClient ?? null,
     () => {},
     opts.ssh,
-    opts.hooks,
+    {
+      // THE FIXTURE'S ADOPTION PATH (review finding C): the backend's
+      // replacement session is taken from the sessions the fixture already
+      // holds, exactly as the product's live-inventory claim takes it.
+      adoptReplacement: (sessionId: string) => {
+        const found = clientFake._sessions.find((candidate) => candidate.sessionId === sessionId)
+        return Promise.resolve(found === undefined ? null : asSessionHandleForTest(found))
+      },
+      ...opts.hooks,
+    },
   )
   const tab = new Pane(
     content,
@@ -4227,7 +4236,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   // prompt. It never runs in the session that is gone.
   it('a command typed while the rebind is in flight waits for the new session, then returns (sequence 11)', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' } },
+      client,
+    )
     content.setVisible(true)
     const session = client._sessions[0]
     const editor = editorOf(content)
@@ -4362,8 +4375,12 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   it('a plain command typed during a raw session’s reconnect comes back to the composer (sequence 13)', async () => {
     const client = makeClient()
     const session = makeSession({ awaitsIntegration: false })
-    client.openSession.mockResolvedValue(session)
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    client.openSSHSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' } },
+      client,
+    )
     content.setVisible(true)
     const editor = editorOf(content)
     const view = editorViewOf(editor)
@@ -4410,7 +4427,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   // else could withdraw it, and the replacement ran it.
   it('a cancel during a reconnect drops a command already held for it (sequence 14)', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' } },
+      client,
+    )
     content.setVisible(true)
     const session = client._sessions[0]
     const editor = editorOf(content)
@@ -4467,7 +4488,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   // attempt. A new bind starts with an UNKNOWN verdict.
   it('a command held across a reconnect waits for the NEW session’s verdict (sequence 15)', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' } },
+      client,
+    )
     content.setVisible(true)
     const session = client._sessions[0]
     const editor = editorOf(content)
@@ -5780,6 +5805,12 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       onExit({ sessionId: first.sessionId, cause: 'interrupted' })
       publishLost(client, content)
       expect(await content.pressReconnect()).toBe(true)
+      await vi.waitFor(() => expect(subscriptions().length).toBe(2))
+      await vi.waitFor(() =>
+        expect((content as unknown as { session: { sessionId: string } }).session.sessionId).toBe(
+          client._sessions[1].sessionId,
+        ),
+      )
 
       const second = client._sessions[1]
       const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
@@ -6767,6 +6798,9 @@ describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () =>
     try {
       publishConnected(client, content)
       exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+      // The connection's verdict is the backend's next observation, never the
+      // exit's (review finding A).
+      publishLost(client, content)
 
       // Not closed: the tab and its scrollback survive.
       expect(closeRequested).not.toHaveBeenCalled()
@@ -6815,6 +6849,7 @@ describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () =>
     try {
       publishConnected(client, content)
       exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+      publishLost(client, content)
       const markedAt = warnings.length
 
       // A recovered-looking fact ("integrated", no reason) arriving late:
@@ -23662,6 +23697,8 @@ describe('the pane screen mapping follows the session lifetime', () => {
       onExit!({ sessionId: first.sessionId, cause: 'interrupted' })
       publishLost(client, content)
       await expect(content.pressReconnect()).resolves.toBe(true)
+      // The replacement is adopted from pane.connection, not from the ack.
+      await vi.waitFor(() => expect(sessionOf(content).sessionId).not.toBe(first.sessionId))
 
       // Exercise the public renderer seam with the departed session identity.
       tab.pane.setAttribute('data-session-id', first.sessionId)

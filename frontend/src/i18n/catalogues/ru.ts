@@ -256,6 +256,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'scrollback.duration.days': '{days} д {hours} ч',
 
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
+  'connection.retryShell': 'Повторить оболочку',
+  'connection.retryShellTitle': 'Открыть новую оболочку на этом соединении',
+  'connection.shellFailed': 'Оболочка не запустилась',
   'connection.lost': 'Соединение потеряно',
   'connection.notAnswering': 'Хост не отвечает',
   'connection.endsShells': 'завершит оболочек: {n}',

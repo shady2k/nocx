@@ -30,14 +30,11 @@ export interface ConnectionSource {
   subscribe(method: string, handler: (params: unknown) => void): () => void
 }
 
-/** One pane's applied observation, plus the one fact an observation cannot
- *  carry: an exit the backend has already announced. */
+/** One pane's applied observation. The backend's answer is the whole of it:
+ *  an exit is the session's end, not the connection's verdict (design §5.6),
+ *  so nothing about it is folded here. */
 export interface PaneConnectionState {
   readonly observation: PaneConnection
-  /** The session this observation names has ended with `interrupted`. The
-   *  connection's next observation replaces it; until then the pane is lost,
-   *  because `connected` under a session that has ended is a stale belief. */
-  readonly sessionEnded: boolean
 }
 
 /** What a Reconnect press must carry: the epoch of the observation that
@@ -115,6 +112,7 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
       'quality',
       'attempt',
       'reconnect',
+      'shellFailure',
       'observedAt',
     ])
   ) {
@@ -128,7 +126,9 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
   if (!parseAttempt(value.attempt)) return null
   if (!parseQuality(value.quality)) return null
   if (!parseReconnect(value.reconnect)) return null
+  if (!parseShellFailure(value.shellFailure)) return null
   if (!parseTransport(value.transport)) return null
+  if (!shellFailureRelations(value)) return null
   return value as unknown as PaneConnection
 }
 
@@ -151,6 +151,35 @@ function parseReconnect(value: unknown): boolean {
   if (value === undefined) return true
   if (!isRecord(value) || !onlyKeys(value, ['endsShells'])) return false
   return isNonNegativeInteger(value.endsShells)
+}
+
+function parseShellFailure(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  if (!onlyKeys(value, ['code', 'message', 'data'])) return false
+  return (
+    typeof value.code === 'number' &&
+    Number.isSafeInteger(value.code) &&
+    typeof value.message === 'string'
+  )
+}
+
+/** The schema's cross-field rules for a healthy transport whose shell failed:
+ *  the failure and a shell-only retry travel together, the retry ends no
+ *  shells, and a failed shell never carries the session id of one that does
+ *  not exist. */
+function shellFailureRelations(value: Record<string, unknown>): boolean {
+  const transport = value.transport as Record<string, unknown>
+  const connected = transport.state === 'connected'
+  const failure = value.shellFailure !== undefined
+  if (failure && value.sessionId !== undefined) return false
+  if (connected && value.reconnect !== undefined) {
+    if (!failure) return false
+    const offer = value.reconnect as Record<string, unknown>
+    if (offer.endsShells !== 0) return false
+  }
+  if (connected && failure && value.reconnect === undefined) return false
+  return true
 }
 
 /** The transport branch, by its state's own required and forbidden fields. */
@@ -198,18 +227,23 @@ function parseTransport(value: unknown): boolean {
 export class ConnectionStore {
   private state: PaneConnectionState | null = null
   private lastEpoch = 0
-  private instanceId: string | null = null
+  /** The backend this store's epochs are ordered against. Only the CLIENT's
+   *  current identity may move it; a new value resets the epoch counter,
+   *  because a replacement backend starts its per-pane epochs over. */
+  private observedBackend: string | null = null
   private readonly listeners = new Set<() => void>()
   private readonly unsubscribe: (() => void)[]
 
   constructor(
     source: ConnectionSource,
     readonly paneId: string,
+    /** The client's CURRENT backend identity, or null before it knows one.
+     *  Never learned from this store's own observations: a first observation
+     *  can be a stale one, and pinning it would refuse the replacement
+     *  backend for the life of the window. */
+    private readonly backendIdentity: () => string | null = () => null,
   ) {
-    this.unsubscribe = [
-      source.subscribe('pane.connection', (params) => this.receive(params)),
-      source.subscribe('exit', (params) => this.noteExit(params)),
-    ]
+    this.unsubscribe = [source.subscribe('pane.connection', (params) => this.receive(params))]
   }
 
   /** The latest observation, or null for a pane that has never had one — a
@@ -220,9 +254,7 @@ export class ConnectionStore {
 
   /** The one condition a mark or a tab draws, from the one fold. */
   condition(): ConnectionCondition {
-    if (this.state === null) return 'reachable'
-    if (this.state.sessionEnded) return 'lost'
-    return connectionCondition(this.state.observation)
+    return connectionCondition(this.state?.observation ?? null)
   }
 
   /** The button's offer, or null when the backend offers nothing. Its
@@ -253,18 +285,25 @@ export class ConnectionStore {
   private receive(params: unknown): void {
     const observation = parsePaneConnection(params)
     if (observation === null || observation.paneId !== this.paneId) return
-    if (this.instanceId !== null && observation.instanceId !== this.instanceId) return
+    // THE CLIENT'S IDENTITY, NOT THE FIRST OBSERVATION'S. A backend restart
+    // keeps this renderer alive: the replacement's per-pane epochs start at 1
+    // again, so the old counter must be dropped with the old instance. When
+    // the client does not know an identity yet, observations are accepted and
+    // nothing is pinned — the first one to arrive may be a stale one.
+    const backend = this.backendIdentity()
+    if (backend !== null) {
+      if (this.observedBackend !== null && this.observedBackend !== backend) {
+        this.observedBackend = backend
+        this.lastEpoch = 0
+        this.state = null
+      } else {
+        this.observedBackend = backend
+      }
+      if (observation.instanceId !== backend) return
+    }
     if (observation.connectionEpoch <= this.lastEpoch) return
-    this.instanceId ??= observation.instanceId
     this.lastEpoch = observation.connectionEpoch
-    const previous = this.state
-    // A NEW SESSION IS THE END OF A LOSS (design §5.4): the old session's
-    // end stays true only while it is still the session this pane names.
-    const sessionEnded =
-      previous?.sessionEnded === true &&
-      previous.observation.sessionId !== undefined &&
-      previous.observation.sessionId === observation.sessionId
-    this.state = { observation, sessionEnded }
+    this.state = { observation }
     this.emit()
   }
 
@@ -272,29 +311,6 @@ export class ConnectionStore {
    *  and never reaches a connection state; a loss is the fact the head's
    *  `lost` paragraph is for, and it outranks a `connected` observation that
    *  was minted before the channel died. */
-  /**
-   * The session's own end, delivered through the pane's exit handler when a
-   * surface already holds it. It is the same fact `exit` carries on the wire,
-   * and it is idempotent: a test or an embedding that drives the handle
-   * directly still reaches the one owner.
-   */
-  noteSessionEnd(sessionId: string | null | undefined, cause: string): void {
-    if (sessionId === null || sessionId === undefined || cause !== 'interrupted') return
-    this.noteExit({ sessionId, cause })
-  }
-
-  private noteExit(params: unknown): void {
-    if (!isRecord(params)) return
-    const sessionId = params.sessionId
-    const cause = params.cause
-    if (typeof sessionId !== 'string' || cause !== 'interrupted') return
-    const state = this.state
-    if (state === null || state.observation.sessionId !== sessionId) return
-    if (state.sessionEnded) return
-    this.state = { observation: state.observation, sessionEnded: true }
-    this.emit()
-  }
-
   private emit(): void {
     for (const listener of [...this.listeners]) listener()
   }

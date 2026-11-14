@@ -241,8 +241,15 @@ func (m *Minter) EndTurnContext(ctx context.Context, id string) error {
 }
 
 func (m *Minter) endTurnContext(ctx context.Context, s *session) error {
+	m.mu.Lock()
+	lifetime := s.authority.lifetime
+	m.mu.Unlock()
 	for {
 		m.mu.Lock()
+		if s.authority.lifetime != lifetime || lifetime == nil {
+			m.mu.Unlock()
+			return nil
+		}
 		if s.settling != nil {
 			done := s.settling
 			m.mu.Unlock()

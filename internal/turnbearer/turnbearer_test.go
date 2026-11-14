@@ -390,3 +390,39 @@ func TestToolSessionDeadlineKeepsAuthorityClosedUntilSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAdmissionCleanupDeadlineKeepsRetirementJoined(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := NewMinter(&testEndpoint{}, "helper")
+		token, retire := mint(t, m, "session")
+		defer retire()
+		begin(t, m, "session", "run")
+		a, _ := m.Lookup(token)
+		admission, done, ok := a.StartAdmission(context.Background())
+		if !ok {
+			t.Fatal("admission refused")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := m.RetireContext(ctx, "session"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Retire: %v", err)
+		}
+		<-admission.Done()
+		if _, _, err := m.Mint("session"); err == nil {
+			t.Fatal("unsettled session replaced")
+		}
+		ended := make(chan struct{})
+		go func() { m.EndTurn("session"); close(ended) }()
+		synctest.Wait()
+		select {
+		case <-ended:
+			t.Fatal("EndTurn did not join admission cleanup")
+		default:
+		}
+		done()
+		<-ended
+		retire()
+		_, nextRetire := mint(t, m, "session")
+		nextRetire()
+	})
+}

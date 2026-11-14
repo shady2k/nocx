@@ -146,10 +146,18 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 		}
 	}
 	steps := codec.BeginTurn(harness.TurnSpec{Text: "hello", ConversationID: "conversation"})
-	if len(steps) != 1 || !steps[0].Prompt || steps[0].Command.Name != "prompt" {
+	if len(steps) != 2 || !steps[0].Barrier || steps[0].Prompt || steps[0].Command.Name != "get_state" || !steps[1].Prompt || steps[1].Barrier || steps[1].Command.Name != "prompt" {
 		t.Fatalf("turn: %+v", steps)
 	}
-	raw, err = codec.Encode("command-1", steps[0].Command)
+	raw, err = codec.Encode("barrier-1", steps[0].Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var barrier protocol.Command
+	if err = json.Unmarshal(raw, &barrier); err != nil || barrier.ID != "barrier-1" || barrier.Name != "get_state" {
+		t.Fatalf("barrier: %+v, %v", barrier, err)
+	}
+	raw, err = codec.Encode("command-1", steps[1].Command)
 	if err != nil {
 		t.Fatal(err)
 	}

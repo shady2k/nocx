@@ -12,8 +12,9 @@ type TurnAuthority = assistant.TurnTools
 
 // ToolSession owns a process generation's bearer and the settlement boundary
 // between its turns. EndTurn closes admission before waiting for accepted work.
-// Retire additionally revokes the bearer. Both may report a caller deadline;
-// that does not make the generation reusable.
+// Retire additionally revokes the bearer and cancels all work for the session.
+// An EndTurn error requires retirement before settlement can be confirmed. A
+// Retire error leaves work unconfirmed and the generation must never be reused.
 type ToolSession interface {
 	BeginTurn(TurnAuthority) error
 	EndTurn(context.Context) error

@@ -171,6 +171,46 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 		trace.assertBefore(t, "terminal", 1, "prompt-written", 2)
 	})
 
+	t.Run("reused turn calls through the session bridge", func(t *testing.T) {
+		dir := t.TempDir()
+		resultFile := filepath.Join(dir, "result")
+		pidFile := filepath.Join(dir, "pid")
+		tools := newTestToolSession(false)
+		factoryCalls := 0
+		toolFactory := func(context.Context, harness.SessionInfo) (harness.ToolSession, harness.ToolBridge, error) {
+			factoryCalls++
+			return tools, harness.ToolBridge{Command: []string{server}, Env: []string{"NOCX_TEST_SECRET=session-bridge"}}, nil
+		}
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{Tools: toolFactory}, Script: protocol.Script{PIDFile: pidFile, ResultFile: resultFile, Turns: [][]protocol.Step{
+			{{Kind: protocol.StepEnd, Model: "fake-model"}},
+			{{Kind: protocol.StepTool, Name: "probe"}, {Kind: protocol.StepEnd, Model: "fake-model"}},
+		}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		runSuccessful(t, h, dir)
+		pid := readPID(t, pidFile)
+		second, err := h.Run(context.Background(), harness.TurnSpec{ConversationID: "conversation-1", Dir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		events := collect(t, second)
+		if _, err = second.Wait(context.Background()); err != nil {
+			t.Fatalf("second tool turn: %v; events=%+v", err, events)
+		}
+		if len(events) != 3 || events[0].Kind != harness.EventToolStarted || events[1].Kind != harness.EventToolFinished || events[2].Kind != harness.EventEnd {
+			t.Fatalf("second tool events: %+v", events)
+		}
+		result, err := os.ReadFile(resultFile) //nolint:gosec // private fixture result in t.TempDir
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(result), "server_secret=session-bridge") {
+			t.Fatalf("second turn did not use factory bridge: %s", result)
+		}
+		if factoryCalls != 1 || readPID(t, pidFile) != pid {
+			t.Fatal("second turn did not reuse the tool session and process")
+		}
+	})
+
 	t.Run("endpoint settlement delays terminal and queued turn", func(t *testing.T) {
 		dir := t.TempDir()
 		tools := newTestToolSession(true)

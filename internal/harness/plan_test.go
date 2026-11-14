@@ -12,10 +12,11 @@ import (
 // The fixture observes actual commands in a child process. It sends the wrong
 // response ID first; only a matched response may run the payload check.
 type planProtocol struct {
-	script   string
-	sessions chan SessionInfo
-	checks   chan string
-	reject   bool
+	script         string
+	sessions       chan SessionInfo
+	checks         chan string
+	reject         bool
+	barrierFixture bool
 }
 
 func (p *planProtocol) Start(context.Context, TurnSpec) (Launch, error) {
@@ -24,6 +25,9 @@ func (p *planProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 
 func (p *planProtocol) NewCodec(info SessionInfo) Codec {
 	p.sessions <- info
+	if p.barrierFixture {
+		return &barrierCodec{}
+	}
 	return &planCodec{checks: p.checks, reject: p.reject}
 }
 
@@ -51,7 +55,7 @@ func (c *planCodec) Setup() []Step {
 func (c *planCodec) BeginTurn(TurnSpec) []Step {
 	c.stateChecked = false
 	return []Step{
-		{Command: Command{Name: "state"}, Check: func(value any) error {
+		{Command: Command{Name: "state"}, Barrier: true, Check: func(value any) error {
 			if !c.ready || value != "state" {
 				return fmt.Errorf("state before setup or bad payload: %v", value)
 			}
@@ -78,8 +82,12 @@ func (*planCodec) Decode(line []byte) (Decoded, error) {
 	if len(fields) == 3 && fields[0] == "response" {
 		return Decoded{Response: &Response{ID: fields[1], Payload: fields[2]}}, nil
 	}
-	if string(line) == "end" {
-		return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: "plan"}}}}, nil
+	if len(fields) > 0 && fields[0] == "end" {
+		model := "plan"
+		if len(fields) == 2 {
+			model = fields[1]
+		}
+		return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: model}}}}, nil
 	}
 	return Decoded{}, fmt.Errorf("bad fixture line: %q", line)
 }
@@ -176,6 +184,76 @@ done`, sessions: make(chan SessionInfo, 8), checks: make(chan string, 8),
 	}
 	if _, err = turn.Wait(ctx); err == nil {
 		t.Fatal("terminal from setup settled the turn successfully")
+	}
+}
+
+// barrierCodec intentionally has no stateful prompt guard: removing the actor's
+// barrier must expose the stale terminal, not fail an unrelated payload check.
+type barrierCodec struct{}
+
+func (*barrierCodec) Setup() []Step { return nil }
+func (*barrierCodec) BeginTurn(TurnSpec) []Step {
+	return []Step{
+		{Command: Command{Name: "state"}, Barrier: true},
+		{Command: Command{Name: "prompt"}, Prompt: true},
+	}
+}
+func (*barrierCodec) CancelSequence() []Command { return nil }
+func (*barrierCodec) Encode(id string, command Command) ([]byte, error) {
+	return []byte(id + " " + command.Name + "\n"), nil
+}
+
+func (*barrierCodec) Decode(line []byte) (Decoded, error) {
+	return (*planCodec)(nil).Decode(line)
+}
+
+// The old terminal is deliberately held until the next barrier command. It
+// cannot be removed by draining stdout when the previous turn finishes.
+func TestPlanBarrierRejectsPreviousTurnTerminal(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	p := &planProtocol{
+		barrierFixture: true,
+		script: `turn=0
+stale=0
+while read id command; do
+ case "$command" in
+ state)
+   if [ "$turn" = 1 ]; then echo "end stale"; stale=1; fi
+   echo "response $id state" ;;
+ prompt)
+   # Without a barrier the pending old terminal follows the new prompt.
+   if [ "$turn" = 1 ] && [ "$stale" = 0 ]; then echo "end stale"; fi
+   turn=$((turn + 1))
+   echo "response $id accepted"
+   echo "end fresh-$turn" ;;
+ esac
+done`, sessions: make(chan SessionInfo, 8), checks: make(chan string, 8),
+	}
+	m := NewSessionManager(Base{}, p)
+	defer func() { _ = m.Close(ctx) }()
+	for i := 1; i <= 3; i++ {
+		turn, err := m.Run(ctx, TurnSpec{ConversationID: "stale"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := turn.Wait(ctx)
+		if i == 2 {
+			if err == nil {
+				t.Fatalf("stale output settled the next turn successfully: %+v", result)
+			}
+			continue
+		}
+		if err != nil || result.Model != "fresh-1" {
+			t.Fatalf("turn %d: Wait=%+v, %v", i, result, err)
+		}
+	}
+	if len(p.sessions) != 2 {
+		t.Fatalf("codec creations=%d, want replacement after stale output", len(p.sessions))
+	}
+	first, replacement := <-p.sessions, <-p.sessions
+	if first.Generation == replacement.Generation {
+		t.Fatalf("stale incarnation reused: %+v, %+v", first, replacement)
 	}
 }
 

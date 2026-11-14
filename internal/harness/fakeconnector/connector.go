@@ -83,7 +83,10 @@ func (c *codec) Setup() []harness.Step {
 }
 
 func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
-	return []harness.Step{{Command: harness.Command{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}, Prompt: true}}
+	return []harness.Step{
+		{Command: harness.Command{Name: "get_state"}, Barrier: true},
+		{Command: harness.Command{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}, Prompt: true},
+	}
 }
 
 func (c *codec) CancelSequence() []harness.Command { return []harness.Command{{Name: "abort"}} }

@@ -298,6 +298,8 @@ type (
 	cleanupResult struct {
 		generation uint64
 		err        error
+		toolErr    error
+		killed     bool
 	}
 	incarnationStart struct {
 		generation uint64
@@ -332,11 +334,14 @@ func (s *session) loop() {
 	var process *child
 	var codec Codec
 	var tools ToolSession
+	var bridge ToolBridge
+	var barrierPassed bool
 	var current *actorTurn
 	var queue []*actorTurn
 	var generation, turnNumber, serial uint64
-	var starting, retiring, closing, cancelling, promptWritten, settling, settled bool
-	var deathPending bool
+	var starting, retiring, closing, cancelling, promptWritten, settling, settlementDone bool
+	var deathPending, retired bool
+	var retirementErr error
 	var terminal *Event
 	var plan []Step
 	var cancelCommands []Command
@@ -362,11 +367,12 @@ func (s *session) loop() {
 		}
 	}
 	// Cleanup owns only blocking pipe/reaper waits. It never changes actor state.
-	retire := func() {
-		if retiring {
+	retire := func(graceful bool) {
+		if retiring || retired {
 			return
 		}
 		retiring = true
+		retired = true
 		if stopStart != nil {
 			stopStart()
 			stopStart = nil
@@ -378,7 +384,13 @@ func (s *session) loop() {
 			cleanupDeadline = time.Now().Add(bound)
 		}
 		if child != nil {
-			child.kill()
+			if graceful {
+				_ = child.stdin.Close()
+				observe("stdin-close", nil)
+			} else {
+				child.kill()
+				observe("kill", nil)
+			}
 		}
 		process = nil
 		codec = nil
@@ -390,19 +402,31 @@ func (s *session) loop() {
 		go func() {
 			ctx, cancel := context.WithDeadline(context.Background(), cleanupDeadline)
 			defer cancel()
-			var err error
+			var toolErr, exitErr error
+			var killed bool
 			if sessionTools != nil {
-				err = sessionTools.Retire(ctx)
+				toolErr = sessionTools.Retire(ctx)
 			}
-			err = errors.Join(err, disposeChild(child))
+			if child != nil {
+				if graceful {
+					select {
+					case <-child.observed:
+					case <-ctx.Done():
+						child.kill()
+						killed = true
+					}
+				}
+				child.finish()
+				exitErr = <-child.gone
+			}
 			select {
-			case cleanups <- cleanupResult{gen, err}:
+			case cleanups <- cleanupResult{gen, exitErr, toolErr, killed}:
 			case <-s.done:
 			}
 		}()
 	}
 	settle := func() {
-		if current == nil || settling || settled {
+		if current == nil || settling || settlementDone {
 			return
 		}
 		settling = true
@@ -440,13 +464,13 @@ func (s *session) loop() {
 		// A selected terminal prevents new work. A partially written work frame
 		// cannot be reused by any later command.
 		if len(frame) > 0 && frameWritten > 0 {
-			retire()
+			retire(false)
 		}
 		frame = nil
 		observe("terminal-taken", []byte(ev.Kind))
 		settle()
 	}
-	fail := func(reason string) { choose(failure(reason)); retire() }
+	fail := func(reason string) { choose(failure(reason)); retire(false) }
 	cancelTurn := func() {
 		if current == nil {
 			return
@@ -474,7 +498,7 @@ func (s *session) loop() {
 		}
 		if starting || process == nil || partial {
 			choose(failure("cancelled"))
-			retire()
+			retire(false)
 			return
 		}
 		cancelCommands = codec.CancelSequence()
@@ -483,8 +507,9 @@ func (s *session) loop() {
 		current = t
 		cancelling = false
 		promptWritten = false
+		barrierPassed = false
 		settling = false
-		settled = false
+		settlementDone = false
 		terminal = nil
 		delivery = nil
 		frame = nil
@@ -497,11 +522,17 @@ func (s *session) loop() {
 				return
 			}
 		}
+		if s.base.Tools != nil {
+			t.spec.Tools = bridge
+		}
 		plan = codec.BeginTurn(t.spec)
+		if len(plan) == 0 || !plan[0].Barrier {
+			fail("agent turn plan has no admission barrier")
+		}
 	}
 	for {
 		// Publication is the only point at which Wait and Events become terminal.
-		if current != nil && terminal != nil && settled && len(delivery) == 0 {
+		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 {
 			observe("terminal", nil)
 			publish(current, *terminal)
 			current = nil
@@ -510,9 +541,6 @@ func (s *session) loop() {
 			pending = nil
 			frame = nil
 			idleAt = time.Now().Add(idle)
-			if cancelling {
-				retire()
-			}
 		}
 		if closing && current == nil && !starting && !retiring && process == nil {
 			return
@@ -543,7 +571,7 @@ func (s *session) loop() {
 				if errors.Is(result.err, io.EOF) {
 					deathPending = true
 					settle()
-					retire()
+					retire(false)
 					return
 				}
 				reason := fmt.Sprint("the agent stdout ended: ", result.err)
@@ -560,6 +588,10 @@ func (s *session) loop() {
 			decoded, err := codec.Decode(line)
 			if err != nil {
 				fail(fmt.Sprint("agent protocol: ", err))
+				return
+			}
+			if decoded.Response != nil && len(decoded.Events) > 0 {
+				fail("agent response envelope also carried turn events")
 				return
 			}
 			if response := decoded.Response; response != nil {
@@ -579,13 +611,17 @@ func (s *session) loop() {
 							return
 						}
 					}
+					if step.Barrier {
+						barrierPassed = true
+						observe("barrier-passed", nil)
+					}
 					if len(plan) > 0 {
 						plan = plan[1:]
 					}
 				}
 			}
 			for _, ev := range decoded.Events {
-				if current == nil || !promptWritten {
+				if current == nil || !barrierPassed || !promptWritten {
 					fail("agent output before a turn prompt was written")
 					return
 				}
@@ -596,7 +632,7 @@ func (s *session) loop() {
 				if ev.Kind == EventEnd || ev.Kind == EventFailure {
 					choose(ev)
 					if cancelling {
-						retire()
+						retire(true)
 					}
 				} else if !cancelling {
 					delivery = append(delivery, ev)
@@ -616,7 +652,7 @@ func (s *session) loop() {
 				if current != nil {
 					cancelTurn()
 				} else if process != nil || starting {
-					retire()
+					retire(false)
 				}
 			}
 			if r.turn != nil && !r.cancel {
@@ -665,6 +701,8 @@ func (s *session) loop() {
 				stopStart = nil
 			}
 			process, tools = result.child, result.tools
+			bridge = result.bridge
+			barrierPassed = false
 			if result.err != nil {
 				fail(fmt.Sprint(result.err))
 				continue
@@ -681,26 +719,58 @@ func (s *session) loop() {
 					continue
 				}
 			}
-			plan = append(codec.Setup(), codec.BeginTurn(spec)...)
+			turnPlan := codec.BeginTurn(spec)
+			if len(turnPlan) == 0 || !turnPlan[0].Barrier {
+				fail("agent turn plan has no admission barrier")
+				continue
+			}
+			plan = append(codec.Setup(), turnPlan...)
 		case result := <-settlements:
 			if current == nil || result.generation != generation || result.turn != current.number {
 				continue
 			}
 			settling = false
-			settled = true
+			settlementDone = result.err == nil || (retired && !retiring)
 			if settleCancel != nil {
 				settleCancel()
 				settleCancel = nil
 			}
-			observe("settled", nil)
-			if result.err != nil && !cancelling {
-				terminalEvent := failure(fmt.Sprint("tool settlement: ", result.err))
-				terminal = &terminalEvent
-				retire()
+			if result.err == nil || (settlementDone && retirementErr == nil) {
+				observe("settled", nil)
+			}
+			if result.err != nil {
+				if !retired {
+					retire(false)
+				}
+				if retirementErr != nil {
+					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", retirementErr))
+					terminal = &ev
+				}
 			}
 		case result := <-cleanups:
 			if result.generation == generation {
 				retiring = false
+				retirementErr = result.toolErr
+				if !settling && current != nil {
+					settlementDone = true
+					if result.toolErr == nil {
+						observe("settled", nil)
+					} else {
+						observe("settlement-unconfirmed", nil)
+					}
+				}
+				if result.killed {
+					observe("kill", nil)
+				}
+				if result.err == nil {
+					observe("cleanup", nil)
+				} else {
+					observe("cleanup", []byte(exitReason(result.err)))
+				}
+				if result.toolErr != nil && current != nil {
+					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", result.toolErr))
+					terminal = &ev
+				}
 				if deathPending {
 					deathPending = false
 					reason := "the agent exited without an end event"
@@ -715,25 +785,16 @@ func (s *session) loop() {
 		case <-exited:
 			deathPending = true
 			settle()
-			retire()
+			retire(false)
 		case now := <-tick.C:
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
-				retire()
-			}
-			// A queued line wins over admission and writes, never over cancellation.
-			if lines != nil {
-				select {
-				case line := <-lines:
-					handleLine(line)
-					continue
-				default:
-				}
+				retire(false)
 			}
 			if current == nil && process != nil && !retiring && !now.Before(idleAt) {
 				observe("idle-expired", nil)
 				if tools == nil || !tools.Pending() {
-					retire()
+					retire(false)
 				}
 			}
 			if current == nil && !retiring && !starting && len(queue) > 0 && !closing {
@@ -743,11 +804,13 @@ func (s *session) loop() {
 					begin(t)
 				} else {
 					generation++
+					retired = false
+					retirementErr = nil
 					current = t
 					cancelling = false
 					promptWritten = false
 					settling = false
-					settled = false
+					settlementDone = false
 					terminal = nil
 					deadline = time.Time{}
 					starting = true

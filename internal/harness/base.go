@@ -37,8 +37,9 @@ type SessionInfo struct {
 }
 
 // Codec belongs to one process incarnation, never to multiple sessions.
-// Setup runs once. BeginTurn resets turn-local decoding state and supplies the
-// turn plan. Each step advances only after its command's matched response.
+// Setup runs once. BeginTurn resets turn-local decoding state and supplies a
+// turn plan beginning with a barrier. Each step advances only after its matched
+// response. The barrier response must follow all output from the previous turn.
 type Codec interface {
 	Setup() []Step
 	BeginTurn(TurnSpec) []Step
@@ -48,11 +49,13 @@ type Codec interface {
 }
 
 // Step is a response-dependent command. Check may inspect the matched response
-// payload and update codec state needed by later commands. Only the final step
-// may set Prompt; only that step admits turn events.
+// payload and update codec state needed by later commands. BeginTurn's first
+// step must set Barrier: its matched response fences output from the previous
+// turn before any new turn events are admitted. Only the final step sets Prompt.
 type Step struct {
 	Command Command
 	Check   func(any) error
+	Barrier bool
 	Prompt  bool
 }
 

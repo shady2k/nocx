@@ -71,6 +71,12 @@ func main() {
 				continue
 			}
 			emit(protocol.Line{Kind: "response", ID: command.ID, Payload: command.Session})
+		case "get_state":
+			// The previous run must finish writing before this response fences it.
+			if done != nil {
+				<-done
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID})
 		case "prompt":
 			if done != nil {
 				<-done

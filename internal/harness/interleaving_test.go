@@ -22,6 +22,7 @@ func (p *interleaveProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	// Every response ID comes from bytes actually read by the agent, not Encode.
 	script := `while read -r id name; do
  case "$name" in
+ barrier) echo "response $id";;
  setup) echo "response $id"; echo "response $id"; echo 'response unmatched';;
  prompt-end) echo delta; echo end;;
  prompt-stale) echo end; echo end;;
@@ -33,7 +34,7 @@ func (p *interleaveProtocol) Start(context.Context, TurnSpec) (Launch, error) {
  esac
  done`
 	if p.mode == "blocked" {
-		script = `exec sleep 30`
+		script = `read -r id name; echo "response $id"; exec sleep 30`
 	}
 	return Launch{Argv: []string{"/bin/sh", "-c", script}}, nil
 }
@@ -52,9 +53,9 @@ func (p *interleaveProtocol) Setup() []Step {
 
 func (p *interleaveProtocol) BeginTurn(TurnSpec) []Step {
 	if p.mode == "blocked" {
-		return []Step{{Command: Command{Name: "blocked", Payload: strings.Repeat("x", 1<<20)}, Prompt: true}, {Command: Command{Name: "forbidden"}}}
+		return []Step{{Command: Command{Name: "barrier"}, Barrier: true}, {Command: Command{Name: "blocked", Payload: strings.Repeat("x", 1<<20)}, Prompt: true}, {Command: Command{Name: "forbidden"}}}
 	}
-	return []Step{{Command: Command{Name: "prompt-" + p.mode}, Prompt: true}}
+	return []Step{{Command: Command{Name: "barrier"}, Barrier: true}, {Command: Command{Name: "prompt-" + p.mode}, Prompt: true}}
 }
 func (p *interleaveProtocol) CancelSequence() []Command { return []Command{{Name: "abort"}} }
 func (p *interleaveProtocol) Encode(id string, c Command) ([]byte, error) {
@@ -195,9 +196,12 @@ func assertTerminal(t *testing.T, ctx context.Context, seed int, turn Turn) {
 
 func TestRandomizedInterleaving(t *testing.T) {
 	before := runtime.NumGoroutine()
+	modes := []string{"end", "failure", "hold", "stale", "exit", "blocked", "flood"}
+	seen := map[string]bool{}
 	for seed := range 2000 {
 		random := rand.New(rand.NewSource(int64(seed))) //nolint:gosec // reproducible schedule
-		mode := []string{"end", "failure", "hold", "stale", "exit", "blocked", "flood"}[random.Intn(5)]
+		mode := modes[random.Intn(len(modes))]
+		seen[mode] = true
 		ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
 		p := &interleaveProtocol{mode: mode, decoded: make(chan struct{}, 1)}
 		trace := &wireTrace{changed: make(chan struct{}, 1)}
@@ -215,7 +219,7 @@ func TestRandomizedInterleaving(t *testing.T) {
 				t.Fatalf("seed %d turn %d Run: %v", seed, turnIndex, err)
 			}
 			if mode == "hold" || mode == "blocked" || mode == "flood" || random.Intn(3) == 0 {
-				if turnIndex == 0 && random.Intn(2) == 0 && !trace.await(ctx, "prompt-written") {
+				if turnIndex == 0 && mode != "blocked" && random.Intn(2) == 0 && !trace.await(ctx, "prompt-written") {
 					t.Fatalf("seed %d prompt not written", seed)
 				}
 				if err = turn.Cancel(ctx); err != nil {
@@ -275,6 +279,11 @@ func TestRandomizedInterleaving(t *testing.T) {
 			t.Fatalf("seed %d prompt without syscall bytes", seed)
 		}
 		stop()
+	}
+	for _, mode := range modes {
+		if !seen[mode] {
+			t.Fatalf("mode %s never exercised", mode)
+		}
 	}
 	if after := runtime.NumGoroutine(); after > before+2 {
 		t.Fatalf("goroutine leak: before %d after %d", before, after)

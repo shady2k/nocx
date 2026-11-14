@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { AgentInstalledSection } from './agent-installed-section'
+import { setActiveLocale } from './i18n/locale-model'
 import type { Agent } from './generated/agentRecords.detect'
 import type { AgentRecordsClient } from './agent-records-client'
 
@@ -56,7 +57,10 @@ function row(container: HTMLElement, id: string): HTMLElement {
 }
 
 describe('AgentInstalledSection', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    setActiveLocale('en')
+  })
 
   it('lists every agent the backend answered, with its version and what it says about being ready', async () => {
     const { api, detect } = client()
@@ -120,6 +124,58 @@ describe('AgentInstalledSection', () => {
     await waitFor(() => expect(view.container.textContent).toContain('Not installed'))
     expect(view.container.textContent).not.toContain('Ready')
   })
+
+  it.each([
+    [
+      'en',
+      'Refresh',
+      'Refreshing… Shown agents are from the previous result.',
+      'Agent check complete.',
+    ],
+    [
+      'ru',
+      'Обновить',
+      'Обновляем… Показаны агенты из предыдущего результата.',
+      'Проверка агентов завершена.',
+    ],
+  ] as const)(
+    'qualifies retained rows during refresh and announces success in %s',
+    async (locale, refresh, refreshing, complete) => {
+      setActiveLocale(locale)
+      let finish!: (answer: { agents: Agent[] }) => void
+      const pending = new Promise<{ agents: Agent[] }>((resolve) => {
+        finish = resolve
+      })
+      const detect = vi
+        .fn()
+        .mockResolvedValueOnce({ agents: [PI] })
+        .mockReturnValueOnce(pending)
+      const view = render(() => (
+        <AgentInstalledSection client={{ detect } as unknown as AgentRecordsClient} />
+      ))
+      await waitFor(() => expect(view.container.textContent).toContain(PI.version))
+
+      fireEvent.click(screen.getByRole('button', { name: refresh }))
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole('status').some((status) => status.textContent === refreshing),
+        ).toBe(true),
+      )
+      expect(screen.getByRole('list').getAttribute('aria-busy')).toBe('true')
+      expect(row(view.container, 'pi').textContent).toContain(PI.version)
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: refresh }).disabled).toBe(true)
+
+      finish({ agents: [CLAUDE] })
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole('status').some((status) => status.textContent === complete),
+        ).toBe(true),
+      )
+      expect(screen.getByRole('list').getAttribute('aria-busy')).toBe('false')
+      expect(view.container.textContent).not.toContain(PI.version)
+      expect(row(view.container, 'claude').textContent).toContain(CLAUDE.displayName)
+    },
+  )
 
   it('says why a refresh failed and keeps the answer it already had', async () => {
     const detect = vi

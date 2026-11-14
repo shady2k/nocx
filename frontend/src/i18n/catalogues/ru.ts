@@ -1327,6 +1327,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.installed.listAria': 'Агенты на этом компьютере',
   'agents.installed.refresh': 'Обновить',
   'agents.installed.loading': 'Ищем агентов в PATH вашей командной оболочки входа…',
+  'agents.installed.refreshing': 'Обновляем… Показаны агенты из предыдущего результата.',
+  'agents.installed.complete': 'Проверка агентов завершена.',
   'agents.installed.failedHead': 'Не удалось найти агентов:',
   'agents.installed.notInstalled': 'Не установлен',
   'agents.installed.installed': 'Установлен',

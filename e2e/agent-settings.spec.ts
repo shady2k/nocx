@@ -67,15 +67,16 @@ const CLAUDE_ROW = '[data-agent="claude"]'
  *  other `pi` — the machine's own, if one were on the runner — cannot pass. */
 const PI_VERSION = 'pi 9.9.9-e2e'
 
-/** A pi that answers both questions detection asks it: `--version` prints a
- *  version, and `auth check` exits 0, which its record reads as ready. */
+/** A pi whose auth succeeds only with the login shell's exported credential
+ *  and home cwd, proving detection forwards both rather than only PATH. */
 const PI_STUB = `#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "${PI_VERSION}"
   exit 0
 fi
 if [ "$1" = "auth" ] && [ "$2" = "check" ]; then
-  exit 0
+  [ "$NOCX_AGENT_SETTINGS_CREDENTIAL" = "login-only" ] && [ "$PWD" = "$HOME" ]
+  exit $?
 fi
 exit 1
 `
@@ -100,7 +101,7 @@ test.beforeAll(async () => {
   // Written AFTER the backend is up, because the home is the one start()
   // resolved — and before the page opens, because detection runs when the
   // section asks it to, not when the backend boots.
-  const line = `export PATH="${stubDir}:$PATH"\n`
+  const line = `export PATH="${stubDir}:$PATH"\nexport NOCX_AGENT_SETTINGS_CREDENTIAL=login-only\n`
   for (const name of ['.bash_profile', '.zprofile']) {
     writeFileSync(join(backend.isolatedHome, name), line)
   }
@@ -130,6 +131,44 @@ test.describe('Settings lists the agents this computer has (nocx-a62cl.12.2)', (
   test('shows pi found with its version and ready, Claude Code not installed, and re-reads after the stub is removed', async ({
     page,
   }) => {
+    // Hold only the real refresh result at the wire so the in-flight state
+    // can be checked without racing a fast probe or adding a timed delay.
+    let refreshId: string | number | undefined
+    let releaseRefresh!: () => void
+    let resultHeld!: () => void
+    const held = new Promise<void>((resolve) => {
+      resultHeld = resolve
+    })
+    await page.routeWebSocket(
+      (url) => url.port === String(endpoint.port),
+      (socket) => {
+        const server = socket.connectToServer()
+        socket.onMessage((message) => {
+          if (typeof message === 'string') {
+            const request = JSON.parse(message) as {
+              id?: string | number
+              method?: string
+              params?: { refresh?: boolean }
+            }
+            if (request.method === 'agentRecords.detect' && request.params?.refresh === true) {
+              refreshId = request.id
+            }
+          }
+          server.send(message)
+        })
+        server.onMessage((message) => {
+          if (typeof message === 'string') {
+            const response = JSON.parse(message) as { id?: string | number }
+            if (refreshId !== undefined && response.id === refreshId) {
+              releaseRefresh = () => socket.send(message)
+              resultHeld()
+              return
+            }
+          }
+          socket.send(message)
+        })
+      },
+    )
     await openAgentSection(page)
 
     const pi = page.locator(PI_ROW)
@@ -142,8 +181,25 @@ test.describe('Settings lists the agents this computer has (nocx-a62cl.12.2)', (
     // The premise of the second half: pi is there BECAUSE the stub is, so
     // removing the stub has something to change.
     rmSync(join(stubDir, 'pi'), { force: true })
-    await page.getByRole('button', { name: 'Refresh' }).click()
+    const refresh = page.getByRole('button', { name: 'Refresh' })
+    await refresh.click()
+    await held
+    const list = page.getByRole('list', { name: 'Agents on this computer' })
+    await expect(list).toHaveAttribute('aria-busy', 'true')
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: 'Refreshing… Shown agents are from the previous result.' }),
+    ).toBeVisible()
+    await expect(pi).toContainText(PI_VERSION)
+    await expect(pi).toContainText('Ready')
+    await expect(refresh).toBeDisabled()
+    releaseRefresh()
 
+    await expect(list).toHaveAttribute('aria-busy', 'false')
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Agent check complete.' }),
+    ).toBeVisible()
     await expect(pi).toContainText('Not installed', { timeout: 20_000 })
     await expect(pi).not.toContainText(PI_VERSION)
   })

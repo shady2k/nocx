@@ -34,6 +34,7 @@ import type { AgentRecordsClient } from './agent-records-client'
 import { Button } from './ui/button'
 import { PageSection } from './ui/page-section'
 import { RecordRow } from './ui/record-row'
+import { StatusCard } from './ui/status-card'
 import type { StatusDotTone } from './ui/status-dot'
 import { t } from './i18n/locale-model'
 
@@ -113,16 +114,34 @@ export function AgentInstalledSection(props: AgentInstalledSectionProps) {
           {t('agents.installed.refresh', 'Refresh')}
         </Button>
       </div>
-      <Show when={loading()}>
-        <p role="status">
-          {t('agents.installed.loading', 'Looking for the agents on your login shell’s PATH…')}
-        </p>
-      </Show>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        <Show when={!error()}>
+          <StatusCard
+            title={
+              loading()
+                ? t(
+                    'agents.installed.loading',
+                    'Looking for the agents on your login shell’s PATH…',
+                  )
+                : busy()
+                  ? t(
+                      'agents.installed.refreshing',
+                      'Refreshing… Shown agents are from the previous result.',
+                    )
+                  : t('agents.installed.complete', 'Agent check complete.')
+            }
+          />
+        </Show>
+      </div>
       <Show when={error()}>
         <p role="alert">{error()}</p>
       </Show>
       <Show when={agents().length > 0}>
-        <div role="list" aria-label={t('agents.installed.listAria', 'Agents on this computer')}>
+        <div
+          role="list"
+          aria-label={t('agents.installed.listAria', 'Agents on this computer')}
+          aria-busy={busy()}
+        >
           <For each={agents()}>
             {(agent) => (
               // The wrapper carries the row's identity for a test and for a

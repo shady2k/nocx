@@ -1552,6 +1552,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.installed.listAria': 'Agents on this computer',
   'agents.installed.refresh': 'Refresh',
   'agents.installed.loading': 'Looking for the agents on your login shell’s PATH…',
+  'agents.installed.refreshing': 'Refreshing… Shown agents are from the previous result.',
+  'agents.installed.complete': 'Agent check complete.',
   'agents.installed.failedHead': 'Could not look for the agents:',
   'agents.installed.notInstalled': 'Not installed',
   'agents.installed.installed': 'Installed',

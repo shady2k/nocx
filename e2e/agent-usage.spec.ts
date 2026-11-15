@@ -1,5 +1,5 @@
 /** Real pi reports provider usage; the run keeps it through a backend restart. */
-import { expect, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,12 +51,20 @@ const cases = [
     expected: '104 input · 27 output · 40 from cache',
   },
   {
-    name: 'pi states zero counts when provider usage is absent, live and after restart',
+    name: 'an answer whose provider stated no usage shows none, live and after restart',
     answer: 'The provider omitted usage.',
     usage: undefined,
-    expected: '0 input · 0 output · 0 from cache',
+    expected: null,
   },
 ]
+
+async function expectUsage(block: Locator, expected: string | null): Promise<void> {
+  if (expected === null) {
+    await expect(block.locator(USAGE)).toHaveCount(0)
+    return
+  }
+  await expect(block.locator(USAGE)).toHaveText(expected)
+}
 
 for (const scenario of cases) {
   test(scenario.name, async ({ page }) => {
@@ -75,12 +83,12 @@ for (const scenario of cases) {
       await page.locator('.nocx-tab-title').first().click()
 
       // OpenAI prompt tokens include cache reads. Pi separates the uncached input.
-      // Pi 1.5.2 initializes explicit zero counts even if the provider omits usage.
-      // Those are agent-stated counts, not absent facts; nocx must not hide zeros.
+      // Pi 1.5.2 fills zeros when the provider omits usage; the pi connector reads
+      // all-zero usage as not stated, so the block shows no usage at all.
       fake.setScript({ chunks: [scenario.answer], usage: scenario.usage })
       await ask(page, question)
       await expect(turn(page, question)).toContainText(scenario.answer)
-      await expect(turn(page, question).locator(USAGE)).toHaveText(scenario.expected)
+      await expectUsage(turn(page, question), scenario.expected)
 
       endpoint = await backend.restart()
       await bindEndpoint(page, endpoint)
@@ -90,7 +98,7 @@ for (const scenario of cases) {
       await page.locator('.nocx-tab-title').first().click()
       await expect(turn(page, question)).toHaveAttribute('data-restored', 'true')
       await expect(turn(page, question)).toContainText(scenario.answer)
-      await expect(turn(page, question).locator(USAGE)).toHaveText(scenario.expected)
+      await expectUsage(turn(page, question), scenario.expected)
     } finally {
       await backend.stop()
       await fake.stop()

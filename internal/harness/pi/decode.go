@@ -118,8 +118,20 @@ func newDecoder() func([]byte) ([]harness.Event, error) {
 			if last.Provider != "" {
 				model = last.Provider + "/" + model
 			}
-			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: model, Usage: usage}}}, nil
+			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: model, Usage: statedUsage(usage)}}}, nil
 		}
 		return nil, nil
 	}
+}
+
+// statedUsage drops a usage pi filled with zeros. pi 1.5.2 reports
+// {input:0, output:0, cacheRead:0, cacheWrite:0} when its provider sent no
+// usage at all, and an answer that ended normally cannot have taken zero
+// input and produced zero output, so all zeros means "not stated" and the
+// block shows nothing rather than three zeros.
+func statedUsage(u *harness.Usage) *harness.Usage {
+	if u == nil || (u.InputTokens == 0 && u.OutputTokens == 0) {
+		return nil
+	}
+	return u
 }

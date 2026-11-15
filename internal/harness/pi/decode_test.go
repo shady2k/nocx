@@ -92,3 +92,19 @@ func TestHandledPromptEndsWithExplicitFailure(t *testing.T) {
 		t.Fatalf("handled prompt response = %+v", events)
 	}
 }
+
+// pi fills usage with zeros when its provider sent none; the end reports
+// no usage rather than three zeros (and a stated usage still comes through).
+func TestEndDropsUsagePiFilledWithZeros(t *testing.T) {
+	d := newDecoder()
+	if _, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"stop","content":[{"type":"text","text":"answer"}],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	events, err := d([]byte(`{"type":"agent_settled","aborted":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != harness.EventEnd || events[0].End.Usage != nil {
+		t.Fatalf("events = %+v, want an end with no usage", events)
+	}
+}

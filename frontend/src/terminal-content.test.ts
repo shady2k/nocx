@@ -89,7 +89,12 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
+import {
+  SessionNotAttachedError,
+  type SessionHandle,
+  type SessionRecovery,
+  type WSClient,
+} from './ipc'
 import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
@@ -13717,6 +13722,100 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
         expect(String(calls[calls.length - 1]?.[0]?.message)).toContain(
           'may not have reached the shell',
         )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it('keeps a submitted command on the shell queue while its connection is opening', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: true })
+    client.openSSHSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'test-host' } },
+      client,
+    )
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    try {
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      publishConnection(client, content, {
+        transport: { state: 'opening', stage: 'tcp', stateMs: 0 },
+      })
+      expect((content as unknown as { _connectionGate(): string })._connectionGate()).toBe('hold')
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('echo opening submit')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(ed.getDoc()).toBe(''))
+      await vi.waitFor(() =>
+        expect((content as unknown as { _heldRaw: unknown })._heldRaw).toBeNull(),
+      )
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-opening', state: 'open', origin: 'app' },
+      })
+      publishConnected(client, content)
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
+          ['paste', 'echo opening submit', 'bare'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(ed.getDoc()).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it.each(['before-rejection', 'after-rejection'] as const)(
+    'holds a locally unwritten submit and sends it once with attachment %s',
+    async (order) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const session = sessionOf(content)
+      let attached = false
+      const delivered: Array<[string, string]> = []
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (!attached) {
+          if (order === 'before-rejection') {
+            attached = true
+            session.fireAttachment({ kind: 'attached' })
+          }
+          return Promise.reject(new SessionNotAttachedError('not attached'))
+        }
+        delivered.push([kind, payload])
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'echo held submit')
+        await vi.waitFor(() =>
+          expect((content as unknown as { _sessionCallSending: boolean })._sessionCallSending).toBe(
+            false,
+          ),
+        )
+        expect(showToast).not.toHaveBeenCalled()
+        if (order === 'after-rejection') {
+          expect(delivered).toEqual([])
+          attached = true
+          session.fireAttachment({ kind: 'attached' })
+        }
+        await vi.waitFor(() =>
+          expect(delivered).toEqual([
+            ['paste', 'echo held submit'],
+            ['key', 'enter'],
+          ]),
+        )
+        session.fireAttachment({ kind: 'attached' })
+        expect(delivered).toHaveLength(2)
       } finally {
         teardown()
       }

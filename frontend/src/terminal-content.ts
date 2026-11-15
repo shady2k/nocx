@@ -723,6 +723,10 @@ class BindState {
   phase: 'opening' | 'live' = 'opening'
   /** The session id this bind produced, once it has one. */
   sessionId = ''
+  /** A local input refusal waits for this handle's next attachment. */
+  callHeld = false
+  /** Fences an attachment arriving before the local refusal settles. */
+  attachmentRevision = 0
   /** Human shell submits taken while the session is proving its shell's
    *  integration state, in the order the person made them (nocx-evj4b.1.6).
    *  Each entry carries the TARGET it was typed for and the BIND it was typed
@@ -2082,6 +2086,7 @@ export class TerminalContent extends BasePaneContent {
       this.session?.cancelPendingIntents()
     }
     this._applyTypeAhead(previous)
+    if (this._connectionGate() === 'send') void this.drainSessionCallQueue()
   }
 
   /** A replacement is an open answered by notification. Register and wire it
@@ -5667,6 +5672,15 @@ export class TerminalContent extends BasePaneContent {
     this._inventoryOffer?.dispose()
     this._inventoryOffer = null
     this._boundSessionId = session.sessionId
+    const sessionBind = this._bind
+    session.onAttachment((attachment) => {
+      if (this._bind !== sessionBind || this.session !== session || this._disposed) return
+      sessionBind.attachmentRevision++
+      if (attachment.kind !== 'attached') return
+      sessionBind.callHeld = false
+      this._releaseDeferredShellSubmissions()
+      void this.drainSessionCallQueue()
+    })
     // READ THE ACK'S OWN VERDICT THE MOMENT THE SESSION NAMES IT. A store
     // observation can arrive between here and the integration subscription
     // below; with the bind's default `false` the gate would read that as a
@@ -10040,10 +10054,6 @@ export class TerminalContent extends BasePaneContent {
     // sent them anyway and raised a danger toast per refused keystroke — the
     // flood the owner saw on 2026-11-13.
     const gate = this._connectionGate()
-    if (gate === 'hold') {
-      this._heldTypeAhead.push(intent)
-      return true
-    }
     if (gate === 'drop') return false
     const session = this.session
     if (!session) return false
@@ -10107,6 +10117,7 @@ export class TerminalContent extends BasePaneContent {
    *  when its answer arrives. */
   private _discardQueuedIntents(): void {
     this._sessionCallEpoch++
+    this._bind.callHeld = false
     this._sessionCallQueue.length = 0
   }
 
@@ -10134,10 +10145,11 @@ export class TerminalContent extends BasePaneContent {
   }
 
   private async drainSessionCallQueue(): Promise<void> {
-    if (this._sessionCallSending) return
+    if (this._sessionCallSending || this._bind.callHeld) return
     this._sessionCallSending = true
     const queue = this._sessionCallQueue
     const epoch = this._sessionCallEpoch
+    const bind = this._bind
     try {
       while (
         queue === this._sessionCallQueue &&
@@ -10147,11 +10159,14 @@ export class TerminalContent extends BasePaneContent {
         // A GATE THAT CLOSED WHILE AN ANSWER WAS OUTSTANDING (task 5.1's
         // ordering defect): the drain must stop here, not present what was
         // queued behind it.
-        if (this._connectionGate() !== 'send') {
+        const gate = this._connectionGate()
+        if (gate === 'hold') return
+        if (gate === 'drop') {
           this._discardQueuedIntents()
           return
         }
         const call = queue.shift()!
+        const attachmentRevision = bind.attachmentRevision
         try {
           const result =
             call.intent.kind === 'paste' && call.intent.framing === 'bare'
@@ -10181,12 +10196,11 @@ export class TerminalContent extends BasePaneContent {
             continue
           }
           if (err instanceof SessionNotAttachedError) {
-            // There is no attachment to wait for any more (task 5.5): the
-            // connection owner says whether this pane has a usable session.
-            // A local not-attached rejection still proves no bytes were
-            // written, so the line is not replayed; it is discarded with the
-            // one refusal line below.
-            this._discardFailedSessionInput('no session')
+            // This local refusal proves the intent was never dispatched.
+            // Keep its order and wait for this handle's attachment, not for
+            // a transport observation that says nothing about the renderer.
+            queue.unshift(call)
+            bind.callHeld = bind.attachmentRevision === attachmentRevision
             return
           }
           // A lost answer does not prove the bytes were not written. Never
@@ -10199,7 +10213,11 @@ export class TerminalContent extends BasePaneContent {
       }
     } finally {
       this._sessionCallSending = false
-      if (this._sessionCallQueue.length > 0) {
+      if (
+        this._sessionCallQueue.length > 0 &&
+        !this._bind.callHeld &&
+        this._connectionGate() === 'send'
+      ) {
         void this.drainSessionCallQueue()
       }
     }

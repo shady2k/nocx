@@ -21,6 +21,12 @@ type Config struct {
 	Script protocol.Script
 	// Base is the shared process ownership. Zero uses its defaults.
 	Base harness.Base
+	// Steers makes the fake AGENT take a message while it answers, the way pi
+	// does. The default is what the conformance suite proves: the fixture
+	// queues it as the conversation's next question, which is the other half
+	// of ADR-anntnxdj decision 4. A caller that wants the steering variant
+	// says so here, and its script answers the steer command.
+	Steers bool
 }
 
 // Connector implements harness.Harness on the fake agent.
@@ -48,9 +54,15 @@ func (c *Connector) Readiness(ctx context.Context) harness.Readiness {
 }
 
 // Facts states the fixture's actual limits: it forwards conversation IDs but
-// does not retain conversations between processes.
+// does not retain conversations between processes, and — unless a test asks for
+// the steering variant — its agent takes no message while it answers, so the
+// message is the conversation's next question.
 func (c *Connector) Facts() harness.Facts {
-	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ReportsAnsweringModel: true}
+	steering := harness.QueuesNextQuestion
+	if c.cfg.Steers {
+		steering = harness.Steers
+	}
+	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ReportsAnsweringModel: true, Steering: steering}
 }
 
 // Start describes the process without creating or owning it.
@@ -64,11 +76,12 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 
 // NewCodec allocates wire state for one process incarnation.
 func (c *Connector) NewCodec(info harness.SessionInfo, _ harness.Launch) harness.Codec {
-	return &codec{info: info}
+	return &codec{info: info, steers: c.cfg.Steers}
 }
 
 type codec struct {
-	info harness.SessionInfo
+	info   harness.SessionInfo
+	steers bool
 }
 
 func (c *codec) Setup() []harness.Step {
@@ -101,6 +114,9 @@ func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 func (c *codec) CancelSequence() []harness.Command { return []harness.Command{{Name: "abort"}} }
 
 func (c *codec) SteerCommand(text string) (harness.Command, bool) {
+	if !c.steers {
+		return harness.Command{}, false
+	}
 	return harness.Command{Name: "steer", Payload: protocol.Steer{Text: text}}, true
 }
 

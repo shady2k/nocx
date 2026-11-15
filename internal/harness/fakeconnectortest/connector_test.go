@@ -46,6 +46,14 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 		script.Steps = []protocol.Step{{Kind: protocol.StepAnswer, Text: "Hel"}, {Kind: protocol.StepGate}, {Kind: protocol.StepReasoning, Text: "thinking"}, {Kind: protocol.StepAnswer, Text: "lo"}, end}
 	case harnesstest.Tool, harnesstest.CancelTool, harnesstest.ParentTool:
 		script.Steps = []protocol.Step{{Kind: protocol.StepTool, Name: "probe", Arguments: map[string]any{"note": "hello"}}, end}
+	case harnesstest.Steering:
+		// The turn is held open after its first words, so the message is sent
+		// while it is genuinely running.
+		script.Gate = path("gate")
+		if err := syscall.Mkfifo(script.Gate, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script.Steps = []protocol.Step{{Kind: protocol.StepAnswer, Text: "Hel"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}
 	case harnesstest.CancelStream:
 		script.Steps = []protocol.Step{{Kind: protocol.StepAnswer, Text: "Hel"}, {Kind: protocol.StepHang}}
 	case harnesstest.ParentIdle:

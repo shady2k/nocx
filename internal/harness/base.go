@@ -27,6 +27,12 @@ var ErrTurnNotRunning = errors.New("harness: the turn is not running")
 // no steering: the message cannot be delivered into a turn already under way.
 var ErrNotSteerable = errors.New("harness: this agent does not take a message while it answers")
 
+// ErrSteerNotTaken is what a person's message gets when the turn could not take
+// it: the turn ended, was cancelled, or the agent did not accept it within the
+// turn's own bound. The message is not lost — it becomes the conversation's
+// next question (ADR-4khgzeyp decision 3).
+var ErrSteerNotTaken = errors.New("harness: the turn did not take the message")
+
 type TurnError struct{ Reason string }
 
 func (e *TurnError) Error() string { return e.Reason }
@@ -68,11 +74,6 @@ type Codec interface {
 type Step struct {
 	// Model reports the model resolved by a successful response check.
 	Model func() string
-
-	// Steer marks the command a person's message became. Its matched response
-	// is the agent's acceptance of that message, which is what the person's
-	// Steer call waits for.
-	Steer bool
 
 	Command Command
 	Check   func(any) error

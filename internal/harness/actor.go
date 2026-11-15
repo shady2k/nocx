@@ -338,6 +338,21 @@ type pendingStep struct {
 	id               string
 	generation, turn uint64
 	step             Step
+	// steerAck answers a person's message when the agent accepts it. Nil for
+	// every other command: only a steer's response means somebody is waiting.
+	steerAck chan error
+}
+
+// queuedSteer is a person's message the turn has taken but the agent has not:
+// one command is outstanding at a time, so a message typed while the agent is
+// starting, or while its answer is being read, waits here until its turn comes.
+// deadline is the turn's own bound (Base.ShutdownTimeout) — the same ten
+// seconds a cancel gets — after which the message is handed back to be asked as
+// the next question.
+type queuedSteer struct {
+	text     string
+	ack      chan error
+	deadline time.Time
 }
 type (
 	settlement struct {
@@ -404,10 +419,10 @@ func (s *session) loop() {
 	var cancelPrepared bool
 	var pendingTools map[string]struct{}
 	var pending *pendingStep
-	// steerAcks answers a person's Steer calls in the order their messages
-	// were written to the agent: the matched response of a Step marked Steer
-	// is that message's acceptance.
-	var steerAcks []chan error
+	// steers are the messages the turn has taken but not yet written, and
+	// writtenSteer is the one whose command is out and unanswered.
+	var steers []queuedSteer
+	var writtenSteer *queuedSteer
 	var frame []byte
 	var frameWritten int
 	var frameStep Step
@@ -517,12 +532,21 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
-		// A message the agent had not accepted by the time its turn ended has
-		// nowhere left to land: the person is told rather than left waiting.
-		for _, ack := range steerAcks {
-			ack <- ErrTurnNotRunning
+		// A message the agent had not accepted by the time its turn ended did
+		// not land in it: the caller is told so it can ask it next
+		// (ADR-4khgzeyp decision 3), never left waiting and never told it was
+		// delivered.
+		for _, steer := range steers {
+			steer.ack <- ErrSteerNotTaken
 		}
-		steerAcks = nil
+		steers = nil
+		if writtenSteer != nil {
+			writtenSteer.ack <- ErrSteerNotTaken
+			writtenSteer = nil
+			if pending != nil {
+				pending.steerAck = nil
+			}
+		}
 		if ev.Outcome == nil {
 			snapshot := outcome
 			ev.Outcome = &snapshot
@@ -610,23 +634,30 @@ func (s *session) loop() {
 			fail("agent turn plan has no admission barrier")
 		}
 	}
-	// admitSteer queues a person's message behind the turn's remaining plan —
-	// which always ends with the prompt — so it reaches the agent after the
-	// question and is answered by the agent's own acceptance of it.
+	// admitSteer takes a person's message for the running turn. It is QUEUED
+	// and written after the prompt, one command at a time; the caller is
+	// answered when the agent accepts it, and handed the message back if the
+	// turn ends first (ADR-4khgzeyp decision 3). The command cannot be built
+	// yet while the agent is still starting — its codec belongs to the process
+	// incarnation — so the text waits and is encoded when its turn comes.
 	admitSteer := func(r request) error {
-		if r.turn != current || terminal != nil || cancelling || starting || retiring || !exitBy.IsZero() || codec == nil {
+		if r.turn != current || terminal != nil || cancelling || retiring || !exitBy.IsZero() {
 			return ErrTurnNotRunning
 		}
-		command, ok := codec.SteerCommand(r.steer)
-		if !ok {
-			return ErrNotSteerable
+		if codec == nil && !starting {
+			return ErrTurnNotRunning
 		}
-		plan = append(plan, Step{Command: command, Steer: true})
-		// The person's call is answered by the agent's acceptance of the
-		// message, not by the queueing: a message queued for a turn that ends
-		// first has not landed, and saying otherwise would be a lie the block
-		// could not take back.
-		steerAcks = append(steerAcks, r.reply)
+		if codec != nil {
+			// The connector states whether its agent steers at all; a message
+			// for one that does not is refused here, before anything is
+			// queued (Facts().Steering is how the core learns the same fact
+			// without asking).
+			if _, ok := codec.SteerCommand(r.steer); !ok {
+				return ErrNotSteerable
+			}
+		}
+		steers = append(steers, queuedSteer{text: r.steer, ack: r.reply, deadline: time.Now().Add(bound)})
+		observe("steer-queued", []byte(r.steer))
 		return nil
 	}
 	for {
@@ -713,6 +744,7 @@ func (s *session) loop() {
 				}
 				if pending != nil && pending.id == response.ID && pending.generation == generation && current != nil && pending.turn == current.number {
 					step := pending.step
+					steerAck := pending.steerAck
 					pending = nil
 					if response.Error != "" {
 						fail(response.Error)
@@ -739,9 +771,12 @@ func (s *session) loop() {
 							pinnedModel = model
 						}
 					}
-					if step.Steer && len(steerAcks) > 0 {
-						steerAcks[0] <- nil
-						steerAcks = steerAcks[1:]
+					if steerAck != nil {
+						// The agent has taken the person's message: this is the
+						// acceptance their call waits for, and the point after
+						// which the turn owns it.
+						steerAck <- nil
+						writtenSteer = nil
 					}
 					if step.Barrier {
 						barrierPassed = true
@@ -940,6 +975,20 @@ func (s *session) loop() {
 			settle()
 			exitBy = time.Now().Add(bound)
 		case now := <-tick.C:
+			// A message the agent has not taken within the turn's bound is not
+			// going to be: it is handed back to be asked next, and the turn
+			// goes on untouched (nocx-a62cl.6.3).
+			for len(steers) > 0 && !now.Before(steers[0].deadline) {
+				steers[0].ack <- ErrSteerNotTaken
+				steers = steers[1:]
+			}
+			if writtenSteer != nil && !now.Before(writtenSteer.deadline) {
+				writtenSteer.ack <- ErrSteerNotTaken
+				writtenSteer = nil
+				if pending != nil {
+					pending.steerAck = nil
+				}
+			}
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
 				retire(false)
@@ -1028,6 +1077,7 @@ func (s *session) loop() {
 			}
 			if len(frame) == 0 {
 				var step Step
+				var steering *queuedSteer
 				if cancelling {
 					if len(cancelCommands) == 0 {
 						continue
@@ -1035,10 +1085,28 @@ func (s *session) loop() {
 					step = Step{Command: cancelCommands[0]}
 					cancelCommands = cancelCommands[1:]
 				} else {
-					if pending != nil || len(plan) == 0 {
+					if pending != nil {
 						continue
 					}
-					step = plan[0]
+					if len(plan) > 0 {
+						step = plan[0]
+					} else {
+						// The turn's own plan is done — the prompt was answered
+						// — so a person's message is what comes next, in the
+						// order the person sent them.
+						if len(steers) == 0 || !promptWritten {
+							continue
+						}
+						command, ok := codec.SteerCommand(steers[0].text)
+						if !ok {
+							steers[0].ack <- ErrNotSteerable
+							steers = steers[1:]
+							continue
+						}
+						step = Step{Command: command}
+						steering = &steers[0]
+						steers = steers[1:]
+					}
 				}
 				serial++
 				id := strconv.FormatUint(generation, 10) + "/" + strconv.FormatUint(current.number, 10) + "/" + strconv.FormatUint(serial, 10)
@@ -1052,6 +1120,10 @@ func (s *session) loop() {
 				frameStep = step
 				if !cancelling {
 					pending = &pendingStep{id: id, generation: generation, turn: current.number, step: step}
+					if steering != nil {
+						pending.steerAck = steering.ack
+						writtenSteer = steering
+					}
 				}
 			}
 			if len(frame) > 0 {

@@ -3,9 +3,11 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,5 +126,158 @@ func TestRealPiSteerReachesTheNextModelCall(t *testing.T) {
 	}
 	if last.Role != "user" || !strings.Contains(string(last.Content), message) {
 		t.Fatalf("last message of the next model call = %s (%s)", last.Content, last.Role)
+	}
+}
+
+// A message the agent has taken but not yet used when the turn is CANCELLED is
+// handed back to the caller, which asks it as the conversation's next question
+// — the session that held it ends with the cancel (ADR-4khgzeyp decision 3).
+// The message is in the actor's queue — sent before pi has even come up — so
+// the agent has certainly not consumed it.
+func TestRealPiCancelWhileASteerIsQueuedHandsItBack(t *testing.T) {
+	gate := make(chan struct{})
+	defer close(gate)
+	c, fake := configuredPi(t, fakemodel.Response{Text: []string{"first answer"}})
+	defer func() { _ = c.Close(context.Background()) }()
+	begun := make(chan struct{})
+	queued := make(chan struct{})
+	var once, queuedOnce sync.Once
+	// The same conversation store, with an observation of the actor's own
+	// transitions: "begin-turn" is the window in which the agent is coming up
+	// and a person's message is queued for it.
+	c = NewWithBase(c.dataDir, c.env, harness.Base{Observe: func(transition harness.Transition) {
+		switch transition.Kind {
+		case "begin-turn":
+			once.Do(func() { close(begun) })
+		case "steer-queued":
+			queuedOnce.Do(func() { close(queued) })
+		}
+	}})
+	ctx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
+	spec := harness.TurnSpec{ConversationID: "queued-steer", Dir: t.TempDir(), SystemPrompt: "Fixed nocx instructions", Text: "pane=local cwd=/work: look at the logs"}
+	turn, err := c.Run(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-begun:
+	case <-ctx.Done():
+		t.Fatal("the turn never began")
+	}
+	steerer, ok := turn.(harness.Steerer)
+	if !ok {
+		t.Fatal("pi's turn has no Steer")
+	}
+	steered := make(chan error, 1)
+	go func() { steered <- steerer.Steer(ctx, "ask this next instead") }()
+	select {
+	case <-queued:
+	case <-ctx.Done():
+		t.Fatal("the message was never queued for the turn")
+	}
+	if err := turn.Cancel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := turn.Wait(ctx); !errors.Is(err, harness.ErrCancelled) {
+		t.Fatalf("Wait = %v", err)
+	}
+	select {
+	case err := <-steered:
+		if !errors.Is(err, harness.ErrSteerNotTaken) {
+			t.Fatalf("a message the cancelled turn never took = %v, want ErrSteerNotTaken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the queued message was never answered")
+	}
+
+	// The caller asks it as the next question, and the conversation answers.
+	const message = "ask this next instead"
+	spec.Text = "pane=local cwd=/work: " + message
+	next := piTurn(t, c, spec)
+	events := piCollect(t, next)
+	if _, err := next.Wait(ctx); err != nil {
+		t.Fatalf("the next turn: %v events=%+v", err, events)
+	}
+	requests := fake.Requests()
+	if len(requests) == 0 {
+		t.Fatal("the question after the cancel never reached the model")
+	}
+	// The cancelled turn was stopped before its model call in most runs, so what
+	// matters is not how many calls there were but that the LAST one is the
+	// question the caller asked with the message.
+	last := requests[len(requests)-1]
+	if !strings.Contains(string(last.Body), message) {
+		t.Fatalf("the last model call does not carry the message the turn handed back:\n%s", last.Body)
+	}
+}
+
+// Normally the message is consumed inside the turn: no extra turn is asked, and
+// the text never becomes a question of its own.
+func TestRealPiSteerIsConsumedInsideTheTurn(t *testing.T) {
+	gate := make(chan struct{})
+	c, fake := configuredPi(t,
+		fakemodel.Response{
+			Deltas:    []fakemodel.Delta{{Text: "reading the logs "}, {Text: "first", Block: gate}},
+			ToolCalls: []fakemodel.ToolCall{{ID: "probe-call", Name: "mcp__nocx__steer_probe", Arguments: `{"note":"probe"}`}},
+		},
+		fakemodel.Response{Text: []string{"the answer after the message"}},
+	)
+	defer func() { _ = c.Close(context.Background()) }()
+	source := `export default function(pi) {
+ pi.registerTool({name:'mcp__nocx__steer_probe', label:'Steer probe', description:'Fixed steer probe',
+ parameters:{type:'object',properties:{note:{type:'string'}},required:['note']},
+ async execute() { return {content:[{type:'text',text:'probe result'}],isError:false}; }});
+}`
+	extensions := filepath.Join(piAgentDir(c.env), "extensions")
+	if err := os.MkdirAll(extensions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extensions, "steer.ts"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
+	spec := harness.TurnSpec{ConversationID: "consumed-steer", Dir: t.TempDir(), SystemPrompt: "Fixed nocx instructions", Text: "pane=local cwd=/work: look at the logs"}
+	turn := piTurn(t, c, spec)
+	events := make(chan harness.Event, 256)
+	go func() {
+		defer close(events)
+		for ev := range turn.Events() {
+			events <- ev
+		}
+	}()
+	for streamed := false; !streamed; {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("the turn ended before the first answer arrived")
+			}
+			streamed = ev.Kind == harness.EventAnswerDelta && ev.Text == "reading the logs "
+		case <-ctx.Done():
+			t.Fatal("the first model call never streamed")
+		}
+	}
+	steerer, ok := turn.(harness.Steerer)
+	if !ok {
+		t.Fatal("pi's turn has no Steer")
+	}
+	if err := steerer.Steer(ctx, "also check the second log"); err != nil {
+		t.Fatalf("steer while pi answers: %v", err)
+	}
+	close(gate)
+	for range events {
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	// Consumed inside the turn: the agent asked the model ONCE MORE with the
+	// message, and the caller was never handed it back to ask again.
+	requests := fake.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("model calls = %d, want exactly the two of one turn", len(requests))
+	}
+	if !strings.Contains(string(requests[1].Body), "also check the second log") {
+		t.Fatal("the message was not carried into the turn")
 	}
 }

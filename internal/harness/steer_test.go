@@ -161,3 +161,149 @@ func TestSteerIsRefusedByAnAgentWithoutSteering(t *testing.T) {
 	_ = turn.Cancel(ctx)
 	_, _ = turn.Wait(ctx)
 }
+
+// slowStartProtocol is an agent that takes its time coming up: the window in
+// which a person has sent a message and no turn is running yet.
+type slowStartProtocol struct {
+	shellProtocol
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p slowStartProtocol) Start(ctx context.Context, spec TurnSpec) (Launch, error) {
+	close(p.started)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return Launch{}, ctx.Err()
+	}
+	return p.shellProtocol.Start(ctx, spec)
+}
+
+func (p slowStartProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
+
+// A message sent while the agent is still starting is QUEUED; a cancel before
+// the agent takes it hands it back to the caller, which asks it as the
+// conversation's next question (ADR-4khgzeyp decision 3).
+func TestSteerQueuedWhenTheTurnIsCancelledIsHandedBack(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	protocol := slowStartProtocol{started: make(chan struct{}), release: make(chan struct{})}
+	queued := make(chan struct{})
+	var once sync.Once
+	m := NewSessionManager(Base{
+		Observe: func(transition Transition) {
+			if transition.Kind == "steer-queued" {
+				once.Do(func() { close(queued) })
+			}
+		},
+	}, protocol)
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "handback", Text: "first question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-protocol.started:
+	case <-ctx.Done():
+		t.Fatal("the agent never started coming up")
+	}
+	steerer, ok := turn.(Steerer)
+	if !ok {
+		t.Fatal("the turn has no Steer")
+	}
+	steered := make(chan error, 1)
+	go func() { steered <- steerer.Steer(ctx, "ask this next") }()
+	// The message is in the actor's queue and the agent has not seen it: the
+	// cancel below is about a turn that had already taken it.
+	select {
+	case <-queued:
+	case <-ctx.Done():
+		t.Fatal("the message was never queued")
+	}
+	if err := turn.Cancel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("Wait = %v", err)
+	}
+	select {
+	case err := <-steered:
+		if !errors.Is(err, ErrSteerNotTaken) {
+			t.Fatalf("a message the cancelled turn never took = %v, want ErrSteerNotTaken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the queued message was never answered")
+	}
+}
+
+// noSteerAnswerProtocol takes the steer command and never answers it: the agent
+// has stopped moving. The turn's own bound hands the message back instead of
+// holding the caller for ever (nocx-a62cl.6.3).
+type noSteerAnswerProtocol struct {
+	shellProtocol
+}
+
+func (p noSteerAnswerProtocol) Start(context.Context, TurnSpec) (Launch, error) {
+	script := `while read -r line; do
+case "${line#* }" in
+barrier* | prompt*) echo "response ${line%% *}";;
+steer*) : ;;
+esac
+done`
+	return Launch{Argv: []string{"/bin/sh", "-c", script}}, nil
+}
+
+func (p noSteerAnswerProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
+
+func (p noSteerAnswerProtocol) SteerCommand(text string) (Command, bool) {
+	return Command{Name: "steer", Payload: map[string]any{"message": text}}, true
+}
+
+func TestSteerNotAcceptedWithinTheTurnBoundIsHandedBack(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	written := make(chan struct{})
+	prompted := make(chan struct{})
+	var once, promptedOnce sync.Once
+	m := NewSessionManager(Base{
+		ShutdownTimeout: 100 * time.Millisecond,
+		Observe: func(transition Transition) {
+			if transition.Kind == "write" && strings.Contains(string(transition.Data), "steer") {
+				once.Do(func() { close(written) })
+			}
+			if transition.Kind == "prompt-written" {
+				promptedOnce.Do(func() { close(prompted) })
+			}
+		},
+	}, noSteerAnswerProtocol{})
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "silent", Text: "first question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-prompted:
+	case <-ctx.Done():
+		t.Fatal("the turn never reached its prompt")
+	}
+	steerer, ok := turn.(Steerer)
+	if !ok {
+		t.Fatal("the turn has no Steer")
+	}
+	if err := steerer.Steer(ctx, "ask this next"); !errors.Is(err, ErrSteerNotTaken) {
+		t.Fatalf("a message the agent never accepted = %v, want ErrSteerNotTaken", err)
+	}
+	select {
+	case <-written:
+	default:
+		t.Fatal("the message was never written to the agent, so the bound was not what answered")
+	}
+	// The turn itself is not killed by a message the agent ignored.
+	if err := turn.Cancel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("Wait = %v", err)
+	}
+}

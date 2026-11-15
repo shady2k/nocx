@@ -60,6 +60,11 @@ func TestPiDeclaresSupportedFacts(t *testing.T) {
 	if got.ToolBoundary != harness.NocxToolsOnly || !got.ContinuesConversationByID || !got.ReportsAnsweringModel {
 		t.Fatalf("Facts = %+v", got)
 	}
+	// pi takes a message while it answers: its steer is queued and delivered
+	// before the next model call (ADR-anntnxdj decision 4).
+	if got.Steering != harness.Steers {
+		t.Fatalf("Steering = %q, want %q", got.Steering, harness.Steers)
+	}
 }
 
 func configuredPi(t *testing.T, responses ...fakemodel.Response) (*Connector, *fakemodel.Server) {

@@ -592,7 +592,7 @@ OS_PKG_DIRS := cmd/e2e-sshd cmd/nocx-helper internal/apicoll internal/app intern
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system \
                internal/peerpin internal/monoclock internal/emulator/ghostty/ghosttytest \
-               internal/harness internal/harness/harnesstest
+               internal/harness internal/harness/harnesstest internal/wakesource
 # One list owns both partitions; a second hand-kept regex can silently leave a
 # new OS package in the portable set even after OS_PKG_DIRS is corrected.
 os_pkg_empty :=

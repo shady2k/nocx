@@ -25039,6 +25039,23 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
+  it('does not report a new size when only the accepted frame grid changes', async () => {
+    const { session, fits, openCommand, restore } = await paneWithLayout()
+    vi.useFakeTimers()
+    try {
+      openCommand()
+      const before = fits().length
+      const alternate = screenFrame(10, ['ALT'], { cols: 40, rows: 20 })
+      alternate.state.bufferKind = 'alternate'
+      session.fireScreenFrame(alternate)
+      await vi.runOnlyPendingTimersAsync()
+      expect(fits()).toHaveLength(before)
+    } finally {
+      vi.useRealTimers()
+      restore()
+    }
+  })
+
   it('gives the alternate screen the same grid, and keeps it on return', async () => {
     const { content, session, tab, sb, fits, openCommand, resize, restore } = await paneWithLayout()
     try {

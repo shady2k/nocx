@@ -5963,7 +5963,16 @@ export class TerminalContent extends BasePaneContent {
             previous.geometry.cellHeightPx !== geometry.cellHeightPx
           if (geometryChanged) {
             this.scrollback?.cellMetricsChanged()
-            this._scheduleResizeReport()
+            // Another client's grid is not a measurement of this pane.
+            // Only a new cell metric changes the local size report here;
+            // viewport delivery owns changes to our columns and rows.
+            if (
+              previous === null ||
+              previous.geometry.cellWidthPx !== geometry.cellWidthPx ||
+              previous.geometry.cellHeightPx !== geometry.cellHeightPx
+            ) {
+              this._scheduleResizeReport()
+            }
             // The same screen on a new grid, and the shell's own redraw
             // after SIGWINCH, are not something writing: retake the baseline.
             if (this._screenHandbackSnapshot !== null) {
@@ -6744,6 +6753,7 @@ export class TerminalContent extends BasePaneContent {
     // The height arrives as `rows * cell` from `_gridHeight`, so this is the
     // same count, not a second division (see `gridRows`).
     const rows = Math.max(1, gridRows(usable.height, metrics.cellHeight))
+    const previousLocalGrid = this.lastLocalGridSize
     this.lastLocalGridSize = { cols, rows }
     const accepted = this._cellModel?.current()?.geometry
     if (accepted && (accepted.cellWidthPx <= 0 || accepted.cellHeightPx <= 0)) {
@@ -6753,7 +6763,9 @@ export class TerminalContent extends BasePaneContent {
     const last = this.lastFitGeometry
     const sameViewport =
       last !== null && last.width === usable.width && last.height === usable.height
-    const sameSize = cols === this.cols && rows === this.rows
+    // Accepted frames may belong to another client's grid. Only compare
+    // our measurement with our previous fit, never with that remote grid.
+    const sameSize = previousLocalGrid?.cols === cols && previousLocalGrid.rows === rows
     const report = this._lastReport
     const sameMetric =
       report !== null &&

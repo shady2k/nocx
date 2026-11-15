@@ -658,39 +658,43 @@ func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
 // looked — but no close may rest on a reading taken after a jump, so the
 // connection must come back and must never be ended for it.
 func TestAClockJumpOnAHealthyConnectionStallsItAtMostAndClosesNothing(t *testing.T) {
-	var probes atomic.Int32
-	link := newMemoryLink()
-	link.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		return time.Millisecond, nil
-	}
-	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
-	clock := hostconntest.New()
-	m, sup := managerOn(t, carrier, clock)
-
-	// A helper-owned connection: no plain shell, so the closing policy MAY end
-	// it — which is exactly what must not happen on this evidence.
-	lease, err := m.Acquire(context.Background(), plan())
-	if err != nil {
-		t.Fatalf("Acquire: %v", err)
-	}
-	t.Cleanup(lease.Release)
-
-	// One step, ten minutes: the probe that was due inside them is still
-	// outstanding when the guard looks, and its answer arrives in real time.
-	clock.Advance(10 * time.Minute)
-
-	waittest.WaitFor(t, "the answer to arrive", func() bool { return probes.Load() >= 1 })
-	waittest.WaitFor(t, "the connection to be connected again", func() bool {
-		return sup.Current().Kind == hostconn.Connected
-	})
-
-	if lease.Lost() {
-		t.Fatal("a clock jump closed a healthy connection")
-	}
-	for _, state := range sup.States() {
-		if state.Kind == hostconn.Reconnecting || state.Kind == hostconn.Ended {
-			t.Fatalf("a clock jump ended a healthy connection: path %v", sup.States())
+	synctest.Test(t, func(t *testing.T) {
+		var probes atomic.Int32
+		link := newMemoryLink()
+		link.probe = func() (time.Duration, error) {
+			probes.Add(1)
+			return time.Millisecond, nil
 		}
-	}
+		carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
+		clock := hostconntest.New()
+		m, sup := managerOn(t, carrier, clock)
+
+		// A helper-owned connection: no plain shell, so the closing policy MAY end
+		// it — which is exactly what must not happen on this evidence.
+		lease, err := m.Acquire(context.Background(), plan())
+		if err != nil {
+			t.Fatalf("Acquire: %v", err)
+		}
+		defer lease.Release()
+
+		// One step, ten minutes: the probe that was due inside them is still
+		// outstanding when the guard looks, and its answer arrives in real time.
+		synctest.Wait()
+		clock.Advance(10 * time.Minute)
+		synctest.Wait()
+
+		waittest.WaitFor(t, "the answer to arrive", func() bool { return probes.Load() >= 1 })
+		waittest.WaitFor(t, "the connection to be connected again", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
+
+		if lease.Lost() {
+			t.Fatal("a clock jump closed a healthy connection")
+		}
+		for _, state := range sup.States() {
+			if state.Kind == hostconn.Reconnecting || state.Kind == hostconn.Ended {
+				t.Fatalf("a clock jump ended a healthy connection: path %v", sup.States())
+			}
+		}
+	})
 }

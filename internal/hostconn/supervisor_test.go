@@ -506,7 +506,6 @@ func TestTwoIdentitiesOnOneHostDoNotShareAState(t *testing.T) {
 		synctest.Wait()
 		clock.Advance(hostconn.ProbeInterval)
 		synctest.Wait()
-		synctest.Wait()
 		clock.Advance(hostconn.ProbeDeadline)
 		synctest.Wait()
 		waittest.WaitFor(t, "the first connection to read stalled", func() bool {

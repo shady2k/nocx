@@ -845,10 +845,22 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			requestCancel()
 			return
 		}
+		requestInvocation := invocation
+		requestInvocation.Context = requestCtx
+		dispatch := e.cfg.Dispatch
+		if invocation.Dispatcher != nil {
+			dispatch = invocation.Dispatcher
+		}
+		releaseOrder := func() {}
+		if reserver, ok := dispatch.(assistant.ToolRequestReserver); ok {
+			requestInvocation, releaseOrder = reserver.ReserveInvocation(requestInvocation)
+			requestCtx = requestInvocation.Context
+		}
 		requests.Add(1)
 		inFlight.Add(1)
 		go func(request rpcRequest, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer requests.Done()
+			defer releaseOrder()
 			defer e.finishRequest(publishedSession, conn)
 			defer func() {
 				if inFlight.Add(-1) == 0 {
@@ -876,15 +888,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 					"participant", invocation.RunContext.Participant,
 				),
 				request.Method)
-			requestInvocation := invocation
 			requestInvocation.Context = requestCtx
 			requestInvocation.Terminal = terminal
 			requestInvocation.Method = request.Method
 			requestInvocation.RawParams = append(json.RawMessage(nil), request.Params...)
-			dispatch := e.cfg.Dispatch
-			if requestInvocation.Dispatcher != nil {
-				dispatch = requestInvocation.Dispatcher
-			}
 			var result string
 			var dispatchErr error
 			// TWO ANSWERS COME FROM THE GRANT RATHER THAN FROM THE
@@ -894,7 +901,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			// admitted invocation's, never an argument.
 			if request.Method == "tools.instructions" {
 				var instructions []byte
-				instructions, dispatchErr = buildInstructions(requestInvocation.Grant)
+				instructions, dispatchErr = buildDispatcherInstructions(dispatch, requestInvocation.Grant)
 				result = string(instructions)
 			} else if request.Method == "tools.catalogue" {
 				var catalogueResult []byte

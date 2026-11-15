@@ -23,6 +23,7 @@ type TurnTools interface {
 type RunTools struct {
 	kernel      *effectKernel
 	turnContext context.Context
+	fatal       chan error
 }
 
 // BindRunTools binds the same run inputs the in-process assistant uses.
@@ -39,7 +40,15 @@ func BindRunTools(ctx context.Context, c Client, p AskParams, onCall func(ToolCa
 	if err != nil {
 		return nil, err
 	}
-	return &RunTools{kernel: k, turnContext: ctx}, nil
+	return &RunTools{kernel: k, turnContext: ctx, fatal: make(chan error, 1)}, nil
+}
+
+// ReserveInvocation fixes this call's position while the endpoint still reads
+// requests in arrival order. Waiting remains in dispatch so cancels can be read.
+func (r *RunTools) ReserveInvocation(invocation ToolInvocation) (ToolInvocation, func()) {
+	reservation, release := r.kernel.order.reserve()
+	invocation.orderReservation = reservation
+	return invocation, release
 }
 
 // RunContext returns the complete context bound once for the run.
@@ -64,6 +73,14 @@ func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
 func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	invocation.RunContext = r.RunContext()
 	out, err := r.kernel.invokeInvocation(invocation, uuid.NewString())
+	var declined *ScreenDeclinedError
+	var screening *EgressScreeningError
+	if errors.As(err, &declined) || errors.As(err, &screening) {
+		select {
+		case r.fatal <- err:
+		default:
+		}
+	}
 	if err == nil && out.kind == modelNocxMessage {
 		return "", &DispatchRefusalError{Method: invocation.Method, Reason: out.text}
 	}
@@ -77,9 +94,27 @@ func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	return out.text, err
 }
 
-// Catalogue projects the same declarations and grant as the run's dispatcher.
-func (r *RunTools) Catalogue(grant content.Grant) []agenttools.Tool {
-	return r.kernel.dispatcher.Catalogue(grant)
+// Fatal reports a screen outcome that the agent cannot overrule. The turn driver
+// must cancel and join the turn before returning this error.
+func (r *RunTools) Fatal() <-chan error { return r.fatal }
+
+// Catalogue keeps the assistant's MCP prefix fixed across changes in authority.
+// The pipeline still decides each call against its fresh grant.
+func (r *RunTools) Catalogue(_ content.Grant) []agenttools.Tool {
+	var tools []agenttools.Tool
+	for _, tool := range r.kernel.registry.All() {
+		if tool.Narrow != nil {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
+}
+
+// Instructions is fixed for assistant turns; pane dispatchers keep their
+// grant-derived endpoint instructions.
+func (r *RunTools) Instructions() string {
+	return "This assistant runs inside nocx. Use nocx's tools for actions on the pane and its host. " +
+		"The tool list is fixed; each call is checked against the current authority and may be refused with a reason."
 }
 
 func (c *client) bindRunKernel(logger log.Logger, p AskParams, onCall func(ToolCall) error) (*effectKernel, error) {

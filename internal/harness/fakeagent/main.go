@@ -196,7 +196,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 				calls++
 				id := "call-" + strconv.Itoa(calls)
 				emit(protocol.Line{Kind: "tool_started", ID: id, Name: "session.wait"})
-				result, _, err := callTool(ctx, prompt.Tools, "session.wait", map[string]any{"runId": match[1], "decision": step.Decision}, script.ProbeEnvironment, false)
+				result, _, err := callTool(ctx, prompt.Tools, "session.wait", map[string]any{"runId": match[1], "decision": step.Decision}, script.ProbeEnvironment, false, false)
 				if ctx.Err() != nil {
 					return
 				}
@@ -272,7 +272,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 					arguments[key] = value
 				}
 			}
-			result, isError, err := callTool(ctx, prompt.Tools, step.Name, arguments, script.ProbeEnvironment, step.FailOnError)
+			result, isError, err := callTool(ctx, prompt.Tools, step.Name, arguments, script.ProbeEnvironment, step.FailOnError, step.ContinueOnRPCError)
 			if ctx.Err() != nil {
 				return
 			}
@@ -333,7 +333,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 // callTool launches the turn's bridge as an MCP stdio client and makes one
 // tools/call. The bridge's environment is added to this child alone; this
 // process's own environment is what it is.
-func callTool(ctx context.Context, bridge harness.ToolBridge, name string, arguments map[string]any, probeEnvironment, failOnError bool) (string, bool, error) {
+func callTool(ctx context.Context, bridge harness.ToolBridge, name string, arguments map[string]any, probeEnvironment, failOnError, continueOnRPCError bool) (string, bool, error) {
 	if len(bridge.Command) == 0 {
 		return "", false, fmt.Errorf("no tool bridge was declared")
 	}
@@ -399,7 +399,11 @@ func callTool(ctx context.Context, bridge harness.ToolBridge, name string, argum
 		return "", false, err
 	}
 	if response.Error != nil {
-		return "", false, fmt.Errorf("tools/call: %s", response.Error.Message)
+		text := "tools/call: " + response.Error.Message
+		if !continueOnRPCError {
+			return text, true, errors.New(text)
+		}
+		return text, true, nil
 	}
 	var result struct {
 		Content []struct {

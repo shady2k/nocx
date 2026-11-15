@@ -1494,6 +1494,7 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 		return errors.New("the answering agent is not available")
 	}
 	var authority agentharness.TurnAuthority
+	var fatal <-chan error
 	if p.Grant != nil {
 		tools, err := assistant.BindRunTools(ctx, h.client, p, func(call assistant.ToolCall) error {
 			return writeEvent(agentAskEvent{Kind: agentAskToolCall, Call: &call})
@@ -1502,6 +1503,7 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 			return err
 		}
 		authority = tools
+		fatal = tools.Fatal()
 	}
 	conversation := string(rc.sessionID)
 	if rc.paneID != nil {
@@ -1517,7 +1519,21 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	if err != nil {
 		return err
 	}
-	for event := range turn.Events() {
+	var fatalErr error
+	var emissionErr error
+stream:
+	for {
+		var event agentharness.Event
+		select {
+		case fatalErr = <-fatal:
+			_ = turn.Cancel(context.WithoutCancel(ctx))
+			break stream
+		case next, ok := <-turn.Events():
+			if !ok {
+				break stream
+			}
+			event = next
+		}
 		var ev agentAskEvent
 		switch event.Kind {
 		case agentharness.EventAnswerDelta:
@@ -1529,10 +1545,25 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 		}
 		if emitErr := writeEvent(ev); emitErr != nil {
 			_ = turn.Cancel(context.WithoutCancel(ctx))
-			return emitErr
+			emissionErr = emitErr
+			break stream
 		}
 	}
 	outcome, err := turn.Wait(context.WithoutCancel(ctx))
+	if emissionErr != nil {
+		return emissionErr
+	}
+	// A terminal event may race the screen notification. Settlement guarantees
+	// every accepted call has reported its fatal result before Wait returns.
+	if fatalErr == nil {
+		select {
+		case fatalErr = <-fatal:
+		default:
+		}
+	}
+	if fatalErr != nil {
+		err = fatalErr
+	}
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		rc.control.answeringModel = outcome.Model

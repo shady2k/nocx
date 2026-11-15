@@ -46,6 +46,8 @@ type Step struct {
 	Arguments map[string]any `json:"arguments,omitempty"`
 	// FailOnError ends the turn with the actual MCP tool error text.
 	FailOnError bool `json:"failOnError,omitempty"`
+	// ContinueOnRPCError lets a script continue after a protocol-level refusal.
+	ContinueOnRPCError bool `json:"continueOnRPCError,omitempty"`
 	// ArgumentsFromResult copies JSON fields from the preceding tool-output.
 	ArgumentsFromResult map[string]string `json:"argumentsFromResult,omitempty"`
 	// ArgumentOffsets adds a numeric offset after resolving a result argument.

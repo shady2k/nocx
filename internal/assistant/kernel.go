@@ -1915,7 +1915,14 @@ func (k *effectKernel) invokeInvocation(request ToolInvocation, callID string) (
 	// attempt opens between them and the narrowed capability, and the
 	// approver is an adapter that keeps the kernel's own suspension exactly
 	// until nocx-a62cl.3.4 replaces it with a service that blocks.
-	release, declined, enterErr := k.order.enter(ctx)
+	var release func()
+	var declined *Declined
+	var enterErr error
+	if request.orderReservation != nil {
+		release, declined, enterErr = request.orderReservation.enter(ctx)
+	} else {
+		release, declined, enterErr = k.order.enter(ctx)
+	}
 	if enterErr != nil {
 		return modelResult{}, &PipelineRefusal{
 			Call:   Call{runID: k.runID, tool: name},

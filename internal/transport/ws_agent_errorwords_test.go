@@ -95,9 +95,7 @@ func unknownToolRun(t *testing.T, policy *assistant.GlobalPolicyStore, name stri
 	return h, state
 }
 
-// The MCP helper refuses names absent from its authenticated catalogue before
-// dispatch. The embedded carrier's richer policy sentences are separately held
-// by TestCallsCarrier_Unknown* in internal/assistant.
+// Invented names are refused by the MCP helper before dispatch.
 func assertUnadvertisedCallWasNotRun(t *testing.T, h *askHarness, name string) {
 	t.Helper()
 	if result := h.toolResult(); !strings.Contains(result, name) || !strings.Contains(result, "not offered by the endpoint") {
@@ -116,17 +114,34 @@ func assertUnadvertisedCallWasNotRun(t *testing.T, h *askHarness, name string) {
 
 func TestAsk_StandingNeverUnknownCallCompletes(t *testing.T) {
 	h, _ := unknownToolRun(t, refusingPolicyStore(t), "session.read", map[string]any{"sessionId": "not-this-run"})
-	assertUnadvertisedCallWasNotRun(t, h, "session.read")
+	assertGrantedCatalogueCallWasRefused(t, h)
 }
 
 func TestAsk_WithheldToolNamesEveryRefusedEffect(t *testing.T) {
-	h, _ := unknownToolRun(t, refusingPolicyStore(t), "session.run", map[string]any{})
-	assertUnadvertisedCallWasNotRun(t, h, "session.run")
+	h, _ := unknownToolRun(t, refusingPolicyStore(t), "session.run", map[string]any{"command": "echo forbidden"})
+	assertGrantedCatalogueCallWasRefused(t, h)
 }
 
 func TestAsk_InventedUnknownCallCompletes(t *testing.T) {
 	h, _ := unknownToolRun(t, autonomousPolicyStore(t), "model.invented.tool", map[string]any{})
 	assertUnadvertisedCallWasNotRun(t, h, "model.invented.tool")
+}
+
+func assertGrantedCatalogueCallWasRefused(t *testing.T, h *askHarness) {
+	t.Helper()
+	result := h.toolResult()
+	if !strings.Contains(result, "not offered to this session") && !strings.Contains(result, "refused by the policy") {
+		t.Fatalf("call did not preserve its refusal: %s", result)
+	}
+	entries, err := h.db.Ledger().ListEntries(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Kind == content.EntryAction {
+			t.Fatalf("refused call reached execution: %+v", entry)
+		}
+	}
 }
 
 func TestAsk_EgressSealedVaultUnlocksAndContinues(t *testing.T) {

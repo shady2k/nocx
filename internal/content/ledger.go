@@ -1913,6 +1913,8 @@ type ArtifactRange struct {
 // write both. The header above keeps the by-hand list of which methods have
 // a production caller and which do not.
 type LedgerRepository interface {
+	// PinConversationModel records the first admitted model, independently of run outcomes.
+	PinConversationModel(ctx context.Context, conversationID, harnessID, model string) error
 	// ConversationModel reads the first resolved model of this agent conversation.
 	ConversationModel(ctx context.Context, conversationID, harnessID string) (string, error)
 	// CreateSession records a restore key under a workspace. The workspace

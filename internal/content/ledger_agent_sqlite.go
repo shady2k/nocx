@@ -520,9 +520,6 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		// this transaction, the closing end is the terminal state. The
 		// payload pins the endpoint+model the run will use, as they were at
 		// the time (design §5).
-		if pinErr := pinConversationModel(ctx, tx, in.Facts); pinErr != nil {
-			return pinErr
-		}
 		factsJSON, err := json.Marshal(in.Facts)
 		if err != nil {
 			return err
@@ -680,13 +677,6 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 				return err
 			}
 			payload = string(b)
-		}
-		var runFacts RunFacts
-		if err := json.Unmarshal([]byte(payload), &runFacts); err != nil {
-			return err
-		}
-		if err := pinConversationModel(ctx, tx, runFacts); err != nil {
-			return err
 		}
 		status := EntryFailure
 		if in.State == RunCompleted {

@@ -18,6 +18,7 @@ import (
 // What a handler may touch is exactly these two methods — nothing reaches a
 // store the operation was not constructed with.
 type AgentService interface {
+	PinConversationModel(ctx context.Context, conversationID, harnessID, model string) error
 	ConversationModel(ctx context.Context, conversationID, harnessID string) (string, error)
 	// CaptureFrame ingests one renderer-minted frame and returns the
 	// backend-minted frame id.
@@ -77,6 +78,13 @@ func newAgentService(g *guard, db content.ContentDB) *agentService {
 type agentService struct {
 	guard  *guard
 	ledger content.LedgerRepository
+}
+
+func (s *agentService) PinConversationModel(ctx context.Context, conversationID, harnessID, model string) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.ledger.PinConversationModel(ctx, conversationID, harnessID, model)
 }
 
 func (s *agentService) ConversationModel(ctx context.Context, conversationID, harnessID string) (string, error) {

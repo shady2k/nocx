@@ -14700,6 +14700,53 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
+  it('asks in the pinned conversation when the new-conversation role is unavailable', async () => {
+    const client = makeClient()
+    const fallback = client.dispatcher.call.getMockImplementation()!
+    const openSettings = vi.fn()
+    let roleUnavailable = false
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'agent.status') {
+        const conversation = (params as { sessionId?: string }).sessionId
+        return Promise.resolve({
+          answering: {
+            ready: !roleUnavailable || Boolean(conversation),
+            reason: roleUnavailable && !conversation ? 'model-gone' : null,
+            agentId: 'fixture',
+            model: conversation ? 'pinned' : 'removed-choice',
+          },
+          message: 'Choose an available model',
+        })
+      }
+      return fallback(method, params)
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onOpenAgentSettings: openSettings } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      typeAndAsk(ed, content, 'first turn')
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call).toHaveBeenCalledWith('agent.ask', expect.anything()),
+      )
+      client.dispatcher.call.mockClear()
+      roleUnavailable = true
+      typeAndAsk(ed, content, 'continue the conversation')
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call).toHaveBeenCalledWith(
+          'agent.ask',
+          expect.objectContaining({ question: 'continue the conversation' }),
+        ),
+      )
+      expect(openSettings).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
   it('with no answering agent installed, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
     const client = makeClient()
     const openSettings = vi.fn()

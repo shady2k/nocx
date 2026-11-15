@@ -53,6 +53,9 @@ type Codec interface {
 // step must set Barrier: its matched response fences output from the previous
 // turn before any new turn events are admitted. Only the final step sets Prompt.
 type Step struct {
+	// Model reports the model resolved by a successful response check.
+	Model func() string
+
 	Command Command
 	Check   func(any) error
 	Barrier bool

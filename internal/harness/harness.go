@@ -188,6 +188,10 @@ type Outcome struct {
 // here; nocx's system prompt does not, because it is the same bytes on every
 // turn and the cache prefix depends on that.
 type TurnSpec struct {
+	// ModelSelected records the resolved model at admission, before any prompt.
+	// A recording failure prevents the prompt from reaching the agent.
+	ModelSelected func(context.Context, string) error
+
 	// ConversationID names the conversation whose agent session this turn
 	// continues.
 	ConversationID string

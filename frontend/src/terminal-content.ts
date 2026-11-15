@@ -3681,7 +3681,10 @@ export class TerminalContent extends BasePaneContent {
       // to be here was `() => new AgentClient(…).status()` handed to the
       // ask target — a function called at refusal time, which no surface
       // can render and nothing can repaint.
-      const readiness = new AgentReadiness(agentClient)
+      const readiness = new AgentReadiness({
+        // Match agent.ask's session; the backend resolves its durable pane pin.
+        status: () => agentClient.status(this.session?.sessionId),
+      })
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
       // And a write to the configuration behind that chip, whenever it lands

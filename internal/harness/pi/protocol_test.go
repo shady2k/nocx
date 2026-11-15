@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -41,7 +42,13 @@ func codecWire(t *testing.T, codec harness.Codec, id string, command harness.Com
 }
 
 func TestCodecTurnPlanBarrierAndPrompt(t *testing.T) {
-	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	connector := newTestConnector(t.TempDir(), nil)
+	launch, err := connector.Start(context.Background(), harness.TurnSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = launch.Cleanup() })
+	codec := connector.NewCodec(harness.SessionInfo{})
 	text := "line one\nline two with \"quotes\""
 	plan := codec.BeginTurn(harness.TurnSpec{Text: text})
 	if len(plan) < 2 || plan[0].Command.Name != "get_state" || !plan[0].Barrier {

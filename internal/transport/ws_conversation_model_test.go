@@ -11,6 +11,10 @@ import (
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
+func (*fakeAgentService) PinConversationModel(context.Context, string, string, string) error {
+	return nil
+}
+
 func (*fakeAgentService) ConversationModel(context.Context, string, string) (string, error) {
 	return "", nil
 }

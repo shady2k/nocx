@@ -27,8 +27,8 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 		t.Fatalf("unstable private cwd: %q %q pane %q", first.Dir, second.Dir, spec.Dir)
 	}
 	entries, err := os.ReadDir(first.Dir)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("workspace not empty: %v %v", entries, err)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "prompt.txt" {
+		t.Fatalf("workspace has unexpected files: %v %v", entries, err)
 	}
 	var configs []string
 	for _, launch := range []harness.Launch{first, second} {
@@ -51,15 +51,23 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 			t.Fatalf("config permissions: %v %v", info, statErr)
 		}
 		var data struct {
-			Command      []string          `json:"command"`
-			Env          map[string]string `json:"env"`
-			SystemPrompt string            `json:"systemPrompt"`
+			Command    []string          `json:"command"`
+			Env        map[string]string `json:"env"`
+			PromptFile string            `json:"promptFile"`
 		}
 		if err = json.Unmarshal(raw, &data); err != nil {
 			t.Fatal(err)
 		}
-		if data.Env["BEARER"] != "private" || data.SystemPrompt != spec.SystemPrompt || strings.Join(data.Command, " ") != "bridge mcp" {
+		if data.Env["BEARER"] != "private" || data.PromptFile != filepath.Join(first.Dir, "prompt.txt") || strings.Join(data.Command, " ") != "bridge mcp" {
 			t.Fatalf("config: %+v", data)
+		}
+		prompt, err := os.ReadFile(data.PromptFile)
+		if err != nil || string(prompt) != spec.SystemPrompt {
+			t.Fatalf("prompt: %q %v", prompt, err)
+		}
+		info, err = os.Stat(data.PromptFile)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("prompt permissions: %v %v", info, err)
 		}
 		if !strings.Contains(strings.Join(launch.Argv, " "), "--session-dir "+filepath.Join(c.dataDir, "pi", "sessions")) {
 			t.Fatalf("launch: %+v", launch)

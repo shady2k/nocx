@@ -47,10 +47,12 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 		return harness.Launch{}, err
 	}
 	configPath := config.Name()
+	promptPath := filepath.Join(dir, "prompt.txt")
 	ready := false
 	defer func() {
 		if !ready {
 			_ = os.Remove(configPath)
+			_ = os.Remove(promptPath)
 		}
 	}()
 	env := make(map[string]string, len(spec.Tools.Env))
@@ -61,15 +63,18 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 		}
 	}
 	raw, err := json.Marshal(struct {
-		Command      []string          `json:"command"`
-		Env          map[string]string `json:"env"`
-		SystemPrompt string            `json:"systemPrompt"`
-	}{spec.Tools.Command, env, spec.SystemPrompt})
+		Command    []string          `json:"command"`
+		Env        map[string]string `json:"env"`
+		PromptFile string            `json:"promptFile"`
+	}{spec.Tools.Command, env, promptPath})
 	if err != nil {
 		return harness.Launch{}, err
 	}
 	_, configErr := config.Write(raw)
 	if err = errors.Join(configErr, config.Close()); err != nil {
+		return harness.Launch{}, err
+	}
+	if err = os.WriteFile(promptPath, []byte(spec.SystemPrompt), 0o600); err != nil {
 		return harness.Launch{}, err
 	}
 	// Atomic replacement keeps concurrent conversation starts from seeing a
@@ -99,17 +104,20 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 	argv = append(argv, "-e", extensionPath)
 	ready = true
 	return harness.Launch{Argv: argv, Dir: dir, Env: append(append([]string(nil), c.env...), "NOCX_PI_SESSION_FILE="+configPath), Cleanup: func() error {
-		err := os.Remove(configPath)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+		var errs []error
+		for _, path := range []string{configPath, promptPath} {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
 		}
-		return err
+		return errors.Join(errs...)
 	}}, nil
 }
 
 func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(info.ConversationID)))
-	codec := &codec{markerPath: filepath.Join(c.dataDir, "pi", "resume", key+".json")}
+	promptPath, _ := filepath.Abs(filepath.Join(c.dataDir, "pi", "workspaces", key, "prompt.txt"))
+	codec := &codec{markerPath: filepath.Join(c.dataDir, "pi", "resume", key+".json"), promptPath: promptPath}
 	raw, err := os.ReadFile(codec.markerPath) //nolint:gosec // connector-owned conversation metadata
 	if err == nil {
 		codec.markerErr = json.Unmarshal(raw, &codec.expected)
@@ -126,6 +134,8 @@ type resumeMarker struct {
 }
 
 type codec struct {
+	promptPath  string
+	prompt      string
 	model       string
 	decode      func([]byte) ([]harness.Event, error)
 	markerPath  string
@@ -137,6 +147,7 @@ type codec struct {
 func (*codec) Setup() []harness.Step { return nil }
 func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 	c.decode = newDecoder()
+	c.prompt = spec.SystemPrompt
 	selectModel := spec.Model != "" && spec.Model != c.model
 	steps := []harness.Step{{Command: harness.Command{Name: "get_state"}, Barrier: true, Check: func(payload any) error {
 		if err := c.readState(payload); err != nil {
@@ -146,6 +157,11 @@ func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 			return fmt.Errorf("pi changed the pinned model: wanted %q, selected %q", spec.Model, c.model)
 		}
 		return nil
+	}, Model: func() string {
+		if spec.Model == "" || c.model == spec.Model {
+			return c.model
+		}
+		return ""
 	}}}
 	if selectModel {
 		provider, model, _ := strings.Cut(spec.Model, "/")
@@ -159,7 +175,7 @@ func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 					return fmt.Errorf("pi did not select the exact model %q (selected %q)", spec.Model, c.model)
 				}
 				return nil
-			}})
+			}, Model: func() string { return c.model }})
 	}
 	return append(steps, harness.Step{Command: harness.Command{Name: "prompt", Payload: map[string]any{"message": spec.Text}}, Prompt: true})
 }
@@ -200,7 +216,12 @@ func (*codec) CancelSequence() []harness.Command {
 	return []harness.Command{{Name: "clear_queue"}, {Name: "abort"}}
 }
 
-func (*codec) Encode(id string, command harness.Command) ([]byte, error) {
+func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
+	if command.Name == "prompt" {
+		if err := os.WriteFile(c.promptPath, []byte(c.prompt), 0o600); err != nil {
+			return nil, fmt.Errorf("pi prompt file: %w", err)
+		}
+	}
 	wire := map[string]any{"id": id, "type": command.Name}
 	if payload, ok := command.Payload.(map[string]any); ok {
 		for key, value := range payload {

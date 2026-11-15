@@ -14,8 +14,8 @@ import type { AgentStatusResult } from './generated/agent.status'
 export class AgentClient {
   constructor(private readonly dispatcher: Dispatcher) {}
 
-  status(): Promise<AgentStatusResult> {
-    return this.dispatcher.call<AgentStatusResult>('agent.status', {})
+  status(sessionId?: string): Promise<AgentStatusResult> {
+    return this.dispatcher.call<AgentStatusResult>('agent.status', sessionId ? { sessionId } : {})
   }
 
   cancel(runId: number): Promise<AgentCancel> {

@@ -7,7 +7,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-func TestConversationModelPinsActualDefault(t *testing.T) {
+func TestConversationModelPinsAdmissionBeforeOutcome(t *testing.T) {
 	db, led, path := newLedgerAt(t)
 	ctx := context.Background()
 	submit := func(conversation, model string) content.AgentAskResult {
@@ -18,12 +18,27 @@ func TestConversationModelPinsActualDefault(t *testing.T) {
 		}
 		return ask
 	}
-	first := submit("thread-a", "")
-	if err := led.FinishAgentRun(ctx, first.RunID, content.FinishAgentRun{State: content.RunCompleted, TerminationReason: content.TermCompleted, Model: "provider/actual", EndedAt: 1}); err != nil {
+	first := submit("thread-a", "requested-model")
+	if got, err := led.ConversationModel(ctx, "thread-a", "pi"); err != nil || got != "" {
+		t.Fatalf("submission pinned model: %q %v", got, err)
+	}
+	if err := led.PinConversationModel(ctx, "thread-a", "pi", "provider/actual"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := led.ConversationModel(ctx, "thread-a", "pi"); err != nil || got != "provider/actual" {
+		t.Fatalf("before outcome: %q %v", got, err)
+	}
+	if err := led.PinConversationModel(ctx, "thread-a", "pi", "provider/later"); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.FinishAgentRun(ctx, first.RunID, content.FinishAgentRun{State: content.RunCompleted, TerminationReason: content.TermCompleted, Model: "provider/completed", EndedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	submit("thread-a", "provider/changed-role")
 	submit("thread-b", "provider/other")
+	if err := led.PinConversationModel(ctx, "thread-b", "pi", "provider/other"); err != nil {
+		t.Fatal(err)
+	}
 	for conversation, want := range map[string]string{"thread-a": "provider/actual", "thread-b": "provider/other", "new-thread": ""} {
 		got, err := led.ConversationModel(ctx, conversation, "pi")
 		if err != nil || got != want {
@@ -52,7 +67,7 @@ func TestConversationModelPinsActualDefault(t *testing.T) {
 	}
 }
 
-func TestConversationModelPinsReportedFailureAndCancellation(t *testing.T) {
+func TestConversationModelDoesNotPinOutcome(t *testing.T) {
 	for _, state := range []content.RunState{content.RunFailed, content.RunCancelled} {
 		t.Run(string(state), func(t *testing.T) {
 			_, led := newLedger(t)
@@ -65,7 +80,7 @@ func TestConversationModelPinsReportedFailureAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			model, err := led.ConversationModel(ctx, "thread", "pi")
-			if err != nil || model != "reported-model" {
+			if err != nil || model != "" {
 				t.Fatalf("pin %q %v", model, err)
 			}
 		})

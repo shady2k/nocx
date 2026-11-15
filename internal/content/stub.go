@@ -234,6 +234,10 @@ func (s *Stub) Close() error {
 var _ LedgerRepository = (*ledgerStub)(nil)
 
 // ledgerStub implements LedgerRepository for the stub.
+func (s *ledgerStub) PinConversationModel(context.Context, string, string, string) error {
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) ConversationModel(context.Context, string, string) (string, error) {
 	return "", ErrNotImplemented
 }

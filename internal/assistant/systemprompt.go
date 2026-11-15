@@ -101,26 +101,14 @@ func SystemPrompt(f SystemPromptFacts) string {
 	b.WriteString("A link on its own means go there and tell the person what is on it. " +
 		"Text on its own, with no question, means save it as a note with notes.create; text that is a question or context for a question is part of that question instead. " +
 		"When the intent is not plain, ask one question and stop. ")
-	// THE RULE AND THE ATTACHMENT MUST NOT CONTRADICT EACH OTHER
-	// (nocx-hp8p2.4). "Do not call a tool to check first" is about going
-	// OUTSIDE for something nobody offered. Left unqualified it also
-	// forbade reading the screen this very question arrived with — and an
-	// unclear question is precisely when it fires, so the one case the
-	// attachment exists for was the one case it was never read in. The
-	// owner asked "what is this?" over a running `top` and was told there
-	// was not enough context, by a model whose own reasoning had named the
-	// attachment two lines earlier.
-	//
-	// The exemption is written only when there IS an attachment: with
-	// nothing attached, going and looking before answering is the guessing
-	// this rule exists to prevent, and the rule keeps its whole force.
-	if len(f.AttachedContent) > 0 {
-		b.WriteString("Do not guess, and do not go outside this pane to check first — " +
-			"but what is attached above is already yours: read it before you answer, " +
-			"because it is why the question was asked here.\n")
-	} else {
-		b.WriteString("Do not guess, and do not call a tool to check first; notes.create is the requested write for questionless text, not a check.\n")
-	}
+	// Attachment facts live in the turn message, not the standing prefix
+	// (ADR-anntnxdj decision 8). This exception must stay fixed even when
+	// the prefix is built without those facts.
+	b.WriteString("Do not guess, and do not call a tool to check first; " +
+		"notes.create is the requested write for questionless text, not a check. " +
+		"If the turn's message says terminal content is attached, read it before you answer " +
+		"with session.read and the ids and windows in that message; reading that content " +
+		"is not a check outside what the person supplied.\n")
 
 	b.WriteString("\nHow to answer\n")
 	// THE LANGUAGE IS THE MESSAGE'S, NEVER A SETTING. It is stated here and

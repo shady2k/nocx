@@ -1511,10 +1511,18 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	}
 	turn, err := h.harness.Run(ctx, agentharness.TurnSpec{
 		ConversationID: conversation,
-		Text:           rc.question + assistant.TurnContext(rc.promptFacts),
-		Model:          rc.model,
-		SystemPrompt:   assistant.StandingSystemPrompt(rc.promptFacts.PersonalInstructions),
-		Authority:      authority,
+		ModelSelected: func(admissionCtx context.Context, model string) error {
+			if h.op == nil {
+				return nil
+			}
+			return h.op.Run(admissionCtx, func(ctx context.Context, svc capability.AgentService) error {
+				return svc.PinConversationModel(ctx, conversation, h.harnessID, model)
+			})
+		},
+		Text:         rc.question + assistant.TurnContext(rc.promptFacts),
+		Model:        rc.model,
+		SystemPrompt: assistant.StandingSystemPrompt(rc.promptFacts.PersonalInstructions),
+		Authority:    authority,
 	})
 	if err != nil {
 		return err
@@ -2521,7 +2529,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 		return h
 	}
 	return []methodSpec{
-		reg(contentSub, catalog.OpAgentStatus, noParams(), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentStatus, params(validateHarnessStatusRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return h.handleHarnessStatus
 		}),

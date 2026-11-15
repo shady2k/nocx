@@ -353,6 +353,7 @@ func (s *session) loop() {
 	var tools ToolSession
 	var bridge ToolBridge
 	var barrierPassed bool
+	var pinnedModel string
 	var current *actorTurn
 	var queue []*actorTurn
 	var generation, turnNumber, serial uint64
@@ -525,6 +526,9 @@ func (s *session) loop() {
 		// abandon its MCP waiters. The existing deadline still bounds settlement.
 	}
 	begin := func(t *actorTurn) {
+		if pinnedModel != "" {
+			t.spec.Model = pinnedModel
+		}
 		current = t
 		pendingTools = make(map[string]struct{})
 		cancelling = false
@@ -640,6 +644,21 @@ func (s *session) loop() {
 						if err := step.Check(response.Payload); err != nil {
 							fail(fmt.Sprint("agent response: ", err))
 							return
+						}
+					}
+					if step.Model != nil {
+						if model := step.Model(); model != "" {
+							if pinnedModel != "" && model != pinnedModel {
+								fail("agent changed the conversation's pinned model")
+								return
+							}
+							if current.spec.ModelSelected != nil {
+								if err := current.spec.ModelSelected(context.WithoutCancel(current.ctx), model); err != nil {
+									fail(fmt.Sprint("record conversation model: ", err))
+									return
+								}
+							}
+							pinnedModel = model
 						}
 					}
 					if step.Barrier {
@@ -845,6 +864,9 @@ func (s *session) loop() {
 					generation++
 					retired = false
 					retirementErr = nil
+					if pinnedModel != "" {
+						t.spec.Model = pinnedModel
+					}
 					current = t
 					pendingTools = make(map[string]struct{})
 					cancelling = false

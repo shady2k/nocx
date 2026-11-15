@@ -16,10 +16,14 @@ func (s *sqliteContent) ConversationModel(ctx context.Context, conversationID, h
 	return model, err
 }
 
-func pinConversationModel(ctx context.Context, tx *sql.Tx, facts RunFacts) error {
-	if facts.ConversationID == "" || facts.Model == "" {
+// PinConversationModel records admission before the turn can produce an outcome.
+// Later admissions cannot replace the conversation's first model.
+func (s *sqliteContent) PinConversationModel(ctx context.Context, conversationID, harnessID, model string) error {
+	if conversationID == "" || model == "" {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO agent_conversations(id,harness,model) VALUES(?,?,?) ON CONFLICT DO NOTHING`, facts.ConversationID, facts.Harness, facts.Model)
-	return err
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.conn(ctx).ExecContext(ctx, `INSERT INTO agent_conversations(id,harness,model) VALUES(?,?,?) ON CONFLICT DO NOTHING`, conversationID, harnessID, model)
+		return err
+	})
 }

@@ -79,7 +79,21 @@ func main() {
 			if done != nil {
 				<-done
 			}
-			emit(protocol.Line{Kind: "response", ID: command.ID})
+			model := "fake-default"
+			for _, step := range script.Steps {
+				if step.Model != "" {
+					model = step.Model
+					break
+				}
+			}
+			if script.DefaultModelFile != "" {
+				raw, err := os.ReadFile(script.DefaultModelFile)
+				if err != nil {
+					os.Exit(2)
+				}
+				model = string(raw)
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID, Model: model, Payload: model})
 		case "prompt":
 			if done != nil {
 				<-done

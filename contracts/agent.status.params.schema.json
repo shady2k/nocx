@@ -6,5 +6,11 @@
   "type": "object",
   "additionalProperties": false,
   "required": [],
-  "properties": {}
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": ".*\\S.*",
+      "description": "Resolve readiness for this attached session's conversation. Omit for a new conversation."
+    }
+  }
 }

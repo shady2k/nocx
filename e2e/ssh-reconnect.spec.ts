@@ -193,7 +193,7 @@ interface Wired {
  * test can change.
  */
 async function wire(page: Page, home: string): Promise<Wired> {
-  const fixture = await startSshd({ home, cwd: home })
+  const fixture = await startSshd({ home, cwd: home, startupTrace: true })
   const proxy = await startFaultProxy(fixture.host, fixture.port)
   trustHostKey(knownHostsFor(fixture, proxy.port))
 
@@ -233,6 +233,7 @@ async function unwire(page: Page, w: Wired | null): Promise<void> {
   } catch {
     // A cleanup that throws would replace the real failure with its own.
   }
+  console.error('SSH startup phases before reconnect cleanup:\n' + w.fixture.startupTrace())
   await w.proxy.close()
   w.fixture.proc.kill('SIGKILL')
 }

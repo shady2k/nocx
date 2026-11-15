@@ -527,60 +527,70 @@ func TestTwoIdentitiesOnOneHostDoNotShareAState(t *testing.T) {
 // rule is "the smallest stated interval wins, and a stated one beats the
 // default", not "whoever dialled first".
 func TestAHoldersStatedCadenceReachesTheOneProber(t *testing.T) {
-	link := newMemoryLink()
-	var probes atomic.Int32
-	link.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		return time.Millisecond, nil
-	}
-	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
-	clock := hostconntest.New()
-	m, _ := managerOn(t, carrier, clock)
+	synctest.Test(t, func(t *testing.T) {
+		link := newMemoryLink()
+		var probes atomic.Int32
+		link.probe = func() (time.Duration, error) {
+			probes.Add(1)
+			return time.Millisecond, nil
+		}
+		carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
+		clock := hostconntest.New()
+		m, _ := managerOn(t, carrier, clock)
 
-	first := plan()
-	lease, err := m.Acquire(context.Background(), first)
-	if err != nil {
-		t.Fatalf("Acquire: %v", err)
-	}
-	t.Cleanup(lease.Release)
+		first := plan()
+		lease, err := m.Acquire(context.Background(), first)
+		if err != nil {
+			t.Fatalf("Acquire: %v", err)
+		}
+		defer lease.Release()
 
-	// The connection was dialled with no cadence stated, so the design's
-	// default is what runs: nothing is asked before fifteen seconds.
-	clock.Advance(hostconn.ProbeInterval - time.Second)
-	if got := probes.Load(); got != 0 {
-		t.Fatalf("%d probe(s) were sent inside the default interval", got)
-	}
-	clock.Advance(time.Second)
-	waittest.WaitFor(t, "the default cadence's first probe", func() bool { return probes.Load() == 1 })
+		// The connection was dialled with no cadence stated, so the design's
+		// default is what runs: nothing is asked before fifteen seconds.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval - time.Second)
+		synctest.Wait()
+		if got := probes.Load(); got != 0 {
+			t.Fatalf("%d probe(s) were sent inside the default interval", got)
+		}
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the default cadence's first probe", func() bool { return probes.Load() == 1 })
 
-	// A shell joins and states a second. The change is asked at once — the
-	// fifteen seconds the default had put in front of the next probe is not
-	// time a person who asked to be told quickly should wait — and the cadence
-	// is a second from then on.
-	stated := plan()
-	stated.ProbeInterval = time.Second
-	second, err := m.Acquire(context.Background(), stated)
-	if err != nil {
-		t.Fatalf("the shell's Acquire: %v", err)
-	}
-	t.Cleanup(second.Release)
-	waittest.WaitFor(t, "the stated cadence's probe", func() bool { return probes.Load() == 2 })
+		// A shell joins and states a second. The change is asked at once — the
+		// fifteen seconds the default had put in front of the next probe is not
+		// time a person who asked to be told quickly should wait — and the cadence
+		// is a second from then on.
+		stated := plan()
+		stated.ProbeInterval = time.Second
+		second, err := m.Acquire(context.Background(), stated)
+		if err != nil {
+			t.Fatalf("the shell's Acquire: %v", err)
+		}
+		defer second.Release()
+		waittest.WaitFor(t, "the stated cadence's probe", func() bool { return probes.Load() == 2 })
 
-	clock.Advance(time.Second)
-	waittest.WaitFor(t, "the second probe on the stated cadence", func() bool { return probes.Load() == 3 })
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the second probe on the stated cadence", func() bool { return probes.Load() == 3 })
 
-	// And a holder that asks for something quieter does not take it back: the
-	// tightest stated interval is the answer to "how often", so a connection
-	// only ever gets more attentive while its holders disagree.
-	quieter := plan()
-	quieter.ProbeInterval = 10 * time.Second
-	third, err := m.Acquire(context.Background(), quieter)
-	if err != nil {
-		t.Fatalf("the quieter Acquire: %v", err)
-	}
-	t.Cleanup(third.Release)
-	clock.Advance(time.Second)
-	waittest.WaitFor(t, "the tightest stated cadence to keep running", func() bool { return probes.Load() == 4 })
+		// And a holder that asks for something quieter does not take it back: the
+		// tightest stated interval is the answer to "how often", so a connection
+		// only ever gets more attentive while its holders disagree.
+		quieter := plan()
+		quieter.ProbeInterval = 10 * time.Second
+		third, err := m.Acquire(context.Background(), quieter)
+		if err != nil {
+			t.Fatalf("the quieter Acquire: %v", err)
+		}
+		defer third.Release()
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the tightest stated cadence to keep running", func() bool { return probes.Load() == 4 })
+	})
 }
 
 // TestAConnectionThatAnswersEveryProbeNeverReadsStalled is the shape a cadence

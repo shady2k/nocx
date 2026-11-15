@@ -68,37 +68,46 @@ func TestATaintedConnectionIsNotGivenToANewCaller(t *testing.T) {
 // stalled connection. The acquire waits for the state to move, with the
 // caller's deadline, instead of opening a session that would park.
 func TestAnAcquireOnAStalledConnectionWaits(t *testing.T) {
-	clock := hostconntest.New()
-	link, _, mgr, sup := wakeStand(t, clock)
-	first := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		first := acquire(t, mgr, hostconn.HoldsNone)
+		defer first.Release()
 
-	// The cadence's probe parks, and the deadline reads stalled.
-	clock.Advance(hostconn.ProbeInterval)
-	waittest.WaitFor(t, "the cadence's probe", func() bool { return link.probeCalls.Load() == 1 })
-	clock.Advance(hostconn.ProbeDeadline)
-	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		// The cadence's probe parks, and the deadline reads stalled.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "the cadence's probe", func() bool { return link.probeCalls.Load() == 1 })
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 
-	// An acquire now waits rather than opening a channel on it.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	if _, err := mgr.Acquire(ctx, plan()); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Acquire on a stalled connection answered %v, want the caller's deadline", err)
-	}
-	if calls := link.probeCalls.Load(); calls != 1 {
-		t.Fatalf("%d probes; the waiting acquire asked for a channel, not a probe", calls)
-	}
+		// An acquire now waits rather than opening a channel on it.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if _, err := mgr.Acquire(ctx, plan()); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Acquire on a stalled connection answered %v, want the caller's deadline", err)
+		}
+		if calls := link.probeCalls.Load(); calls != 1 {
+			t.Fatalf("%d probes; the waiting acquire asked for a channel, not a probe", calls)
+		}
 
-	// When it answers, the same connection is handed out again.
-	link.release()
-	waittest.WaitFor(t, "the recovery", func() bool { return sup.Current().Kind == hostconn.Connected })
-	third, err := mgr.Acquire(context.Background(), plan())
-	if err != nil {
-		t.Fatalf("Acquire after recovery: %v", err)
-	}
-	t.Cleanup(third.Release)
-	if third.Link() != first.Link() {
-		t.Fatal("the recovered connection was not the one waited for")
-	}
+		// When it answers, the same connection is handed out again.
+		link.release()
+		waittest.WaitFor(t, "the recovery", func() bool { return sup.Current().Kind == hostconn.Connected })
+		synctest.Wait()
+		third, err := mgr.Acquire(context.Background(), plan())
+		if err != nil {
+			t.Fatalf("Acquire after recovery: %v", err)
+		}
+		defer third.Release()
+		if third.Link() != first.Link() {
+			t.Fatal("the recovered connection was not the one waited for")
+		}
+	})
 }
 
 // TestRidersFollowTheGenerationTheLeaseHolds — finding 8: rider accounting is
@@ -249,45 +258,52 @@ func TestAnAnswerDoesNotClearALaterSleep(t *testing.T) {
 // TestAWakeDuringTheDialIsNotLost — finding 9: the five-second proof survives
 // the window between a successful dial and its publication.
 func TestAWakeDuringTheDialIsNotLost(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	released := make(chan struct{})
-	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
-		<-released
-		return link, nil
-	}}
-	_, logger := logtest.New(t)
-	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
-	sup := mgr.Supervisor(plan().Key)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		released := make(chan struct{})
+		carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
+			<-released
+			return link, nil
+		}}
+		_, logger := logtest.New(t)
+		mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+		sup := mgr.Supervisor(plan().Key)
 
-	acquired := make(chan *hostconn.Lease, 1)
-	go func() {
-		lease, err := mgr.Acquire(context.Background(), plan())
-		if err == nil {
-			acquired <- lease
-		}
-	}()
+		acquired := make(chan *hostconn.Lease, 1)
+		go func() {
+			lease, err := mgr.Acquire(context.Background(), plan())
+			if err == nil {
+				acquired <- lease
+			}
+		}()
 
-	// The wake arrives while the dial is in flight.
-	clock.Advance(time.Second)
-	sup.Wake(clock.Now())
-	close(released)
+		// The wake arrives while the dial is in flight.
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		sup.Wake(clock.Now())
+		close(released)
 
-	var lease *hostconn.Lease
-	waittest.WaitFor(t, "the dial to publish", func() bool {
-		select {
-		case lease = <-acquired:
-			return true
-		default:
-			return false
-		}
+		var lease *hostconn.Lease
+		waittest.WaitFor(t, "the dial to publish", func() bool {
+			select {
+			case lease = <-acquired:
+				return true
+			default:
+				return false
+			}
+		})
+		defer lease.Release()
+
+		// The published connection proves itself at once, without a cadence.
+		waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+		synctest.Wait()
+		clock.Advance(hostconn.WakeProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the wake's stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 	})
-	t.Cleanup(lease.Release)
-
-	// The published connection proves itself at once, without a cadence.
-	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
-	clock.Advance(hostconn.WakeProbeDeadline)
-	waittest.WaitFor(t, "the wake's stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 }
 
 // TestTheReleaseBarrierReusesTheOneProber — finding 1: the barrier asks the
@@ -466,46 +482,53 @@ func TestACoalescedBurstKeepsTheLastWake(t *testing.T) {
 // a sleep edge that arrives while the connection is being dialled is honoured
 // by the published guard, which then asks a sleeping machine nothing.
 func TestASleepDuringTheDialPublishesSuspended(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	released := make(chan struct{})
-	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
-		<-released
-		return link, nil
-	}}
-	_, logger := logtest.New(t)
-	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
-	sup := mgr.Supervisor(plan().Key)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		released := make(chan struct{})
+		carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
+			<-released
+			return link, nil
+		}}
+		_, logger := logtest.New(t)
+		mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+		sup := mgr.Supervisor(plan().Key)
 
-	acquired := make(chan *hostconn.Lease, 1)
-	go func() {
-		lease, err := mgr.Acquire(context.Background(), plan())
-		if err == nil {
-			acquired <- lease
+		acquired := make(chan *hostconn.Lease, 1)
+		go func() {
+			lease, err := mgr.Acquire(context.Background(), plan())
+			if err == nil {
+				acquired <- lease
+			}
+		}()
+
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		sup.Suspend(clock.Now())
+		close(released)
+
+		var lease *hostconn.Lease
+		waittest.WaitFor(t, "the dial to publish", func() bool {
+			select {
+			case lease = <-acquired:
+				return true
+			default:
+				return false
+			}
+		})
+		defer lease.Release()
+
+		waittest.WaitFor(t, "the published connection to read suspended", lease.Suspended)
+		synctest.Wait()
+		clock.Advance(10 * time.Minute)
+		synctest.Wait()
+		if calls := link.probeCalls.Load(); calls != 0 {
+			t.Fatalf("%d probes were sent to a machine that is asleep", calls)
 		}
-	}()
-
-	clock.Advance(time.Second)
-	sup.Suspend(clock.Now())
-	close(released)
-
-	var lease *hostconn.Lease
-	waittest.WaitFor(t, "the dial to publish", func() bool {
-		select {
-		case lease = <-acquired:
-			return true
-		default:
-			return false
-		}
+		sup.Wake(clock.Now())
+		waittest.WaitFor(t, "the wake", func() bool { return !lease.Suspended() })
+		waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 	})
-	t.Cleanup(lease.Release)
-
-	waittest.WaitFor(t, "the published connection to read suspended", lease.Suspended)
-	clock.Advance(10 * time.Minute)
-	if calls := link.probeCalls.Load(); calls != 0 {
-		t.Fatalf("%d probes were sent to a machine that is asleep", calls)
-	}
-	sup.Wake(clock.Now())
-	waittest.WaitFor(t, "the wake", func() bool { return !lease.Suspended() })
-	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 }

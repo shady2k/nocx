@@ -77,26 +77,31 @@ func acquire(t *testing.T, mgr *hostconn.Manager, holds hostconn.Holds) *hostcon
 // the next probe plus its fifteen-second deadline, and the parked probe is what
 // notices the far side the moment it speaks.
 func TestASilentConnectionReadsStalledWithinThirtySeconds(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the connection to read stalled", func() bool {
-		return sup.Current().Kind == hostconn.Stalled
-	})
-	if got := sup.Current().Silent; got != 15*time.Second {
-		t.Fatalf("stalled reports %v of silence, want 15s (the unanswered probe)", got)
-	}
-	if lease.Lost() {
-		t.Fatal("a stalled connection is not a lost one")
-	}
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to read stalled", func() bool {
+			return sup.Current().Kind == hostconn.Stalled
+		})
+		if got := sup.Current().Silent; got != 15*time.Second {
+			t.Fatalf("stalled reports %v of silence, want 15s (the unanswered probe)", got)
+		}
+		if lease.Lost() {
+			t.Fatal("a stalled connection is not a lost one")
+		}
 
-	// And the parked probe's answer returns it to connected.
-	link.release()
-	waittest.WaitFor(t, "the stalled connection to answer again", func() bool {
-		return sup.Current().Kind == hostconn.Connected
+		// And the parked probe's answer returns it to connected.
+		link.release()
+		waittest.WaitFor(t, "the stalled connection to answer again", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
 	})
 }
 
@@ -146,58 +151,74 @@ func TestAPlainShellConnectionStaysOpenAfterTenMinutesOfSilence(t *testing.T) {
 // are all helper-owned, so the evidence of a host that answers new connections
 // plus the grace ends it.
 func TestAHelperOwnedConnectionClosesThirtySecondsAfterAnAnsweredLook(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the connection to read stalled", func() bool {
-		return sup.Current().Kind == hostconn.Stalled
-	})
-	// The look is answered at thirty seconds, and the nudge follows it.
-	waittest.WaitFor(t, "the look to be answered and the nudge sent", func() bool {
-		_, nudges := link.counters()
-		return nudges == 1
-	})
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to read stalled", func() bool {
+			return sup.Current().Kind == hostconn.Stalled
+		})
+		// The look is answered at thirty seconds, and the nudge follows it.
+		waittest.WaitFor(t, "the look to be answered and the nudge sent", func() bool {
+			_, nudges := link.counters()
+			return nudges == 1
+		})
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the connection to be closed for silence", func() bool {
-		return sup.Current().Kind == hostconn.Reconnecting
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to be closed for silence", func() bool {
+			return sup.Current().Kind == hostconn.Reconnecting
+		})
+		if got := sup.Current().Cause; got != hostconn.CauseSilence {
+			t.Fatalf("a connection closed for silence reads cause %q, want %q", got, hostconn.CauseSilence)
+		}
+		waittest.WaitFor(t, "the transport to be closed", func() bool { return lease.Lost() })
 	})
-	if got := sup.Current().Cause; got != hostconn.CauseSilence {
-		t.Fatalf("a connection closed for silence reads cause %q, want %q", got, hostconn.CauseSilence)
-	}
-	waittest.WaitFor(t, "the transport to be closed", func() bool { return lease.Lost() })
 }
 
 // TestAHelperOwnedConnectionClosesAtTheSilenceBudget is the case with no
 // evidence at all: the host answers neither the probe nor a new connection, and
 // five minutes is the outer bound.
 func TestAHelperOwnedConnectionClosesAtTheSilenceBudget(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	link.lookAlwaysError = true
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		link.lookAlwaysError = true
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the connection to read stalled", func() bool {
-		return sup.Current().Kind == hostconn.Stalled
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to read stalled", func() bool {
+			return sup.Current().Kind == hostconn.Stalled
+		})
+		// The budget counts from the moment this guard JUDGED the connection
+		// silent (30 s here), never from the probe's send: a close may not rest on
+		// one reading taken after a clock jump (see due's close branch).
+		synctest.Wait()
+		clock.Advance(hostconn.SilenceCloseBudget)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to be closed at the budget", func() bool {
+			return sup.Current().Kind == hostconn.Reconnecting
+		})
+		if got := sup.Current().Cause; got != hostconn.CauseSilence {
+			t.Fatalf("closed for silence with cause %q", got)
+		}
+		if !lease.Lost() {
+			t.Fatal("the transport outlived the budget")
+		}
 	})
-	// The budget counts from the moment this guard JUDGED the connection
-	// silent (30 s here), never from the probe's send: a close may not rest on
-	// one reading taken after a clock jump (see due's close branch).
-	clock.Advance(hostconn.SilenceCloseBudget)
-	waittest.WaitFor(t, "the connection to be closed at the budget", func() bool {
-		return sup.Current().Kind == hostconn.Reconnecting
-	})
-	if got := sup.Current().Cause; got != hostconn.CauseSilence {
-		t.Fatalf("closed for silence with cause %q", got)
-	}
-	if !lease.Lost() {
-		t.Fatal("the transport outlived the budget")
-	}
 }
 
 // TestAHealthyConnectionNeverReadsStalledOverTenMinutes is the paired success:
@@ -245,23 +266,29 @@ func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
 // TestTheLookStopsAfterTheFirstAnswer — a look can be logged as a preauth close,
 // so a person whose link is down must not be locked out by their own client.
 func TestTheLookStopsAfterTheFirstAnswer(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, _ := managerOn(t, quietCarrier(link), clock)
-	acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		mgr, _ := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the first look", func() bool { looks, _ := link.counters(); return looks == 1 })
-	clock.Advance(2 * time.Minute)
-	// Give the guard a chance to make another look if it were going to.
-	waittest.WaitFor(t, "the clock advance to be seen", func() bool { return true })
-	looks, nudges := link.counters()
-	if looks != 1 {
-		t.Fatalf("%d looks after the first answer, want 1: the cadence stops when the host answers", looks)
-	}
-	if nudges != 1 {
-		t.Fatalf("%d nudges, want 1: one nudge, after the first answered look", nudges)
-	}
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the first look", func() bool { looks, _ := link.counters(); return looks == 1 })
+		synctest.Wait()
+		clock.Advance(2 * time.Minute)
+		synctest.Wait()
+		looks, nudges := link.counters()
+		if looks != 1 {
+			t.Fatalf("%d looks after the first answer, want 1: the cadence stops when the host answers", looks)
+		}
+		if nudges != 1 {
+			t.Fatalf("%d nudges, want 1: one nudge, after the first answered look", nudges)
+		}
+	})
 }
 
 // TestAPlainShellRidingAHopKeepsTheHopOpen is §5.1.1's second trap: the hop's
@@ -293,19 +320,25 @@ func TestAPlainShellRidingAHopKeepsTheHopOpen(t *testing.T) {
 // TestAProbeItselfEndingTheTransportIsReportedAsLost — the transport error is
 // the fact, and nothing about it is an inference.
 func TestAProbeErrorEndsTheGuardAndLeavesTheWatcherToReportTheLoss(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	link.memoryLink.probe = func() (time.Duration, error) { return 0, errors.New("connection reset") }
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		link.memoryLink.probe = func() (time.Duration, error) { return 0, errors.New("connection reset") }
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
 
-	clock.Advance(hostconn.ProbeInterval)
-	// A probe error is a transport error: the connection is over, and Done is
-	// what says so. The guard must not read it as silence.
-	link.end(errors.New("connection reset"))
-	waittest.WaitFor(t, "the transport's end", func() bool { return lease.Lost() })
-	waittest.WaitFor(t, "the loss to be reported", func() bool {
-		return sup.Current().Kind == hostconn.Reconnecting
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		// A probe error is a transport error: the connection is over, and Done is
+		// what says so. The guard must not read it as silence.
+		link.end(errors.New("connection reset"))
+		waittest.WaitFor(t, "the transport's end", func() bool { return lease.Lost() })
+		waittest.WaitFor(t, "the loss to be reported", func() bool {
+			return sup.Current().Kind == hostconn.Reconnecting
+		})
 	})
 }
 

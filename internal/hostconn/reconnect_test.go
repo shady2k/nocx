@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -11,30 +12,36 @@ import (
 )
 
 func TestRetainedConnectionRetriesInSupervisor(t *testing.T) {
-	clock := hostconntest.New()
-	first := newMemoryLink()
-	carrier := &memoryCarrier{dial: func(sink hostconn.EventSink) (hostconn.Link, error) { return first, nil }}
-	mgr, sup := managerOn(t, carrier, clock)
-	release := sup.Retain("auto")
-	defer release()
-	lease, err := mgr.Acquire(context.Background(), plan())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Release()
-	carrier.mu.Lock()
-	carrier.dial = func(sink hostconn.EventSink) (hostconn.Link, error) {
-		sink(hostconn.Event{Kind: hostconn.Lost, Cause: hostconn.CauseLostLink})
-		return nil, errors.New("offline")
-	}
-	carrier.mu.Unlock()
-	first.end(errors.New("drop"))
-	waitFor(t, "first retry timer", func() bool { return sup.Current().Kind == hostconn.Reconnecting && sup.RetryScheduled() })
-	clock.Advance(time.Second)
-	waitFor(t, "second attempt", func() bool { return carrier.dialCount() == 2 && sup.Current().Attempt == 2 })
-	waitFor(t, "next retry timer", func() bool { return sup.RetryScheduled() })
-	clock.Advance(2 * time.Second)
-	waitFor(t, "third attempt", func() bool { return carrier.dialCount() == 3 && sup.Current().Attempt == 3 })
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		first := newMemoryLink()
+		carrier := &memoryCarrier{dial: func(sink hostconn.EventSink) (hostconn.Link, error) { return first, nil }}
+		mgr, sup := managerOn(t, carrier, clock)
+		release := sup.Retain("auto")
+		defer release()
+		lease, err := mgr.Acquire(context.Background(), plan())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lease.Release()
+		carrier.mu.Lock()
+		carrier.dial = func(sink hostconn.EventSink) (hostconn.Link, error) {
+			sink(hostconn.Event{Kind: hostconn.Lost, Cause: hostconn.CauseLostLink})
+			return nil, errors.New("offline")
+		}
+		carrier.mu.Unlock()
+		first.end(errors.New("drop"))
+		waitFor(t, "first retry timer", func() bool { return sup.Current().Kind == hostconn.Reconnecting && sup.RetryScheduled() })
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		waitFor(t, "second attempt", func() bool { return carrier.dialCount() == 2 && sup.Current().Attempt == 2 })
+		waitFor(t, "next retry timer", func() bool { return sup.RetryScheduled() })
+		synctest.Wait()
+		clock.Advance(2 * time.Second)
+		synctest.Wait()
+		waitFor(t, "third attempt", func() bool { return carrier.dialCount() == 3 && sup.Current().Attempt == 3 })
+	})
 }
 
 func TestRetainedNeverConnectionRestsAndRejectsHealthyReconnect(t *testing.T) {

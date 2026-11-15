@@ -448,6 +448,11 @@ func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) SubmitSteer(_ context.Context, turnID string, runID int64, text string) (ProseBlock, error) {
+	s.log.Info("content stub: LedgerRepository.SubmitSteer", "turn", turnID, "run", runID, "chars", len(text))
+	return ProseBlock{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) SubmitAgentAsk(_ context.Context, in AgentAsk) (AgentAskResult, error) {
 	s.log.Info("content stub: LedgerRepository.SubmitAgentAsk", "id", in.ID)
 	return AgentAskResult{}, ErrNotImplemented

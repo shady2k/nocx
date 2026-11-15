@@ -77,12 +77,17 @@ const (
 	EntryShell  EntryKind = "shell"
 	EntryAsk    EntryKind = "ask"
 	EntryAction EntryKind = "action"
-	// EntryText is one run of assistant prose (ADR-0040): a thing that was
+	// EntryText is one run of prose in a turn (ADR-0040): a thing that was
 	// PRINTED, not attempted. It has no intent, no execution and no outcome
 	// to wait for, so the schema's CHECK pins its shape — inside a block
 	// (parent and pos), empty intent, born closed and successful. Everything
 	// drawn in the scrollback is an entry, and this is the kind that makes
 	// that true of what the model writes between its calls.
+	//
+	// WHOSE prose it is comes from `source`, never from a second kind: the
+	// model's answer and the person's own message into the running turn are
+	// the same row shape, and the restored block draws each from the pair
+	// (nocx-a62cl.6.4).
 	EntryText EntryKind = "text"
 	// EntryFrame is a captured frame (design §2.2): a row the ledger owns —
 	// it has no output and no outcome (a capture is a fact, complete at
@@ -2169,6 +2174,21 @@ type LedgerRepository interface {
 	// than an error, because the caller's fact is "this block is finished",
 	// which is true either way.
 	SealProse(ctx context.Context, entryID string) error
+	// SubmitSteer writes ONE person's message into a turn's causal order: the
+	// `text` child at the turn's next free seat with `source` set to the
+	// person, and its words as that child's body, both in one transaction.
+	//
+	// It is prose of the same kind the answer's runs are, because that is what
+	// the block draws (ADR-0040), and `source` is the ledger's existing answer
+	// to "whose is this row" — the same fact a restored block's badge is
+	// painted from. A separate kind would answer "who spoke" twice
+	// (nocx-a62cl.6.4).
+	//
+	// The words are written COMPLETE, unlike a streamed answer: a person typed
+	// them, so the body is born sealed. runID is the agent-lane execution the
+	// turn is running under, refused for another turn's run for the same
+	// reason OpenProse refuses it.
+	SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (ProseBlock, error)
 	// RunState returns the assistant run state of one execution: the
 	// durable state a reconnecting renderer reads (design §7 — it never
 	// infers liveness from notifications having stopped). Nil when the

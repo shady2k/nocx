@@ -901,6 +901,106 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 	return out, err
 }
 
+// SubmitSteer writes one person's message into a turn's order (nocx-a62cl.6.4):
+// the `text` child that draws it and its words as that child's body, in ONE
+// commit — the same reasoning as OpenProse, from the same seat rule, differing
+// only in who spoke (`source` = the person) and in the body being complete.
+//
+// It takes the same boundary the answer's runs do: the caller seals the prose
+// that was streaming before it, because a message cuts the answer where the
+// person sent it, and the next delta opens the next run. That is the caller's
+// fact, not this method's, for the reason OpenProse's boundary is the caller's.
+func (s *sqliteContent) SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (ProseBlock, error) {
+	if turnID == "" {
+		return ProseBlock{}, errors.New("content: submit steer: turn id is required — a message is somebody's")
+	}
+	if runID <= 0 {
+		return ProseBlock{}, errors.New("content: submit steer: run id is required — a message belongs to the turn's run")
+	}
+	facts, factsErr := json.Marshal(ProseFacts{RunID: runID})
+	if factsErr != nil {
+		return ProseBlock{}, factsErr
+	}
+	var out ProseBlock
+	err := s.run(ctx, func(ctx context.Context) error {
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer txEnd.rollback()
+
+		var client, envID, cwd string
+		err = tx.QueryRowContext(ctx,
+			`SELECT client, environment_id, cwd FROM entries WHERE id = ?`, turnID).
+			Scan(&client, &envID, &cwd)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: submit steer under %s: %w", turnID, ErrNoSuchEntry)
+		}
+		if err != nil {
+			return err
+		}
+		var lane sql.NullString
+		err = tx.QueryRowContext(ctx,
+			`SELECT lane FROM executions WHERE id = ? AND entry_id = ?`, runID, turnID).Scan(&lane)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: submit steer under %s: run %d is not a run of that turn: %w",
+				turnID, runID, ErrNoSuchRun)
+		}
+		if err != nil {
+			return err
+		}
+		if lane.String != agentLane {
+			return fmt.Errorf("content: submit steer under %s: execution %d is not an agent run: %w",
+				turnID, runID, ErrNoSuchRun)
+		}
+
+		var highest sql.NullInt64
+		if err = tx.QueryRowContext(ctx,
+			`SELECT MAX(pos) FROM entries WHERE parent_id = ?`, turnID).Scan(&highest); err != nil {
+			return err
+		}
+		pos := 0
+		if highest.Valid {
+			pos = int(highest.Int64) + 1
+		}
+		var seq int64
+		if seqErr := tx.QueryRowContext(ctx,
+			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&seq); seqErr != nil {
+			return fmt.Errorf("content: submit steer: assign ingest_seq: %w", seqErr)
+		}
+
+		entryID := mintID()
+		// The same shape a run of prose has, and the clause of its CHECK that
+		// says so: inside a block, seated, no intent, born closed and
+		// successful. What differs is the SOURCE — the row is the person's.
+		if _, err = tx.ExecContext(ctx, `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			 phase, status, submitted_at, sensitivity, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', 'user', '', 'closed', 'success', ?, 'normal', ?)`,
+			entryID, seq, client, proseDigest(turnID, pos), envID, turnID, pos, cwd,
+			time.Now().UnixMilli(), string(facts)); err != nil {
+			return err
+		}
+		artifactID := mintID()
+		if _, err = tx.ExecContext(ctx, `INSERT INTO artifacts
+			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
+			 encoding, gaps, payload)
+			VALUES (?, ?, NULL, 'text/plain', 'sealed', ?, 'none', 1, 'utf-8', '[]', '{}')`,
+			artifactID, entryID, len([]byte(text))); err != nil {
+			return err
+		}
+		if err = appendChunkAt(ctx, tx, artifactID, 1, []byte(text)); err != nil {
+			return err
+		}
+		if err = txEnd.commit(); err != nil {
+			return err
+		}
+		out = ProseBlock{EntryID: entryID, ArtifactID: artifactID}
+		return nil
+	})
+	return out, err
+}
+
 // SealProse seals one prose block's body. The caller's fact is "nothing more
 // will be appended here", and it is stated by id rather than by hunting for
 // "the open one": the transport holds the block it opened, so a search would

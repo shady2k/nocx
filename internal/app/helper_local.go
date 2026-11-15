@@ -51,6 +51,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
@@ -2133,6 +2134,20 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
 	defer hold.release()
 	if selected {
+		// A consent refusal created no shell. Its probe-only connection must
+		// not outlive the open while the person decides; the answered retry
+		// obtains its own hold. Other shell failures keep the pane's hold for
+		// retry, as they did before selection began binding early.
+		var ask *transport.ErrHelperConsentNeeded
+		if binding.client != nil && errors.As(err, &ask) {
+			scope := catalog.BeginInternal(context.WithoutCancel(ctx), catalog.OpInternalSshRelease)
+			defer scope.Complete()
+			releaseCtx, cancel := context.WithDeadline(catalog.WithScope(context.WithoutCancel(ctx), scope), scope.Deadline())
+			defer cancel()
+			if releaseErr := binding.client.ReleaseConnection(releaseCtx, cfg.PaneID); releaseErr != nil {
+				log.From(ctx).Warn("consent refusal could not release its provisional connection", "pane", cfg.PaneID, "error", releaseErr)
+			}
+		}
 		if err == nil && opened.Session != nil && binding.connectionID != "" {
 			h.local.paneConnections().AdoptSession(cfg.PaneID, binding.connectionID, string(opened.Session.ID()), string(opened.Session.Identity().InstanceID), binding.generation)
 		}

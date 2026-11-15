@@ -45,6 +45,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,10 +53,12 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -272,4 +275,64 @@ func TestARefusedSpawnReleasesTheProbesLease(t *testing.T) {
 		func() bool { return srv.liveConns() == 0 })
 	t.Logf("MEASURED %d authentication(s) and %d connection(s) left open after a refused open",
 		srv.connCount(), srv.liveConns())
+}
+
+// A consent refusal ends the probe-only open; no shell exists to own its
+// connection. Retrying after the answer must start a fresh open, not retain
+// the authentication of a pane that was never admitted.
+func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
+	srv := startPasswordSSHServer(t)
+	secrets := &askRecorder{value: openPasswordFixturePassword}
+	stand := startFilesStand(t, srv, secrets)
+	stand.opener.paneConns = panedriver.New("consent-pane", nil)
+	seam := openSeamOver(t, stand)
+	seam.hosted.remote.source = stubArtifacts(t)
+	cfg := paneConfig(srv, secrets, "pane-consent")
+	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	opened, selected, err := seam.hosted.OpenHosted(ctx, cfg, "claim-consent")
+	var ask *transport.ErrHelperConsentNeeded
+	if !selected || opened.Session != nil || !errors.As(err, &ask) {
+		t.Fatalf("consent open = selected %v session %v error %v, want consent refusal", selected, opened.Session, err)
+	}
+	waittest.WaitForTimeout(t, "the probe-only connection to close after consent refusal", 5*time.Second,
+		func() bool { return srv.liveConns() == 0 })
+	cfg.Remote.DesiredMode = string(profile.DesiredRaw)
+	openPanes(t, ctx, seam, cfg, "claim-answered")
+	if got := srv.connCount(); got != 2 {
+		t.Fatalf("authenticated %d connections, want probe-only open plus answered open", got)
+	}
+}
+
+// Cancel at the end of selection, after the probe has authenticated but before
+// the consent refusal is returned. Cleanup must not inherit that cancellation.
+type cancellingConsentArtifacts struct {
+	deploy.ArtifactSource
+	cancel context.CancelFunc
+}
+
+func (a cancellingConsentArtifacts) Artifact(p deploy.Platform) ([]byte, string, error) {
+	data, hash, err := a.ArtifactSource.Artifact(p)
+	a.cancel()
+	return data, hash, err
+}
+
+func TestACancelledConsentOpenStillReleasesItsConnection(t *testing.T) {
+	srv := startPasswordSSHServer(t)
+	stand := startFilesStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
+	stand.opener.paneConns = panedriver.New("cancelled-consent-pane", nil)
+	seam := openSeamOver(t, stand)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	seam.hosted.remote.source = cancellingConsentArtifacts{ArtifactSource: stubArtifacts(t), cancel: cancel}
+	cfg := paneConfig(srv, &askRecorder{value: openPasswordFixturePassword}, "pane-cancelled-consent")
+	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
+	_, _, err := seam.hosted.OpenHosted(ctx, cfg, "claim-cancelled-consent")
+	var ask *transport.ErrHelperConsentNeeded
+	if !errors.As(err, &ask) || ctx.Err() == nil {
+		t.Fatalf("open = %v, context = %v, want consent refusal after cancellation", err, ctx.Err())
+	}
+	waittest.WaitForTimeout(t, "cancelled consent open's connection to close", 5*time.Second,
+		func() bool { return srv.liveConns() == 0 })
 }

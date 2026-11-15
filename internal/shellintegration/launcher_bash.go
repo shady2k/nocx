@@ -111,6 +111,9 @@ unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session \
 # acknowledgement; a hostile program cannot forge what it never saw.
 @CAPSRC@
 @NOCX_BASH@
+if declare -F __nocx_startup_trace >/dev/null; then
+    __nocx_startup_trace source_returned
+fi
 case "${__nocx_old_opts}" in *e*) set -e;; esac
 case "${__nocx_old_opts}" in *x*) set -x;; esac
 unset __nocx_old_opts

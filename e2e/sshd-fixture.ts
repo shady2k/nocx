@@ -27,7 +27,7 @@
 // inheritance means uploading into the checkout. The caller states it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import path from 'node:path'
 
@@ -69,6 +69,8 @@ export interface SshdFixture {
    * caller polls it rather than waiting a while and reading once.
    */
   lines(): readonly string[]
+  /** Independent shell startup witnesses, read before fixture cleanup. */
+  startupTrace(): string
 }
 
 export interface StartSshdOptions {
@@ -79,6 +81,8 @@ export interface StartSshdOptions {
   cwd: string
   /** Extra flags, e.g. `['-password', 'secret']`. */
   args?: string[]
+  /** Record fixed bash startup phases in a private file, not the lifecycle stream. */
+  startupTrace?: boolean
 }
 
 /**
@@ -117,12 +121,15 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
       cwd: path.resolve(__dirname, '..'),
     })
   }
+  const startupTracePath = opts.startupTrace ? path.join(opts.home, '.nocx-startup.trace') : ''
+  if (startupTracePath) writeFileSync(startupTracePath, '', { mode: 0o600 })
   const proc = spawn(bin, [...(opts.args ?? []), ...sftpArgs(opts.slowSftp)], {
     stdio: ['ignore', 'pipe', 'inherit'],
     cwd: opts.cwd,
     env: {
       ...process.env,
       HOME: opts.home,
+      NOCX_STARTUP_TRACE: startupTracePath,
       ZDOTDIR: opts.home,
       XDG_CONFIG_HOME: path.join(opts.home, '.config'),
       XDG_DATA_HOME: path.join(opts.home, '.local', 'share'),
@@ -169,6 +176,8 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
           rsaKey: rsaKey === '' ? undefined : rsaKey,
           knownHosts,
           lines: () => lines,
+          startupTrace: () =>
+            startupTracePath ? readFileSync(startupTracePath, 'utf8') : 'startup tracing disabled',
         })
       }
     }

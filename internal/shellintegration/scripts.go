@@ -359,7 +359,8 @@ var (
 // `interrupt trap: line 2: unexpected EOF while looking for matching ')'` and
 // the open-question wait, which has no deadline, never ended: ^C echoed, then
 // nothing. A shell still sourcing 70 can be left inside a cancelled launch.
-const version = "71"
+// 72: opt-in independent startup phase witnesses for e2e diagnostics.
+const version = "72"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

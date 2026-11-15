@@ -2235,7 +2235,7 @@ func (s *Service) LifecycleData(ctx context.Context, f proto.SessionFrame) {
 		return
 	}
 	sink, _ := host.ConnectionFrom(ctx).(Sink)
-	if err := hs.writeLifecycle(sink, f); err != nil {
+	if err := hs.writeLifecycle(ctx, sink, f); err != nil {
 		s.log.Warn("lifecycle write refused", "session", hex, "subscriber", proto.SessionHex(f.Subscriber),
 			"bytes", len(f.Payload), "err", err)
 	}

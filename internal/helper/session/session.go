@@ -1351,7 +1351,7 @@ func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	return res.Err
 }
 
-func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
+func (s *hostSession) writeLifecycle(ctx context.Context, sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub, ok := s.subs[proto.SubscriberID(proto.SessionHex(f.Subscriber))]
@@ -1366,7 +1366,10 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 	if carrier == nil {
 		return ErrNotAttached
 	}
-	_, err := carrier.Write(f.Payload)
+	n, err := carrier.Write(f.Payload)
+	nocxlog.From(ctx).Debug("lifecycle: helper carrier write completed",
+		"session", s.id.Session, "subscriber", sub.id,
+		"bytes", n, "requested_bytes", len(f.Payload), "error", err)
 	return err
 }
 

@@ -62,6 +62,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // lifecycleBindHost is the far-side address the lifecycle listener is bound
@@ -123,6 +124,7 @@ type PaneSpec struct {
 type PaneListeners struct {
 	pool *pooledConn
 	log  *slog.Logger
+	ctx  context.Context
 
 	lifecycleLn net.Listener
 	port        int
@@ -161,6 +163,7 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 	}
 
 	p := &PaneListeners{
+		ctx: context.WithoutCancel(ctx),
 		log: s.log,
 	}
 	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, false, 0)
@@ -291,14 +294,34 @@ func (p *PaneListeners) bridge(conn net.Conn) {
 			_ = p.sink.Close()
 		})
 	}
-	go func() {
-		_, _ = io.Copy(p.sink, conn)
+	copyDirection := func(dst io.Writer, src io.Reader, direction string) {
+		observed := &lifecycleCopyWriter{ctx: p.ctx, dst: dst, port: p.port, direction: direction}
+		n, err := io.Copy(observed, src)
+		nocxlog.From(p.ctx).Debug("lifecycle: ssh pane bridge copy ended",
+			"lifecycle_port", p.port, "direction", direction, "bytes_total", n, "error", err)
 		closeBoth()
-	}()
-	go func() {
-		_, _ = io.Copy(conn, p.sink)
-		closeBoth()
-	}()
+	}
+	go copyDirection(p.sink, conn, "shell_to_carrier")
+	go copyDirection(conn, p.sink, "carrier_to_shell")
+}
+
+// lifecycleCopyWriter counts completed downstream writes, not upstream reads.
+// That distinction keeps a parked write from looking like shell delivery.
+type lifecycleCopyWriter struct {
+	ctx       context.Context
+	dst       io.Writer
+	port      int
+	direction string
+	total     int64
+}
+
+func (w *lifecycleCopyWriter) Write(b []byte) (int, error) {
+	n, err := w.dst.Write(b)
+	w.total += int64(n)
+	nocxlog.From(w.ctx).Debug("lifecycle: ssh pane bridge write completed",
+		"lifecycle_port", w.port, "direction", w.direction,
+		"bytes", n, "bytes_total", w.total, "error", err)
+	return n, err
 }
 
 // Lifecycle is the session's end of the lifecycle stream, or nil when this

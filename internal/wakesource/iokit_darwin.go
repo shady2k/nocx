@@ -1,10 +1,10 @@
-//go:build darwin && cgo && nocx_local_ssh
+//go:build darwin && nocx_local_ssh
 
 package wakesource
 
 // IOKit's system power notifications, for the LOCAL helper's Darwin build.
 //
-// The build tag is the boundary: this file carries cgo and links IOKit, and the
+// The build tag is the boundary: this file loads IOKit at runtime without SDK headers, and the
 // helper that is installed on somebody else's machine is built WITHOUT
 // nocx_local_ssh (the two are different bytes of one repository, D11). The far
 // helper therefore never links this, which TestDeployedHelperDependencyGraphHas
@@ -12,9 +12,8 @@ package wakesource
 //
 // # Every symbol below is declared by the public SDK
 //
-// The header and the declaration are named beside each use, because this file
-// is compiled only on macOS and a symbol the public headers do not declare
-// cannot be caught by a Linux build:
+// The header and the declaration are named beside each use, because the foreign-call ABI must match them even when cross-compiled
+// on Linux without a macOS SDK:
 //
 //	IOKit/pwr_mgt/IOPMLib.h
 //	  io_connect_t IORegisterForSystemPower(void *refcon, IONotificationPortRef *thePortRef,
@@ -90,129 +89,135 @@ package wakesource
 // never blocks: it hands the event to a buffered Go channel and answers IOKit
 // immediately.
 
-/*
-#cgo LDFLAGS: -framework IOKit -framework CoreFoundation
-
-#include <IOKit/IOKitLib.h>
-#include <IOKit/IOMessage.h>
-#include <IOKit/pwr_mgt/IOPMLib.h>
-#include <CoreFoundation/CoreFoundation.h>
-
-// The Go side, defined in this file's //export below.
-extern void nocxWakeEvent(int kind);
-
-static io_connect_t nocxPowerRootPort;
-static IONotificationPortRef nocxPowerNotifyPort;
-static io_object_t nocxPowerNotifier;
-
-// nocxPowerCallback runs on the run loop this file starts. It must never
-// block, and it answers every message the public header says needs an answer.
-static void nocxPowerCallback(void *refcon, io_service_t service, uint32_t messageType, void *messageArgument) {
-	(void)refcon;
-	(void)service;
-	switch (messageType) {
-	case kIOMessageCanSystemSleep:
-		// Pondering an idle sleep. Allow it: nocx never vetoes a system sleep.
-		IOAllowPowerChange(nocxPowerRootPort, (intptr_t)messageArgument);
-		break;
-	case kIOMessageSystemWillSleep:
-		nocxWakeEvent(0); // EventWillSleep
-		IOAllowPowerChange(nocxPowerRootPort, (intptr_t)messageArgument);
-		break;
-	case kIOMessageSystemHasPoweredOn:
-		nocxWakeEvent(1); // EventWoke
-		break;
-	case kIOMessageSystemWillNotSleep:
-		// Cancelled: the machine never left. A wake for every connection.
-		nocxWakeEvent(1);
-		break;
-	default:
-		// kIOMessageSystemWillPowerOn and anything this file does not act on.
-		break;
-	}
-}
-
-// nocxRegisterPower registers for power notifications and adds their source to
-// the CALLING thread's run loop; nocxRunPowerLoop then drives it. Split in two
-// so the Go caller learns whether registration worked before the thread
-// disappears into the loop.
-static int nocxRegisterPower(void) {
-	nocxPowerRootPort = IORegisterForSystemPower(NULL, &nocxPowerNotifyPort, nocxPowerCallback, &nocxPowerNotifier);
-	if (nocxPowerRootPort == MACH_PORT_NULL) {
-		// IOPMLib.h: IORegisterForSystemPower "Returns a io_connect_t session
-		// for the IOPMrootDomain or IO_OBJECT_NULL if request failed."
-		return 1;
-	}
-	CFRunLoopAddSource(
-		CFRunLoopGetCurrent(),
-		IONotificationPortGetRunLoopSource(nocxPowerNotifyPort),
-		kCFRunLoopDefaultMode);
-	return 0;
-}
-
-static void nocxRunPowerLoop(void) {
-	CFRunLoopRun();
-}
-*/
-import "C"
-
 import (
 	"fmt"
 	"runtime"
 
+	"github.com/ebitengine/purego"
 	"github.com/shady2k/nocx/internal/monoclock"
 )
 
-// powerEvents is the one channel the IOKit callback feeds. There is one wake
-// source per process (the helper constructs it once), and the C callback has no
-// Go context to carry one, so the destination is package state.
-var powerEvents chan Event
+// IOKit/IOReturn.h: iokit_common_msg(x) is sys_iokit | sub_iokit_common | x.
+const (
+	canSystemSleep     uint32 = 0xe0000270
+	systemWillSleep    uint32 = 0xe0000280
+	systemWillNotSleep uint32 = 0xe0000290
+	systemHasPoweredOn uint32 = 0xe0000300
+)
 
-// nocxWakeEvent is called from IOKit's run loop thread. It queues and returns;
-// nothing here may block, and a full queue drops the edge rather than stalling
-// the system's power machine.
-//
-// The kinds are the EventKind values this package's callback contract fixes:
-// 0 EventWillSleep, 1 EventWoke. There is no third one to send: the public API
-// has no dark-wake edge, as the file's comment above sets out.
-//
-//export nocxWakeEvent
-func nocxWakeEvent(kind C.int) {
-	events := powerEvents
-	if events == nil {
-		return
+// powerAPI is the public SDK ABI. Mach ports (io_connect_t, io_object_t) and
+// IOReturn are 32-bit, while pointers and intptr_t are pointer-sized on both
+// supported Darwin architectures. The frameworks stay loaded for process life.
+type powerAPI struct {
+	// IOPMLib.h: io_connect_t IORegisterForSystemPower(void *,
+	// IONotificationPortRef *, IOServiceInterestCallback, io_object_t *).
+	register func(uintptr, *uintptr, uintptr, *uint32) uint32
+	// IOPMLib.h: IOReturn IOAllowPowerChange(io_connect_t, intptr_t).
+	allow func(uint32, uintptr) int32
+	// IOKitLib.h: CFRunLoopSourceRef IONotificationPortGetRunLoopSource(IONotificationPortRef).
+	source func(uintptr) uintptr
+	// CFRunLoop.h: CFRunLoopRef CFRunLoopGetCurrent(void);
+	// void CFRunLoopAddSource(CFRunLoopRef, CFRunLoopSourceRef, CFRunLoopMode);
+	// void CFRunLoopRun(void).
+	current func() uintptr
+	add     func(uintptr, uintptr, uintptr)
+	run     func()
+	// CFString.h: CFStringRef CFStringCreateWithCString(CFAllocatorRef,
+	// const char *, CFStringEncoding); CFBase.h: void CFRelease(CFTypeRef).
+	stringCreate func(uintptr, string, uint32) uintptr
+	release      func(uintptr)
+}
+
+func loadPowerAPI() (*powerAPI, error) {
+	io, err := purego.Dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", purego.RTLD_NOW|purego.RTLD_LOCAL)
+	if err != nil {
+		return nil, fmt.Errorf("load IOKit: %w", err)
 	}
-	ev := Event{Kind: EventKind(kind), At: monoclock.Now()}
-	select {
-	case events <- ev:
-	default:
+	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_NOW|purego.RTLD_LOCAL)
+	if err != nil {
+		return nil, fmt.Errorf("load CoreFoundation: %w", err)
+	}
+	api := &powerAPI{}
+	for _, symbol := range []struct {
+		lib  uintptr
+		name string
+		fn   any
+	}{
+		{io, "IORegisterForSystemPower", &api.register},
+		{io, "IOAllowPowerChange", &api.allow},
+		{io, "IONotificationPortGetRunLoopSource", &api.source},
+		{cf, "CFRunLoopGetCurrent", &api.current},
+		{cf, "CFRunLoopAddSource", &api.add},
+		{cf, "CFRunLoopRun", &api.run},
+		{cf, "CFStringCreateWithCString", &api.stringCreate},
+		{cf, "CFRelease", &api.release},
+	} {
+		addr, err := purego.Dlsym(symbol.lib, symbol.name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", symbol.name, err)
+		}
+		purego.RegisterFunc(symbol.fn, addr)
+	}
+	return api, nil
+}
+
+// powerCallback implements IOServiceInterestCallback (IOKitLib.h): void
+// (*)(void *refcon, io_service_t service, uint32_t messageType, void *argument).
+// Acknowledgement is synchronous and never waits for a channel reader.
+func powerCallback(events chan<- Event, root *uint32, allow func(uint32, uintptr) int32) func(uintptr, uint32, uint32, uintptr) {
+	return func(_ uintptr, _ uint32, message uint32, argument uintptr) {
+		var kind EventKind
+		switch message {
+		case canSystemSleep:
+			allow(*root, argument)
+			return
+		case systemWillSleep:
+			allow(*root, argument)
+			kind = EventWillSleep
+		case systemWillNotSleep, systemHasPoweredOn:
+			kind = EventWoke
+		default:
+			return
+		}
+		select {
+		case events <- Event{Kind: kind, At: monoclock.Now()}:
+		default:
+		}
 	}
 }
 
-// osEvents registers for system power notifications and answers the channel
-// they arrive on. Registration happens on a thread locked to a run loop that
-// then blocks for the life of the process; that is the source's stated
-// lifetime, so nothing deregisters (IODeregisterForSystemPower plus
-// IONotificationPortDestroy would be the pair, in that order).
+// osEvents registers on a locked thread and drives that thread's CFRunLoop for
+// process life. The callback retains its channel and root port; no package-wide
+// callback destination is needed. The deployed helper never imports purego.
 func osEvents() (<-chan Event, error) {
+	api, err := loadPowerAPI()
+	if err != nil {
+		return nil, err
+	}
 	events := make(chan Event, 8)
-	powerEvents = events
-
 	started := make(chan error, 1)
 	go func() {
-		// The run loop belongs to this OS thread; without the lock Go may move
-		// the goroutine and the callback would fire on a loop nobody runs.
 		runtime.LockOSThread()
-		if code := int(C.nocxRegisterPower()); code != 0 {
-			started <- fmt.Errorf("IORegisterForSystemPower failed (code %d)", code)
+		defer runtime.UnlockOSThread()
+		var root, notifier uint32
+		var port uintptr
+		callback := purego.NewCallback(powerCallback(events, &root, api.allow))
+		root = api.register(0, &port, callback, &notifier)
+		if root == 0 {
+			started <- fmt.Errorf("IORegisterForSystemPower failed (IO_OBJECT_NULL)")
 			return
 		}
+		// CFRunLoop.h: kCFRunLoopDefaultMode is the CFString
+		// "kCFRunLoopDefaultMode". Create that value rather than dereferencing
+		// a foreign data pointer. CFString.h: kCFStringEncodingUTF8=0x08000100.
+		mode := api.stringCreate(0, "kCFRunLoopDefaultMode", 0x08000100)
+		api.add(api.current(), api.source(port), mode)
+		api.release(mode)
 		started <- nil
-		C.nocxRunPowerLoop() // never returns
+		api.run()
+		close(events)
 	}()
-
 	if err := <-started; err != nil {
-		powerEvents = nil
 		return nil, err
 	}
 	return events, nil

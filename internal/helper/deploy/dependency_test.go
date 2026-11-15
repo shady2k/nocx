@@ -45,10 +45,10 @@ var forbiddenSSHPackages = []string{
 	"github.com/shady2k/nocx/internal/ssh",
 	"github.com/shady2k/nocx/internal/helper/sshconn",
 	"github.com/shady2k/nocx/internal/hostconn",
-	// The wake source is the local helper's OS bridge: Darwin's half is cgo
-	// against IOKit, and the artifact written to somebody else's host must
-	// link neither it nor anything that would.
+	// The wake source and its SDK-free Darwin bridge belong only to the
+	// local helper, never the artifact written to somebody else's host.
 	"github.com/shady2k/nocx/internal/wakesource",
+	"github.com/ebitengine/purego",
 }
 
 // TestDeployedHelperDependencyGraphHasNoSSHClient is half (a) of the pair: the
@@ -166,4 +166,33 @@ func moduleRoot(t *testing.T) string {
 		t.Fatalf("go env GOMOD returned %q", gomod)
 	}
 	return filepath.Dir(gomod)
+}
+
+// The local Darwin bridge must exist without cgo: release cross-compiles it
+// on Ubuntu, where Zig has no macOS SDK. The deployed artifact must not carry
+// the bridge or its foreign-call dependency.
+func TestDarwinPowerBridgeIsLocalAndNeedsNoSDK(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		args := []string{"list", "-deps"}
+		if local {
+			args = append(args, "-tags", "nocx_local_ssh")
+		}
+		args = append(args, "./cmd/nocx-helper")
+		cmd := exec.Command("go", args...) // #nosec G204 -- fixed compiler and arguments
+		cmd.Dir = moduleRoot(t)
+		cmd.Env = append(os.Environ(), "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Darwin dependency graph (local=%v): %v\n%s", local, err, out)
+		}
+		reached := false
+		for _, pkg := range strings.Fields(string(out)) {
+			if pkg == "github.com/ebitengine/purego" {
+				reached = true
+			}
+		}
+		if reached != local {
+			t.Fatalf("Darwin local=%v reaches purego=%v; only the local helper must carry the SDK-free OS bridge", local, reached)
+		}
+	}
 }

@@ -9,6 +9,7 @@ require (
 	// It fixes the lost ioctl pointer/index from issue #216; drop this pin when
 	// a tagged release carries the fix. SyscallConn.Control also preserves nonblocking.
 	github.com/creack/pty v1.1.25-0.20260601142114-9246436fffe8
+	github.com/ebitengine/purego v0.9.1
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/ncruces/go-sqlite3 v0.35.2

@@ -1989,11 +1989,12 @@ describe("the person's own instructions to the assistant", () => {
     for (const intakeRule of [
       'A link on its own means go there and tell the person what is on it.',
       'When the intent is not plain, ask one question and stop.',
-      // The settings artifact shows the prompt WITH attachments, and there
-      // the rule carries its exemption: what came with the question is not
-      // an outside check (nocx-hp8p2.4).
-      'Do not guess, and do not go outside this pane to check first',
-      'what is attached above is already yours',
+      'Do not guess, and do not call a tool to check first',
+      'notes.create is the requested write for questionless text, not a check',
+      // The settings artifact shows the standing prompt's instruction to
+      // read attached terminal content through the supplied ids and windows.
+      "If the turn's message says terminal content is attached, read it before you answer with session.read and the ids and windows in that message",
+      'reading that content is not a check outside what the person supplied',
     ]) {
       expect(systemPromptText).toContain(intakeRule)
       expect(prompt!.textContent).toContain(intakeRule)

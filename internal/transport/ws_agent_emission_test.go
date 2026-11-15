@@ -61,6 +61,7 @@ func (h *emissionHarness) Run(ctx context.Context, spec agentharness.TurnSpec) (
 	}()
 	go func() {
 		defer close(turn.events)
+		turn.events <- agentharness.Event{Kind: agentharness.EventToolStarted, Tool: &agentharness.ToolCall{ID: "fetch-call"}}
 		<-h.fetcher.started
 		turn.events <- agentharness.Event{Kind: agentharness.EventAnswerDelta, Text: "partial"}
 	}()

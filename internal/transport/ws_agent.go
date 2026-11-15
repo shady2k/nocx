@@ -599,9 +599,10 @@ type agentApproveResponse struct {
 type agentAskEventKind string
 
 const (
-	agentAskAnswer    agentAskEventKind = "answer"
-	agentAskReasoning agentAskEventKind = "reasoning"
-	agentAskToolCall  agentAskEventKind = "tool_call"
+	agentAskAnswer      agentAskEventKind = "answer"
+	agentAskReasoning   agentAskEventKind = "reasoning"
+	agentAskToolCall    agentAskEventKind = "tool_call"
+	agentAskToolStarted agentAskEventKind = "tool_started"
 )
 
 type agentAskEvent struct {
@@ -1253,17 +1254,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// answer that was streaming when it happened, and the socket
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
-		case agentAskToolCall:
-			// NOT PERSISTED AS PROSE, and that is not an omission: the
-			// durable account of a tool call is the LEDGER's action entry,
-			// which the middleware wrote before the call ran and whose id
-			// rides this notification. Writing it into the prose block would
-			// be a second record of one fact, disagreeing with the first the
-			// moment either changed.
-			if ev.Call == nil {
-				return nil
+		case agentAskToolStarted:
+			if ev.Call != nil {
+				recordRequested(ev.Call.CallID)
 			}
-			recordRequested(ev.Call.CallID)
 			// THE BOUNDARY, and it is the backend's (ADR-0040). The prose
 			// that was streaming ends HERE, where the call arrived, because
 			// a sentence written before a command explains why the command
@@ -1291,6 +1285,18 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 					return sealErr
 				}
 			}
+			return nil
+		case agentAskToolCall:
+			// NOT PERSISTED AS PROSE, and that is not an omission: the
+			// durable account of a tool call is the LEDGER's action entry,
+			// which the middleware wrote before the call ran and whose id
+			// rides this notification. Writing it into the prose block would
+			// be a second record of one fact, disagreeing with the first the
+			// moment either changed.
+			if ev.Call == nil {
+				return nil
+			}
+			recordRequested(ev.Call.CallID)
 			// The wire declares `args` as an OBJECT and requires it, so a
 			// call that carried none is announced as `{}` rather than as
 			// null: absent and empty are the same sentence about a call, and
@@ -1479,29 +1485,42 @@ func (r runBoundWaitRequester) RequestRunWait(ctx context.Context, runID string,
 	return r.waiter.RequestRunWait(r.runContext(ctx), runID, decision)
 }
 
-// askHarness translates only agent prose and reasoning. Tool announcements come
-// from the endpoint kernel, after its durable attempt has been recorded.
+// askHarness owns the ordered prose stream. The agent places tool boundaries;
+// the kernel supplies only the details of that same call.
 func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assistant.AskParams, emit func(agentAskEvent) error) error {
-	// Tool admission and the agent stream run on independent goroutines, but
-	// both update the same prose block and publish to the same run.
-	var emitMu sync.Mutex
-	writeEvent := func(event agentAskEvent) error {
-		emitMu.Lock()
-		defer emitMu.Unlock()
-		return emit(event)
+	type callDetails struct {
+		call assistant.ToolCall
+		done chan error
 	}
+	deliveryCtx, stopDelivery := context.WithCancel(ctx)
+	defer stopDelivery()
+	details := make(chan callDetails)
 	if h.harness == nil {
 		return errors.New("the answering agent is not available")
 	}
 	var authority agentharness.TurnAuthority
+	var runTools *assistant.RunTools
 	var fatal <-chan error
 	if p.Grant != nil {
 		tools, err := assistant.BindRunTools(ctx, h.client, p, func(call assistant.ToolCall) error {
-			return writeEvent(agentAskEvent{Kind: agentAskToolCall, Call: &call})
+			detail := callDetails{call: call, done: make(chan error, 1)}
+			select {
+			case details <- detail:
+			case <-deliveryCtx.Done():
+				return deliveryCtx.Err()
+			}
+			select {
+			case err := <-detail.done:
+				return err
+			case <-deliveryCtx.Done():
+				return deliveryCtx.Err()
+			}
 		})
 		if err != nil {
 			return err
 		}
+		tools.UseAgentCallIDs()
+		runTools = tools
 		authority = tools
 		fatal = tools.Fatal()
 	}
@@ -1529,10 +1548,25 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	}
 	var fatalErr error
 	var emissionErr error
+	started := make(map[string]struct{})
 stream:
 	for {
 		var event agentharness.Event
 		select {
+		case detail := <-details:
+			var detailErr error
+			if _, ok := started[detail.call.CallID]; !ok {
+				detailErr = errors.New("tool details have no ordered start")
+			} else {
+				detailErr = emit(agentAskEvent{Kind: agentAskToolCall, Call: &detail.call})
+			}
+			detail.done <- detailErr
+			if detailErr != nil {
+				_ = turn.Cancel(context.WithoutCancel(ctx))
+				emissionErr = detailErr
+				break stream
+			}
+			continue
 		case fatalErr = <-fatal:
 			_ = turn.Cancel(context.WithoutCancel(ctx))
 			break stream
@@ -1544,6 +1578,17 @@ stream:
 		}
 		var ev agentAskEvent
 		switch event.Kind {
+		case agentharness.EventToolStarted:
+			if event.Tool == nil || runTools == nil {
+				continue
+			}
+			started[event.Tool.ID] = struct{}{}
+			ev = agentAskEvent{Kind: agentAskToolStarted, Call: &assistant.ToolCall{CallID: event.Tool.ID}}
+		case agentharness.EventToolFinished:
+			if event.Tool != nil {
+				delete(started, event.Tool.ID)
+			}
+			continue
 		case agentharness.EventAnswerDelta:
 			ev = agentAskEvent{Kind: agentAskAnswer, Text: event.Text}
 		case agentharness.EventReasoningDelta:
@@ -1551,12 +1596,16 @@ stream:
 		default:
 			continue
 		}
-		if emitErr := writeEvent(ev); emitErr != nil {
+		if emitErr := emit(ev); emitErr != nil {
 			_ = turn.Cancel(context.WithoutCancel(ctx))
 			emissionErr = emitErr
 			break stream
 		}
+		if event.Kind == agentharness.EventToolStarted {
+			runTools.StartToolCall(event.Tool.ID)
+		}
 	}
+	stopDelivery()
 	outcome, err := turn.Wait(context.WithoutCancel(ctx))
 	if emissionErr != nil {
 		return emissionErr

@@ -323,6 +323,7 @@ func (h *concurrentDeliveryHarness) Run(ctx context.Context, spec agentharness.T
 				return
 			}
 			for range 100 {
+				events <- agentharness.Event{Kind: agentharness.EventToolStarted, Tool: &agentharness.ToolCall{ID: "sequential-call"}}
 				invocation, err := tools.Admit(ctx)
 				if err == nil {
 					invocation.Context = ctx
@@ -373,4 +374,75 @@ func (*deliveryLedger) FinishExecution(context.Context, int64, content.FinishExe
 func (*deliveryLedger) AddCause(context.Context, string, string) (int, error) { return 1, nil }
 func (*deliveryLedger) CaptureOutput(context.Context, content.CaptureOutput) (bool, error) {
 	return true, nil
+}
+
+// The endpoint cannot position prose: its durable attempt may still be waiting
+// while the agent has already announced the call on its ordered stream.
+func TestAgentHarnessPlacesDelayedToolAtStreamBoundary(t *testing.T) {
+	backend := newScriptedAgent(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "before"},
+		readFileStep(t),
+		{Kind: protocol.StepAnswer, Text: "after"},
+		{Kind: protocol.StepEnd, Model: "actual"},
+	}})
+	h := newAskHarnessWithOpts(t, answeringScript(), WithAgentHarness("test", backend.harness), WithAgentPolicy(autonomousPolicyStore(t)))
+	handler := h.ws.agentTerminalizer(nil)
+	grant := h.ws.runGrantFor("test")
+	ledger := &boundaryDeliveryLedger{release: make(chan struct{}), entered: make(chan struct{})}
+	var got []string
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.askHarness(t.Context(), askRunContext{}, assistant.AskParams{
+			RunID: "boundary-run", SessionID: "boundary-pane", Environment: content.Environment{Kind: content.EnvLocal}, Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: ledger, KnownMaterial: adapterKnownMaterial(h.v),
+		}, func(ev agentAskEvent) error {
+			switch string(ev.Kind) {
+			case "tool_started":
+				got = append(got, "boundary")
+				close(ledger.release)
+			case "tool_call":
+				got = append(got, "details:"+ev.Call.CallID)
+			case "answer":
+				got = append(got, ev.Text)
+			}
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ledger.entered:
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			close(ledger.release)
+			<-done
+			t.Fatal("the ordered tool start did not split the answer while kernel details were delayed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool never reached the ledger")
+	}
+	if strings.Join(got, ",") != "before,boundary,details:call-1,after" {
+		t.Fatalf("answer order = %v", got)
+	}
+}
+
+type boundaryDeliveryLedger struct {
+	deliveryLedger
+	release chan struct{}
+	entered chan struct{}
+}
+
+func (l *boundaryDeliveryLedger) Submit(ctx context.Context, _ content.SubmitEntry) (content.SubmitResult, error) {
+	close(l.entered)
+	select {
+	case <-l.release:
+		return content.SubmitResult{}, nil
+	case <-ctx.Done():
+		return content.SubmitResult{}, ctx.Err()
+	}
 }

@@ -52,6 +52,7 @@ import {
   standalone as base,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
   settingsReady,
   VaultBackend,
@@ -104,6 +105,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, 'vault-pass-answer-stream')
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {

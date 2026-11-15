@@ -852,6 +852,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			dispatch = invocation.Dispatcher
 		}
 		releaseOrder := func() {}
+		requestInvocation.Method = request.Method
 		if reserver, ok := dispatch.(assistant.ToolRequestReserver); ok {
 			requestInvocation, releaseOrder = reserver.ReserveInvocation(requestInvocation)
 			requestCtx = requestInvocation.Context

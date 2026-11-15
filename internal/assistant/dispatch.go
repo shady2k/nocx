@@ -22,6 +22,7 @@ type ToolInvocation struct {
 	// Terminal is shared by cancellation, attempt recording and delivery.
 	Terminal         *CallTerminal
 	orderReservation *turnReservation
+	agentCallID      <-chan string
 	Context          context.Context
 	Method           string
 	RunContext       agenttools.RunContext

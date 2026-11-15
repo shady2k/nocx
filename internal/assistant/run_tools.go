@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -21,9 +22,13 @@ type TurnTools interface {
 // RunTools exposes the existing assistant kernel to the tool endpoint.
 // Its state, ordering, approvals and screens belong to one run.
 type RunTools struct {
-	kernel      *effectKernel
-	turnContext context.Context
-	fatal       chan error
+	kernel          *effectKernel
+	turnContext     context.Context
+	fatal           chan error
+	identityMu      sync.Mutex
+	agentCallIDs    bool
+	startedIDs      []string
+	identityWaiters []chan string
 }
 
 // BindRunTools binds the same run inputs the in-process assistant uses.
@@ -43,11 +48,54 @@ func BindRunTools(ctx context.Context, c Client, p AskParams, onCall func(ToolCa
 	return &RunTools{kernel: k, turnContext: ctx, fatal: make(chan error, 1)}, nil
 }
 
+// UseAgentCallIDs makes this turn use identities from the ordered agent stream.
+// Call it before admitting requests.
+func (r *RunTools) UseAgentCallIDs() {
+	r.identityMu.Lock()
+	r.agentCallIDs = true
+	r.identityMu.Unlock()
+}
+
+// StartToolCall binds the next endpoint invocation to an agent's tool-start event.
+// It never waits for endpoint admission or execution.
+func (r *RunTools) StartToolCall(id string) {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	if len(r.identityWaiters) != 0 {
+		waiter := r.identityWaiters[0]
+		r.identityWaiters = r.identityWaiters[1:]
+		waiter <- id
+		return
+	}
+	r.startedIDs = append(r.startedIDs, id)
+}
+
+func (r *RunTools) reserveCallIdentity() <-chan string {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	if !r.agentCallIDs {
+		return nil
+	}
+	waiter := make(chan string, 1)
+	if len(r.startedIDs) != 0 {
+		waiter <- r.startedIDs[0]
+		r.startedIDs = r.startedIDs[1:]
+	} else {
+		r.identityWaiters = append(r.identityWaiters, waiter)
+	}
+	return waiter
+}
+
 // ReserveInvocation fixes this call's position while the endpoint still reads
 // requests in arrival order. Waiting remains in dispatch so cancels can be read.
 func (r *RunTools) ReserveInvocation(invocation ToolInvocation) (ToolInvocation, func()) {
 	reservation, release := r.kernel.order.reserve()
 	invocation.orderReservation = reservation
+	// Discovery requests have no agent tool-start event. The endpoint sets Method
+	// before reserving so they cannot consume a call identity.
+	if invocation.Method != "tools.instructions" && invocation.Method != "tools.catalogue" {
+		invocation.agentCallID = r.reserveCallIdentity()
+	}
 	return invocation, release
 }
 
@@ -72,7 +120,18 @@ func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
 // Dispatch uses the kernel's own per-turn order and complete authority chain.
 func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	invocation.RunContext = r.RunContext()
-	out, err := r.kernel.invokeInvocation(invocation, uuid.NewString())
+	callID := uuid.NewString()
+	if invocation.agentCallID == nil {
+		invocation.agentCallID = r.reserveCallIdentity()
+	}
+	if invocation.agentCallID != nil {
+		select {
+		case callID = <-invocation.agentCallID:
+		case <-invocation.Context.Done():
+			return "", invocation.Context.Err()
+		}
+	}
+	out, err := r.kernel.invokeInvocation(invocation, callID)
 	var declined *ScreenDeclinedError
 	var screening *EgressScreeningError
 	if errors.As(err, &declined) || errors.As(err, &screening) {

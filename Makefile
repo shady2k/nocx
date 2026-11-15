@@ -807,8 +807,9 @@ print-darwin-pkgs:
 LOCAL_SSH_TAG := nocx_local_ssh
 LOCAL_SSH_RE := ^//go:build.*nocx_local_ssh
 LOCAL_SSH_PKG_DIRS := cmd/nocx-helper internal/app internal/helper/session \
+                      internal/helper/sshconn \
                       internal/helper/sshdial internal/helper/sshsvc \
-                      internal/helper/tunnelchan internal/ssh
+                      internal/helper/tunnelchan internal/ssh internal/wakesource
 LOCAL_SSH_PKGS := $(addprefix ./,$(addsuffix /...,$(LOCAL_SSH_PKG_DIRS)))
 LOCAL_SSH_OS_PKGS := $(addprefix ./,$(addsuffix /...,$(filter $(OS_PKG_DIRS),$(LOCAL_SSH_PKG_DIRS))))
 LOCAL_SSH_PORTABLE_PKGS := $(filter-out $(LOCAL_SSH_OS_PKGS),$(LOCAL_SSH_PKGS))

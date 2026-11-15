@@ -1618,6 +1618,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'kit.fileReadout.what.aria': 'Что это за файл',
   'kit.fileReadout.scanNotice': 'Подсвеченные строки совпали со статическим сканированием',
   'kit.personMessage.aria': 'ваше сообщение, пока писался ответ',
+  'kit.personMessage.queued': 'спросим, когда закончится этот ответ',
   'kit.personMessage.label': 'Вы',
   'footprint.read.failedHead': 'Не удалось прочитать состояние хоста:',
   'footprint.removed.head': 'Удалено',

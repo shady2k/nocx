@@ -27,3 +27,17 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* A message the turn could not take: kept, and asked once this answer ends.
+   The note sits beside the words, muted like the label, and the rule turns
+   dashed because the message is not IN this answer. */
+.ui-person-message[data-state='next_question'] {
+  border-left-style: dashed;
+  border-left-color: var(--color-border);
+}
+
+.ui-person-message__note {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}

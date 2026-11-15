@@ -25,12 +25,20 @@ export interface PersonMessageLabels {
   /** What a screen reader hears when it reaches the line — the label alone
    *  ("You") says nothing about WHERE this message went. */
   readonly aria: string
+  /** Said beside a message the turn could NOT take: it is kept, and asked once
+   *  this answer ends (ADR-anntnxdj decision 4). Absent when the words are
+   *  already in the turn. */
+  readonly queued: string
 }
+
+/** What became of the message: the agent took it into this turn, or it waits to
+ *  be asked next. The line says which, because the two are different promises. */
+export type PersonMessageState = 'steered' | 'next_question'
 
 export class PersonMessage {
   readonly root: HTMLElement
 
-  constructor(text: string, labels: PersonMessageLabels) {
+  constructor(text: string, labels: PersonMessageLabels, state: PersonMessageState = 'steered') {
     this.root = document.createElement('div')
     this.root.className = 'ui-person-message'
     // A note in the flow, not a live region: it is part of what is being
@@ -50,5 +58,15 @@ export class PersonMessage {
     said.textContent = text
 
     this.root.append(who, said)
+    this.root.dataset.state = state
+    if (state === 'next_question') {
+      // A message this turn could not take is drawn where the person sent it
+      // and marked: it is waiting, and the answer below it is not the answer to
+      // it. The note is the line's own, so the words stay the person's.
+      const note = document.createElement('span')
+      note.className = 'ui-person-message__note'
+      note.textContent = labels.queued
+      this.root.append(note)
+    }
   }
 }

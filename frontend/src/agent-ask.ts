@@ -75,6 +75,9 @@ export class AgentInputTarget implements InputTarget {
     number,
     { handle: AnswerBlockHandle; settle: () => void; askId: string }
   >()
+  /** Messages a turn kept for later, in the order the person sent them: each is
+   *  asked as the conversation's next question once that turn ends. */
+  private nextQuestions: string[] = []
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -105,6 +108,11 @@ export class AgentInputTarget implements InputTarget {
       await this.steer(answering.runId, answering.handle, doc)
       return
     }
+    await this.ask(doc)
+  }
+
+  /** Ask one question: a block of its own, a run of its own. */
+  private async ask(doc: string): Promise<void> {
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
     const attachedContent = this.seams
@@ -181,14 +189,22 @@ export class AgentInputTarget implements InputTarget {
    *  and a block that had already shown it would be claiming a delivery that
    *  never happened. */
   private async steer(runId: number, handle: AnswerBlockHandle, text: string): Promise<void> {
+    let outcome: AgentSteer['outcome']
     try {
-      await this.seams.steer(runId, text)
+      outcome = (await this.seams.steer(runId, text)).outcome
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       this.seams.onRefusal(message)
       throw err
     }
-    handle.steer(text)
+    // WHAT BECAME OF IT, as the backend stated it (ADR-anntnxdj decision 4). The
+    // message goes into the turn, or it is kept and asked once the turn ends —
+    // because the agent cannot steer, or because the turn could not take it. The
+    // block says which, and a kept message is asked as the conversation's next
+    // question as soon as this turn terminalizes.
+    const queued = outcome === 'next_question'
+    handle.steer(text, queued ? 'next_question' : 'steered')
+    if (queued) this.nextQuestions.push(text)
   }
 
   private settleRun(
@@ -254,6 +270,30 @@ export class AgentInputTarget implements InputTarget {
       )
     }
     this.seams.onTurnEnd?.(run.askId)
+    // The messages this turn could not take are asked now, as its successors:
+    // each opens its own block and is a question like any other (ADR-anntnxdj
+    // decision 4 — a message is never lost to the turn that could not take it).
+    this.askNextQuestions()
+  }
+
+  /**
+   * Ask whatever the just-finished turn kept for later, oldest first.
+   *
+   * One at a time, deliberately: `ask` opens a block and starts a run, and the
+   * question after it belongs to THAT run's conversation. This queue is the
+   * same pane's, so the next one waits for the run it follows — which is what
+   * "the conversation's next question" means.
+   */
+  private askNextQuestions(): void {
+    if (this.nextQuestions.length === 0 || this.runs.size > 0) return
+    const [text, ...rest] = this.nextQuestions
+    this.nextQuestions = rest
+    void this.ask(text).catch(() => {
+      // The refusal is already on screen (onRefusal); the message itself was
+      // the person's, and a turn that would not start must not swallow the rest
+      // of the queue.
+      this.askNextQuestions()
+    })
   }
 
   /**

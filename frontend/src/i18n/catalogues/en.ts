@@ -1966,6 +1966,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'kit.codeBlock.copy': 'Copy code',
   'kit.codeBlock.failedToast': 'Could not copy code',
   'kit.personMessage.aria': 'your message while the answer was written',
+  'kit.personMessage.queued': 'asked when this answer ends',
   'kit.personMessage.label': 'You',
   'kit.secretChip.damaged': '{name}: these bytes are no longer the secret — {damage}',
   'kit.secretChip.resolved': 'secret from the vault: {name}',

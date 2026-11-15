@@ -74,6 +74,7 @@ export const blockReceiptLabels = (): BlockReceiptLabels => ({
 export const personMessageLabels = (): PersonMessageLabels => ({
   label: t('kit.personMessage.label', 'You'),
   aria: t('kit.personMessage.aria', 'your message while the answer was written'),
+  queued: t('kit.personMessage.queued', 'asked when this answer ends'),
 })
 
 export const folderPickerLabels = (): FolderPickerLabels => ({

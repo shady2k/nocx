@@ -10,15 +10,15 @@
  */
 
 /**
- * Result of the agent.steer JSON-RPC method: the person's message was handed to the agent answering the run. The answer waits for the agent's own acceptance of the message, so a message the turn ended under is refused with an error rather than reported delivered. steer is a capability, not a promise: an agent whose protocol has no steering refuses the message and says so.
+ * Result of the agent.steer JSON-RPC method: the run the message was about, and what became of it. A message typed while a turn runs either goes INTO that turn — the agent takes it before its next model call — or becomes the conversation's next question, because the connector says its agent cannot steer, because the turn ended first, was cancelled, or the agent did not accept it in time. The block draws the two differently, so the outcome is stated rather than derived. The declines a message applies to a pending approval happen either way, before this answer.
  */
 export interface AgentSteer {
   /**
-   * The run that took the message.
+   * The run the message was about.
    */
   runId: number
   /**
-   * True because the agent accepted the message into the running turn.
+   * steered: the agent took the message inside the running turn. next_question: the turn could not take it, so the message is kept and asked once the current turn ends, in a block of its own.
    */
-  steered: true
+  outcome: 'steered' | 'next_question'
 }

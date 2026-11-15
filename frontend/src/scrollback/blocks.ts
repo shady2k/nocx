@@ -14,7 +14,7 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import { BlockNotice, type BlockNoticeState } from '../ui/block-notice'
-import { PersonMessage } from '../ui/person-message'
+import { PersonMessage, type PersonMessageState } from '../ui/person-message'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
 import { findReferences } from '../secret-reference'
@@ -499,10 +499,12 @@ export interface AnswerBlockHandle {
    *  new run BELOW it rather than continuing one above it and reading as
    *  though they came first.
    *
-   *  Only a delivered message is drawn: the surface calls this after the
-   *  backend says the agent took it, so a message the turn ended under never
-   *  appears in a block that cannot act on it. */
-  steer(this: void, text: string): void
+   *  Only a message the run ACCEPTED is drawn: the surface calls this after the
+   *  backend answered, and `state` says what became of it — into this turn, or
+   *  kept to be asked once it ends (ADR-anntnxdj decision 4). A kept message is
+   *  drawn here too, marked, because this is where the person sent it; its
+   *  question opens a block of its own later. */
+  steer(this: void, text: string, state?: PersonMessageState): void
   /** Close the block: success, failure with a renderable reason, or the
    *  distinct cancelled outcome shown as "stopped". */
   close(
@@ -3924,10 +3926,10 @@ export class BlockManager {
         showTyping()
         return drawn
       },
-      steer(text: string): void {
+      steer(text: string, state: PersonMessageState = 'steered'): void {
         if (text === '') return
         endProse()
-        const drawn = new PersonMessage(text, personMessageLabels())
+        const drawn = new PersonMessage(text, personMessageLabels(), state)
         children.appendChild(drawn.root)
         own(drawn.root)
         showTyping()

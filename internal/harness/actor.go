@@ -371,6 +371,40 @@ type queuedSteer struct {
 	ack      chan error
 	deadline time.Time
 }
+
+// resolveDroppedSteers reconciles the agent's queue answer with what this turn
+// was holding, and answers exactly one channel per message (nocx-a62cl.6.3):
+//
+//   - a message the agent ACKNOWLEDGED and the answer names was never used: its
+//     sender was already told the turn had taken it, so it is RETURNED for the
+//     run to report (the `droppedSteers` presentation), never answered twice;
+//   - a message the actor WROTE but was never acknowledged is still waiting on
+//     its own reply: the answer names it, so it never landed, and the caller is
+//     told so directly — and NOT returned, or the same words would be asked
+//     twice;
+//   - anything else the answer names (a message from another window, an
+//     extension's) is the person's all the same, and is returned.
+func resolveDroppedSteers(texts []string, acknowledged map[string]int, written **queuedSteer, pending *pendingStep) []string {
+	var returned []string
+	for _, text := range texts {
+		if acknowledged[text] > 0 {
+			acknowledged[text]--
+			returned = append(returned, text)
+			continue
+		}
+		if current := *written; current != nil && current.text == text {
+			current.ack <- ErrSteerNotTaken
+			*written = nil
+			if pending != nil {
+				pending.steerAck = nil
+			}
+			continue
+		}
+		returned = append(returned, text)
+	}
+	return returned
+}
+
 type (
 	settlement struct {
 		generation, turn uint64
@@ -436,10 +470,20 @@ func (s *session) loop() {
 	var cancelPrepared bool
 	var pendingTools map[string]struct{}
 	var pending *pendingStep
-	// steers are the messages the turn has taken but not yet written, and
-	// writtenSteer is the one whose command is out and unanswered.
+	// ONE DISPOSITION PER MESSAGE (nocx-a62cl.6.3). A message the actor has not
+	// written is its own to hand back at any point. A message it HAS written
+	// belongs to the agent until the agent answers it: acknowledged, it is the
+	// agent's (delivered, or named later by the cancel's queue answer); and a
+	// written message the queue answer does not name was delivered. So the
+	// actor keeps three things: the messages waiting to be written, the written
+	// one, and the messages the agent has acknowledged — the last so a queue
+	// answer can say which of them the cancel threw away.
 	var steers []queuedSteer
 	var writtenSteer *queuedSteer
+	var acknowledged map[string]int
+	// queueRecovered records that the agent answered the command that clears
+	// its queue: from then on a missing message means delivered, not unknown.
+	var queueRecovered bool
 	var frame []byte
 	var frameWritten int
 	var frameStep Step
@@ -549,21 +593,31 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
-		// A message the agent had not accepted by the time its turn ended did
-		// not land in it: the caller is told so it can ask it next
-		// (ADR-4khgzeyp decision 3), never left waiting and never told it was
-		// delivered.
+		// The turn is ending: settle every message it still holds, ONCE each.
+		// Never-written messages were never the agent's to lose, so they are
+		// handed back. A WRITTEN message the agent never acknowledged is
+		// settled by what the agent said about its queue: named by the cancel's
+		// answer, it was never used and is handed back; missing from that
+		// answer, it was delivered before the turn stopped. With no answer at
+		// all (the agent died under it), the honest reading is that it was not
+		// taken.
 		for _, steer := range steers {
 			steer.ack <- ErrSteerNotTaken
 		}
 		steers = nil
 		if writtenSteer != nil {
-			writtenSteer.ack <- ErrSteerNotTaken
+			if cancelling && queueRecovered {
+				writtenSteer.ack <- nil
+			} else {
+				writtenSteer.ack <- ErrSteerNotTaken
+			}
 			writtenSteer = nil
 			if pending != nil {
 				pending.steerAck = nil
 			}
 		}
+		acknowledged = nil
+		queueRecovered = false
 		if ev.Outcome == nil {
 			snapshot := outcome
 			ev.Outcome = &snapshot
@@ -625,6 +679,8 @@ func (s *session) loop() {
 		}
 		current = t
 		pendingTools = make(map[string]struct{})
+		acknowledged = make(map[string]int)
+		queueRecovered = false
 		cancelling = false
 		promptWritten = false
 		barrierPassed = false
@@ -762,9 +818,13 @@ func (s *session) loop() {
 			// because its own queue is the authority on what was left.
 			if response := decoded.Response; response != nil && cancelling {
 				if recovery, ok := codec.(SteerRecovery); ok {
-					if texts, ok := recovery.DroppedSteers(response.Payload); ok && len(texts) > 0 {
-						current.dropped = append(current.dropped, texts...)
-						observe("steer-dropped", []byte(strings.Join(texts, "\n")))
+					if texts, ok := recovery.DroppedSteers(response.Payload); ok {
+						queueRecovered = true
+						recovered := resolveDroppedSteers(texts, acknowledged, &writtenSteer, pending)
+						if len(recovered) > 0 {
+							current.dropped = append(current.dropped, recovered...)
+							observe("steer-dropped", []byte(strings.Join(recovered, "\n")))
+						}
 					}
 				}
 			}
@@ -804,8 +864,12 @@ func (s *session) loop() {
 					if steerAck != nil {
 						// The agent has taken the person's message: this is the
 						// acceptance their call waits for, and the point after
-						// which the turn owns it.
+						// which the agent owns it. It is remembered so a later
+						// queue answer can say whether the cancel threw it away.
 						steerAck <- nil
+						if writtenSteer != nil {
+							acknowledged[writtenSteer.text]++
+						}
 						writtenSteer = nil
 					}
 					if step.Barrier {
@@ -1005,19 +1069,15 @@ func (s *session) loop() {
 			settle()
 			exitBy = time.Now().Add(bound)
 		case now := <-tick.C:
-			// A message the agent has not taken within the turn's bound is not
-			// going to be: it is handed back to be asked next, and the turn
-			// goes on untouched (nocx-a62cl.6.3).
+			// A message the actor never WROTE within the turn's bound is handed
+			// back to be asked next, and the turn goes on untouched
+			// (nocx-a62cl.6.3). A message it DID write is not on a timer: the
+			// agent may hold it, and asking the same words again would run them
+			// twice. Its fate is settled by the agent (acknowledged) or by the
+			// cancel's queue answer.
 			for len(steers) > 0 && !now.Before(steers[0].deadline) {
 				steers[0].ack <- ErrSteerNotTaken
 				steers = steers[1:]
-			}
-			if writtenSteer != nil && !now.Before(writtenSteer.deadline) {
-				writtenSteer.ack <- ErrSteerNotTaken
-				writtenSteer = nil
-				if pending != nil {
-					pending.steerAck = nil
-				}
 			}
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
@@ -1048,6 +1108,10 @@ func (s *session) loop() {
 					}
 					current = t
 					pendingTools = make(map[string]struct{})
+					acknowledged = make(map[string]int)
+					queueRecovered = false
+					acknowledged = make(map[string]int)
+					queueRecovered = false
 					cancelling = false
 					promptWritten = false
 					settling = false

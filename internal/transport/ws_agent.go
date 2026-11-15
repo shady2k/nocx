@@ -179,6 +179,9 @@ type agentRunControl struct {
 	// replaced: a steer addresses the turn that is answering, and a turn that
 	// has ended refuses the message itself.
 	steerer agentharness.Steerer
+	// steerBoundary writes a person's message into the turn's record, in order
+	// with the answer's runs (nocx-a62cl.6.4). Nil until the stream installs it.
+	steerBoundary func(ctx context.Context, text string) error
 	// droppedSteers is what a cancelled turn's agent had queued and dropped:
 	// messages nobody used, which become the conversation's next questions
 	// (ADR-4khgzeyp decision 3). Set when the turn reports its terminal.
@@ -230,6 +233,21 @@ func (c *agentRunControl) attachSteerer(steerer agentharness.Steerer) {
 	c.mu.Lock()
 	c.steerer = steerer
 	c.mu.Unlock()
+}
+
+// attachSteerBoundary names the stream's way of writing a person's message into
+// the turn's record. It is installed by the stream and cleared when the stream
+// ends, because it is the stream that owns the order the answer's runs land in.
+func (c *agentRunControl) attachSteerBoundary(boundary func(ctx context.Context, text string) error) {
+	c.mu.Lock()
+	c.steerBoundary = boundary
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) attachedSteerBoundary() func(ctx context.Context, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.steerBoundary
 }
 
 func (c *agentRunControl) attachedSteerer() agentharness.Steerer {
@@ -668,6 +686,11 @@ const (
 	agentAskReasoning   agentAskEventKind = "reasoning"
 	agentAskToolCall    agentAskEventKind = "tool_call"
 	agentAskToolStarted agentAskEventKind = "tool_started"
+	// agentAskSteer is a person's message, delivered into the stream so the
+	// ledger records it in the turn's order (nocx-a62cl.6.4). It is not a
+	// notification: the renderer drew the line from agent.steer's own answer,
+	// and only the durable record needs the seat.
+	agentAskSteer agentAskEventKind = "steer"
 )
 
 type agentAskEvent struct {
@@ -1397,6 +1420,26 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			// accepted tool-call events from requests that merely arrived.
 			toolCallsExecuted.Add(1)
 			return nil
+		case agentAskSteer:
+			// THE PERSON'S MESSAGE IS A BOUNDARY, like the tool call above and
+			// for the same reason: the prose that was streaming ends here, at
+			// the point the person spoke, the message takes the next seat, and
+			// the next delta opens the next run (ADR-0040, ADR-0019). A
+			// failure aborts the stream: a message the person sees but the
+			// ledger never held is the live view lying about what was recorded.
+			if prose.EntryID != "" {
+				sealed := prose
+				prose = content.ProseBlock{}
+				if sealErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+					return svc.SealProse(ctx, sealed.EntryID)
+				}); sealErr != nil {
+					return sealErr
+				}
+			}
+			return h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+				_, submitErr := svc.SubmitSteer(ctx, rc.entryID, rc.runID, ev.Text)
+				return submitErr
+			})
 		case agentAskReasoning:
 			reasoningChars.Add(int64(len(ev.Text)))
 			// Also not persisted, and for the stronger reason: the durable
@@ -1614,6 +1657,28 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	if steerer, ok := turn.(agentharness.Steerer); ok && rc.control != nil {
 		rc.control.attachSteerer(steerer)
 	}
+	// A person's message is written into the turn's record from HERE, on this
+	// stream's own goroutine, so it lands in the order the answer's runs do
+	// (nocx-a62cl.6.4). agent.steer runs on another goroutine, so it hands the
+	// text over and waits for the ledger rather than writing out of order.
+	steers := make(chan steerBoundaryWrite)
+	if rc.control != nil {
+		rc.control.attachSteerBoundary(func(ctx context.Context, text string) error {
+			write := steerBoundaryWrite{text: text, ack: make(chan error, 1)}
+			select {
+			case steers <- write:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			select {
+			case ackErr := <-write.ack:
+				return ackErr
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		defer rc.control.attachSteerBoundary(nil)
+	}
 	var fatalErr error
 	var emissionErr error
 	started := make(map[string]struct{})
@@ -1621,6 +1686,8 @@ stream:
 	for {
 		var event agentharness.Event
 		select {
+		case write := <-steers:
+			write.ack <- emit(agentAskEvent{Kind: agentAskSteer, Text: write.text})
 		case detail := <-details:
 			var detailErr error
 			if _, ok := started[detail.call.CallID]; !ok {
@@ -1846,6 +1913,19 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 	if steerer != nil {
 		if err := steerer.Steer(ctx, p.Text); err == nil {
 			h.log.Info("agent steer: the agent took the person's message", "run", p.RunID)
+			// AND THE TURN'S RECORD TAKES IT (nocx-a62cl.6.4): the ledger is
+			// the record of what is shown (ADR-0019), so the message is written
+			// into the turn's order here, where the person sent it. The agent
+			// already has it, so a record that cannot be written is logged
+			// rather than reported as a failed steer: the message was said.
+			if boundary := rc.control.attachedSteerBoundary(); boundary != nil {
+				if recordErr := boundary(ctx, p.Text); recordErr != nil {
+					h.log.Warn("agent steer: the message could not be written into the turn's record",
+						"run", p.RunID, "error", recordErr)
+				}
+			} else {
+				h.log.Warn("agent steer: the turn has no stream to write the message into", "run", p.RunID)
+			}
 			_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerSteered}))
 			return
 		} else if !isSteerNotTaken(err) {
@@ -1860,6 +1940,13 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 	// (ADR-4khgzeyp decision 3).
 	h.log.Info("agent steer: the turn did not take the message, so it is asked next", "run", p.RunID)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+}
+
+// steerBoundaryWrite is one person's message handed to the stream, and the
+// answer: the ledger holds it, or it does not.
+type steerBoundaryWrite struct {
+	text string
+	ack  chan error
 }
 
 // isSteerNotTaken reports whether a turn's refusal of a person's message means

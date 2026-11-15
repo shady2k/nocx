@@ -38,6 +38,7 @@ import (
 // under test here is a recorder: what matters is WHICH writes happened and
 // in what order, not the SQLite behind the real operation.
 type fakeAgentService struct {
+	steers      []string
 	mu          sync.Mutex
 	transitions []content.RunState
 	appended    []string
@@ -107,6 +108,19 @@ func (f *fakeAgentService) AppendRunDelta(_ context.Context, artifactID string, 
 	f.appended = append(f.appended, string(body))
 	f.appendedArtifacts = append(f.appendedArtifacts, artifactID)
 	return nil
+}
+
+// SubmitSteer records the person's message the way the ledger would: a child of
+// the turn, whose text is the message itself (nocx-a62cl.6.4).
+func (f *fakeAgentService) SubmitSteer(_ context.Context, turnID string, _ int64, text string) (content.ProseBlock, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prose++
+	f.steers = append(f.steers, text)
+	return content.ProseBlock{
+		EntryID:    fmt.Sprintf("%s/steer-%d", turnID, f.prose),
+		ArtifactID: fmt.Sprintf("%s/steer-body-%d", turnID, f.prose),
+	}, nil
 }
 
 func (f *fakeAgentService) FrameText(context.Context, string) (string, error) { return "", nil }

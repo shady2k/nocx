@@ -394,3 +394,86 @@ func cancelledRunState(t *testing.T, h *askHarness) agentRunState {
 	}
 	return state
 }
+
+// The person's message is part of the turn's RECORD, in order with the answer's
+// runs: the ledger is the record of what is shown (ADR-0019), so a restored
+// block draws the message where it was sent instead of an answer with a gap in
+// it (nocx-a62cl.6.4).
+func TestAgentSteer_TheMessageIsWrittenIntoTheTurnsRecord(t *testing.T) {
+	h := newAskHarness(t, steerScript())
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "steer-ask-record", "sessionId": sid, "question": "what is in the log?", "cwd": "/repo",
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	h.waitHung()
+	const message = "also check the second log"
+	steerResponse := jsonrpcCallWithID(t, h.conn, "agent.steer", map[string]any{"runId": res.RunID, "text": message}, 2)
+	var steered struct {
+		Result agentSteerResponse `json:"result"`
+		Error  *jsonrpcErrorObj   `json:"error"`
+	}
+	if err := json.Unmarshal(steerResponse, &steered); err != nil || steered.Error != nil {
+		t.Fatalf("agent.steer: %v %+v", err, steered.Error)
+	}
+	if steered.Result.Outcome != steerSteered {
+		t.Fatalf("agent.steer = %+v, want the agent to have taken the message", steered.Result)
+	}
+	_ = jsonrpcCallWithID(t, h.conn, "agent.cancel", map[string]any{"runId": res.RunID}, 3)
+
+	// THE TURN'S CHILDREN, in seat order: the answer's first run of prose, the
+	// person's message, and nothing else invented.
+	kids, err := h.db.Ledger().Caused(t.Context(), res.EntryID)
+	if err != nil {
+		t.Fatalf("Caused: %v", err)
+	}
+	if len(kids) != 2 {
+		t.Fatalf("the turn's children = %+v, want the prose and the message", kids)
+	}
+	if kids[0].Kind != content.EntryText || kids[0].Source != content.SourceAssistant || kids[0].Position != 0 {
+		t.Fatalf("seat 0 = %+v, want the answer's prose", kids[0])
+	}
+	if kids[1].Kind != content.EntryText || kids[1].Source != content.SourceUser ||
+		kids[1].Position != 1 || kids[1].Intent != "" {
+		t.Fatalf("seat 1 = %+v, want the person's message as text at the next seat", kids[1])
+	}
+	// Its words are its own body, complete.
+	entry, err := h.db.Ledger().Entry(t.Context(), kids[1].EntryID)
+	if err != nil || entry == nil || len(entry.Artifacts) != 1 {
+		t.Fatalf("the message's row = %+v (%v)", entry, err)
+	}
+	body, err := h.db.Ledger().Artifact(t.Context(), entry.Artifacts[0].ID)
+	if err != nil || body == nil {
+		t.Fatalf("Artifact: %v", err)
+	}
+	var said strings.Builder
+	for _, chunk := range body.Chunks {
+		said.Write(chunk)
+	}
+	if said.String() != message {
+		t.Fatalf("the message's body = %q, want %q", said.String(), message)
+	}
+
+	// AND THE RESTORE READS IT: ledger.get's caused carries the child's kind
+	// and source, which is the pair the renderer draws the line from.
+	got := vaultCall(t, h.conn, "ledger.get", map[string]any{"id": res.EntryID}, 4)
+	if got.Error != nil {
+		t.Fatalf("ledger.get: %+v", got.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.get.schema.json"), got.Result, "ledger.get result (a turn with a message)")
+	var restored struct {
+		Caused []struct {
+			EntryID string `json:"entryId"`
+			Kind    string `json:"kind"`
+			Source  string `json:"source"`
+		} `json:"caused"`
+	}
+	if err := json.Unmarshal(got.Result, &restored); err != nil {
+		t.Fatalf("decode ledger.get: %v", err)
+	}
+	if len(restored.Caused) != 2 || restored.Caused[1].Kind != "text" || restored.Caused[1].Source != "user" {
+		t.Fatalf("restored caused = %+v, want the person's text child second", restored.Caused)
+	}
+}

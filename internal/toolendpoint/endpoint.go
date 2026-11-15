@@ -22,6 +22,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/coordinator"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	nocxlog "github.com/shady2k/nocx/internal/log"
@@ -1100,6 +1101,11 @@ func (e *Endpoint) log() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func personCancelledTurn(err error) bool {
+	reason, ok := assistant.TurnEndedReason(err)
+	return ok && reason == content.TermUserKilled
+}
+
 func rpcErrorFor(err error) (code int, message, reason string) {
 	var lease *assistant.RunLeaseError
 	if errors.As(err, &lease) {
@@ -1307,7 +1313,7 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// loud rather than reporting as a fault inside nocx.
 		return rpcInvalidParams, "invalid params",
 			"this report is not one a worker's tool can send — the kind must be done, question or progress, and estimate and artifact belong to a progress checkpoint only. Correct it and call again; the tool's schema in tools.catalogue says what each one accepts."
-	case errors.Is(err, ErrPersonCancelled):
+	case errors.Is(err, ErrPersonCancelled) || personCancelledTurn(err):
 		return rpcDomainError, "call abandoned", "The person cancelled this call before it finished. Do not repeat it unless they ask."
 	case errors.Is(err, context.Canceled):
 		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is

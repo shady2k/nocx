@@ -68,11 +68,9 @@ type turnEndingContextKey struct{}
 // request was cancelled, the endpoint's caller sent calls.cancel — carries none
 // and records TermInterrupted, which is what the run records too. A call that
 // runs IN THE RENDERER (session.run, session.wait) is stopped by its run lease
-// withdrawing the request before the turn's context is cancelled —
-// deliberately, because the ladder must name the process group before the
-// withdrawal (nocx-uvac6.11) — so what reaches here is the request's own
-// cancellation and the attempt records TermInterrupted. The run's row is what
-// says the person pressed Stop.
+// withdrawing the request before the turn's context is cancelled. The lease
+// carries the chosen cause through that withdrawal, while still naming the
+// process group before cancelling the request (nocx-uvac6.11).
 //
 // ctx is the call's context when its outcome has not yet been decided (the
 // kernel). A frozen terminal verdict instead carries cancellation in cause;
@@ -83,14 +81,8 @@ func stoppedEnding(ctx context.Context, cause error) (content.TerminationReason,
 		return "", "", false
 	}
 	ended := content.TermInterrupted
-	if stated, ok := TurnEndedReason(cause); ok {
+	if stated, ok := TurnEndedReason(callCancellationCause(ctx, cause)); ok {
 		ended = stated
-	} else if stated, ok := TurnEndedReason(context.Cause(ctx)); ok {
-		ended = stated
-	} else if turn, ok := ctx.Value(turnEndingContextKey{}).(context.Context); ok {
-		if stated, ok := TurnEndedReason(context.Cause(turn)); ok {
-			ended = stated
-		}
 	}
 	return ended, content.EntryInterrupted, true
 }
@@ -105,4 +97,29 @@ func ProgramEndedSentence(err error) (string, bool) {
 		return c.sentence, true
 	}
 	return "", false
+}
+
+// callCancellationCause resolves a cancelled call's stated turn reason before
+// its terminal verdict is frozen. Request contexts keep their own lifetime;
+// their bound turn contributes only the reason, never authority or a deadline.
+func callCancellationCause(ctx context.Context, cause error) error {
+	if _, ok := TurnEndedReason(cause); ok {
+		return cause
+	}
+	if stated := context.Cause(ctx); stated != nil {
+		if _, ok := TurnEndedReason(stated); ok {
+			return stated
+		}
+	}
+	if turn, ok := ctx.Value(turnEndingContextKey{}).(context.Context); ok {
+		if stated := context.Cause(turn); stated != nil {
+			if _, ok := TurnEndedReason(stated); ok {
+				return stated
+			}
+		}
+	}
+	if stated := context.Cause(ctx); stated != nil {
+		return stated
+	}
+	return cause
 }

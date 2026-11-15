@@ -198,7 +198,7 @@ func (c *agentRunControl) detachRunLease(lease *runLease) {
 	c.mu.Unlock()
 }
 
-func (c *agentRunControl) cancelRunLeases() bool {
+func (c *agentRunControl) cancelRunLeases(reason content.TerminationReason) bool {
 	c.mu.Lock()
 	leases := make([]*runLease, 0, len(c.runLeases))
 	for lease := range c.runLeases {
@@ -207,7 +207,7 @@ func (c *agentRunControl) cancelRunLeases() bool {
 	c.mu.Unlock()
 	unsupported := false
 	for _, lease := range leases {
-		if lease.cancelExecution() == foregroundUnsupported {
+		if lease.cancelExecution(reason) == foregroundUnsupported {
 			unsupported = true
 		}
 	}
@@ -1677,7 +1677,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	// synchronous ladder completes before provider cancellation, durable
 	// terminalization and the reserved response; user/summoned commands have
 	// no registration and are never signalled here.
-	if rc.control.cancelRunLeases() {
+	if rc.control.cancelRunLeases(reason) {
 		sentence = "no local process group to signal — the execution keeps running"
 		hasDetails = true
 	}
@@ -2769,7 +2769,7 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 			continue
 		}
 		runCtx, _ := log.StartTrace(ctx, runTrace(id))
-		rc.control.cancelRunLeases()
+		rc.control.cancelRunLeases(content.TermAnswerRevoked)
 		rc.control.cancelContext(content.TermAnswerRevoked)
 		rc.control.finishCancel(content.RunCancelled, content.TermAnswerRevoked, sentence, true)
 		h.terminalize(runCtx, rc, content.RunCancelled, content.TermAnswerRevoked, sentence, r)

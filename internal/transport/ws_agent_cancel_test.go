@@ -135,7 +135,7 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	}
 	rc.leaseDegradation.Add(assistant.RunLeaseBoundInactivity)
 	lease.sess = nil
-	lease.cancel = func() {} // armed RequestRun: the renderer execution exists
+	lease.cancel = func(error) {} // armed RequestRun: the renderer execution exists
 	if !rc.control.attachRunLease(lease) {
 		h.ws.pendingRunsMu.Unlock()
 		t.Fatal("active run refused its exact lease")

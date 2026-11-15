@@ -45,8 +45,8 @@ func (t *CallTerminal) Complete(ctx context.Context, dispatchErr error) error {
 func (t *CallTerminal) complete(ctx context.Context, dispatchErr error) error {
 	if !t.decided {
 		var lease *RunLeaseError
-		if cause := context.Cause(ctx); cause != nil && !errors.As(dispatchErr, &lease) {
-			dispatchErr = cause
+		if (ctx.Err() != nil || errors.Is(dispatchErr, context.Canceled)) && !errors.As(dispatchErr, &lease) {
+			dispatchErr = callCancellationCause(ctx, dispatchErr)
 			t.cancelled = true
 		}
 		t.decided, t.err = true, dispatchErr

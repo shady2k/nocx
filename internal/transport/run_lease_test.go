@@ -552,7 +552,7 @@ func TestRunLease_CancelExecutionStopsBeforeReturning(t *testing.T) {
 	}()
 	<-started
 
-	if got := lease.cancelExecution(); got != foregroundDelivered {
+	if got := lease.cancelExecution(content.TermUserKilled); got != foregroundDelivered {
 		t.Fatalf("cancel outcome = %q, want %q", got, foregroundDelivered)
 	}
 	if got := sess.got(); len(got) != 1 || got[0] != syscall.SIGINT {
@@ -567,7 +567,7 @@ func TestRunLease_CancelBeforeSuperviseEmitsNothingAndSignalsNothing(t *testing.
 	sess := &fakeLeaseSession{}
 	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
 
-	if got := lease.cancelExecution(); got != foregroundNothingRunning {
+	if got := lease.cancelExecution(content.TermUserKilled); got != foregroundNothingRunning {
 		t.Fatalf("pre-arm cancel outcome = %q, want %q", got, foregroundNothingRunning)
 	}
 	called := false
@@ -593,7 +593,7 @@ func TestRunLease_CancelExecutionAfterDisarmSignalsNothing(t *testing.T) {
 		t.Fatalf("supervise: %v", err)
 	}
 
-	if got := lease.cancelExecution(); got != foregroundNothingRunning {
+	if got := lease.cancelExecution(content.TermUserKilled); got != foregroundNothingRunning {
 		t.Fatalf("late cancel outcome = %q, want %q", got, foregroundNothingRunning)
 	}
 	if got := sess.got(); len(got) != 0 {
@@ -616,10 +616,10 @@ func TestAgentRunControl_CancelSignalsOnlyRegisteredAssistantLease(t *testing.T)
 	owned := &fakeLeaseSession{dieOn: syscall.SIGINT}
 	userStarted := &fakeLeaseSession{}
 	lease, _ := newUnitLease(t, owned, RunLeaseConfig{})
-	lease.cancel = func() {}
+	lease.cancel = func(error) {}
 	control := &agentRunControl{runLeases: map[*runLease]struct{}{lease: {}}}
 
-	if control.cancelRunLeases() {
+	if control.cancelRunLeases(content.TermUserKilled) {
 		t.Fatal("local assistant lease reported unsupported")
 	}
 	if got := owned.got(); len(got) != 1 || got[0] != syscall.SIGINT {
@@ -644,7 +644,7 @@ func TestRunLease_CancelExecutionWithoutLocalProcessStillCancelsRequest(t *testi
 	}()
 	<-started
 
-	if got := lease.cancelExecution(); got != foregroundUnsupported {
+	if got := lease.cancelExecution(content.TermUserKilled); got != foregroundUnsupported {
 		t.Fatalf("cancel outcome = %q, want %q", got, foregroundUnsupported)
 	}
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -690,9 +690,9 @@ func TestRunLease_CancelExecutionNamesItsOwnGroupBeforeWithdrawing(t *testing.T)
 	sess := newHandoffSession(owned)
 	sess.diesOn = syscall.SIGINT
 	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
-	lease.cancel = func() { sess.takeOver(personStarted) }
+	lease.cancel = func(error) { sess.takeOver(personStarted) }
 
-	if got := lease.cancelExecution(); got != foregroundDelivered {
+	if got := lease.cancelExecution(content.TermUserKilled); got != foregroundDelivered {
 		t.Fatalf("cancel outcome = %q, want %q", got, foregroundDelivered)
 	}
 	if got := sess.signalsTo(owned); len(got) != 1 || got[0] != syscall.SIGINT {
@@ -700,5 +700,45 @@ func TestRunLease_CancelExecutionNamesItsOwnGroupBeforeWithdrawing(t *testing.T)
 	}
 	if got := sess.signalsTo(personStarted); len(got) != 0 {
 		t.Fatalf("a command the person started under the withdrawal was signalled: %v", got)
+	}
+}
+
+func TestRunLease_PersonCancelCauseReachesCallBeforeTurnSettlement(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGINT}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	terminal := &assistant.CallTerminal{}
+	go func() {
+		err := lease.supervise(t.Context(), func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		done <- terminal.Complete(t.Context(), err)
+	}()
+	<-started
+	// The drive and endpoint settlement are deliberately not cancelled yet.
+	lease.cancelExecution(content.TermUserKilled)
+	err := <-done
+	if reason, ok := assistant.TurnEndedReason(err); !ok || reason != content.TermUserKilled {
+		t.Fatalf("call verdict before settlement = %v (%q), want person cancellation", err, reason)
+	}
+}
+
+func TestRunLease_CancelBeforeResumePreservesCause(t *testing.T) {
+	for _, reason := range []content.TerminationReason{content.TermUserKilled, content.TermAnswerRevoked} {
+		t.Run(string(reason), func(t *testing.T) {
+			lease, _ := newUnitLease(t, &fakeLeaseSession{}, RunLeaseConfig{})
+			lease.cancelExecution(reason)
+			called := false
+			err := lease.superviseResume(t.Context(), func(context.Context) error {
+				called = true
+				return nil
+			})
+			if got, ok := assistant.TurnEndedReason(err); called || !ok || got != reason {
+				t.Fatalf("resume called=%v, cause=%v (%q), want %q", called, err, got, reason)
+			}
+		})
 	}
 }

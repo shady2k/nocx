@@ -63,7 +63,9 @@ func TestNoWakeMeansNoExtraProbe(t *testing.T) {
 		clock := hostconntest.New()
 		link := newQuietLink()
 		defer link.release()
-		mgr, _ := managerOn(t, quietCarrier(link), clock)
+		wake := hostconntest.NewWakeSource(clock)
+		defer wake.Close()
+		mgr, _ := managerWith(t, quietCarrier(link), clock, wake)
 		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
 		defer lease.Release()
 

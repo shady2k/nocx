@@ -19,6 +19,14 @@ const DefaultMaxLineBytes = 4 << 20
 
 var ErrCancelled = errors.New("the turn was cancelled")
 
+// ErrTurnNotRunning refuses a person's message that has no turn to land in —
+// the turn ended, was cancelled, or has not reached the agent yet.
+var ErrTurnNotRunning = errors.New("harness: the turn is not running")
+
+// ErrNotSteerable refuses a person's message when the agent's own protocol has
+// no steering: the message cannot be delivered into a turn already under way.
+var ErrNotSteerable = errors.New("harness: this agent does not take a message while it answers")
+
 type TurnError struct{ Reason string }
 
 func (e *TurnError) Error() string { return e.Reason }
@@ -44,6 +52,11 @@ type Codec interface {
 	Setup() []Step
 	BeginTurn(TurnSpec) []Step
 	CancelSequence() []Command
+	// SteerCommand is the command that carries a person's message into the
+	// turn already running. ok is false when the agent's protocol has no
+	// steering, and the actor refuses the message rather than writing a
+	// command the agent cannot read (ADR-anntnxdj decision 4).
+	SteerCommand(text string) (Command, bool)
 	Encode(id string, command Command) ([]byte, error)
 	Decode(line []byte) (Decoded, error)
 }
@@ -55,6 +68,11 @@ type Codec interface {
 type Step struct {
 	// Model reports the model resolved by a successful response check.
 	Model func() string
+
+	// Steer marks the command a person's message became. Its matched response
+	// is the agent's acceptance of that message, which is what the person's
+	// Steer call waits for.
+	Steer bool
 
 	Command Command
 	Check   func(any) error

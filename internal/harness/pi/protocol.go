@@ -224,6 +224,12 @@ func (*codec) CancelSequence() []harness.Command {
 	return []harness.Command{{Name: "clear_queue"}, {Name: "abort"}}
 }
 
+// SteerCommand is pi's own steer: it answers "queued" and is delivered before
+// the next model call, after the running tool and the streamed text.
+func (*codec) SteerCommand(text string) (harness.Command, bool) {
+	return harness.Command{Name: "steer", Payload: map[string]any{"message": text}}, true
+}
+
 func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
 	if command.Name == "prompt" {
 		if err := os.WriteFile(c.promptPath, []byte(c.prompt), 0o600); err != nil {

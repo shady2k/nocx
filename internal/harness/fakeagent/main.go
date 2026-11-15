@@ -129,6 +129,20 @@ func main() {
 			done = make(chan struct{})
 			emit(protocol.Line{Kind: "response", ID: command.ID})
 			go func(done chan struct{}) { defer close(done); run(ctx, script, prompt, steps, emit) }(done)
+		case "steer":
+			if command.Steer == nil {
+				emit(protocol.Line{Kind: "response", ID: command.ID, Reason: "missing steer"})
+				continue
+			}
+			if script.SteerFile != "" {
+				file, openErr := os.OpenFile(script.SteerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if openErr != nil {
+					os.Exit(2)
+				}
+				_, _ = file.WriteString(command.Steer.Text + "\n")
+				_ = file.Close()
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID})
 		case "abort":
 			if script.IgnoreAbort {
 				continue

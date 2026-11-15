@@ -87,6 +87,11 @@ type request struct {
 	cancel bool
 	reply  chan error
 	close  bool
+	// steer is a person's message for the running turn, and steering says a
+	// request carries one. Its acceptance, or the refusal, is answered on
+	// reply.
+	steer    string
+	steering bool
 }
 type actorTurn struct {
 	ctx      context.Context
@@ -99,6 +104,29 @@ type actorTurn struct {
 }
 
 func (t *actorTurn) Events() <-chan Event { return t.events }
+
+// Steer delivers a person's message into the turn while it runs
+// (ADR-anntnxdj decision 4). It returns once the agent has accepted the
+// message, and ErrTurnNotRunning when there is no turn left to land in.
+func (t *actorTurn) Steer(ctx context.Context, text string) error {
+	reply := make(chan error, 1)
+	select {
+	case <-t.done:
+		return ErrTurnNotRunning
+	case t.session.in <- request{turn: t, steer: text, steering: true, reply: reply}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.session.done:
+		return ErrTurnNotRunning
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (t *actorTurn) Cancel(ctx context.Context) error {
 	reply := make(chan error, 1)
 	select {
@@ -376,6 +404,10 @@ func (s *session) loop() {
 	var cancelPrepared bool
 	var pendingTools map[string]struct{}
 	var pending *pendingStep
+	// steerAcks answers a person's Steer calls in the order their messages
+	// were written to the agent: the matched response of a Step marked Steer
+	// is that message's acceptance.
+	var steerAcks []chan error
 	var frame []byte
 	var frameWritten int
 	var frameStep Step
@@ -485,6 +517,12 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
+		// A message the agent had not accepted by the time its turn ended has
+		// nowhere left to land: the person is told rather than left waiting.
+		for _, ack := range steerAcks {
+			ack <- ErrTurnNotRunning
+		}
+		steerAcks = nil
 		if ev.Outcome == nil {
 			snapshot := outcome
 			ev.Outcome = &snapshot
@@ -571,6 +609,25 @@ func (s *session) loop() {
 		if len(plan) == 0 || !plan[0].Barrier {
 			fail("agent turn plan has no admission barrier")
 		}
+	}
+	// admitSteer queues a person's message behind the turn's remaining plan —
+	// which always ends with the prompt — so it reaches the agent after the
+	// question and is answered by the agent's own acceptance of it.
+	admitSteer := func(r request) error {
+		if r.turn != current || terminal != nil || cancelling || starting || retiring || !exitBy.IsZero() || codec == nil {
+			return ErrTurnNotRunning
+		}
+		command, ok := codec.SteerCommand(r.steer)
+		if !ok {
+			return ErrNotSteerable
+		}
+		plan = append(plan, Step{Command: command, Steer: true})
+		// The person's call is answered by the agent's acceptance of the
+		// message, not by the queueing: a message queued for a turn that ends
+		// first has not landed, and saying otherwise would be a lie the block
+		// could not take back.
+		steerAcks = append(steerAcks, r.reply)
+		return nil
 	}
 	for {
 		// Endpoint settlement confirms response delivery, not that the agent has
@@ -682,6 +739,10 @@ func (s *session) loop() {
 							pinnedModel = model
 						}
 					}
+					if step.Steer && len(steerAcks) > 0 {
+						steerAcks[0] <- nil
+						steerAcks = steerAcks[1:]
+					}
 					if step.Barrier {
 						barrierPassed = true
 						observe("barrier-passed", nil)
@@ -734,7 +795,7 @@ func (s *session) loop() {
 					retire(false)
 				}
 			}
-			if r.turn != nil && !r.cancel {
+			if r.turn != nil && !r.cancel && !r.steering {
 				if closing {
 					publish(r.turn, failure("cancelled"))
 				} else {
@@ -744,6 +805,11 @@ func (s *session) loop() {
 					if s.base.Observe != nil {
 						s.base.Observe(Transition{Kind: "turn-queued", Generation: generation, Turn: r.turn.number})
 					}
+				}
+			}
+			if r.steering {
+				if err := admitSteer(r); err != nil {
+					r.reply <- err
 				}
 			}
 			if r.cancel {

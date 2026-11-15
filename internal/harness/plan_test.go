@@ -67,6 +67,8 @@ func (c *planCodec) BeginTurn(TurnSpec) []Step {
 	}
 }
 func (*planCodec) CancelSequence() []Command { return []Command{{Name: "abort"}} }
+
+func (*planCodec) SteerCommand(string) (Command, bool) { return Command{}, false }
 func (c *planCodec) Encode(id string, command Command) ([]byte, error) {
 	if command.Name == "state" && !c.ready {
 		return nil, errors.New("state encoded before setup response")
@@ -199,6 +201,8 @@ func (*barrierCodec) BeginTurn(TurnSpec) []Step {
 	}
 }
 func (*barrierCodec) CancelSequence() []Command { return nil }
+
+func (*barrierCodec) SteerCommand(string) (Command, bool) { return Command{}, false }
 func (*barrierCodec) Encode(id string, command Command) ([]byte, error) {
 	return []byte(id + " " + command.Name + "\n"), nil
 }

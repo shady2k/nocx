@@ -100,6 +100,10 @@ func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 
 func (c *codec) CancelSequence() []harness.Command { return []harness.Command{{Name: "abort"}} }
 
+func (c *codec) SteerCommand(text string) (harness.Command, bool) {
+	return harness.Command{Name: "steer", Payload: protocol.Steer{Text: text}}, true
+}
+
 func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
 	wire := protocol.Command{ID: id, Name: command.Name}
 	switch command.Name {
@@ -115,6 +119,12 @@ func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
 			return nil, fmt.Errorf("fakeconnector: invalid prompt payload")
 		}
 		wire.Prompt = &prompt
+	case "steer":
+		steer, ok := command.Payload.(protocol.Steer)
+		if !ok {
+			return nil, fmt.Errorf("fakeconnector: invalid steer payload")
+		}
+		wire.Steer = &steer
 	}
 	raw, err := json.Marshal(wire)
 	return append(raw, '\n'), err

@@ -108,3 +108,18 @@ func TestEndDropsUsagePiFilledWithZeros(t *testing.T) {
 		t.Fatalf("events = %+v, want an end with no usage", events)
 	}
 }
+
+// A usage with only cache counters set is stated, not dropped.
+func TestEndKeepsCacheOnlyUsage(t *testing.T) {
+	d := newDecoder()
+	if _, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"stop","content":[{"type":"text","text":"answer"}],"usage":{"input":0,"output":0,"cacheRead":7,"cacheWrite":0}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	events, err := d([]byte(`{"type":"agent_settled","aborted":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].End == nil || events[0].End.Usage == nil || events[0].End.Usage.CacheReadTokens != 7 {
+		t.Fatalf("events = %+v, want an end keeping the cache-read usage", events)
+	}
+}

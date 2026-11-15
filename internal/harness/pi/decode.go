@@ -126,11 +126,11 @@ func newDecoder() func([]byte) ([]harness.Event, error) {
 
 // statedUsage drops a usage pi filled with zeros. pi 1.5.2 reports
 // {input:0, output:0, cacheRead:0, cacheWrite:0} when its provider sent no
-// usage at all, and an answer that ended normally cannot have taken zero
-// input and produced zero output, so all zeros means "not stated" and the
-// block shows nothing rather than three zeros.
+// usage at all. Only all four counters at zero read as "not stated" (the
+// block shows nothing rather than zeros); any nonzero counter, cache reads
+// alone included, is a stated usage and is kept.
 func statedUsage(u *harness.Usage) *harness.Usage {
-	if u == nil || (u.InputTokens == 0 && u.OutputTokens == 0) {
+	if u == nil || (u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0) {
 		return nil
 	}
 	return u

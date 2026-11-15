@@ -263,6 +263,9 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 	d.nextGeneration++
 	b.generation = d.nextGeneration
 	b.sessionID = ""
+	// This open owns the new shell; a previous attempt's loss must not
+	// launch a second open when this attempt connects.
+	b.lost = false
 	generation := b.generation
 	c := d.conns[connectionID]
 	if c == nil {
@@ -451,7 +454,11 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	for paneID := range c.panes {
 		if b := d.panes[paneID]; b != nil {
 			snaps = append(snaps, d.snapshotLocked(paneID, b, c))
-			if ev.State == proto.ConnectionReconnecting || ev.State == proto.ConnectionEnded || ev.State == proto.ConnectionFailed {
+			if ev.State == proto.ConnectionEnded && ev.Cause == "released" {
+				// Consent can release a probe-only hold before the first shell
+				// exists. Its retry opens the shell, not the return callback.
+				b.lost = false
+			} else if ev.State == proto.ConnectionReconnecting || ev.State == proto.ConnectionEnded || ev.State == proto.ConnectionFailed {
 				b.lost = true
 			}
 			if ev.State == proto.ConnectionConnected && b.lost && !b.replacing && b.shellFailure == nil {

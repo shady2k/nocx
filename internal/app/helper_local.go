@@ -1042,29 +1042,11 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
 	}
-	// THE PANE IS BOUND TO ITS CONNECTION BEFORE ANYTHING DIALS (design §5.5,
-	// §5.6). The helper derives the identity its own acquire will use from the
-	// destination, so this costs no socket and no credential question; what it
-	// buys is that the first observation of the dial — opening, at a stage —
-	// reaches the pane while the shell does not exist yet. Binding after the
-	// spawn would deliver exactly the news the pane was opened for to nobody.
-	var connectionID string
-	var bindingGeneration uint64
-	if cfg.PaneID != "" {
-		var cerr error
-		policy := "never"
-		if o.reconnectPolicy != nil {
-			policy = o.reconnectPolicy()
-		}
-		connectionID, cerr = spawn.client.BindConnection(ctx, ssh.WireDestination(target), cfg.PaneID, policy)
-		if cerr != nil {
-			return hostedSpawnResult{}, fmt.Errorf("name the ssh pane's connection: %w", cerr)
-		}
-		if driver := o.paneConnections(); driver != nil {
-			bindingGeneration = driver.Bind(cfg.PaneID, connectionID)
-			transport.BindPaneConnection(ctx, bindingGeneration)
-		}
+	binding, err := o.bindSSHConnection(ctx, cfg, spawn.client, target)
+	if err != nil {
+		return hostedSpawnResult{}, err
 	}
+	connectionID, bindingGeneration := binding.connectionID, binding.generation
 	// THE GENERATION THE LAUNCH NAMES HAS TO BE ON THE FAR SIDE BEFORE THE
 	// LAUNCH IS ASKED FOR (nocx-50w7p.21).
 	//
@@ -2043,6 +2025,42 @@ func (o *localHelperOpener) close() {
 	}
 }
 
+type sshPaneBinding struct {
+	client       *helperclient.Client
+	connectionID string
+	generation   uint64
+}
+
+type sshPaneBindingKey struct{}
+
+// bindSSHConnection binds both delivery routes before selection can dial,
+// deploy or start a far helper. The helper derives the identity its own acquire
+// uses without opening a socket, so the pane sees the first handshake stage
+// before its shell exists. The binding travels through fallback on the open's
+// context so the same open never binds twice.
+func (o *localHelperOpener) bindSSHConnection(ctx context.Context, cfg session.Config, client *helperclient.Client, target ssh.DialTarget) (sshPaneBinding, error) {
+	if binding, ok := ctx.Value(sshPaneBindingKey{}).(sshPaneBinding); ok && binding.client == client {
+		return binding, nil
+	}
+	if cfg.PaneID == "" {
+		return sshPaneBinding{}, nil
+	}
+	policy := "never"
+	if o.reconnectPolicy != nil {
+		policy = o.reconnectPolicy()
+	}
+	id, err := client.BindConnection(ctx, ssh.WireDestination(target), cfg.PaneID, policy)
+	if err != nil {
+		return sshPaneBinding{}, fmt.Errorf("name the ssh pane's connection: %w", err)
+	}
+	binding := sshPaneBinding{client: client, connectionID: id}
+	if driver := o.paneConnections(); driver != nil {
+		binding.generation = driver.Bind(cfg.PaneID, id)
+		transport.BindPaneConnection(ctx, binding.generation)
+	}
+	return binding, nil
+}
+
 // hostedOpeners is the one seam the transport asks, and the only thing in the
 // composition root that knows a destination has two possible helpers.
 //
@@ -2096,9 +2114,28 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 	if cfg.Kind == session.KindLocal {
 		return h.local.OpenHosted(ctx, cfg, claim)
 	}
+	var binding sshPaneBinding
+	if cfg.PaneID != "" && cfg.Remote != nil && h.local.paneConnections() != nil {
+		target, err := h.local.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
+		if err != nil {
+			return transport.HostedSessionOpen{}, true, err
+		}
+		client, _, err := h.local.connect(ctx)
+		if err != nil {
+			return transport.HostedSessionOpen{}, true, err
+		}
+		binding, err = h.local.bindSSHConnection(ctx, cfg, client, target)
+		if err != nil {
+			return transport.HostedSessionOpen{}, true, err
+		}
+		ctx = context.WithValue(ctx, sshPaneBindingKey{}, binding)
+	}
 	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
 	defer hold.release()
 	if selected {
+		if err == nil && opened.Session != nil && binding.connectionID != "" {
+			h.local.paneConnections().AdoptSession(cfg.PaneID, binding.connectionID, string(opened.Session.ID()), string(opened.Session.Identity().InstanceID), binding.generation)
+		}
 		return opened, true, err
 	}
 	return h.local.OpenHosted(ctx, cfg, claim)

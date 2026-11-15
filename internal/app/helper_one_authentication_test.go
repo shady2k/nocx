@@ -52,6 +52,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -258,11 +259,15 @@ func TestARefusedSpawnReleasesTheProbesLease(t *testing.T) {
 		t.Fatalf("the far host authenticated %d connection(s) for a refused open, want 1 — the probe dialed, and the spawn must not have dialed again", got)
 	}
 
-	// AND THE REFERENCE CAME BACK. The probe's lease was the last reference on
-	// the pooled connection, so releasing it closes the transport and the far
-	// side's own view of the connection ends. Waited on rather than slept on:
-	// the close is the observable, and a duration would be a guess about how
-	// long the helper takes to send it.
+	// A refused shell leaves its layout pane open for retry. The logical pane
+	// hold is released by the same PaneClosed route the transport calls when
+	// that pane leaves the layout, not by the failed spawn's probe release.
+	if got := srv.liveConns(); got != 1 {
+		t.Fatalf("failed pane retained %d connections, want 1 until pane closes", got)
+	}
+	owner := paneConnectionOwner{Driver: panedriver.New("refused-pane", nil), opener: stand.opener}
+	owner.PaneClosed("pane-refused")
+	// Once the pane is closed, the probe and logical hold must both be gone.
 	waittest.WaitForTimeout(t, "the far host's connection to close after the refused open", 30*time.Second,
 		func() bool { return srv.liveConns() == 0 })
 	t.Logf("MEASURED %d authentication(s) and %d connection(s) left open after a refused open",

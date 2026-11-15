@@ -105,32 +105,39 @@ func TestASilentConnectionReadsStalledWithinThirtySeconds(t *testing.T) {
 // connection"): ten minutes of blackhole on the injected clock, and the
 // connection is still there.
 func TestAPlainShellConnectionStaysOpenAfterTenMinutesOfSilence(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	clock.Advance(30 * time.Second)
-	waittest.WaitFor(t, "the connection to read stalled", func() bool {
-		return sup.Current().Kind == hostconn.Stalled
-	})
-	waittest.WaitFor(t, "the host's new connections to be answered", func() bool {
-		looks, _ := link.counters()
-		return looks > 0
-	})
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to read stalled", func() bool {
+			return sup.Current().Kind == hostconn.Stalled
+		})
+		waittest.WaitFor(t, "the host's new connections to be answered", func() bool {
+			looks, _ := link.counters()
+			return looks > 0
+		})
 
-	clock.Advance(10 * time.Minute)
-	// The state stays stalled and nobody closed the transport: waiting is the
-	// person's choice.
-	if got := sup.Current().Kind; got != hostconn.Stalled {
-		t.Fatalf("a stalled plain-shell connection reads %v after ten minutes, want stalled", got)
-	}
-	if lease.Lost() {
-		t.Fatal("a plain-shell connection was closed for silence")
-	}
-	link.release()
-	waittest.WaitFor(t, "the connection to answer again", func() bool {
-		return sup.Current().Kind == hostconn.Connected
+		synctest.Wait()
+		clock.Advance(10 * time.Minute)
+		synctest.Wait()
+		// The state stays stalled and nobody closed the transport: waiting is the
+		// person's choice.
+		if got := sup.Current().Kind; got != hostconn.Stalled {
+			t.Fatalf("a stalled plain-shell connection reads %v after ten minutes, want stalled", got)
+		}
+		if lease.Lost() {
+			t.Fatal("a plain-shell connection was closed for silence")
+		}
+		link.release()
+		waittest.WaitFor(t, "the connection to answer again", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
 	})
 }
 

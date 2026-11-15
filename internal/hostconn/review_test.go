@@ -212,29 +212,38 @@ func syncGuard(t *testing.T, sup *hostconn.Supervisor, queue func()) {
 // sleep answered about a machine that was already going away, so its answer is
 // not evidence that the connection is awake.
 func TestAnAnswerDoesNotClearALaterSleep(t *testing.T) {
-	clock := hostconntest.New()
-	link, _, mgr, sup := wakeStand(t, clock)
-	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	// The cadence's probe is sent and parks.
-	clock.Advance(hostconn.ProbeInterval)
-	waittest.WaitFor(t, "the probe", func() bool { return link.probeCalls.Load() == 1 })
+		// The cadence's probe is sent and parks.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "the probe", func() bool { return link.probeCalls.Load() == 1 })
 
-	// The sleep edge follows the probe's send.
-	clock.Advance(time.Second)
-	sup.Suspend(clock.Now())
-	waittest.WaitFor(t, "the suspension", lease.Suspended)
+		// The sleep edge follows the probe's send.
+		synctest.Wait()
+		clock.Advance(time.Second)
+		synctest.Wait()
+		sup.Suspend(clock.Now())
+		waittest.WaitFor(t, "the suspension", lease.Suspended)
 
-	// The parked probe answers; the connection is still going to sleep.
-	link.release()
-	waittest.WaitFor(t, "the answer", func() bool { return sup.Current().Kind == hostconn.Connected })
-	if !lease.Suspended() {
-		t.Fatal("a probe sent before the sleep treated its answer as a wake")
-	}
+		// The parked probe answers; the connection is still going to sleep.
+		link.release()
+		synctest.Wait()
+		waittest.WaitFor(t, "the answer", func() bool { return sup.Current().Kind == hostconn.Connected })
+		if !lease.Suspended() {
+			t.Fatal("a probe sent before the sleep treated its answer as a wake")
+		}
 
-	// The wake is what clears it.
-	sup.Wake(clock.Now() + monoclock.Nanos(time.Second))
-	waittest.WaitFor(t, "the wake", func() bool { return !lease.Suspended() })
+		// The wake is what clears it.
+		sup.Wake(clock.Now() + monoclock.Nanos(time.Second))
+		waittest.WaitFor(t, "the wake", func() bool { return !lease.Suspended() })
+	})
 }
 
 // TestAWakeDuringTheDialIsNotLost — finding 9: the five-second proof survives

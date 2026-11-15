@@ -127,26 +127,36 @@ func TestAParkedProbeIsNotDoubledByAWake(t *testing.T) {
 // TestAHelperOwnedConnectionWithoutAnAnswerAfterAWakeReconnects — thirty
 // seconds after the signal, and nothing is lost by closing it.
 func TestAHelperOwnedConnectionWithoutAnAnswerAfterAWakeReconnects(t *testing.T) {
-	clock := hostconntest.New()
-	link, wake, mgr, sup := wakeStand(t, clock)
-	lease := acquire(t, mgr, hostconn.HoldsNone)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link, wake, mgr, sup := wakeStand(t, clock)
+		defer wake.Close()
+		defer link.release()
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
 
-	wake.Wake()
-	waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
-	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
-	clock.Advance(hostconn.WakeProbeDeadline)
-	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		wake.Wake()
+		synctest.Wait()
+		waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
+		waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+		synctest.Wait()
+		clock.Advance(hostconn.WakeProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 
-	clock.Advance(hostconn.WakeCloseAfter)
-	waittest.WaitFor(t, "the connection to be closed after the wake", func() bool {
-		return sup.Current().Kind == hostconn.Reconnecting
+		synctest.Wait()
+		clock.Advance(hostconn.WakeCloseAfter)
+		synctest.Wait()
+		waittest.WaitFor(t, "the connection to be closed after the wake", func() bool {
+			return sup.Current().Kind == hostconn.Reconnecting
+		})
+		if got := sup.Current().Cause; got != hostconn.CauseSilence {
+			t.Fatalf("closed after a wake with cause %q, want %q", got, hostconn.CauseSilence)
+		}
+		if !lease.Lost() {
+			t.Fatal("the transport outlived the wake's close")
+		}
 	})
-	if got := sup.Current().Cause; got != hostconn.CauseSilence {
-		t.Fatalf("closed after a wake with cause %q, want %q", got, hostconn.CauseSilence)
-	}
-	if !lease.Lost() {
-		t.Fatal("the transport outlived the wake's close")
-	}
 }
 
 // TestAPlainShellConnectionStaysOpenAfterAWake — the person's terminal is not

@@ -97,40 +97,45 @@ func TestAWatchSeesThePathAndTheStateItIsIn(t *testing.T) {
 // host answers is named as evidence, and the parked probe's answer is connected
 // again.
 func TestAStalledFactCarriesTheLookAndReturnsOnTheAnswer(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
 
-	var log factLog
-	stop := sup.Watch(log.add)
-	defer stop()
+		var log factLog
+		stop := sup.Watch(log.add)
+		defer stop()
 
-	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
-	clock.Advance(30 * time.Second)
-	waittest.WaitForDetail(t, "the stalled observation with a look answered",
-		func() string { return fmt.Sprintf("facts: %+v", log.all()) },
-		func() bool {
-			_, ok := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Stalled && f.LookAnswered })
-			return ok
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		waittest.WaitForDetail(t, "the stalled observation with a look answered",
+			func() string { return fmt.Sprintf("facts: %+v", log.all()) },
+			func() bool {
+				_, ok := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Stalled && f.LookAnswered })
+				return ok
+			})
+		stalled, _ := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Stalled && f.LookAnswered })
+		if stalled.State.Silent != 15*time.Second {
+			t.Fatalf("stalled says silent=%v, want 15s", stalled.State.Silent)
+		}
+		if stalled.LookAnsweredFor < 0 {
+			t.Fatalf("lookAnsweredFor is negative: %v", stalled.LookAnsweredFor)
+		}
+		if stalled.PlainShells != 1 {
+			t.Fatalf("stalled says plainShells=%d, want 1", stalled.PlainShells)
+		}
+
+		// The parked probe is answered: the connection is whole again.
+		link.release()
+		waittest.WaitFor(t, "the return to connected", func() bool {
+			f, ok := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Connected })
+			return ok && f.State.Silent == 0
 		})
-	stalled, _ := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Stalled && f.LookAnswered })
-	if stalled.State.Silent != 15*time.Second {
-		t.Fatalf("stalled says silent=%v, want 15s", stalled.State.Silent)
-	}
-	if stalled.LookAnsweredFor < 0 {
-		t.Fatalf("lookAnsweredFor is negative: %v", stalled.LookAnsweredFor)
-	}
-	if stalled.PlainShells != 1 {
-		t.Fatalf("stalled says plainShells=%d, want 1", stalled.PlainShells)
-	}
-
-	// The parked probe is answered: the connection is whole again.
-	link.release()
-	waittest.WaitFor(t, "the return to connected", func() bool {
-		f, ok := log.find(func(f hostconn.Facts) bool { return f.State.Kind == hostconn.Connected })
-		return ok && f.State.Silent == 0
+		lease.Release()
 	})
-	lease.Release()
 }
 
 // TestASlowAnswerCarriesItsGrade: the measurement rides the fact, and the grade

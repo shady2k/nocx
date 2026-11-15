@@ -141,7 +141,10 @@ package coordinator
 // into the turn or kept for the next question — because the block draws each
 // one differently and a window built against 37 would read a flag that no
 // longer exists.
-const ProtocolVersion = 38
+// 39 (nocx-a62cl.6.3): agent.cancel and agent.runState carry droppedSteers —
+// the messages a cancelled turn's agent had queued and dropped — so a window
+// built against 38 would lose them instead of asking them next.
+const ProtocolVersion = 39
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

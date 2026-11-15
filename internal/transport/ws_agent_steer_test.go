@@ -318,3 +318,79 @@ func TestAgentSteer_DeclinesTheEgressQuestionAndEndsTheRun(t *testing.T) {
 		t.Fatal("the first prompt never reached the agent")
 	}
 }
+
+// A message pi (or any steering agent) had QUEUED and a cancel dropped is not
+// lost: the agent's own queue says what it removed, the cancelled turn hands
+// those back, and the wire carries them on the reserved cancel response and on
+// the runState so the block can ask them next (ADR-4khgzeyp decision 3).
+func TestAgentSteer_TheCancelNamesTheMessageTheAgentDropped(t *testing.T) {
+	h := newAskHarness(t, steerScript())
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "steer-ask-dropped", "sessionId": sid, "question": "what is in the log?", "cwd": "/repo",
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	h.waitHung()
+	const message = "ask the other thing instead"
+	steerResponse := jsonrpcCallWithID(t, h.conn, "agent.steer", map[string]any{"runId": res.RunID, "text": message}, 2)
+	var steered struct {
+		Result agentSteerResponse `json:"result"`
+		Error  *jsonrpcErrorObj   `json:"error"`
+	}
+	if err := json.Unmarshal(steerResponse, &steered); err != nil || steered.Error != nil {
+		t.Fatalf("agent.steer: %v %+v", err, steered.Error)
+	}
+	if steered.Result.Outcome != steerSteered {
+		t.Fatalf("agent.steer = %+v, want the agent to have taken the message", steered.Result)
+	}
+
+	raw, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 3)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("agent.cancel: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "agent.cancel.schema.json"), env.Result, "agent.cancel result (real socket)")
+	var cancelled agentCancelResponse
+	if err := json.Unmarshal(env.Result, &cancelled); err != nil {
+		t.Fatalf("decode agent.cancel result: %v", err)
+	}
+	if len(cancelled.DroppedSteers) != 1 || cancelled.DroppedSteers[0] != message {
+		t.Fatalf("agent.cancel droppedSteers = %v, want exactly the message the agent never used", cancelled.DroppedSteers)
+	}
+
+	// The notification says the same thing, because the block is drawn from it
+	// when it arrives first.
+	var state agentRunState
+	found := false
+	for _, notification := range notifications {
+		var candidate agentRunState
+		if json.Unmarshal(notification, &candidate) == nil && candidate.State == string(content.RunCancelled) {
+			state, found = candidate, true
+		}
+	}
+	if !found {
+		state = cancelledRunState(t, h)
+	}
+	if len(state.DroppedSteers) != 1 || state.DroppedSteers[0] != message {
+		t.Fatalf("runState droppedSteers = %v, want the same message", state.DroppedSteers)
+	}
+}
+
+// cancelledRunState reads the runState notification a test has not already seen.
+func cancelledRunState(t *testing.T, h *askHarness) agentRunState {
+	t.Helper()
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var state agentRunState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("agent.runState: %v", err)
+	}
+	return state
+}

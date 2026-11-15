@@ -100,11 +100,16 @@ type agentSteerParams struct {
 // only when this request closed a live run; an already-terminal or unknown
 // run is answered as an error rather than being reported as stopped.
 type agentCancelResponse struct {
-	RunID         int64    `json:"runId"`
-	State         string   `json:"state"`
-	Cancelled     bool     `json:"cancelled"`
-	Error         string   `json:"error,omitempty"`
-	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
+	RunID         int64  `json:"runId"`
+	State         string `json:"state"`
+	Cancelled     bool   `json:"cancelled"`
+	Error         string `json:"error,omitempty"`
+	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
+	// DroppedSteers are the person's messages the cancelled turn's agent had
+	// queued and dropped. The reserved response carries them as well as the
+	// runState notification, because that notification may be dropped under
+	// outbound pressure and these are messages a person must not lose.
+	DroppedSteers []string `json:"droppedSteers,omitempty"`
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
 }
 
@@ -174,6 +179,10 @@ type agentRunControl struct {
 	// replaced: a steer addresses the turn that is answering, and a turn that
 	// has ended refuses the message itself.
 	steerer agentharness.Steerer
+	// droppedSteers is what a cancelled turn's agent had queued and dropped:
+	// messages nobody used, which become the conversation's next questions
+	// (ADR-4khgzeyp decision 3). Set when the turn reports its terminal.
+	droppedSteers []string
 }
 
 type agentRunDrive struct {
@@ -444,6 +453,11 @@ type agentRunState struct {
 	Error         string            `json:"error,omitempty"`
 	DroppedDeltas int               `json:"droppedDeltas,omitempty"`
 	UnarmedBounds []string          `json:"unarmedBounds,omitempty"`
+	// DroppedSteers are the person's messages the cancelled turn's agent had
+	// queued and dropped: nobody used them, so they are asked as this
+	// conversation's next questions (ADR-4khgzeyp decision 3). Present only
+	// when at least one was dropped.
+	DroppedSteers []string `json:"droppedSteers,omitempty"`
 	// Notices are what the RUN must state about ITSELF — today, only that it
 	// stopped asking to widen a scope because it reached the bound on how
 	// often one answer may ask (design §5.3). A silent stop is the soft
@@ -1661,9 +1675,18 @@ stream:
 	}
 	stopDelivery()
 	outcome, err := turn.Wait(context.WithoutCancel(ctx))
+	// A cancelled turn hands back exactly the messages its agent had queued and
+	// dropped (ADR-4khgzeyp decision 3): they were never used, so the block says
+	// they are asked next and the renderer asks them. Read after Wait, which is
+	// when the agent has finished dropping them.
+	var dropped []string
+	if handback, ok := turn.(agentharness.SteerHandback); ok {
+		dropped = handback.DroppedSteers()
+	}
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		rc.control.answeringModel = outcome.Model
+		rc.control.droppedSteers = dropped
 		if u := outcome.Usage; u != nil {
 			rc.control.usage = &content.RunUsage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadTokens, CacheWrite: u.CacheWriteTokens}
 		}
@@ -1751,12 +1774,14 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	rc.control.mu.Lock()
 	cancelAccepted := rc.control.cancelled
 	actorTerminalState := rc.control.actorTerminalState
+	droppedSteers := append([]string(nil), rc.control.droppedSteers...)
 	rc.control.mu.Unlock()
 	result := agentCancelResponse{
 		RunID:         p.RunID,
 		State:         string(content.RunCancelled),
 		Cancelled:     cancelAccepted,
 		DroppedDeltas: rc.control.droppedDeltaCount(),
+		DroppedSteers: droppedSteers,
 		UnarmedBounds: unarmedRunLeaseSentences(rc),
 	}
 	if !cancelAccepted {
@@ -2422,9 +2447,11 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 	}
 	model := rc.model
 	var usage *content.RunUsage
+	var droppedSteers []string
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		usage = rc.control.usage
+		droppedSteers = append([]string(nil), rc.control.droppedSteers...)
 		if rc.control.answeringModel != "" {
 			model = rc.control.answeringModel
 		}
@@ -2460,6 +2487,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		RunID:         rc.runID,
 		State:         string(state),
 		DroppedDeltas: dropped,
+		DroppedSteers: droppedSteers,
 		UnarmedBounds: unarmedBounds,
 		Notices:       notices,
 	}

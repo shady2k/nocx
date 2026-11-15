@@ -169,7 +169,7 @@ import {
   type BlockRowsMetadata,
   type BlockRowsRead,
 } from './restore-client'
-import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { restoredBlock, restoredPersonMessage, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
   loadedRowRanges,
@@ -7337,6 +7337,12 @@ export class TerminalContent extends BasePaneContent {
             // body — or, when retention took it, as an empty block: the
             // run's notice is the turn's, said once (proseEvicted above).
             if (cause.kind === 'text') {
+              // THE PERSON'S OWN WORDS: a text child whose source is the person
+              // is the message they sent into the turn, drawn as the same kit
+              // line the live block drew (nocx-a62cl.6.4).
+              if (cause.source === 'user') {
+                return restoredPersonMessage(cause, childBody.get(cause.entryId) ?? null).root
+              }
               return restoredBlock(
                 {
                   ...factsOf(b),

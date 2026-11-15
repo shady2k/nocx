@@ -80,62 +80,55 @@ async function openPane(page: Page, shell: string, inputrc: string | null): Prom
     home: remoteHome,
     cwd: remoteHome,
     args: ['-input-log', logRoot, '-shell', shell],
-    startupTrace: true,
   })
-  try {
-    const sshDir = path.join(readStand().home, '.ssh')
-    mkdirSync(sshDir, { recursive: true, mode: 0o700 })
-    writeFileSync(path.join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
+  const sshDir = path.join(readStand().home, '.ssh')
+  mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+  writeFileSync(path.join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
 
-    const info = await resolveBackend(page)
-    const profileName = `e2e-framing-${shell}-${Date.now()}`
-    const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
-      type: 'ssh',
-      name: profileName,
-      options: {
-        host: fixture.host,
-        port: fixture.port,
-        user: 'e2e',
-        keyPath: fixture.userKey,
-        desiredMode: 'script',
-      },
-    })
-    await page.keyboard.press('Control+Shift+P')
-    const search = page.locator('.quick-connect__search input')
-    await expect(search).toBeVisible({ timeout: 30_000 })
-    await search.fill(profileName)
-    await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
-      timeout: 30_000,
-    })
-    await page.keyboard.press('Enter')
-    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 180_000 })
+  const info = await resolveBackend(page)
+  const profileName = `e2e-framing-${shell}-${Date.now()}`
+  const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
+    type: 'ssh',
+    name: profileName,
+    options: {
+      host: fixture.host,
+      port: fixture.port,
+      user: 'e2e',
+      keyPath: fixture.userKey,
+      desiredMode: 'script',
+    },
+  })
+  await page.keyboard.press('Control+Shift+P')
+  const search = page.locator('.quick-connect__search input')
+  await expect(search).toBeVisible({ timeout: 30_000 })
+  await search.fill(profileName)
+  await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.keyboard.press('Enter')
+  await expect(page.locator(EDITOR)).toBeVisible({ timeout: 180_000 })
 
-    await expect
-      .poll(() => fixture.lines().find((line) => line.startsWith('INPUTLOG=')) ?? '', {
-        timeout: 60_000,
-        message: 'the fixture never announced an input log for the ssh pane',
-      })
-      .not.toBe('')
-    const announced = fixture.lines().filter((line) => line.startsWith('INPUTLOG='))
-    expect(
-      announced,
-      `the fixture recorded ${announced.length} pty channels for this open; this spec reads the one ` +
-        'interactive shell, so it needs exactly one',
-    ).toHaveLength(1)
-    const logPath = announced[0].slice('INPUTLOG='.length).split(' ')[0]
-    // THE BASELINE IS TAKEN AT THE PROMPT, NOT AT THE ANNOUNCEMENT (nocx-evj4b.1.2,
-    // review round 3). The fixture announces its input log as soon as the channel
-    // starts, and the shell's own bootstrap input keeps arriving after that: a
-    // baseline sampled there left those bytes to be read as the first submit's
-    // input. The prompt is the last thing the open writes before a person can
-    // type, so it is where the person's bytes begin.
-    await promptReady(page)
-    return { fixture, profileId: created.id, logPath, openOffset: readFileSync(logPath).length }
-  } catch (error) {
-    console.error('SSH startup phases at open failure:\n' + fixture.startupTrace())
-    fixture.proc.kill('SIGKILL')
-    throw error
-  }
+  await expect
+    .poll(() => fixture.lines().find((line) => line.startsWith('INPUTLOG=')) ?? '', {
+      timeout: 60_000,
+      message: 'the fixture never announced an input log for the ssh pane',
+    })
+    .not.toBe('')
+  const announced = fixture.lines().filter((line) => line.startsWith('INPUTLOG='))
+  expect(
+    announced,
+    `the fixture recorded ${announced.length} pty channels for this open; this spec reads the one ` +
+      'interactive shell, so it needs exactly one',
+  ).toHaveLength(1)
+  const logPath = announced[0].slice('INPUTLOG='.length).split(' ')[0]
+  // THE BASELINE IS TAKEN AT THE PROMPT, NOT AT THE ANNOUNCEMENT (nocx-evj4b.1.2,
+  // review round 3). The fixture announces its input log as soon as the channel
+  // starts, and the shell's own bootstrap input keeps arriving after that: a
+  // baseline sampled there left those bytes to be read as the first submit's
+  // input. The prompt is the last thing the open writes before a person can
+  // type, so it is where the person's bytes begin.
+  await promptReady(page)
+  return { fixture, profileId: created.id, logPath, openOffset: readFileSync(logPath).length }
 }
 
 /** One submit through the composer: type the line and press Enter. */
@@ -214,7 +207,6 @@ for (const tc of CASES) {
         expectFraming(bytes, line, false, `submit ${i + 1} of ${SUBMITS}, ${tc.name}`)
       }
     } finally {
-      console.error('SSH startup phases before cleanup:\n' + stand.fixture.startupTrace())
       try {
         const info = await resolveBackend(page)
         await rpc(page, info, 'profiles.delete', { id: stand.profileId })

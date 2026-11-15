@@ -320,7 +320,7 @@ import (
 // and `nocx.posix` has no launch window at all.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 95248
+	measuredMaxPublishBytes = 93830
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

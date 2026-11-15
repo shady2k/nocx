@@ -158,9 +158,3 @@ killed by SIGINT is 130, recorded by `__nocx_agent_note_int` after every
 helper, its three call sites and the flag that scopes them; `nocx.zsh` did not
 (its wait polls with the `zselect` builtin and starts no child whose death could
 be read), `nocx.posix` has no launch window, and the worst path is unchanged.
-
-The 2026-11-15 startup-witness measurement is **95,248 bytes**, **1,418 bytes
-above** 93,830, and keeps the **63**-call maximum. The growth is the opt-in
-bash startup phase writer, handshake read markers and rc-source continuation;
-no additional filesystem seam operation was added to publishing. Measured with
-`go test -tags gtk3 ./internal/shellintegration -run '^TestMeasuredMaximumIsStill$'`.

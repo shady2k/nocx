@@ -13,20 +13,6 @@ __nocx_loaded=1
 __nocx_script_version=@NOCX_SCRIPT_VERSION@
 
 
-# Optional e2e startup witnesses use a pre-created private file, never the
-# lifecycle channel or tty. Only a closed phase vocabulary and shell PID leave
-# this shell; no startup content or lifecycle credentials are recorded.
-__nocx_startup_trace() {
-    [[ -n "${NOCX_STARTUP_TRACE:-}" && -f "$NOCX_STARTUP_TRACE" ]] || return 0
-    case "$1" in
-        accept_read_begin|accept_header_read_begin|accept_header_complete|accept_body_read_begin|accept_body_complete|accept_read_complete|source_returned|first_prompt_entered) ;;
-        *) return 0 ;;
-    esac
-    { builtin printf '%s %s\n' "$$" "$1" >> "$NOCX_STARTUP_TRACE"; } 2>/dev/null || :
-}
-__nocx_startup_handshake=0
-__nocx_startup_prompt_seen=0
-
 # --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
 #
 # The command lifecycle rides a channel that is not the tty; every envelope
@@ -320,20 +306,16 @@ __nocx_lc_wait_readable() {
 __nocx_lc_read_frame() {
     local __hdr __len LC_ALL=C __t="${1:-}"
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
-    [[ "$__nocx_startup_handshake" == 1 ]] && __nocx_startup_trace accept_header_read_begin
     __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1 | tr -d ' \n')"
     [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
-    [[ "$__nocx_startup_handshake" == 1 ]] && __nocx_startup_trace accept_header_complete
     __len=$(( 16#$__hdr ))
     (( __len > 0 && __len <= __nocx_lc_max_frame )) || return 1
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
-    [[ "$__nocx_startup_handshake" == 1 ]] && __nocx_startup_trace accept_body_read_begin
     __nocx_lc_frame="$(dd bs=1 count="$__len" 2>/dev/null <&"$__nocx_lc_fd")"
     # A frame whose bytes stopped short because dd died of the interrupt is the
     # interrupt, not a dead channel (nocx-ouru5.1.11): a window records it.
     __nocx_agent_note_int $?
     (( ${#__nocx_lc_frame} == __len )) || return 1
-    [[ "$__nocx_startup_handshake" == 1 ]] && __nocx_startup_trace accept_body_complete
     return 0
 }
 
@@ -493,14 +475,9 @@ __nocx_lc_init() {
     if ! __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'; then
         return 0
     fi
-    __nocx_startup_handshake=1
-    __nocx_startup_trace accept_read_begin
     if ! __nocx_lc_read_frame; then
-        __nocx_startup_handshake=0
         return 0
     fi
-    __nocx_startup_handshake=0
-    __nocx_startup_trace accept_read_complete
     # Three independent substring checks, not one ordered pattern: the
     # envelope's field order is the adapter's, and a case pattern like
     # *evt*dom* would silently reject a valid accept whose fields arrive in
@@ -1939,10 +1916,6 @@ __nocx_prompt_command() {
     # the flag instead. `local` cannot come first: it would reset $?.
     __nocx_prompt_exit=$?
     __nocx_in_prompt_command=1
-    if [[ "$__nocx_startup_prompt_seen" == 0 && "${BASH_SUBSHELL:-0}" == 0 ]]; then
-        __nocx_startup_prompt_seen=1
-        __nocx_startup_trace first_prompt_entered
-    fi
     __nocx_arm_extdebug
     local __nocx_exit=$__nocx_prompt_exit
     if [[ -n "${__nocx_nested_rc:-}" ]]; then

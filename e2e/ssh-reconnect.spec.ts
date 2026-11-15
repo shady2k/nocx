@@ -167,17 +167,16 @@ async function openConnection(page: Page, profileName: string): Promise<void> {
   await expect(page.locator(EDITOR)).toBeVisible({ timeout: 30_000 })
 }
 
-/** Run one command through the nocx editor and wait for its block. */
-async function runCommand(page: Page, command: string): Promise<void> {
+/** Wait for the shell's result, not the app-created submission block. */
+async function runCommand(page: Page, command: string, output: string): Promise<void> {
   const editor = page.locator(EDITOR)
   await editor.click()
   await editor.pressSequentially(command)
   await editor.press('Enter')
-  await expect(
-    page
-      .locator('.pane.active .cmd-block', { hasText: command.split(' ').at(-1) ?? command })
-      .first(),
-  ).toBeVisible({ timeout: 30_000 })
+  const block = page.locator('.pane.active .cmd-block', { hasText: command }).first()
+  await expect(block).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
+  await expect(block).not.toHaveClass(/cmd-block-running/)
+  await expect(block.locator(':scope > .cmd-output')).toContainText(output)
 }
 
 interface Wired {
@@ -193,7 +192,7 @@ interface Wired {
  * test can change.
  */
 async function wire(page: Page, home: string): Promise<Wired> {
-  const fixture = await startSshd({ home, cwd: home, startupTrace: true })
+  const fixture = await startSshd({ home, cwd: home })
   const proxy = await startFaultProxy(fixture.host, fixture.port)
   trustHostKey(knownHostsFor(fixture, proxy.port))
 
@@ -233,7 +232,6 @@ async function unwire(page: Page, w: Wired | null): Promise<void> {
   } catch {
     // A cleanup that throws would replace the real failure with its own.
   }
-  console.error('SSH startup phases before reconnect cleanup:\n' + w.fixture.startupTrace())
   await w.proxy.close()
   w.fixture.proc.kill('SIGKILL')
 }
@@ -253,12 +251,10 @@ test('a silently dead connection is reported to the pane, and the shell is not t
 
     // Work the dead connection will have done. Its output is what must stay
     // readable: the design keeps the shell, so nothing may take it away.
-    await runCommand(page, 'echo before-the-loss')
-    // And the shell is back at its prompt before the network dies — the
-    // composer is the product's own statement that it is, and a command still
-    // running when the silence starts would make "the block is still here"
-    // describe a block that had not finished rather than a shell that
-    // survived.
+    await runCommand(page, 'echo before-the-loss', 'before-the-loss')
+    // runCommand observed the shell's completion and stored output before
+    // the whole SSH connection is blackholed. Visibility alone can still
+    // describe the pre-submission editor.
     await expect(page.locator(EDITOR)).toBeVisible()
 
     const tabsBeforeLoss = await page.locator(TAB).count()
@@ -363,7 +359,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     await openConnection(page, w.profileName)
 
     // Work the dead session will have done. Its output is what must survive.
-    await runCommand(page, 'echo before-the-loss')
+    await runCommand(page, 'echo before-the-loss', 'before-the-loss')
 
     const tabsBeforeLoss = await page.locator(TAB).count()
 
@@ -435,7 +431,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     // A working shell at the same endpoint: the prompt returns and a command
     // runs on it.
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 60_000 })
-    await runCommand(page, 'echo after-the-reconnect')
+    await runCommand(page, 'echo after-the-reconnect', 'after-the-reconnect')
 
     // And the whole point of doing it this way: the dead session's work is
     // still readable, with a divider saying where it ended.
@@ -494,7 +490,7 @@ test('a host that is merely answering late is marked slow and offered nothing', 
 
     // And it is still a shell, which is what makes "slow, not gone" a
     // statement about the product rather than about the indicator.
-    await runCommand(page, 'echo still-working')
+    await runCommand(page, 'echo still-working', 'still-working')
 
     // Recovery clears it: the grade leaves at a lower threshold than it
     // enters, so a link that improves stops being described as struggling.

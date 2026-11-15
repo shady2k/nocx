@@ -13,6 +13,7 @@ import type { CollisionLabels } from '../ui/collision-dialog'
 import type { CodeBlockCopy } from '../ui/code-block'
 import type { SecretChipTitles } from '../ui/secret-chip'
 import type { BlockReceiptLabels } from '../ui/block-receipt'
+import type { PersonMessageLabels } from '../ui/person-message'
 import type { FileReadoutLabels } from '../ui/file-readout'
 import type { FolderPickerLabels } from '../ui/folder-picker'
 
@@ -67,6 +68,12 @@ export const blockReceiptLabels = (): BlockReceiptLabels => ({
   dismissAria: (kindLabel) =>
     t('kit.blockReceipt.dismissAria', 'do not save this {kind}', { kind: kindLabel }),
   save: (count) => tPlural('kit.blockReceipt.save', count, 'Save {count}'),
+})
+
+/** The words a person's in-turn message draws (ui/person-message.ts). */
+export const personMessageLabels = (): PersonMessageLabels => ({
+  label: t('kit.personMessage.label', 'You'),
+  aria: t('kit.personMessage.aria', 'your message while the answer was written'),
 })
 
 export const folderPickerLabels = (): FolderPickerLabels => ({

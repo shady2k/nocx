@@ -9,10 +9,25 @@ import { BlockNotice } from './ui/block-notice'
 class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
   private subs = new Map<string, (params: unknown) => void>()
+  private refusals = new Map<string, string>()
   next = { run: 7, answerEntry: 'answer-1' }
+
+  /** The next call of `method` answers with an error, as a backend refusal. */
+  refuse(method: string, message: string): void {
+    this.refusals.set(method, message)
+  }
 
   call<T = unknown>(method: string, params: unknown): Promise<T> {
     this.calls.push({ method, params })
+    const refusal = this.refusals.get(method)
+    if (refusal !== undefined) {
+      this.refusals.delete(method)
+      return Promise.reject(new Error(refusal))
+    }
+    if (method === 'agent.steer') {
+      const { runId } = params as { runId: number }
+      return Promise.resolve({ runId, steered: true }) as Promise<T>
+    }
     if (method === 'agent.ask') {
       const res = {
         runId: this.next.run,
@@ -60,6 +75,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     toolCall: vi.fn(),
     reasoning: vi.fn(),
     notice: vi.fn(() => new BlockNotice({ text: '' })),
+    steer: vi.fn(),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
@@ -68,6 +84,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     cancel: vi.fn(() =>
       Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
     ),
+    steer: (runId: number, text: string) => dispatcher.call('agent.steer', { runId, text }),
     sessionId: () => 'session-a',
     cwd: () => '/repo',
     grants: () => grants,
@@ -317,6 +334,7 @@ describe('AgentInputTarget', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -334,6 +352,7 @@ describe('AgentInputTarget', () => {
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
       openAnswer: vi.fn(
         (_question: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
@@ -378,6 +397,7 @@ describe('AgentInputTarget', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -400,6 +420,7 @@ describe('AgentInputTarget', () => {
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
       openAnswer: vi.fn(
         (_q: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
@@ -476,6 +497,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -486,6 +508,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
       openAnswer,
       onRefusal: vi.fn(),
@@ -518,6 +541,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -529,6 +553,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
       openAnswer,
       onRefusal,
@@ -562,6 +587,7 @@ describe('AgentInputTarget refusal', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const onRefusal = vi.fn()
@@ -572,6 +598,7 @@ describe('AgentInputTarget refusal', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
       openAnswer: () => handle,
       onRefusal,
@@ -838,6 +865,7 @@ it('opens agent settings before allocating an answer or calling ask when no agen
     cancel: vi.fn(),
     sessionId: () => 'session-a',
     cwd: () => '/repo',
+    steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
     grants: () => [],
     openAnswer,
     onRefusal: vi.fn(),
@@ -847,4 +875,43 @@ it('opens agent settings before allocating an answer or calling ask when no agen
   expect(ensureReady).toHaveBeenCalledOnce()
   expect(openAnswer).not.toHaveBeenCalled()
   expect(dispatcher.calls).toEqual([])
+})
+
+describe('AgentInputTarget steering (nocx-a62cl.6.1)', () => {
+  it('sends a message typed while the turn runs as agent.steer, not a second ask', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('what is in the log?')
+
+    await target.submit('also check the second log')
+
+    const steer = dispatcher.calls.find((call) => call.method === 'agent.steer')
+    expect(steer!.params).toEqual({ runId: 7, text: 'also check the second log' })
+    expect(dispatcher.calls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
+    // The same turn shows it: no second answer block, and the message lands in
+    // the block that is still being written.
+    expect(handle.steer).toHaveBeenCalledWith('also check the second log')
+    expect(target).toBeDefined()
+  })
+
+  it('asks again once the turn has ended', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('first question')
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+
+    await target.submit('second question')
+
+    expect(dispatcher.calls.filter((call) => call.method === 'agent.ask')).toHaveLength(2)
+    expect(dispatcher.calls.some((call) => call.method === 'agent.steer')).toBe(false)
+  })
+
+  it('says so when the message could not be delivered, and does not draw it', async () => {
+    const { dispatcher, handle, onRefusal, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.refuse('agent.steer', 'harness: the turn is not running')
+
+    await expect(target.submit('too late')).rejects.toThrow('the turn is not running')
+
+    expect(onRefusal).toHaveBeenCalledWith('harness: the turn is not running')
+    expect(handle.steer).not.toHaveBeenCalled()
+  })
 })

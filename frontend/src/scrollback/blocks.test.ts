@@ -2688,6 +2688,24 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.textContent).not.toContain('sess-9bb9')
   })
 
+  it('draws a person\u2019s message in the seat they sent it, and the answer goes on below', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('what went wrong?', '/')
+    h.append('let me look')
+    h.steer('also check the second log')
+    h.append('line 3 is wrong')
+    // The message is between the prose written before it and the prose written
+    // after: one turn, one block, and the position in the flow is the claim
+    // about when the person spoke (ADR-anntnxdj decision 4).
+    expect(flowOf(h)).toEqual(['text:let me look', 'ui-person-message', 'text:line 3 is wrong'])
+    expect(h.el.querySelector('.ui-person-message__text')?.textContent).toBe(
+      'also check the second log',
+    )
+    // The label says whose words these are, so the line cannot be read as the
+    // answer's own.
+    expect(h.el.querySelector('.ui-person-message__label')?.textContent).toBe('You')
+  })
+
   it('renders one child per call id, however many times the backend announces it', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

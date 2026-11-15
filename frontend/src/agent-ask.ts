@@ -7,6 +7,7 @@ import type { Extension } from '@codemirror/state'
 import { Dispatcher } from './dispatcher'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCancel } from './generated/agent.cancel'
+import type { AgentSteer } from './generated/agent.steer'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunReasoning } from './generated/agent.runReasoning'
 import type { AgentRunToolCall } from './generated/agent.runToolCall'
@@ -27,6 +28,10 @@ export interface AgentAskSeams {
   grants: () => ReadonlyArray<GrantBlock>
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
+  /** Deliver a person's message into the turn that is answering, and answer
+   *  once the agent took it. The message is delivered, not queued as a new
+   *  question: the agent still holds the conversation. */
+  steer: (runId: number, text: string) => Promise<AgentSteer>
   onRefusal: (message: string) => void
   /** Called only after the backend accepts the turn, so a speculative
    *  overlay can change presentation without hiding itself on refusal. */
@@ -86,6 +91,15 @@ export class AgentInputTarget implements InputTarget {
       throw new Error('The answering agent is not ready')
     }
     this.ensureSubscribed()
+    // A turn is running in this pane's conversation: the person is speaking to
+    // the agent that is answering, not asking a new question (ADR-anntnxdj
+    // decision 4). One turn, one block — the message lands in the block being
+    // written, at the point in the answer where it was sent.
+    const answering = this.runningRun()
+    if (answering !== null) {
+      await this.steer(answering.runId, answering.handle, doc)
+      return
+    }
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
     const attachedContent = this.seams
@@ -143,6 +157,31 @@ export class AgentInputTarget implements InputTarget {
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
     this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
+  }
+
+  /** The conversation's live turn, if one is being answered. The pane's runs
+   *  are the pane's conversation (§ conversation = the pane), and a run leaves
+   *  this map at its terminal, so what is found here is a turn still running. */
+  private runningRun(): { runId: number; handle: AnswerBlockHandle } | null {
+    for (const [runId, run] of this.runs) {
+      return { runId, handle: run.handle }
+    }
+    return null
+  }
+
+  /** Hand the person's message to the running turn. It is drawn only after the
+   *  agent took it: a message a turn ended under is refused by the backend,
+   *  and a block that had already shown it would be claiming a delivery that
+   *  never happened. */
+  private async steer(runId: number, handle: AnswerBlockHandle, text: string): Promise<void> {
+    try {
+      await this.seams.steer(runId, text)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.seams.onRefusal(message)
+      throw err
+    }
+    handle.steer(text)
   }
 
   private settleRun(

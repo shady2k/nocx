@@ -14,6 +14,7 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import { BlockNotice, type BlockNoticeState } from '../ui/block-notice'
+import { PersonMessage } from '../ui/person-message'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
 import { findReferences } from '../secret-reference'
@@ -42,7 +43,7 @@ import type { CommandAuthor } from '../command-ledger'
 import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
-import { secretChipTitles } from '../i18n/kit-labels'
+import { personMessageLabels, secretChipTitles } from '../i18n/kit-labels'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
@@ -492,6 +493,16 @@ export interface AnswerBlockHandle {
    *  The notice is handed back so the caller can restate it in place when
    *  an action changes what it says. */
   notice(this: void, state: BlockNoticeState): BlockNotice
+  /** Draw a message the PERSON sent while this turn was being written, in the
+   *  seat it was sent at — one turn, one block (ADR-anntnxdj decision 4). The
+   *  run of prose in flight is ended first, so the model's next words open a
+   *  new run BELOW it rather than continuing one above it and reading as
+   *  though they came first.
+   *
+   *  Only a delivered message is drawn: the surface calls this after the
+   *  backend says the agent took it, so a message the turn ended under never
+   *  appears in a block that cannot act on it. */
+  steer(this: void, text: string): void
   /** Close the block: success, failure with a renderable reason, or the
    *  distinct cancelled outcome shown as "stopped". */
   close(
@@ -3912,6 +3923,14 @@ export class BlockManager {
         // thing written will land.
         showTyping()
         return drawn
+      },
+      steer(text: string): void {
+        if (text === '') return
+        endProse()
+        const drawn = new PersonMessage(text, personMessageLabels())
+        children.appendChild(drawn.root)
+        own(drawn.root)
+        showTyping()
       },
       reasoning(text: string): void {
         if (text === '') return

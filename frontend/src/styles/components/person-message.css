@@ -1,0 +1,29 @@
+/* PersonMessage (ui/README table) — words the person sent into a turn that is
+   still being written, in the seat where they were sent. This file owns the
+   ui-person-message identity family only; colours are tokens, no literals. */
+.ui-person-message {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 4px 0 4px 10px;
+  /* The rule down the left is what sets it apart from the answer's prose: it
+     marks a different speaker, not another paragraph of the same one. */
+  border-left: 2px solid var(--color-accent);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.ui-person-message__label {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.ui-person-message__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* As typed: the person's own lines break where they made them. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

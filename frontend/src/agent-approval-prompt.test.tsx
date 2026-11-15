@@ -1342,6 +1342,7 @@ describe('AgentApprovalPrompt — the receipt a standing answer earns', () => {
       cancel: vi.fn(() =>
         Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
       ),
+      steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       sessionId: () => 'session-a',
       cwd: () => '/repo',
       grants: () => [],

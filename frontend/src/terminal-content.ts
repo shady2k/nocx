@@ -3772,6 +3772,7 @@ export class TerminalContent extends BasePaneContent {
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
         cancel: (runId) => agentClient.cancel(runId),
+        steer: (runId, text) => agentClient.steer(runId, text),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
         // The ask's payload is the whole-block grants plus the renderer-owned

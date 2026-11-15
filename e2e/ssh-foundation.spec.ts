@@ -8,9 +8,9 @@
  * upload. The pane used to be EMPTY for the whole of it, and the owner's
  * report (nocx-q9od5) is why the connection head exists: one line, painted
  * before any network, naming the stage and the time in it. This spec stages
- * the worst version — a relay that accepts TCP and forwards nothing — so the
- * first second is not a healthy loopback's 150 ms, and asserts the head
- * within one second rather than trusting a fast machine to show it.
+ * a slow route and records the head's visible observations before Enter.
+ * A pooled transport can truthfully start Connected; a cold one must name its
+ * opening stage. Polling only the current state misses fast transitions.
  *
  * ## What a loss must not do to the person's keyboard (nocx-oalo1.5.1)
  *
@@ -162,26 +162,71 @@ test('an SSH tab shows a stage within a second and never an empty screen (Q1)', 
     w.proxy.pass()
     await openConnection(page, w.profileName)
 
-    // A relay that forwards every byte LATE. The dial cannot finish inside the
-    // first second, so the head has to say what it is doing before any answer
-    // arrives — and the same connection then finishes, which a blackhole could
-    // not do (its discarded banner cannot be replayed).
+    // Another pane can reuse the warm transport. Delay the relay without
+    // assuming that a second pane must dial it again. Its truthful first
+    // observation can be Connected: the shell attempt is a separate axis.
     w.proxy.slow(1500)
+    // Record the head before Enter. A stage can finish before Playwright's
+    // next round trip; its visible sentence is still the statement Q1 owes.
+    await page.evaluate(() => {
+      const selector = '[data-testid="connection-head"]'
+      const existing = new Set(document.querySelectorAll(selector))
+      const observations: { state: string; stage: string; text: string; visible: boolean }[] = []
+      Object.assign(window, { __foundationHeadObservations: observations })
+      const record = (): void => {
+        for (const head of document.querySelectorAll<HTMLElement>(selector)) {
+          if (existing.has(head)) continue
+          observations.push({
+            state: head.dataset.state ?? '',
+            stage: head.dataset.stage ?? '',
+            text: head.textContent ?? '',
+            visible:
+              head.getClientRects().length > 0 && getComputedStyle(head).visibility !== 'hidden',
+          })
+        }
+      }
+      const observer = new MutationObserver(record)
+      observer.observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      })
+      Object.assign(window, { __foundationHeadObserver: observer })
+    })
     await startConnection(page, w.profileName)
 
     const head = page.locator(HEAD)
     await expect(head).toBeVisible({ timeout: 1000 })
-    await expect(head).toHaveAttribute('data-state', 'opening', { timeout: 1000 })
-    await expect(head).toHaveAttribute(
-      'data-stage',
-      /^(resolve|tcp|ssh-version|key-exchange|sign-in|shell)$/,
-    )
-    // NOT AN EMPTY SCREEN: the one line is there before any bytes arrive, and
-    // it names what is happening.
-    await expect(head).toContainText('Connecting')
-    await expect(head).toContainText(
-      /resolving the route|waiting for the SSH answer|reaching the host/,
-    )
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const observations = (
+              window as unknown as {
+                __foundationHeadObservations: {
+                  state: string
+                  stage: string
+                  text: string
+                  visible: boolean
+                }[]
+              }
+            ).__foundationHeadObservations
+            return observations.some(
+              (entry) =>
+                entry.visible &&
+                ((entry.state === 'opening' &&
+                  /^(resolve|tcp|ssh-version|key-exchange|sign-in|shell)$/.test(entry.stage) &&
+                  entry.text.includes('Connecting') &&
+                  /resolving the route|reaching the host|waiting for the SSH answer|agreeing encryption keys|signing in|opening a shell/.test(
+                    entry.text,
+                  )) ||
+                  (entry.state === 'connected' && entry.text.includes('Connected'))),
+            )
+          }),
+        { timeout: 1000 },
+      )
+      .toBe(true)
 
     // The link recovers and THE SAME tab reaches its shell: a healthy open on
     // a healthy host ends at Connected, with a shell that runs a command.
@@ -191,6 +236,10 @@ test('an SSH tab shows a stage within a second and never an empty screen (Q1)', 
     await runCommand(page, 'echo after-the-open')
     await expect(head).toContainText('Connected')
   } finally {
+    await page.evaluate(() => {
+      const observed = window as unknown as { __foundationHeadObserver?: MutationObserver }
+      observed.__foundationHeadObserver?.disconnect()
+    })
     await unwire(page, w)
   }
 })

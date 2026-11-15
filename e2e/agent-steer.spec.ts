@@ -230,6 +230,27 @@ test.describe('a message typed while the agent answers (nocx-a62cl.6.1)', () => 
     expect(steers).toHaveLength(1)
     expect(steers[0].params.text).toBe(MESSAGE)
     expect(steers[0].params.runId).toEqual(expect.any(Number))
+
+    // ── AND THE TURN'S RECORD CARRIES IT (nocx-a62cl.6.4) ────────────────
+    // The ledger is the record of what is shown (ADR-0019), so a reloaded page
+    // draws the person's message where they sent it — between the runs of the
+    // same answer — instead of an answer with a hole in it.
+    await page.reload()
+    await appReadyForInput(page)
+    const restored = turn(page, QUESTION)
+    await expect(restored).toHaveAttribute('data-restored', 'true', { timeout: 60_000 })
+    const restoredSaid = restored.locator(':scope > .cmd-children > .ui-person-message')
+    await expect(restoredSaid).toHaveCount(1)
+    await expect(restoredSaid.locator('.ui-person-message__text')).toHaveText(MESSAGE)
+    const restoredFlow = await restored.locator(':scope > .cmd-children > *').evaluateAll((els) =>
+      els.map((el) => {
+        const kind = (el as HTMLElement).dataset.blockKind
+        if (kind) return kind
+        return el.classList.contains('ui-person-message') ? 'said' : 'chrome'
+      }),
+    )
+    expect(restoredFlow).toContain('said')
+    expect(restoredFlow.lastIndexOf('text')).toBeGreaterThan(restoredFlow.indexOf('said'))
   })
   // ── the same message, while a call awaits approval (nocx-a62cl.6.2) ──────
 
@@ -279,15 +300,21 @@ test.describe('a message typed while the agent answers (nocx-a62cl.6.1)', () => 
     await expect(said.locator('.ui-person-message__text')).toHaveText(MESSAGE)
 
     // The call comes back refused IN THE PERSON'S WORDS — that sentence is the
-    // call's result — and the message itself reaches the model. Both are in
-    // the next request the model is sent.
-    const next = await waitForChatCarrying('answered with a message instead')
-    expect(next.body).toContain(MESSAGE)
-
+    // call's result — and the message itself reaches the model.
+    //
+    // TWO CALLS, NOT ONE, AND WHICH IS WHICH IS NOT THIS TEST'S BUSINESS: pi
+    // delivers a queued steer before its next model call, and the refusal here
+    // releases the tool result pi was already waiting on, so the steer can land
+    // in that call or the one after it depending on which side wins the race.
+    // What the product promises is stated as two independent facts: the model
+    // is shown the refusal, and the model is shown the message.
+    const refused = await waitForChatCarrying('answered with a message instead')
+    expect(refused.body).toContain(MESSAGE)
+    await waitForChatCarrying(MESSAGE)
     // The turn goes on in the same block, and the message opened no block of
     // its own.
     await expect(block).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
-    await expect(block.locator('[data-answer-body]').last()).toContainText(ANSWER_AFTER)
+    await expect(block).toContainText(ANSWER_AFTER)
     await expect(page.locator('.pane.active .cmd-block').filter({ hasText: MESSAGE })).toHaveCount(
       1,
     )

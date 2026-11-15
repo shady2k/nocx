@@ -135,7 +135,9 @@ package coordinator
 // 34: agent.status reports harness readiness instead of endpoint health.
 // 35 (nocx-a62cl.5.6): endpoints and agent.dump leave the control plane.
 // 36 (nocx-a62cl.13.1): agent.runState carries the agent's stated token usage.
-const ProtocolVersion = 36
+// 37 (nocx-oalo1.5.5): the merged SSH foundation adds pane.connection,
+// pane.reconnect and pane.opened, and retires session.liveness.
+const ProtocolVersion = 37
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

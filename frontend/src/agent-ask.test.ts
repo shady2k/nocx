@@ -79,6 +79,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
+  const consumeGrants = vi.fn()
   const target = new AgentInputTarget({
     dispatcher: dispatcher as never,
     cancel: vi.fn(() =>
@@ -88,10 +89,11 @@ function makeTarget(grants: GrantBlock[] = []) {
     sessionId: () => 'session-a',
     cwd: () => '/repo',
     grants: () => grants,
+    consumeGrants,
     openAnswer: vi.fn(() => handle),
     onRefusal,
   })
-  return { dispatcher, handle, onRefusal, target }
+  return { dispatcher, handle, onRefusal, consumeGrants, target }
 }
 
 describe('AgentInputTarget', () => {
@@ -104,7 +106,7 @@ describe('AgentInputTarget', () => {
   })
 
   it('sends whole-block and row-window grant facts on the ask payload', async () => {
-    const { dispatcher, handle, target } = makeTarget([
+    const { dispatcher, handle, consumeGrants, target } = makeTarget([
       grant('item-1', 'git status', 'running'),
       grant('item-2', 'npm test', 'exited', { start: 4, count: 3 }),
     ])
@@ -129,6 +131,9 @@ describe('AgentInputTarget', () => {
     ])
     expect(ask!.params).not.toHaveProperty('rows')
     expect(handle.el.dataset.entryId).toBe('answer-1')
+    // The question carried the marks, so it takes them: the chip a person
+    // sees before pressing Enter is spent by the question that used it.
+    expect(consumeGrants).toHaveBeenCalledTimes(1)
   })
   it('preserves automatic frozen-frame provenance on the ask payload', async () => {
     const frozen = { ...grant('frame-1', 'top', 'running'), automatic: true as const }
@@ -354,6 +359,7 @@ describe('AgentInputTarget', () => {
       cwd: () => '/repo',
       steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: vi.fn(
         (_question: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
           actions = provided
@@ -422,6 +428,7 @@ describe('AgentInputTarget', () => {
       cwd: () => '/repo',
       steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: vi.fn(
         (_q: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
           actions = provided
@@ -510,6 +517,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       cwd: () => '/',
       steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer,
       onRefusal: vi.fn(),
     })
@@ -555,6 +563,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       cwd: () => '/',
       steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer,
       onRefusal,
     })
@@ -600,6 +609,7 @@ describe('AgentInputTarget refusal', () => {
       cwd: () => '/',
       steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: () => handle,
       onRefusal,
     })
@@ -867,6 +877,7 @@ it('opens agent settings before allocating an answer or calling ask when no agen
     cwd: () => '/repo',
     steer: vi.fn(() => Promise.resolve({ runId: 0, steered: true as const })),
     grants: () => [],
+    consumeGrants: vi.fn(),
     openAnswer,
     onRefusal: vi.fn(),
     ensureReady,
@@ -879,8 +890,11 @@ it('opens agent settings before allocating an answer or calling ask when no agen
 
 describe('AgentInputTarget steering (nocx-a62cl.6.1)', () => {
   it('sends a message typed while the turn runs as agent.steer, not a second ask', async () => {
-    const { dispatcher, handle, target } = makeTarget()
+    const { dispatcher, handle, consumeGrants, target } = makeTarget()
     await target.submit('what is in the log?')
+    // The question spent the marks it carried; from here the pane is clear,
+    // so anything taken below was taken by the steer.
+    consumeGrants.mockClear()
 
     await target.submit('also check the second log')
 
@@ -890,7 +904,10 @@ describe('AgentInputTarget steering (nocx-a62cl.6.1)', () => {
     // The same turn shows it: no second answer block, and the message lands in
     // the block that is still being written.
     expect(handle.steer).toHaveBeenCalledWith('also check the second log')
-    expect(target).toBeDefined()
+    // The marks the person made belong to their next QUESTION: this submit
+    // carried none of them, so dropping them would throw away a choice
+    // nothing used.
+    expect(consumeGrants).not.toHaveBeenCalled()
   })
 
   it('asks again once the turn has ended', async () => {

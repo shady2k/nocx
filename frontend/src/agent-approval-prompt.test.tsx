@@ -1346,6 +1346,7 @@ describe('AgentApprovalPrompt — the receipt a standing answer earns', () => {
       sessionId: () => 'session-a',
       cwd: () => '/repo',
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: (question, cwd, running) => manager.addAnswerBlock(question, cwd, running),
       onRefusal: vi.fn(),
       openPermissions,

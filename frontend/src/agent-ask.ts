@@ -26,6 +26,11 @@ export interface AgentAskSeams {
   cancel: (runId: number) => Promise<AgentCancel>
   sessionId: () => string
   grants: () => ReadonlyArray<GrantBlock>
+  /** Take the marks the question carried. A message sent into a running turn
+   *  carries none — it reaches an agent that already holds the conversation —
+   *  so the marks stay for the next question rather than being dropped by a
+   *  submit that never used them. */
+  consumeGrants: () => void
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
   /** Deliver a person's message into the turn that is answering, and answer
@@ -153,6 +158,8 @@ export class AgentInputTarget implements InputTarget {
         throw err
       })
     this.seams.onTurnAccepted?.(askId)
+    // The question took the marks it rode with it; nothing else claims them.
+    this.seams.consumeGrants()
     runId = ask.runId
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model

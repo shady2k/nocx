@@ -141,7 +141,12 @@ import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
 import { openBlockMenuAt } from './scrollback/blocks'
-import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
+import type {
+  AnswerBlockHandle,
+  AnswerToolCall,
+  BlockRecord,
+  RunningBlockActions,
+} from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -3875,10 +3880,11 @@ export class TerminalContent extends BasePaneContent {
               status: 'success' | 'failure' | 'cancelled',
               error?: string,
               model?: string,
+              usage?: Parameters<AnswerBlockHandle['close']>[3],
             ) => {
               if (this._liveAnswer?.el === handle.el) this._liveAnswer = null
               this._mutateSummonAnswers(() => {
-                handle.close(status, error, model)
+                handle.close(status, error, model, usage)
                 this._terminalizeSummonedAnswer(handle.el)
               })
               this.scrollback?.scrollToBottom()
@@ -7315,6 +7321,8 @@ export class TerminalContent extends BasePaneContent {
           {
             ...factsOf(b),
             proseEvicted: restored?.proseEvicted ?? false,
+            model: restored?.runFacts?.model,
+            usage: restored?.runFacts?.usage,
             causes: restored?.caused ?? [],
           },
           snapshot,

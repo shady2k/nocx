@@ -156,11 +156,17 @@ type ledgerGapWire struct {
 	Reason string `json:"reason"`
 }
 
+type ledgerRunFactsWire struct {
+	Model string            `json:"model,omitempty"`
+	Usage *content.RunUsage `json:"usage,omitempty"`
+}
+
 // ledgerGetResponse is the detail read (§6.2): the entry, its edges and its
 // artifact metadata. The entry is the SAME shape a page row has, so one
 // mapping serves both — two mappings of one shape disagree the first time
 // either grows a field.
 type ledgerGetResponse struct {
+	RunFacts  *ledgerRunFactsWire  `json:"runFacts,omitempty"`
 	Entry     ledgerEntryWire      `json:"entry"`
 	Edges     []ledgerEdgeWire     `json:"edges"`
 	Artifacts []ledgerArtifactWire `json:"artifacts"`
@@ -428,8 +434,20 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 		for _, c := range caused {
 			wireCaused = append(wireCaused, ledgerCausedWireOf(c))
 		}
+		var runFacts *ledgerRunFactsWire
+		for _, ex := range row.Executions {
+			if ex.State == nil {
+				continue
+			}
+			var facts content.RunFacts
+			if err := json.Unmarshal([]byte(ex.Payload), &facts); err != nil {
+				return err
+			}
+			runFacts = &ledgerRunFactsWire{Model: facts.Model, Usage: facts.Usage}
+		}
 		out = ledgerGetResponse{
-			Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused,
+			RunFacts: runFacts,
+			Entry:    entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused,
 			ProseEvicted: row.ProseEvicted,
 		}
 		return nil

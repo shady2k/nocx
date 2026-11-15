@@ -48,4 +48,13 @@ export interface AgentRunState {
    * @minItems 1
    */
   unarmedBounds?: [string, ...string[]]
+  /**
+   * Token counts stated by the agent for this run. Absent when the agent stated no usage; explicit zero counts are preserved.
+   */
+  usage?: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+  }
 }

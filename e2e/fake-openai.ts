@@ -107,6 +107,13 @@ export interface StreamScript {
   holdAfter?: number
   /** The model id echoed in the chunk frames (default 'e2e-model'). */
   model?: string
+  /** OpenAI token counts; absent means the provider stated no usage. */
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    prompt_tokens_details?: { cached_tokens: number }
+  }
   /** Tool calls this response PROPOSES, written as one frame after the
    *  content chunks and finishing the response with `tool_calls` instead of
    *  `stop`. Absent or empty: a content-only response, exactly as before.
@@ -420,6 +427,7 @@ export class FakeOpenAI {
       JSON.stringify({
         id: CHUNK_ID,
         object: 'chat.completion',
+        ...(script.usage ? { usage: script.usage } : {}),
         created: 0,
         model,
         choices: [
@@ -472,6 +480,18 @@ export class FakeOpenAI {
       if (calls.length > 0) {
         res.write(`data: ${toolCallFrame(model, calls)}\n\n`)
         record.state = 'streaming'
+      }
+      if (script.usage) {
+        res.write(
+          `data: ${JSON.stringify({
+            id: CHUNK_ID,
+            object: 'chat.completion.chunk',
+            created: 0,
+            model,
+            choices: [],
+            usage: script.usage,
+          })}\n\n`,
+        )
       }
       res.write('data: [DONE]\n\n')
       record.state = 'done'

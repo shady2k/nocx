@@ -743,8 +743,9 @@ func (g Grant) Expired(now time.Time) bool {
 // against: unlike a shell command, nobody but this process times a turn, so
 // the close is the only place the number can come from (nocx-hoeq3).
 type FinishAgentRun struct {
-	Model             string   // the model the agent reported answering this turn
-	State             RunState // RunCompleted or RunFailed (this slice)
+	Usage             *RunUsage // nil when the agent stated no usage
+	Model             string    // the model the agent reported answering this turn
+	State             RunState  // RunCompleted or RunFailed (this slice)
 	TerminationReason TerminationReason
 	Error             string // the renderable reason; empty when completed
 	EndedAt           int64
@@ -956,18 +957,27 @@ type FrameRegion struct {
 	ColEnd   *int
 }
 
+// RunUsage holds the token counts the agent stated, without estimating missing usage.
+type RunUsage struct {
+	Input      int `json:"input"`
+	Output     int `json:"output"`
+	CacheRead  int `json:"cacheRead"`
+	CacheWrite int `json:"cacheWrite"`
+}
+
 // RunFacts is the run's configuration as it was at the time (design §5:
 // "run mode, endpoint and model as they were at the time") — pinned into
 // the execution's payload at ask time, so a later endpoint change never
 // reinterprets what the run used. The credential is never part of this:
 // the key is resolved at stream time, never persisted.
 type RunFacts struct {
-	ConversationID string `json:"conversationId,omitempty"`
-	Harness        string `json:"harness,omitempty"`
-	Mode           string `json:"mode"` // "explain" — the only mode this slice knows
-	EndpointID     string `json:"endpointId,omitempty"`
-	BaseURL        string `json:"baseUrl,omitempty"`
-	Model          string `json:"model,omitempty"`
+	Usage          *RunUsage `json:"usage,omitempty"`
+	ConversationID string    `json:"conversationId,omitempty"`
+	Harness        string    `json:"harness,omitempty"`
+	Mode           string    `json:"mode"` // "explain" — the only mode this slice knows
+	EndpointID     string    `json:"endpointId,omitempty"`
+	BaseURL        string    `json:"baseUrl,omitempty"`
+	Model          string    `json:"model,omitempty"`
 }
 
 // AgentAsk is one ask transaction (agent.ask, design §5, §7): the question

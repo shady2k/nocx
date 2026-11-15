@@ -138,6 +138,7 @@ type agentRunControl struct {
 	cancelHasDetails   bool
 	cancelDone         chan struct{}
 	driveDone          chan struct{}
+	usage              *content.RunUsage
 	answeringModel     string
 	actorTerminalState content.RunState
 }
@@ -388,11 +389,12 @@ type agentRunReasoning struct {
 // is present only when shell integration was unavailable; each item is a
 // human-readable sentence naming one bound that did not apply.
 type agentRunState struct {
-	RunID         int64    `json:"runId"`
-	State         string   `json:"state"`
-	Error         string   `json:"error,omitempty"`
-	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
-	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
+	Usage         *content.RunUsage `json:"usage,omitempty"`
+	RunID         int64             `json:"runId"`
+	State         string            `json:"state"`
+	Error         string            `json:"error,omitempty"`
+	DroppedDeltas int               `json:"droppedDeltas,omitempty"`
+	UnarmedBounds []string          `json:"unarmedBounds,omitempty"`
 	// Notices are what the RUN must state about ITSELF — today, only that it
 	// stopped asking to widen a scope because it reached the bound on how
 	// often one answer may ask (design §5.3). A silent stop is the soft
@@ -1624,6 +1626,9 @@ stream:
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		rc.control.answeringModel = outcome.Model
+		if u := outcome.Usage; u != nil {
+			rc.control.usage = &content.RunUsage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadTokens, CacheWrite: u.CacheWriteTokens}
+		}
 		// The actor cancels for both Stop and socket loss. Only an accepted
 		// Stop is a user cancellation; a lost transport interrupts the run.
 		if errors.Is(err, agentharness.ErrCancelled) && !rc.control.cancelled {
@@ -2265,8 +2270,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		h.client.Discard(strconv.FormatInt(rc.runID, 10))
 	}
 	model := rc.model
+	var usage *content.RunUsage
 	if rc.control != nil {
 		rc.control.mu.Lock()
+		usage = rc.control.usage
 		if rc.control.answeringModel != "" {
 			model = rc.control.answeringModel
 		}
@@ -2276,6 +2283,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 	err := h.op.Run(tctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.FinishAgentRun(ctx, rc.runID, content.FinishAgentRun{
 			Model:             model,
+			Usage:             usage,
 			State:             state,
 			TerminationReason: reason,
 			Error:             sentence,
@@ -2297,6 +2305,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		notices = append(notices, "the agent did not report which model answered; this conversation cannot promise to keep the same model")
 	}
 	notification := agentRunState{
+		Usage:         usage,
 		RunID:         rc.runID,
 		State:         string(state),
 		DroppedDeltas: dropped,

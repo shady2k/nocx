@@ -654,12 +654,17 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		if err != nil {
 			return err
 		}
-		if in.Model != "" {
+		if in.Model != "" || in.Usage != nil {
 			var facts map[string]any
 			if err := json.Unmarshal([]byte(payload), &facts); err != nil {
 				return err
 			}
-			facts["model"] = in.Model
+			if in.Model != "" {
+				facts["model"] = in.Model
+			}
+			if in.Usage != nil {
+				facts["usage"] = in.Usage
+			}
 			encoded, err := json.Marshal(facts)
 			if err != nil {
 				return err

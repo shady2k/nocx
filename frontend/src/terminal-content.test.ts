@@ -19247,6 +19247,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       alternate.state.bufferKind = 'alternate'
       session.fireScreenFrame(alternate)
       const dimensions = { cols: alternate.geometry.cols, rows: alternate.geometry.rows }
+      // Let the accepted frame's initial geometry report settle before the
+      // gesture: only a resize caused by summoning violates this assertion.
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalled())
       const resizeCalls = session.sendResize.mock.calls.length
 
       await summonChord(content)
@@ -23158,7 +23161,16 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
-      state!({ runId: 45, entryId: 'entry-45', state: 'completed', droppedDeltas: 0 })
+      state!({
+        runId: 45,
+        entryId: 'entry-45',
+        state: 'completed',
+        droppedDeltas: 0,
+        usage: { input: 104, output: 27, cacheRead: 40, cacheWrite: 8 },
+      })
+      expect(answer.querySelector('.cmd-agent-usage')?.textContent).toBe(
+        '104 input · 27 output · 40 from cache',
+      )
       await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
 
       viewOf(editorOf(content)).contentDOM.dispatchEvent(

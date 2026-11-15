@@ -585,6 +585,7 @@ export type RestoredCause = Caused
  *  block's width, and the header of a command is a command line while the
  *  header of a turn is a question. */
 export interface RestoredBody {
+  runFacts?: LedgerGet['runFacts']
   kind: 'command' | 'ask'
   body: string | null
   /** Stored terminal rows, when the backend captured the block-row artifact. */
@@ -692,6 +693,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       return {
         kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
         body: null,
+        ...(entry.runFacts ? { runFacts: entry.runFacts } : {}),
         caused,
         proseEvicted: !!entry.proseEvicted,
       }

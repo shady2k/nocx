@@ -33,6 +33,20 @@
       "items": {
         "$ref": "#/$defs/caused"
       }
+    },
+    "runFacts": {
+      "description": "The latest agent run’s recorded facts, read from its execution. Absent for entries without an agent run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "agent.runState.schema.json#/properties/usage"
+        }
+      }
     }
   },
   "$defs": {

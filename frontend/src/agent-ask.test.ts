@@ -78,6 +78,14 @@ function makeTarget(grants: GrantBlock[] = []) {
 }
 
 describe('AgentInputTarget', () => {
+  it('forwards terminal usage facts without deriving counts', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('q')
+    const usage = { input: 104, output: 27, cacheRead: 40, cacheWrite: 8 }
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed', usage })
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', usage)
+  })
+
   it('sends whole-block and row-window grant facts on the ask payload', async () => {
     const { dispatcher, handle, target } = makeTarget([
       grant('item-1', 'git status', 'running'),
@@ -352,6 +360,8 @@ describe('AgentInputTarget', () => {
     expect(handle.close).toHaveBeenCalledWith(
       'cancelled',
       'no local process group to signal — the execution keeps running',
+      undefined,
+      undefined,
     )
     expect(onTurnEnd).toHaveBeenCalledTimes(1)
     dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled' })
@@ -418,7 +428,7 @@ describe('AgentInputTarget', () => {
     await target.submit('q')
 
     dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
     expect(handle.close).toHaveBeenCalledTimes(1)
 
     await target.submit('q2')
@@ -427,11 +437,16 @@ describe('AgentInputTarget', () => {
       state: 'failed',
       error: 'the model returned no text',
     })
-    expect(handle.close).toHaveBeenLastCalledWith('failure', 'the model returned no text')
+    expect(handle.close).toHaveBeenLastCalledWith(
+      'failure',
+      'the model returned no text',
+      undefined,
+      undefined,
+    )
 
     await target.submit('q3')
     dispatcher.emit('agent.runState', { runId: 9, state: 'cancelled' })
-    expect(handle.close).toHaveBeenLastCalledWith('cancelled', undefined)
+    expect(handle.close).toHaveBeenLastCalledWith('cancelled', undefined, undefined, undefined)
   })
 
   it('closes the block on a runState with NO prior delta (failure before any text)', async () => {
@@ -442,7 +457,12 @@ describe('AgentInputTarget', () => {
       state: 'failed',
       error: 'the connection was lost',
     })
-    expect(handle.close).toHaveBeenCalledWith('failure', 'the connection was lost')
+    expect(handle.close).toHaveBeenCalledWith(
+      'failure',
+      'the connection was lost',
+      undefined,
+      undefined,
+    )
   })
 })
 
@@ -586,7 +606,7 @@ describe('AgentInputTarget approval routing', () => {
 
     // The run completes: the block closes once.
     dispatcher.emit('agent.runState', { runId, state: 'completed' })
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
 })
 
@@ -612,7 +632,7 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     expect(handle.append).toHaveBeenCalledWith(
       '— 2 chunks of the answer were dropped while streaming; the full answer was saved —',
     )
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
 
   it('names a single dropped chunk in the singular, and a clean close marks nothing', async () => {
@@ -634,7 +654,7 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
       state: 'completed',
     })
     expect(clean.handle.append).not.toHaveBeenCalled()
-    expect(clean.handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(clean.handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
 
   it('marks the gap on a failed run too — the reason and the gap are both facts', async () => {
@@ -650,7 +670,12 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     expect(handle.append).toHaveBeenCalledWith(
       '— part of the answer was dropped while streaming; the full answer was saved —',
     )
-    expect(handle.close).toHaveBeenCalledWith('failure', 'the model stopped mid-answer')
+    expect(handle.close).toHaveBeenCalledWith(
+      'failure',
+      'the model stopped mid-answer',
+      undefined,
+      undefined,
+    )
   })
   it('shows named unavailable lease bounds while preserving a successful run', async () => {
     const { dispatcher, handle, target } = makeTarget()
@@ -669,7 +694,7 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     expect(handle.append).toHaveBeenCalledWith(
       '— the inactivity bound is not active because shell integration is unavailable; the output bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
     )
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
   /**
    * What the RUN says about ITSELF (nocx-4yjwk.1, design §5.3). Repeated
@@ -692,7 +717,7 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     expect(handle.append).toHaveBeenCalledWith(
       '— this run stopped asking to widen a scope after three asks —',
     )
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
 
   it('says nothing extra when a run states no notices', async () => {
@@ -703,7 +728,7 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     dispatcher.emit('agent.runState', { runId, state: 'completed' })
 
     expect(handle.append).not.toHaveBeenCalled()
-    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3', undefined)
   })
 
   /**

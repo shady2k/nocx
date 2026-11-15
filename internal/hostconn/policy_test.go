@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -195,38 +196,43 @@ func TestAHelperOwnedConnectionClosesAtTheSilenceBudget(t *testing.T) {
 // TestAHealthyConnectionNeverReadsStalledOverTenMinutes is the paired success:
 // a connection that answers is never reported as silent, for forty probes.
 //
-// The probes are ASKED FOR, not left to the cadence's scheduling: each
-// `Supervisor.Probe` is the connection making itself answer now (the same act
-// the release barrier asks for), so the test states "forty answers arrive and
-// none is silence" without depending on when a timer happened to be noticed.
+// Each interval delivers its automatic probe and its answered observation
+// before time advances again: forty answers arrive and none is silence.
 func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	var probes atomic.Int64
-	link.memoryLink.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		return time.Millisecond, nil
-	}
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		link.memoryLink.probe = func() (time.Duration, error) { return time.Millisecond, nil }
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
+		var answers atomic.Int64
+		lease.Observe(func(obs hostconn.Observation) {
+			if obs.Answered {
+				answers.Add(1)
+			}
+		})
 
-	for i := 0; i < 40; i++ {
-		clock.Advance(hostconn.ProbeInterval)
-		if err := sup.Probe(context.Background()); err != nil {
-			t.Fatalf("probe %d: %v", i+1, err)
+		// The automatic probe must finish and the guard must schedule its next
+		// wake before another interval passes. A manual Probe can join the
+		// previous call, so its return is not proof this interval was answered.
+		synctest.Wait()
+		for i := 0; i < 40; i++ {
+			clock.Advance(hostconn.ProbeInterval)
+			synctest.Wait()
+			if got := answers.Load(); got != int64(i+1) {
+				t.Fatalf("after %d intervals: %d answered probes, want %d", i+1, got, i+1)
+			}
+			if got := last(lease.States()).Kind; got != hostconn.Connected {
+				t.Fatalf("a healthy connection reads %v after %d probes", got, i+1)
+			}
 		}
-		if got := last(lease.States()).Kind; got == hostconn.Stalled {
-			t.Fatalf("a healthy connection reads %v after %d probes", got, i+1)
+		for _, state := range sup.States() {
+			if state.Kind == hostconn.Stalled {
+				t.Fatalf("a healthy connection was reported stalled: %v", sup.States())
+			}
 		}
-	}
-	if got := probes.Load(); got < 40 {
-		t.Fatalf("%d probes for forty asks, want at least forty", got)
-	}
-	for _, state := range lease.States() {
-		if state.Kind == hostconn.Stalled {
-			t.Fatalf("a healthy connection was reported stalled: %v", lease.States())
-		}
-	}
+	})
 }
 
 // TestTheLookStopsAfterTheFirstAnswer — a look can be logged as a preauth close,

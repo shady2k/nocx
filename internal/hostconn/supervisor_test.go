@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -586,59 +587,49 @@ func TestAHoldersStatedCadenceReachesTheOneProber(t *testing.T) {
 // cadence: twenty probes, every one answered before the next second passes, and
 // the supervisor's own path must contain no stalled state at all.
 func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
-	var probes atomic.Int32
-	link := newMemoryLink()
-	link.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		return time.Millisecond, nil
-	}
-	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
-	clock := hostconntest.New()
-	_, sup := managerOn(t, carrier, clock)
+	synctest.Test(t, func(t *testing.T) {
+		link := newMemoryLink()
+		link.probe = func() (time.Duration, error) { return time.Millisecond, nil }
+		carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
+		clock := hostconntest.New()
+		_, sup := managerOn(t, carrier, clock)
 
-	slow := plan()
-	slow.ProbeInterval = 30 * time.Second
-	lease, err := sup.Acquire(context.Background(), slow)
-	if err != nil {
-		t.Fatalf("Acquire: %v", err)
-	}
-	t.Cleanup(lease.Release)
-
-	for elapsed := time.Second; elapsed <= 10*time.Minute; elapsed += time.Second {
-		clock.Advance(time.Second)
-		// WAIT ON THE ANSWER EACH SECOND MADE DUE, not on a duration: this
-		// test is about a link that answers, and a clock that outruns the
-		// answer's own goroutine is the jump case the next test owns.
-		//
-		// The guard reads the clock and then registers its wake for the due
-		// moment; a step that lands inside that window is noticed one step
-		// later, so one more second is offered before the answer is insisted
-		// on. It is the clock's arithmetic, not the policy's.
-		due := int(elapsed / (30 * time.Second))
-		if due == 0 {
-			continue
+		slow := plan()
+		slow.ProbeInterval = 30 * time.Second
+		lease, err := sup.Acquire(context.Background(), slow)
+		if err != nil {
+			t.Fatalf("Acquire: %v", err)
 		}
-		if int(probes.Load()) < due {
-			clock.Advance(time.Second)
-			elapsed += time.Second
-		}
-		waittest.WaitFor(t, "the probe due by now to be answered", func() bool {
-			return int(probes.Load()) >= due
+		defer lease.Release()
+		var answers atomic.Int64
+		lease.Observe(func(obs hostconn.Observation) {
+			if obs.Answered {
+				answers.Add(1)
+			}
 		})
-	}
 
-	if got := probes.Load(); got < 19 {
-		t.Fatalf("ten minutes on a 30s cadence sent %d probe(s), want 20", got)
-	}
-	for _, state := range sup.States() {
-		if state.Kind == hostconn.Stalled {
-			t.Fatalf("a healthy link on a 30s cadence read %v after %d probe(s): silence was measured from something that answered",
-				state, probes.Load())
+		// Settle the guard's timer registration and each answer before moving
+		// time again. A counter inside Probe is not its recorded answer, and
+		// advancing between Now and After can move the fake timer's deadline.
+		synctest.Wait()
+		for elapsed := time.Second; elapsed <= 10*time.Minute; elapsed += time.Second {
+			clock.Advance(time.Second)
+			synctest.Wait()
+			due := int64(elapsed / (30 * time.Second))
+			if got := answers.Load(); got != due {
+				t.Fatalf("after %v: %d answered probes, want %d", elapsed, got, due)
+			}
 		}
-	}
-	if got := sup.Current().Kind; got != hostconn.Connected {
-		t.Fatalf("a healthy connection reads %v after ten minutes, want connected", got)
-	}
+
+		for _, state := range sup.States() {
+			if state.Kind == hostconn.Stalled {
+				t.Fatalf("a healthy link on a 30s cadence read %v after %d answers", state, answers.Load())
+			}
+		}
+		if got := sup.Current().Kind; got != hostconn.Connected {
+			t.Fatalf("a healthy connection reads %v after ten minutes, want connected", got)
+		}
+	})
 }
 
 // TestAClockJumpOnAHealthyConnectionStallsItAtMostAndClosesNothing is the other

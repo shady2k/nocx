@@ -7,7 +7,7 @@ import (
 )
 
 func TestSettledWithoutAnswerFails(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	events, err := d([]byte(`{"type":"agent_settled","aborted":false}`))
 	if err != nil {
 		t.Fatal(err)
@@ -18,7 +18,7 @@ func TestSettledWithoutAnswerFails(t *testing.T) {
 }
 
 func TestProviderErrorIsNotSuccess(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	_, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","model":"test","stopReason":"error","errorMessage":"invalid key"}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestProviderErrorIsNotSuccess(t *testing.T) {
 }
 
 func TestEndUsesCompletedMessageModelAndUsage(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	_, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"stop","content":[{"type":"text","text":"answer"}],"usage":{"input":3,"output":5,"cacheRead":2,"cacheWrite":1}}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -45,14 +45,14 @@ func TestEndUsesCompletedMessageModelAndUsage(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != harness.EventEnd {
 		t.Fatalf("events = %+v", events)
 	}
-	end := events[0].End
+	end := events[0].Outcome
 	if end.Model != "fake/actual" || end.Usage == nil || end.Usage.InputTokens != 3 || end.Usage.OutputTokens != 5 || end.Usage.CacheReadTokens != 2 || end.Usage.CacheWriteTokens != 1 {
 		t.Fatalf("end = %+v", end)
 	}
 }
 
 func TestDecoderMapsStreamingAndTools(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	lines := []string{
 		`{"type":"message_end","message":{"role":"user","content":"question"}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"answer"}}`,
@@ -83,7 +83,7 @@ func TestDecoderMapsStreamingAndTools(t *testing.T) {
 }
 
 func TestHandledPromptEndsWithExplicitFailure(t *testing.T) {
-	decode := newDecoder()
+	decode := newDecoder(&harness.Outcome{})
 	events, err := decode([]byte(`{"type":"response","command":"prompt","success":true,"data":{"disposition":"handled"}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestHandledPromptEndsWithExplicitFailure(t *testing.T) {
 // pi fills usage with zeros when its provider sent none; the end reports
 // no usage rather than three zeros (and a stated usage still comes through).
 func TestEndDropsUsagePiFilledWithZeros(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	if _, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"stop","content":[{"type":"text","text":"answer"}],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -104,14 +104,14 @@ func TestEndDropsUsagePiFilledWithZeros(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Kind != harness.EventEnd || events[0].End.Usage != nil {
+	if len(events) != 1 || events[0].Kind != harness.EventEnd || events[0].Outcome.Usage != nil {
 		t.Fatalf("events = %+v, want an end with no usage", events)
 	}
 }
 
 // A usage with only cache counters set is stated, not dropped.
 func TestEndKeepsCacheOnlyUsage(t *testing.T) {
-	d := newDecoder()
+	d := newDecoder(&harness.Outcome{})
 	if _, err := d([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"stop","content":[{"type":"text","text":"answer"}],"usage":{"input":0,"output":0,"cacheRead":7,"cacheWrite":0}}}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,32 @@ func TestEndKeepsCacheOnlyUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].End == nil || events[0].End.Usage == nil || events[0].End.Usage.CacheReadTokens != 7 {
+	if len(events) != 1 || events[0].Outcome == nil || events[0].Outcome.Usage == nil || events[0].Outcome.Usage.CacheReadTokens != 7 {
 		t.Fatalf("events = %+v, want an end keeping the cache-read usage", events)
+	}
+}
+
+func TestFailureKeepsCompletedCallUsage(t *testing.T) {
+	for _, terminal := range []string{`{"type":"agent_settled","aborted":true}`, `{"type":"agent_settled","aborted":false}`} {
+		d := newDecoder(&harness.Outcome{})
+		for _, line := range []string{
+			`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"toolUse","usage":{"input":3,"output":5,"cacheRead":2,"cacheWrite":1}}}`,
+			`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"error","errorMessage":"provider is down","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}}`,
+		} {
+			if _, err := d([]byte(line)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		events, err := d([]byte(terminal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Kind != harness.EventFailure {
+			t.Fatalf("events = %+v", events)
+		}
+		facts := events[0].Outcome
+		if facts == nil || facts.Usage == nil || *facts.Usage != (harness.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1}) {
+			t.Fatalf("failure facts = %+v, want completed call usage", facts)
+		}
 	}
 }

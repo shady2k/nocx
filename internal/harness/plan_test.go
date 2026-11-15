@@ -87,7 +87,7 @@ func (*planCodec) Decode(line []byte) (Decoded, error) {
 		if len(fields) == 2 {
 			model = fields[1]
 		}
-		return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: model}}}}, nil
+		return Decoded{Events: []Event{{Kind: EventEnd, Outcome: &Outcome{Model: model}}}}, nil
 	}
 	return Decoded{}, fmt.Errorf("bad fixture line: %q", line)
 }

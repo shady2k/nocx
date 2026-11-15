@@ -24,7 +24,7 @@ type message struct {
 	} `json:"usage"`
 }
 
-func newDecoder() func([]byte) ([]harness.Event, error) {
+func newDecoder(total *harness.Outcome) func([]byte) ([]harness.Event, error) {
 	var last message
 	var usage *harness.Usage
 	return func(line []byte) ([]harness.Event, error) {
@@ -48,8 +48,17 @@ func newDecoder() func([]byte) ([]harness.Event, error) {
 		if err := json.Unmarshal(line, &record); err != nil {
 			return nil, err
 		}
+		outcome := func() *harness.Outcome {
+			model := last.Model
+			if last.Provider != "" {
+				model = last.Provider + "/" + model
+			}
+			*total = harness.Outcome{Model: model, Usage: statedUsage(usage)}
+			snapshot := *total
+			return &snapshot
+		}
 		failure := func(reason string) ([]harness.Event, error) {
-			return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: reason}}}, nil
+			return []harness.Event{{Kind: harness.EventFailure, Outcome: outcome(), Failure: &harness.Failure{Reason: reason}}}, nil
 		}
 		switch record.Type {
 		case "response":
@@ -94,6 +103,7 @@ func newDecoder() func([]byte) ([]harness.Event, error) {
 					usage.CacheReadTokens += u.CacheRead
 					usage.CacheWriteTokens += u.CacheWrite
 				}
+				outcome()
 			}
 		case "agent_settled":
 			if record.Aborted {
@@ -114,11 +124,7 @@ func newDecoder() func([]byte) ([]harness.Event, error) {
 			if !answer {
 				return failure("pi ended without an answer")
 			}
-			model := last.Model
-			if last.Provider != "" {
-				model = last.Provider + "/" + model
-			}
-			return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: model, Usage: statedUsage(usage)}}}, nil
+			return []harness.Event{{Kind: harness.EventEnd, Outcome: outcome()}}, nil
 		}
 		return nil, nil
 	}

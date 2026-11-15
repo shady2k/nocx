@@ -169,7 +169,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 			}
 			emit(protocol.Line{Kind: "end", Model: model, Usage: step.Usage})
 		case protocol.StepFail:
-			emit(protocol.Line{Kind: "failure", Reason: step.Reason})
+			emit(protocol.Line{Kind: "failure", Model: prompt.Model, Usage: step.Usage, Reason: step.Reason})
 		case protocol.StepExit:
 			os.Exit(step.Code)
 		case protocol.StepHang:

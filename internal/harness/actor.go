@@ -123,13 +123,17 @@ func (t *actorTurn) Cancel(ctx context.Context) error {
 func (t *actorTurn) Wait(ctx context.Context) (Outcome, error) {
 	select {
 	case <-t.done:
+		var out Outcome
+		if t.terminal.Outcome != nil {
+			out = *t.terminal.Outcome
+		}
 		if t.terminal.Kind == EventEnd {
-			return Outcome{Model: t.terminal.End.Model, Usage: t.terminal.End.Usage}, nil
+			return out, nil
 		}
 		if t.terminal.Failure.Reason == "cancelled" {
-			return Outcome{}, ErrCancelled
+			return out, ErrCancelled
 		}
-		return Outcome{}, &TurnError{Reason: t.terminal.Failure.Reason}
+		return out, &TurnError{Reason: t.terminal.Failure.Reason}
 	case <-ctx.Done():
 		return Outcome{}, ctx.Err()
 	}
@@ -362,6 +366,7 @@ func (s *session) loop() {
 	var deathPending, retired bool
 	var retirementErr error
 	var terminal *Event
+	var outcome Outcome
 	var plan []Step
 	var cancelCommands []Command
 	var cancelPrepared bool
@@ -476,8 +481,13 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
+		if ev.Outcome == nil {
+			snapshot := outcome
+			ev.Outcome = &snapshot
+		}
 		if cancelling {
-			ev = failure("cancelled")
+			ev.Kind = EventFailure
+			ev.Failure = &Failure{Reason: "cancelled"}
 		}
 		terminal = &ev
 		plan = nil
@@ -538,6 +548,7 @@ func (s *session) loop() {
 		settling = false
 		settlementDone = false
 		terminal = nil
+		outcome = Outcome{}
 		delivery = nil
 		frame = nil
 		pending = nil
@@ -570,6 +581,7 @@ func (s *session) loop() {
 			publish(current, *terminal)
 			current = nil
 			terminal = nil
+			outcome = Outcome{}
 			plan = nil
 			pending = nil
 			frame = nil
@@ -622,6 +634,10 @@ func (s *session) loop() {
 				return
 			}
 			decoded, err := codec.Decode(line)
+			if decoded.Outcome != nil {
+				outcome = *decoded.Outcome
+			}
+
 			if err != nil {
 				fail(fmt.Sprint("agent protocol: ", err))
 				return
@@ -803,6 +819,8 @@ func (s *session) loop() {
 				}
 				if retirementErr != nil {
 					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", retirementErr))
+					snapshot := outcome
+					ev.Outcome = &snapshot
 					terminal = &ev
 				}
 			}
@@ -828,6 +846,8 @@ func (s *session) loop() {
 				}
 				if result.toolErr != nil && current != nil {
 					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", result.toolErr))
+					snapshot := outcome
+					ev.Outcome = &snapshot
 					terminal = &ev
 				}
 				if deathPending {
@@ -875,6 +895,7 @@ func (s *session) loop() {
 					settling = false
 					settlementDone = false
 					terminal = nil
+					outcome = Outcome{}
 					deadline = time.Time{}
 					starting = true
 					observe("begin-turn", nil)

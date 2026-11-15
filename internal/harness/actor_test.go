@@ -42,7 +42,7 @@ func (shellProtocol) Decode(line []byte) (Decoded, error) {
 	if strings.HasPrefix(string(line), "response ") {
 		return Decoded{Response: &Response{ID: strings.TrimPrefix(string(line), "response ")}}, nil
 	}
-	return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: "test"}}}}, nil
+	return Decoded{Events: []Event{{Kind: EventEnd, Outcome: &Outcome{Model: "test"}}}}, nil
 }
 
 type closingTerminalTools struct {
@@ -629,7 +629,7 @@ done`
 func (closeCancelProtocol) CancelSequence() []Command { return []Command{{Name: "abort"}} }
 func (closeCancelProtocol) Decode(line []byte) (Decoded, error) {
 	if string(line) == "end" {
-		return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: "test"}}}}, nil
+		return Decoded{Events: []Event{{Kind: EventEnd, Outcome: &Outcome{Model: "test"}}}}, nil
 	}
 	if strings.HasPrefix(string(line), "response ") {
 		return Decoded{Response: &Response{ID: strings.TrimPrefix(string(line), "response ")}}, nil
@@ -854,5 +854,67 @@ func TestCancelWaitsForAgentToolResultConsumption(t *testing.T) {
 				t.Fatalf("killed=%t consumed=%t", killed, consumed)
 			}
 		})
+	}
+}
+
+func TestWaitKeepsFailureUsage(t *testing.T) {
+	for _, reason := range []string{"provider is down", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			want := &Outcome{Model: "test", Usage: &Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2}}
+			turn := &actorTurn{events: make(chan Event, 1), done: make(chan struct{})}
+			publish(turn, Event{Kind: EventFailure, Outcome: want, Failure: &Failure{Reason: reason}})
+			got, err := turn.Wait(context.Background())
+			if err == nil || got.Model != want.Model || got.Usage == nil || *got.Usage != *want.Usage {
+				t.Fatalf("Wait = %+v, %v; want failure with %+v", got, err, want)
+			}
+			if reason == "cancelled" && !errors.Is(err, ErrCancelled) {
+				t.Fatalf("Wait error = %v", err)
+			}
+		})
+	}
+}
+
+type usageFailureProtocol struct{ shellProtocol }
+
+func (p usageFailureProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
+func (usageFailureProtocol) Start(context.Context, TurnSpec) (Launch, error) {
+	return Launch{Argv: []string{"/bin/sh", "-c", `while read -r id name; do
+case "$name" in
+barrier) echo "response $id";;
+prompt) echo usage; echo broken;;
+esac
+done`}}, nil
+}
+
+func (p usageFailureProtocol) Decode(line []byte) (Decoded, error) {
+	switch string(line) {
+	case "usage":
+		return Decoded{Outcome: &Outcome{Model: "test", Usage: &Usage{InputTokens: 7, CacheReadTokens: 4}}}, nil
+	case "broken":
+		return Decoded{}, errors.New("broken protocol")
+	default:
+		return p.shellProtocol.Decode(line)
+	}
+}
+
+func TestActorFailureKeepsCompletedUsage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m := NewSessionManager(Base{}, usageFailureProtocol{})
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "failure-usage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal Event
+	for ev := range turn.Events() {
+		terminal = ev
+	}
+	got, err := turn.Wait(ctx)
+	if err == nil || terminal.Kind != EventFailure || terminal.Outcome == nil || got.Usage == nil || *got.Usage != (Usage{InputTokens: 7, CacheReadTokens: 4}) {
+		t.Fatalf("terminal = %+v, Wait = %+v, %v", terminal, got, err)
+	}
+	if got.Model != "test" || terminal.Outcome.Usage != got.Usage {
+		t.Fatalf("terminal and Wait differ: %+v, %+v", terminal.Outcome, got)
 	}
 }

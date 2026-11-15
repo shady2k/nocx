@@ -11,7 +11,7 @@ type responseEventProtocol struct{ shellProtocol }
 
 func (p responseEventProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (responseEventProtocol) Decode(line []byte) (Decoded, error) {
-	return Decoded{Response: &Response{ID: strings.TrimPrefix(string(line), "response ")}, Events: []Event{{Kind: EventEnd, End: &End{Model: "unsupported"}}}}, nil
+	return Decoded{Response: &Response{ID: strings.TrimPrefix(string(line), "response ")}, Events: []Event{{Kind: EventEnd, Outcome: &Outcome{Model: "unsupported"}}}}, nil
 }
 
 func TestResponseCannotCarryTurnTerminal(t *testing.T) {

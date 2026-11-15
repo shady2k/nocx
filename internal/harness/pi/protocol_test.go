@@ -182,7 +182,7 @@ func TestCodecBeginTurnResetsLastMessageAndUsage(t *testing.T) {
 	if len(second) != 1 || second[0].Kind != harness.EventEnd {
 		t.Fatalf("second terminal: %+v", second)
 	}
-	end := second[0].End
+	end := second[0].Outcome
 	if end == nil || end.Model != "fake/second" || end.Usage == nil || end.Usage.InputTokens != 2 || end.Usage.OutputTokens != 3 {
 		t.Fatalf("turn-local facts leaked: %+v", end)
 	}
@@ -252,5 +252,25 @@ func TestCodecLaterTurnUsesObservedModel(t *testing.T) {
 	}
 	if !reflect.DeepEqual(names, []string{"get_state", "set_model", "get_state", "prompt"}) {
 		t.Fatalf("changed observed model plan: %v", names)
+	}
+}
+
+func TestCodecKeepsCompletedUsageBeforeTerminalAndResetsNextTurn(t *testing.T) {
+	c := &codec{}
+	c.BeginTurn(harness.TurnSpec{})
+	decoded, err := c.Decode([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"fake","model":"actual","stopReason":"toolUse","usage":{"input":3,"output":5,"cacheRead":2,"cacheWrite":1}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Outcome == nil || decoded.Outcome.Usage == nil || *decoded.Outcome.Usage != (harness.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 1}) {
+		t.Fatalf("completed call outcome = %+v", decoded.Outcome)
+	}
+	c.BeginTurn(harness.TurnSpec{})
+	decoded, err = c.Decode([]byte(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"next answer"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Outcome == nil || decoded.Outcome.Usage != nil {
+		t.Fatalf("next turn inherited usage: %+v", decoded.Outcome)
 	}
 }

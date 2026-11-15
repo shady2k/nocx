@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
@@ -160,7 +161,7 @@ func Run(t *testing.T, driver Driver) {
 				if fmt.Sprint(kinds(events)) != fmt.Sprint(want) || events[1].Text != "thinking" || events[2].Text != "lo" {
 					t.Fatalf("ordered events = %+v", events)
 				}
-				end := events[3].End
+				end := events[3].Outcome
 				if end == nil || end.Model != f.Model || end.Usage == nil || end.Usage.InputTokens != 3 || end.Usage.OutputTokens != 5 || end.Usage.CacheReadTokens != 2 {
 					t.Fatalf("end = %+v", end)
 				}
@@ -222,6 +223,13 @@ func Run(t *testing.T, driver Driver) {
 				t.Fatalf("terminal event count %d: %+v", terminals, events)
 			}
 			outcome, err := turn.Wait(context.Background())
+			terminal := events[len(events)-1]
+			if terminal.Outcome == nil {
+				t.Fatal("terminal has no outcome")
+			}
+			if !reflect.DeepEqual(outcome, *terminal.Outcome) {
+				t.Fatalf("Wait outcome = %+v; terminal = %+v", outcome, terminal.Outcome)
+			}
 			if scenario != Failure && scenario != CancelStream && scenario != CancelTool {
 				if err != nil {
 					t.Fatal(err)
@@ -278,11 +286,11 @@ func Run(t *testing.T, driver Driver) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(events) == 0 || events[len(events)-1].Kind != harness.EventEnd || events[len(events)-1].End == nil {
+			if len(events) == 0 || events[len(events)-1].Kind != harness.EventEnd || events[len(events)-1].Outcome == nil {
 				t.Fatalf("model selection events = %+v", events)
 			}
 			observed := f.Prompt().Model
-			end := events[len(events)-1].End
+			end := events[len(events)-1].Outcome
 			if observed != want || end.Model != want || outcome.Model != want {
 				t.Fatalf("chosen %q: provider model = %q, end = %q, outcome = %q; want %q", chosen, observed, end.Model, outcome.Model, want)
 			}

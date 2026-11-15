@@ -1609,6 +1609,14 @@ stream:
 	}
 	stopDelivery()
 	outcome, err := turn.Wait(context.WithoutCancel(ctx))
+	if rc.control != nil {
+		rc.control.mu.Lock()
+		rc.control.answeringModel = outcome.Model
+		if u := outcome.Usage; u != nil {
+			rc.control.usage = &content.RunUsage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadTokens, CacheWrite: u.CacheWriteTokens}
+		}
+		rc.control.mu.Unlock()
+	}
 	if emissionErr != nil {
 		return emissionErr
 	}
@@ -1625,10 +1633,6 @@ stream:
 	}
 	if rc.control != nil {
 		rc.control.mu.Lock()
-		rc.control.answeringModel = outcome.Model
-		if u := outcome.Usage; u != nil {
-			rc.control.usage = &content.RunUsage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadTokens, CacheWrite: u.CacheWriteTokens}
-		}
 		// The actor cancels for both Stop and socket loss. Only an accepted
 		// Stop is a user cancellation; a lost transport interrupts the run.
 		if errors.Is(err, agentharness.ErrCancelled) && !rc.control.cancelled {

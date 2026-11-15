@@ -143,6 +143,7 @@ type codec struct {
 	promptPath  string
 	prompt      string
 	model       string
+	outcome     harness.Outcome
 	decode      func([]byte) ([]harness.Event, error)
 	markerPath  string
 	markerErr   error
@@ -152,7 +153,8 @@ type codec struct {
 
 func (*codec) Setup() []harness.Step { return nil }
 func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
-	c.decode = newDecoder()
+	c.outcome = harness.Outcome{}
+	c.decode = newDecoder(&c.outcome)
 	c.prompt = spec.SystemPrompt
 	selectModel := spec.Model != "" && spec.Model != c.model
 	steps := []harness.Step{{Command: harness.Command{Name: "get_state"}, Barrier: true, Check: func(payload any) error {
@@ -261,7 +263,8 @@ func (c *codec) Decode(line []byte) (harness.Decoded, error) {
 		return harness.Decoded{Response: &harness.Response{ID: wire.ID, Error: reason, Payload: wire.Data}}, nil
 	}
 	if c.decode == nil {
-		c.decode = newDecoder()
+		c.outcome = harness.Outcome{}
+		c.decode = newDecoder(&c.outcome)
 	}
 	events, err := c.decode(line)
 	// turn_end follows persistence of a completed model call and its tool
@@ -269,5 +272,5 @@ func (c *codec) Decode(line []byte) (harness.Decoded, error) {
 	if err == nil && (wire.Type == "turn_end" || wire.Type == "agent_settled") {
 		err = c.checkpoint()
 	}
-	return harness.Decoded{Events: events}, err
+	return harness.Decoded{Events: events, Outcome: &c.outcome}, err
 }

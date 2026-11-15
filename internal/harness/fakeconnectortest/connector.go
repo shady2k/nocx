@@ -156,9 +156,9 @@ func decode(line []byte) ([]harness.Event, error) {
 	case "tool_finished":
 		return []harness.Event{{Kind: harness.EventToolFinished, Tool: &harness.ToolCall{ID: wire.ID, Name: wire.Name}}}, nil
 	case "end":
-		return []harness.Event{{Kind: harness.EventEnd, End: &harness.End{Model: wire.Model, Usage: usage(wire.Usage)}}}, nil
+		return []harness.Event{{Kind: harness.EventEnd, Outcome: &harness.Outcome{Model: wire.Model, Usage: usage(wire.Usage)}}}, nil
 	case "failure":
-		return []harness.Event{{Kind: harness.EventFailure, Failure: &harness.Failure{Reason: wire.Reason}}}, nil
+		return []harness.Event{{Kind: harness.EventFailure, Outcome: &harness.Outcome{Model: wire.Model, Usage: usage(wire.Usage)}, Failure: &harness.Failure{Reason: wire.Reason}}}, nil
 	default:
 		return nil, fmt.Errorf("unknown event %q", wire.Kind)
 	}

@@ -113,8 +113,8 @@ type Event struct {
 	Text string
 	// Tool is the call, for EventToolStarted and EventToolFinished.
 	Tool *ToolCall
-	// End is the end facts, for EventEnd.
-	End *End
+	// Outcome carries model and accumulated usage for every terminal, including failure and cancellation.
+	Outcome *Outcome
 	// Failure is the reason, for EventFailure.
 	Failure *Failure
 }
@@ -125,17 +125,6 @@ type Event struct {
 type ToolCall struct {
 	Name string
 	ID   string
-}
-
-// End is what the agent states when a turn succeeds.
-type End struct {
-	// Model is the model that actually answered. It is what the block names,
-	// and what a conversation pins.
-	Model string
-	// Usage is what the agent reported, or nil when it reported none. nil is
-	// not zero: an agent that says nothing about usage shows nothing rather
-	// than a made-up zero.
-	Usage *Usage
 }
 
 // Usage is what an agent states about one turn's model calls.
@@ -178,9 +167,14 @@ type Model struct {
 	Name string
 }
 
-// Outcome is what Wait reports for a successful turn.
+// Outcome is what the agent states about a turn, even when it fails or is cancelled.
 type Outcome struct {
+	// Model is the model that actually answered. It is what the block names,
+	// and what a conversation pins.
 	Model string
+	// Usage is what the agent reported, or nil when it reported none. nil is
+	// not zero: an agent that says nothing about usage shows nothing rather
+	// than a made-up zero.
 	Usage *Usage
 }
 

@@ -372,15 +372,18 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // that belong to it rather than counting across the whole file.
     const firstRequestOfTheRun = fake.requests().length
     await askFromPrompt(page, QUESTION)
-    const frozenAsk = (await recorded(page)).asks.at(-1)
-    expect(frozenAsk?.attachedContent).toEqual([
-      expect.objectContaining({
-        itemId: expect.any(String),
-        command: expect.stringContaining('put-marker-on-screen.sh'),
-        state: 'running',
-        automatic: true,
-      }),
-    ])
+    // Submission first refreshes agent readiness. Wait for this ask's wire
+    // frame, not the earlier general question still last in the recording.
+    await expect
+      .poll(async () => (await recorded(page)).asks.at(-1)?.attachedContent)
+      .toEqual([
+        expect.objectContaining({
+          itemId: expect.any(String),
+          command: expect.stringContaining('put-marker-on-screen.sh'),
+          state: 'running',
+          automatic: true,
+        }),
+      ])
     await answerFinished(page, QUESTION)
 
     const body = answerBlock(page, QUESTION).locator('[data-answer-body]')

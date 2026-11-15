@@ -76,6 +76,10 @@
     {
       "test": "go:TestBashAgentWrapperCancelsTheLaunchOnCtrlC",
       "bead": "nocx-xvxoa"
+    },
+    {
+      "test": "job:ci-backend (with-secret-service)#828",
+      "bead": "nocx-f7jk1"
     }
   ]
 }

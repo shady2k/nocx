@@ -129,15 +129,34 @@ func (r *turnReservation) enter(ctx context.Context) (func(), *Declined, error) 
 }
 
 // declinedBy records a person's no as this turn's answer for the calls queued
-// behind the one they declined. It covers exactly the calls that exist at this
-// moment: the ones already waiting for their turn. A call the agent makes after
-// it reads the refusal arrives later and is asked about like any other.
+// behind the one they declined. It covers exactly the calls that had arrived
+// when the ANSWER settled — the cutoff the answer carries — so a call that
+// arrived between the settlement and this call is a new question and is asked
+// about like any other.
+//
+// A NEWER decline REPLACES the earlier one: the person has spoken again, and
+// their latest words are the answer the calls behind the newest declined call
+// are given. It is safe because the calls of the earlier batch have already
+// entered — the order serializes them — and `declinedThrough` only grows, so
+// nothing that was already refused changes its reason after the fact.
 func (o *TurnOrder) declinedBy(answer Declined) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.declined == nil {
-		refusal := answer
-		o.declined = &refusal
-		o.declinedThrough = o.arrivals
+	refusal := answer
+	o.declined = &refusal
+	through := answer.Through
+	if through > o.arrivals {
+		// A cutoff from another turn's order, or none at all: never wider than
+		// what this turn has actually accepted.
+		through = o.arrivals
 	}
+	o.declinedThrough = through
+}
+
+// ArrivalCutoff is how many calls this turn has accepted so far: the boundary
+// a person's answer covers, read at the moment it settles (ADR-anntnxdj §2).
+func (o *TurnOrder) ArrivalCutoff() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.arrivals
 }

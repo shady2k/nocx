@@ -213,7 +213,19 @@ type Answer interface{ answer() }
 type Approved struct{}
 
 // Declined refuses the call, and Reason is the person's own no.
-type Declined struct{ Reason string }
+//
+// Through is how many of the turn's calls had arrived when the person's answer
+// SETTLED — the cutoff, taken at that moment and carried here (ADR-anntnxdj §2).
+// Every call up to it is refused with Reason because it was queued behind the
+// one the person answered; a call that arrived later is a new question and is
+// not covered. It is a fact about the answer rather than a reading taken when
+// the pipeline gets round to it, because the two are different moments and the
+// calls that arrive in between belong to neither. Zero is an answer from a
+// caller with no turn to order.
+type Declined struct {
+	Reason  string
+	Through uint64
+}
 
 // Unanswered is an approver that could not put the question to anybody, or
 // whose answer never arrived. Err says what went wrong, when the approver knows.

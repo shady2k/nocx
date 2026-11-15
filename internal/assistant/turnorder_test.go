@@ -35,6 +35,8 @@ type holdingQuestioner struct {
 
 	mu   sync.Mutex
 	asks int
+	// cutoff is where the answer settles, as the real approver stamps it.
+	cutoff func() uint64
 }
 
 func newHoldingQuestioner() *holdingQuestioner {
@@ -54,7 +56,12 @@ func (q *holdingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answer 
 		// the outcome.
 		return Unanswered{Err: errors.New("a second question was asked: the turn's order is gone")}
 	}
-	return <-q.answers
+	answer := <-q.answers
+	if declined, ok := answer.(Declined); ok && declined.Through == 0 && q.cutoff != nil {
+		declined.Through = q.cutoff()
+		answer = declined
+	}
+	return answer
 }
 
 func (q *holdingQuestioner) AskEgress(_ context.Context, req *EgressRequest) Answer {
@@ -77,6 +84,9 @@ func TestTwoCallsOfOneTurnRunOneAtATimeInOrder(t *testing.T) {
 	q := newHoldingQuestioner()
 	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it, as the transport's wait
+	// stamps it: the calls queued by then are the ones it covers.
+	q.cutoff = k.order.ArrivalCutoff
 
 	type outcome struct {
 		out string
@@ -146,6 +156,9 @@ func TestACallQueuedBehindOneIsStoppedByTheTurnsCancellation(t *testing.T) {
 	q := newHoldingQuestioner()
 	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it, as the transport's wait
+	// stamps it: the calls queued by then are the ones it covers.
+	q.cutoff = k.order.ArrivalCutoff
 
 	go func() {
 		_, _ = k.Invoke(context.Background(), "files.read", "call-1", argsA)

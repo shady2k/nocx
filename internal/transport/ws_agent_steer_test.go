@@ -12,6 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	agentharness "github.com/shady2k/nocx/internal/harness"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
@@ -475,5 +476,38 @@ func TestAgentSteer_TheMessageIsWrittenIntoTheTurnsRecord(t *testing.T) {
 	}
 	if len(restored.Caused) != 2 || restored.Caused[1].Kind != "text" || restored.Caused[1].Source != "user" {
 		t.Fatalf("restored caused = %+v, want the person's text child second", restored.Caused)
+	}
+}
+
+// I2 — THE CUTOFF IS TAKEN WITH THE SETTLEMENT, NOT AFTER IT (nocx-a62cl.6.2).
+//
+// The answer means "the calls that were queued behind this one when I was
+// given". That set is knowable only at the moment the wait settles, so it is
+// read inside the same lock that decides the settlement; a reading taken when
+// the pipeline gets round to it has moved, and calls that arrived in between
+// would be refused for something the person had not yet seen.
+func TestTheAnswerWaitStampsTheArrivalCutoffAsItSettles(t *testing.T) {
+	ctx := t.Context()
+	wait := newAnswerWait(notify.NewManualClock(), "session.read", answerLimit)
+	wait.begin()
+	defer wait.stop()
+
+	arrivals := uint64(3)
+	wait.cutoff = func() uint64 { return arrivals }
+	// The calls arriving between the settlement and the pipeline reading it
+	// must not be covered: the cutoff was fixed when the wait settled.
+	if !wait.settleLocked(assistant.Declined{Reason: "use the other log"}) {
+		t.Fatal("the settlement was refused")
+	}
+	arrivals = 9
+	answer, ok := wait.result(ctx).(assistant.Declined)
+	if !ok {
+		t.Fatalf("the answer = %T, want a decline", wait.result(ctx))
+	}
+	if answer.Through != 3 {
+		t.Fatalf("the decline covers %d arrivals, want the 3 that existed when it settled", answer.Through)
+	}
+	if answer.Reason != "use the other log" {
+		t.Fatalf("reason = %q", answer.Reason)
 	}
 }

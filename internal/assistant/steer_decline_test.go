@@ -32,6 +32,9 @@ func TestThePersonsMessageDeclinesOnlyTheCallsQueuedAtThatMoment(t *testing.T) {
 	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: sentence}, kind: DeclineCallOnce}
 	k := kernelForQuestioner(t, grant, &fakeLedger{}, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it: a stand-in approver stamps
+	// the arrivals covered, exactly as the transport's wait does.
+	q.cutoff = k.order.ArrivalCutoff
 	tools := &RunTools{kernel: k}
 
 	// The call the person was asked about, and the one already queued behind

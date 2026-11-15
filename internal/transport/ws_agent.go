@@ -182,6 +182,10 @@ type agentRunControl struct {
 	// steerBoundary writes a person's message into the turn's record, in order
 	// with the answer's runs (nocx-a62cl.6.4). Nil until the stream installs it.
 	steerBoundary func(ctx context.Context, text string) error
+	// turnCutoff is the turn's arrivals counter, installed with the run's tool
+	// chain: the calls a person's answer covers are the ones queued by the time
+	// it settles (ADR-anntnxdj §2).
+	turnCutoff func() uint64
 	// droppedSteers is what a cancelled turn's agent had queued and dropped:
 	// messages nobody used, which become the conversation's next questions
 	// (ADR-4khgzeyp decision 3). Set when the turn reports its terminal.
@@ -248,6 +252,21 @@ func (c *agentRunControl) attachedSteerBoundary() func(ctx context.Context, text
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.steerBoundary
+}
+
+// attachTurnCutoff names the turn's arrivals counter: how many of its calls
+// have arrived so far, the boundary a person's answer covers (ADR-anntnxdj §2).
+// Nil for a run whose chain has no order to cover.
+func (c *agentRunControl) attachTurnCutoff(cutoff func() uint64) {
+	c.mu.Lock()
+	c.turnCutoff = cutoff
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) attachedTurnCutoff() func() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnCutoff
 }
 
 func (c *agentRunControl) attachedSteerer() agentharness.Steerer {
@@ -1631,6 +1650,11 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 		runTools = tools
 		authority = tools
 		fatal = tools.Fatal()
+		// The turn's arrivals, for the answers that settle on it: a decline
+		// covers the calls queued by then (ADR-anntnxdj §2).
+		if rc.control != nil {
+			rc.control.attachTurnCutoff(tools.TurnArrivalCutoff)
+		}
 	}
 	conversation := string(rc.sessionID)
 	if rc.paneID != nil {

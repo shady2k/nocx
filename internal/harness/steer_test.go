@@ -52,7 +52,22 @@ func (p steerProtocol) SteerCommand(text string) (Command, bool) {
 	return Command{Name: "steer", Payload: map[string]any{"message": text}}, true
 }
 
+// deafSteerProtocol is an agent that takes no message while it answers, and
+// whose turn STAYS RUNNING after its prompt: the capability is what refuses the
+// message here, not a turn that has already ended (the shell fixture answers the
+// prompt with its own end, which made this a race with the terminal).
 type deafSteerProtocol struct{ shellProtocol }
+
+func (deafSteerProtocol) Start(context.Context, TurnSpec) (Launch, error) {
+	return Launch{Argv: []string{"/bin/sh", "-c", `while read -r id name; do
+case "$name" in
+barrier) echo "response $id";;
+abort) echo "response $id"; echo end;;
+esac
+done`}}, nil
+}
+
+func (deafSteerProtocol) NewCodec(SessionInfo, Launch) Codec { return deafSteerProtocol{} }
 
 func (deafSteerProtocol) SteerCommand(string) (Command, bool) { return Command{}, false }
 

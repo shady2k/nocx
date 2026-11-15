@@ -11,6 +11,14 @@ class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
   /** What agent.steer answers: into the turn, or kept for the next question. */
   steerOutcome: 'steered' | 'next_question' = 'steered'
+  /** When true, agent.steer answers only when the test releases it. */
+  holdSteer = false
+  private steerWaiters: ((outcome: 'steered' | 'next_question') => void)[] = []
+
+  /** Answer the oldest held agent.steer. */
+  releaseSteer(outcome: 'steered' | 'next_question'): void {
+    this.steerWaiters.shift()?.(outcome)
+  }
   private subs = new Map<string, (params: unknown) => void>()
   private refusals = new Map<string, string>()
   next = { run: 7, answerEntry: 'answer-1' }
@@ -29,7 +37,14 @@ class FakeDispatcher {
     }
     if (method === 'agent.steer') {
       const { runId } = params as { runId: number }
-      return Promise.resolve({ runId, outcome: this.steerOutcome }) as Promise<T>
+      if (!this.holdSteer) {
+        return Promise.resolve({ runId, outcome: this.steerOutcome }) as Promise<T>
+      }
+      // A HELD steer: the test decides when (and with what) its reply lands,
+      // which is how a reply that arrives after the terminal is exercised.
+      return new Promise<{ runId: number; outcome: 'steered' | 'next_question' }>((resolve) => {
+        this.steerWaiters.push((outcome) => resolve({ runId, outcome }))
+      }) as Promise<T>
     }
     if (method === 'agent.ask') {
       const res = {
@@ -1045,5 +1060,50 @@ describe('a message the agent took and the cancel dropped (nocx-a62cl.6.3)', () 
       .toBe(2)
     const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
     expect((next.params as { question: string }).question).toBe('an extension queued this')
+  })
+})
+
+describe('I1 — one disposition per message, whatever the order of events (nocx-a62cl.6.1)', () => {
+  it('asks a message whose next_question reply lands AFTER the turn ended', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.holdSteer = true
+    const steering = target.submit('ask me the other thing instead')
+
+    // The run terminalizes first: the renderer's queue was empty when it did.
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+    // ...and only then does the backend say the message was kept.
+    dispatcher.releaseSteer('next_question')
+    await steering
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('ask me the other thing instead')
+  })
+
+  it('keeps one question in flight when several kept replies arrive together', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.holdSteer = true
+    const first = target.submit('one')
+    const second = target.submit('two')
+
+    // The run is gone, and both replies land without a turn to queue behind.
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+    dispatcher.releaseSteer('next_question')
+    dispatcher.releaseSteer('next_question')
+    await Promise.all([first, second])
+
+    // One question is asked — the conversation cannot run two — and the other
+    // waits for it.
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const asked = dispatcher.calls
+      .filter((call) => call.method === 'agent.ask')
+      .map((call) => (call.params as { question: string }).question)
+    expect(asked[1]).toBe('one')
   })
 })

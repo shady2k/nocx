@@ -38,7 +38,9 @@ import (
 // under test here is a recorder: what matters is WHICH writes happened and
 // in what order, not the SQLite behind the real operation.
 type fakeAgentService struct {
-	steers      []string
+	steers []string
+	// sessionID is the session its one run belongs to.
+	sessionID   string
 	mu          sync.Mutex
 	transitions []content.RunState
 	appended    []string
@@ -121,6 +123,17 @@ func (f *fakeAgentService) SubmitSteer(_ context.Context, turnID string, _ int64
 		EntryID:    fmt.Sprintf("%s/steer-%d", turnID, f.prose),
 		ArtifactID: fmt.Sprintf("%s/steer-body-%d", turnID, f.prose),
 	}, nil
+}
+
+// SteerTarget reports what this fake's one run can still reach: closed once its
+// terminal write arrived, and belonging to the session it was told about.
+func (f *fakeAgentService) SteerTarget(_ context.Context, runID int64) (content.SteerTarget, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if runID != 1 {
+		return content.SteerTarget{}, content.ErrNoSuchRun
+	}
+	return content.SteerTarget{SessionID: f.sessionID, Terminal: f.finish != nil}, nil
 }
 
 func (f *fakeAgentService) FrameText(context.Context, string) (string, error) { return "", nil }

@@ -1905,6 +1905,17 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 	rc, ok := h.pendingRuns[p.RunID]
 	h.pendingRunsMu.Unlock()
 	if !ok || rc.control == nil {
+		// THE RUN MAY HAVE CLOSED BETWEEN THE RENDERER DRAWING ITS TURN AND
+		// THIS FRAME ARRIVING. A message naming a run of THIS conversation that
+		// has terminalized is not an error: the turn was on screen when the
+		// person typed, and the message is asked as the conversation's next
+		// question (ADR-4khgzeyp decision 3, nocx-a62cl.6.1). Anything else —
+		// an id that names nothing, another window's run — is still refused.
+		if h.steerTargetIsAClosedRunOfThisConversation(ctx, p.RunID) {
+			h.log.Info("agent steer: the run had already ended, so the message is asked next", "run", p.RunID)
+			_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+			return
+		}
 		_ = h.r.TryError(req.ID, RPCError{
 			Code:    -32602,
 			Message: "Invalid params: run is not active (it may already be terminal or never existed)",
@@ -1971,6 +1982,26 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 type steerBoundaryWrite struct {
 	text string
 	ack  chan error
+}
+
+// steerTargetIsAClosedRunOfThisConversation reports whether runID names an agent
+// run that has terminalized and belongs to a session this connection holds: the
+// one case where a message that arrived after the turn is still this
+// conversation's, and is asked next rather than refused (nocx-a62cl.6.1).
+func (h agentHandlers) steerTargetIsAClosedRunOfThisConversation(ctx context.Context, runID int64) bool {
+	if h.op == nil || h.state == nil {
+		return false
+	}
+	var target content.SteerTarget
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		found, targetErr := svc.SteerTarget(ctx, runID)
+		target = found
+		return targetErr
+	})
+	if err != nil || !target.Terminal || target.SessionID == "" {
+		return false
+	}
+	return h.state.has(session.ID(target.SessionID))
 }
 
 // isSteerNotTaken reports whether a turn's refusal of a person's message means

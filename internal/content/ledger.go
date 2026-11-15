@@ -1066,6 +1066,17 @@ type ProseBlock struct {
 	ArtifactID string
 }
 
+// SteerTarget is what a message that names a run can still reach: whose the run
+// was, and whether it has closed (nocx-a62cl.6.1).
+type SteerTarget struct {
+	// SessionID is the session the turn's ask named. Empty for a run recorded
+	// without one, and then nothing can be assumed about which conversation the
+	// message belonged to.
+	SessionID string
+	// Terminal is true once the run has reached a state no turn returns from.
+	Terminal bool
+}
+
 // ProseFacts is the part of a TEXT entry's payload the ledger reads back:
 // WHICH RUN printed this piece of prose (ADR-0040's "the conversation is
 // assembled from the children, in pos order, per run").
@@ -2189,6 +2200,13 @@ type LedgerRepository interface {
 	// turn is running under, refused for another turn's run for the same
 	// reason OpenProse refuses it.
 	SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (ProseBlock, error)
+	// SteerTarget answers what a message naming runID can still reach: the
+	// session its turn belongs to, and whether the run has already
+	// terminalized. It is the fact a message that arrived too late needs
+	// (nocx-a62cl.6.1): the run is still this conversation's, so the message is
+	// asked next rather than refused, and an id that names nothing is refused.
+	// ErrNoSuchRun when no agent run carries id.
+	SteerTarget(ctx context.Context, runID int64) (SteerTarget, error)
 	// RunState returns the assistant run state of one execution: the
 	// durable state a reconnecting renderer reads (design §7 — it never
 	// infers liveness from notifications having stopped). Nil when the

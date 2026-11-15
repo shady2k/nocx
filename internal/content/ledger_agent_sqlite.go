@@ -901,6 +901,29 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 	return out, err
 }
 
+// SteerTarget names the conversation a run belongs to and whether it has closed
+// (nocx-a62cl.6.1). It reads the run's own row joined to its turn: the session
+// the ask named, and the state the run reached. A run that is not an agent run
+// is ErrNoSuchRun, because nothing about a message can be said of it.
+func (s *sqliteContent) SteerTarget(ctx context.Context, runID int64) (SteerTarget, error) {
+	var sessionID sql.NullString
+	var state sql.NullString
+	var lane sql.NullString
+	err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT e.session_id, x.state, x.lane FROM executions x JOIN entries e ON e.id = x.entry_id WHERE x.id = ?`,
+		runID).Scan(&sessionID, &state, &lane)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SteerTarget{}, ErrNoSuchRun
+	}
+	if err != nil {
+		return SteerTarget{}, err
+	}
+	if lane.String != agentLane {
+		return SteerTarget{}, ErrNoSuchRun
+	}
+	return SteerTarget{SessionID: sessionID.String, Terminal: RunState(state.String).IsTerminal()}, nil
+}
+
 // SubmitSteer writes one person's message into a turn's order (nocx-a62cl.6.4):
 // the `text` child that draws it and its words as that child's body, in ONE
 // commit — the same reasoning as OpenProse, from the same seat rule, differing

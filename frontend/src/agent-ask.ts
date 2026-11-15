@@ -87,6 +87,11 @@ export class AgentInputTarget implements InputTarget {
   /** Messages a turn kept for later, in the order the person sent them: each is
    *  asked as the conversation's next question once that turn ends. */
   private nextQuestions: string[] = []
+  /** Whether a kept message is already being asked. One question in flight per
+   *  conversation: the backend can run one turn at a time, and two asks started
+   *  in the same tick would both open a block and one would sit behind the
+   *  other's whole answer. */
+  private askingNext = false
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -220,7 +225,14 @@ export class AgentInputTarget implements InputTarget {
     const line = handle.steer(text, queued ? 'next_question' : 'steered')
     const run = this.runs.get(runId)
     if (run !== undefined) run.steered.push({ text, line })
-    if (queued) this.nextQuestions.push(text)
+    if (queued) {
+      this.nextQuestions.push(text)
+      // DRAIN ON ENQUEUE, not only at the terminal: the reply can arrive after
+      // the turn's terminal (the backend answers a message it could not take
+      // once it knows), and a queue drained only at the terminal would hold
+      // that message for ever.
+      this.askNextQuestions()
+    }
   }
 
   private settleRun(
@@ -303,6 +315,7 @@ export class AgentInputTarget implements InputTarget {
       run.steered.splice(index, 1)
       this.nextQuestions.push(dropped)
     }
+    this.askNextQuestions()
     this.seams.onTurnEnd?.(run.askId)
     // The messages this turn could not take are asked now, as its successors:
     // each opens its own block and is a question like any other (ADR-anntnxdj
@@ -319,15 +332,23 @@ export class AgentInputTarget implements InputTarget {
    * "the conversation's next question" means.
    */
   private askNextQuestions(): void {
-    if (this.nextQuestions.length === 0 || this.runs.size > 0) return
+    if (this.askingNext || this.nextQuestions.length === 0 || this.runs.size > 0) return
     const [text, ...rest] = this.nextQuestions
     this.nextQuestions = rest
-    void this.ask(text).catch(() => {
-      // The refusal is already on screen (onRefusal); the message itself was
-      // the person's, and a turn that would not start must not swallow the rest
-      // of the queue.
-      this.askNextQuestions()
-    })
+    this.askingNext = true
+    void this.ask(text)
+      .catch(() => {
+        // The refusal is already on screen (onRefusal); the message itself was
+        // the person's, and a turn that would not start must not swallow the
+        // rest of the queue.
+      })
+      .finally(() => {
+        this.askingNext = false
+        // The turn that just started holds the queue (runs.size), and asks the
+        // next one when it terminalizes; a turn that never started leaves the
+        // queue to this call.
+        this.askNextQuestions()
+      })
   }
 
   /**

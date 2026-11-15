@@ -12,8 +12,8 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	agentharness "github.com/shady2k/nocx/internal/harness"
-	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
+	"github.com/shady2k/nocx/internal/notify"
 )
 
 // steerScript keeps the turn open after it has said something: the moment a
@@ -75,7 +75,11 @@ func TestAgentSteer_OverTheWireReachesTheRunningAgent(t *testing.T) {
 
 // After the turn has ended there is nowhere for a message to land, and the
 // answer says so instead of pretending it was delivered.
-func TestAgentSteer_RefusedWhenNoTurnRuns(t *testing.T) {
+// A message naming a run of THIS conversation that has already closed is not an
+// error: the renderer's turn was still on screen when the person typed, and the
+// message is asked as the conversation's next question (ADR-4khgzeyp decision 3,
+// nocx-a62cl.6.1). An id that names nothing is still refused.
+func TestAgentSteer_AClosedRunOfThisConversationAsksTheMessageNext(t *testing.T) {
 	h := newAskHarness(t, answerScript("done"))
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
@@ -92,15 +96,48 @@ func TestAgentSteer_RefusedWhenNoTurnRuns(t *testing.T) {
 	if settled.RunID != res.RunID || settled.State != string(content.RunCompleted) {
 		t.Fatalf("runState = %+v, want run %d completed", settled, res.RunID)
 	}
-	resp := jsonrpcCallWithID(t, h.conn, "agent.steer", map[string]any{"runId": res.RunID, "text": "too late"}, 2)
+	// The run is closed, and the message is not lost.
+	reply := jsonrpcCallWithID(t, h.conn, "agent.steer", map[string]any{"runId": res.RunID, "text": "too late"}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &env); err != nil {
+		t.Fatalf("decode agent.steer: %v\nraw: %s", err, reply)
+	}
+	if env.Error != nil {
+		t.Fatalf("agent.steer after the turn ended: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "agent.steer.schema.json"), env.Result, "agent.steer result (a closed run)")
+	var result agentSteerResponse
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("decode agent.steer result: %v", err)
+	}
+	if result.Outcome != steerNextQuestion {
+		t.Fatalf("agent.steer on a closed run = %+v, want %q", result, steerNextQuestion)
+	}
+}
+
+// An id that names no run at all is still refused, and says why: nothing can be
+// assumed about a message addressed to nothing.
+func TestAgentSteer_AnUnknownRunIsRefused(t *testing.T) {
+	h := newAskHarness(t, answerScript("done"))
+	sid := openLocalSession(t, h.conn)
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "steer-ask-3", "sessionId": sid, "question": "what is in the log?", "cwd": "/repo",
+	}, 1); errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	_ = readNotification(t, h.conn, "agent.runState", 15*time.Second)
+	reply := jsonrpcCallWithID(t, h.conn, "agent.steer", map[string]any{"runId": 987654, "text": "hello?"}, 2)
 	var env struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("decode refused agent.steer: %v\nraw: %s", err, resp)
+	if err := json.Unmarshal(reply, &env); err != nil {
+		t.Fatalf("decode refused agent.steer: %v\nraw: %s", err, reply)
 	}
 	if env.Error == nil || !strings.Contains(env.Error.Message, "not active") {
-		t.Fatalf("agent.steer after the turn ended = %s, want an honest not-active error", resp)
+		t.Fatalf("agent.steer for an unknown run = %s, want an honest not-active error", reply)
 	}
 }
 

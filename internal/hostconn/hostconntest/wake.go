@@ -47,6 +47,12 @@ func (w *WakeSource) Wakes() <-chan monoclock.Nanos { return w.ch }
 // can be asserted.
 func (w *WakeSource) Sleeps() <-chan monoclock.Nanos { return w.sleeps }
 
+// Close ends the source after the test has finished sending control edges.
+func (w *WakeSource) Close() {
+	close(w.ch)
+	close(w.sleeps)
+}
+
 // Sleep reports that the machine is about to sleep, at the clock's current
 // reading.
 func (w *WakeSource) Sleep() {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -92,26 +93,34 @@ func TestAWakeOverASilentConnectionReadsStalledWithinFiveSeconds(t *testing.T) {
 // TestAParkedProbeIsNotDoubledByAWake — a parked SendRequest holds the mux's
 // send lock, so a second probe would queue behind it and measure nothing.
 func TestAParkedProbeIsNotDoubledByAWake(t *testing.T) {
-	clock := hostconntest.New()
-	link, wake, mgr, sup := wakeStand(t, clock)
-	acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link, wake, mgr, sup := wakeStand(t, clock)
+		defer wake.Close()
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	// The cadence's probe, parked.
-	clock.Advance(hostconn.ProbeInterval)
-	waittest.WaitFor(t, "the cadence's probe", func() bool { return link.probeCalls.Load() == 1 })
-	clock.Advance(hostconn.ProbeDeadline)
-	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		// The cadence's probe, parked.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "the cadence's probe", func() bool { return link.probeCalls.Load() == 1 })
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 
-	// The guard is waited on for its own statement that it processed the wake,
-	// so the count below is read after the wake was certainly applied.
-	syncGuard(t, sup, wake.Wake)
-	if calls := link.probeCalls.Load(); calls != 1 {
-		t.Fatalf("%d probes after a wake with one parked, want 1: a second would queue behind the mux's send lock", calls)
-	}
+		// The guard is waited on for its own statement that it processed the wake,
+		// so the count below is read after the wake was certainly applied.
+		syncGuard(t, sup, wake.Wake)
+		if calls := link.probeCalls.Load(); calls != 1 {
+			t.Fatalf("%d probes after a wake with one parked, want 1: a second would queue behind the mux's send lock", calls)
+		}
 
-	link.release()
-	waittest.WaitFor(t, "the parked probe's answer", func() bool {
-		return sup.Current().Kind == hostconn.Connected
+		link.release()
+		waittest.WaitFor(t, "the parked probe's answer", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
 	})
 }
 

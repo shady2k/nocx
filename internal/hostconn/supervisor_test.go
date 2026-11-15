@@ -464,52 +464,61 @@ func last(states []hostconn.State) hostconn.State {
 // the connection is the key, not the host name. Two principals on one endpoint
 // are two connections, two probers and two states.
 func TestTwoIdentitiesOnOneHostDoNotShareAState(t *testing.T) {
-	clock := hostconntest.New()
-	links := map[string]*quietLink{}
-	var mu sync.Mutex
-	carrier := &memoryCarrier{dialPlan: func(plan hostconn.Plan, _ hostconn.EventSink) (hostconn.Link, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		link := newQuietLink()
-		if plan.Key.Identity == "key-b" {
-			// This connection answers; only the first goes quiet.
-			link.memoryLink.probe = func() (time.Duration, error) { return time.Millisecond, nil }
-		}
-		links[plan.Key.Identity] = link
-		return link, nil
-	}}
-	_, logger := logtest.New(t)
-	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		links := map[string]*quietLink{}
+		var mu sync.Mutex
+		carrier := &memoryCarrier{dialPlan: func(plan hostconn.Plan, _ hostconn.EventSink) (hostconn.Link, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			link := newQuietLink()
+			if plan.Key.Identity == "key-b" {
+				// This connection answers; only the first goes quiet.
+				link.memoryLink.probe = func() (time.Duration, error) { return time.Millisecond, nil }
+			}
+			links[plan.Key.Identity] = link
+			return link, nil
+		}}
+		_, logger := logtest.New(t)
+		mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
 
-	acquireAs := func(identity string) *hostconn.Lease {
-		t.Helper()
-		p := plan()
-		p.Key.Identity = identity
-		lease, err := mgr.Acquire(context.Background(), p)
-		if err != nil {
-			t.Fatalf("Acquire %s: %v", identity, err)
+		acquireAs := func(identity string) *hostconn.Lease {
+			t.Helper()
+			p := plan()
+			p.Key.Identity = identity
+			lease, err := mgr.Acquire(context.Background(), p)
+			if err != nil {
+				t.Fatalf("Acquire %s: %v", identity, err)
+			}
+			t.Cleanup(lease.Release)
+			return lease
 		}
-		t.Cleanup(lease.Release)
-		return lease
-	}
-	first := acquireAs("key-a")
-	second := acquireAs("key-b")
-	if got := len(links); got != 2 {
-		t.Fatalf("%d connections for two identities on one host, want 2", got)
-	}
+		first := acquireAs("key-a")
+		second := acquireAs("key-b")
+		defer first.Release()
+		defer second.Release()
+		defer links["key-a"].release()
+		if got := len(links); got != 2 {
+			t.Fatalf("%d connections for two identities on one host, want 2", got)
+		}
 
-	// The first goes silent; the second must not inherit it.
-	clock.Advance(hostconn.ProbeInterval)
-	clock.Advance(hostconn.ProbeDeadline)
-	waittest.WaitFor(t, "the first connection to read stalled", func() bool {
-		return last(first.States()).Kind == hostconn.Stalled
+		// The first goes silent; the second must not inherit it.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the first connection to read stalled", func() bool {
+			return last(first.States()).Kind == hostconn.Stalled
+		})
+		if got := last(second.States()).Kind; got != hostconn.Connected {
+			t.Fatalf("the second identity reads %v because the first went silent, want connected", got)
+		}
+		if second.Lost() {
+			t.Fatal("the second identity's transport was closed because the first went silent")
+		}
 	})
-	if got := last(second.States()).Kind; got != hostconn.Connected {
-		t.Fatalf("the second identity reads %v because the first went silent, want connected", got)
-	}
-	if second.Lost() {
-		t.Fatal("the second identity's transport was closed because the first went silent")
-	}
 }
 
 // TestAHoldersStatedCadenceReachesTheOneProber is design §5.3's "a profile's

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -283,43 +284,51 @@ func TestAWakeDuringTheDialIsNotLost(t *testing.T) {
 // TestTheReleaseBarrierReusesTheOneProber — finding 1: the barrier asks the
 // supervisor for one answer, and a probe already in flight is the evidence.
 func TestTheReleaseBarrierReusesTheOneProber(t *testing.T) {
-	clock := hostconntest.New()
-	link, _, mgr, sup := wakeStand(t, clock)
-	var probes atomic.Int64
-	link.memoryLink.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		return time.Millisecond, nil
-	}
-	held := acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		defer link.release()
+		var probes atomic.Int64
+		link.memoryLink.probe = func() (time.Duration, error) {
+			probes.Add(1)
+			return time.Millisecond, nil
+		}
+		held := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer held.Release()
 
-	if err := sup.Probe(context.Background()); err != nil {
-		t.Fatalf("Probe on a healthy connection: %v", err)
-	}
-	if calls := probes.Load(); calls != 1 {
-		t.Fatalf("%d probes for one barrier request, want exactly the one prober's", calls)
-	}
+		if err := sup.Probe(context.Background()); err != nil {
+			t.Fatalf("Probe on a healthy connection: %v", err)
+		}
+		if calls := probes.Load(); calls != 1 {
+			t.Fatalf("%d probes for one barrier request, want exactly the one prober's", calls)
+		}
 
-	// With a probe parked, the barrier waits on it and sends nothing.
-	link.memoryLink.probe = func() (time.Duration, error) {
-		probes.Add(1)
-		<-link.probeBlock
-		return 0, nil
-	}
-	clock.Advance(hostconn.ProbeInterval)
-	waittest.WaitFor(t, "the parked probe", func() bool { return probes.Load() == 2 })
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	if err := sup.Probe(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a barrier over a parked probe answered %v, want its own deadline", err)
-	}
-	if calls := probes.Load(); calls != 2 {
-		t.Fatalf("%d probes: the barrier started a second prober", calls)
-	}
-	// And a barrier that could not get an answer did not close anything: the
-	// closing policy is the supervisor's, never the caller's.
-	if held.Lost() {
-		t.Fatal("the barrier closed the connection it could not get an answer from")
-	}
+		synctest.Wait()
+		// With a probe parked, the barrier waits on it and sends nothing.
+		link.memoryLink.probe = func() (time.Duration, error) {
+			probes.Add(1)
+			<-link.probeBlock
+			return 0, nil
+		}
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "the parked probe", func() bool { return probes.Load() == 2 })
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if err := sup.Probe(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("a barrier over a parked probe answered %v, want its own deadline", err)
+		}
+		if calls := probes.Load(); calls != 2 {
+			t.Fatalf("%d probes: the barrier started a second prober", calls)
+		}
+		// And a barrier that could not get an answer did not close anything: the
+		// closing policy is the supervisor's, never the caller's.
+		if held.Lost() {
+			t.Fatal("the barrier closed the connection it could not get an answer from")
+		}
+	})
 }
 
 // TestAnAcquireDuringTheLastReleaseWaits — the verification's last-release

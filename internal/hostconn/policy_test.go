@@ -305,33 +305,38 @@ func TestAProbeErrorEndsTheGuardAndLeavesTheWatcherToReportTheLoss(t *testing.T)
 // TestObservationsReachTheLease is the liveness path the app's host status
 // hangs on, re-pointed at the supervisor's one prober.
 func TestObservationsReachTheLease(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	mgr, _ := managerOn(t, quietCarrier(link), clock)
-	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		mgr, _ := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	seen := make(chan hostconn.Observation, 8)
-	lease.Observe(func(o hostconn.Observation) { seen <- o })
+		seen := make(chan hostconn.Observation, 8)
+		lease.Observe(func(o hostconn.Observation) { seen <- o })
 
-	clock.Advance(30 * time.Second)
-	select {
-	case o := <-seen:
-		if o.Answered {
-			t.Fatalf("an unanswered probe was reported as answered: %+v", o)
+		synctest.Wait()
+		clock.Advance(30 * time.Second)
+		synctest.Wait()
+		select {
+		case o := <-seen:
+			if o.Answered {
+				t.Fatalf("an unanswered probe was reported as answered: %+v", o)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the silence was never reported to the lease that asked")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the silence was never reported to the lease that asked")
-	}
 
-	link.release()
-	select {
-	case o := <-seen:
-		if !o.Answered {
-			t.Fatalf("the answer was reported as silence: %+v", o)
+		link.release()
+		select {
+		case o := <-seen:
+			if !o.Answered {
+				t.Fatalf("the answer was reported as silence: %+v", o)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the answer was never reported to the lease that asked")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the answer was never reported to the lease that asked")
-	}
+	})
 }
 
 // TestASecondLookIsNotStartedWhileTheFirstOnesWorkIsStillOut is the bound on the

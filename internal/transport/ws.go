@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
+	agentharness "github.com/shady2k/nocx/internal/harness"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
@@ -55,7 +56,6 @@ import (
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/uistate"
-	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/version"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -788,22 +788,17 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
-	// assistantClient is the eino-backed engine (nocx-edio) behind
-	// endpoints.probe and agent.status's last-probe fact. When nil, the
-	// endpoints.probe method answers -32601 "agent not available".
+	// assistantClient holds tool-call authority for harness turns.
 	assistantClient assistant.Client
 	// agentTools is the registry used to decide which declarations this run
 	// may be offered. It is the same assembled table used by the assistant.
-	agentTools agenttools.Registry
+	agentTools     agenttools.Registry
+	agentHarness   agentharness.Harness
+	agentHarnessID string
 	// agentFetcher is the guarded direct-network capability for fetch.url.
 	// It is kept separate from the model client because the tool must use the
 	// same apifetch route/policy owner without exposing a remote pane route.
 	agentFetcher apifetch.TextFetcher
-	// assistantProbes records the last endpoints.probe outcome — the
-	// process-lifetime "last probe result" agent.status reports. When nil,
-	// probes still run and return their outcome, but agent.status reports
-	// lastProbe null.
-	assistantProbes *assistant.ProbeStore
 	// agentKnownMaterial is the egress gate's vault comparison
 	// (assistant.KnownMaterial, design §7.1): the seam that answers "does
 	// this tool result contain a value the vault holds" — in the backend,
@@ -818,12 +813,7 @@ type WSServer struct {
 	// the SAME decisions. Process-lifetime like the checkpoint: it does
 	// not survive a restart, which is what the recovery rule says.
 	agentApprovals *assistant.ApprovalStore
-	// pendingRuns holds a suspended run's stream context (question,
-	// references, resolved endpoint material — everything the resume
-	// re-drives) keyed by run id. The approval store is process-lifetime;
-	// so is this: the agent is alive while the renderer is alive (design
-	// §2.4). A run whose renderer never answers holds its context until
-	// the run terminalizes or the process restarts.
+	// pendingRuns owns live turn state until terminalization or disconnect.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu sync.Mutex
 	// agentTerminalizer builds the agent handler a NON-agent caller needs in
@@ -833,28 +823,6 @@ type WSServer struct {
 	// nil until then — a server registered without the agent methods has no
 	// runs to stop and answers so rather than pretending it stopped none.
 	agentTerminalizer func(Responder) agentHandlers
-	// agentProbeSub runs endpoints.probe probes off the read loop: a
-	// streaming probe can take tens of seconds and must never freeze the
-	// socket that feeds every other tab. It is a bounded QUEUE, not the
-	// capacity-one resource gate it used to be — the serialisation lives in
-	// agentProbeAdmit, which the handler acquires on the task goroutine.
-	agentProbeSub control.Submission
-	// agentProbeAdmit is the one-probe-at-a-time gate, and it WAITS
-	// (nocx-bxafj). It used to be an instant refusal, on the argument that a
-	// probe competes for a scarce worker. Two things were wrong with that.
-	//
-	// A probe is a SERIALISATION POINT, not a scarce worker: one at a time,
-	// and the second may proceed the moment the first is done. That is the
-	// same conclusion the native picker reached (see buildControlPlane), and
-	// the same remedy — ADR-0026 item 4's waiting class.
-	//
-	// And the refusal was reachable by a person, not only by a sequential
-	// client falling into the release window. The renderer disables the Test
-	// button of the row being probed, keyed by endpoint id; every OTHER
-	// endpoint's Test stays enabled while one gate serves the whole server.
-	// Test on one endpoint, then Test on another, was "Control plane busy"
-	// for doing nothing wrong.
-	agentProbeAdmit control.Admission
 	// askSub admits and runs the ask STREAM tasks (nocx-x8s2.2) off the
 	// read loop: a model stream can take minutes, so it must not freeze
 	// the socket. Bounded at askStreamCapacity — several asks overlap (the
@@ -1522,12 +1490,14 @@ func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 	return func(ws *WSServer) { ws.probeResultStore = s }
 }
 
-// WithAssistantClient attaches the assistant engine (nocx-edio): the one
-// eino-backed client behind the endpoints.probe probe and the future ask
-// transaction. When nil, endpoints.probe answers -32601 "agent not
-// available".
+// WithAssistantClient attaches the tool-call state owner used by harness turns.
 func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
+}
+
+// WithAgentHarness supplies the conversation-session owner used by agent.ask.
+func WithAgentHarness(id string, h agentharness.Harness) WSServerOption {
+	return func(ws *WSServer) { ws.agentHarnessID, ws.agentHarness = id, h }
 }
 
 // WithAgentToolRegistry attaches the registry used by the assistant engine:
@@ -1603,14 +1573,6 @@ func WithLiveEffects(live []content.Effect) WSServerOption {
 	return func(ws *WSServer) { ws.liveEffects = live }
 }
 
-// WithAssistantProbeStore attaches the process-lifetime store of the last
-// endpoints.probe outcome — agent.status's "last probe result" fact. When
-// nil, probes still run and return their outcome, but agent.status reports
-// lastProbe null.
-func WithAssistantProbeStore(store *assistant.ProbeStore) WSServerOption {
-	return func(ws *WSServer) { ws.assistantProbes = store }
-}
-
 // WSServerOption configures a WSServer.
 type WSServerOption func(*WSServer)
 
@@ -1657,9 +1619,7 @@ func (s *WSServer) credentialResolver() credential.Resolver {
 	if s.material == nil {
 		return nil
 	}
-	return credential.NewResolver(s.material, func(err error) bool {
-		return errors.Is(err, vault.ErrVaultSealed)
-	}, s.unsealer)
+	return credential.NewResolver(s.material, s.unsealer)
 }
 
 // WithCredentialStore attaches a credential store, enabling the
@@ -2005,13 +1965,6 @@ func WithFilesRevealer(r FilesRevealer) WSServerOption {
 // held by a long operation.
 const DefaultDomainConflictWaitTimeout = time.Second
 
-// probeGateWaitMargin is the slack added to a probe's own timeout when sizing
-// how long the NEXT probe may wait for the gate. It covers the handler work
-// either side of the call itself; without it the second probe's wait and the
-// first probe's run would expire together, which is a coin toss rather than a
-// bound.
-const probeGateWaitMargin = 5 * time.Second
-
 // WithDomainConflictWaitTimeout sets how long a request waits on a domain
 // conflict gate before the wait is refused. Tests use a short value to
 // exhaust the bound deterministically and a long one to hold a conflict
@@ -2109,17 +2062,11 @@ func (s *WSServer) buildControlPlane() {
 		window = DefaultCreditWindow
 	}
 	s.credit = newCreditConfig(window, ingressCriticalMethods, reservedCreditMethods)
-	// Probes, the agent probe, the ask stream, the picker and screen offers
+	// Connection probes, the ask stream, the picker and screen offers
 	// are handed over like everything else. Their tasks are registered with
 	// the inflight set, so Stop cancels and joins them; none of them refuses.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: work}
-	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: work}
 	s.screenOfferSub = &inflightSubmission{inflight: &s.inflight, inner: work}
-	// A probe is a SERIALISATION POINT, not a scarce worker (nocx-bxafj): one
-	// at a time, and the second proceeds when the first is done. The gate
-	// WAITS under the invocation's turn, which is sized by the probe's own
-	// declaration; nothing is refused for arithmetic.
-	s.agentProbeAdmit = control.NewWaitingSemaphore("agent-probe", 1, assistant.ProbeTimeout+probeGateWaitMargin)
 	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: work}
 	// The native picker is the same shape: one at a time, the second waits for
 	// the first to close (ADR-8eej3e66 §5). It is acquired on the task
@@ -2165,7 +2112,7 @@ func (s *WSServer) buildControlPlane() {
 	s.diagAdmits = []control.Admission{
 		gates.config, gates.vault, gates.session,
 		orders.session, orders.content, orders.api,
-		s.agentProbeAdmit, s.dialogAdmit,
+		s.dialogAdmit,
 	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
@@ -2181,10 +2128,9 @@ func (s *WSServer) buildControlPlane() {
 	// ingress-critical set below (the resolution must never wait behind
 	// request work — a pending requestor blocks on it).
 	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
-	configOp, endpointWired := s.buildConfigOp(gates.configVault)
+	configOp, rolesWired := s.buildConfigOp(gates.configVault)
 	noteOp := capability.NewNoteOperation(gates.config, s.notes)
 	snippetOp := capability.NewSnippetOperation(gates.config, s.snippets)
-	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.operationOutcomeSpec(s.work))
@@ -2200,7 +2146,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.work)...)
-	specs = append(specs, s.configSpecs(gates.config, gates.configVault, configOp, endpointWired, noteOp, snippetOp)...)
+	specs = append(specs, s.configSpecs(gates.config, gates.configVault, configOp, rolesWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(gates.config, s.storeGuard)...)
 	specs = append(specs, s.vaultSpecs(gates.configVault, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
@@ -2215,7 +2161,7 @@ func (s *WSServer) buildControlPlane() {
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(work)...)
 	specs = append(specs, s.checkoutsStatusSpecs(work)...)
-	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, noteOp, snippetOp, s.agentTools, s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(work, contentOrder)...)
 	specs = append(specs, s.layoutSpecs(work, contentOrder)...)
 	specs = append(specs, s.shellSpecs(gates.session)...)
@@ -2984,9 +2930,10 @@ func respond(r Responder, resp jsonrpcResponse) error {
 // scope rides on it (the renderer's session-local command ids never cross
 // the wire).
 type connState struct {
-	mu         sync.Mutex
-	sessions   map[session.ID]session.Session
-	generation uint64
+	agentConversations map[string]struct{}
+	mu                 sync.Mutex
+	sessions           map[session.ID]session.Session
+	generation         uint64
 }
 
 func newConnState() *connState {
@@ -3569,6 +3516,7 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// stuck renderer.
 	defer wconn.out.Close()
 	state := newConnState()
+	defer s.closeAgentConversations(ctx, state)
 	// Materialise the connection's control-handler set once, here, where the
 	// connState exists: the handlers' build closures capture it (and the
 	// connection's Responder), so every dispatch after this has its state.
@@ -3610,6 +3558,37 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// keeps producing into its ring — this is AD-9, not a close.
 	for _, sess := range orphaned {
 		s.takeSize(sess.ID(), sess, session.NoClient())
+	}
+}
+
+func (s *WSServer) closeAgentConversations(parent context.Context, state *connState) {
+	ctx := context.WithoutCancel(parent)
+	closer, ok := s.agentHarness.(interface {
+		CloseConversation(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	state.mu.Lock()
+	ids := make([]string, 0, len(state.agentConversations))
+	for id := range state.agentConversations {
+		ids = append(ids, id)
+	}
+	state.mu.Unlock()
+	for _, id := range ids {
+		s.closeAgentConversation(ctx, closer, id)
+	}
+}
+
+func (s *WSServer) closeAgentConversation(ctx context.Context, closer interface {
+	CloseConversation(context.Context, string) error
+}, id string,
+) {
+	opScope := catalog.BeginInternal(ctx, catalog.OpInternalAgentRun)
+	defer opScope.Complete()
+	ctx = catalog.WithScope(ctx, opScope)
+	if err := closer.CloseConversation(ctx, id); err != nil {
+		log.From(log.WithLogger(ctx, s.log)).Warn("closing the assistant conversation failed", "conversation", id, "error", err)
 	}
 }
 

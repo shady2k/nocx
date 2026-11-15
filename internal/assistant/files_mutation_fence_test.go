@@ -85,15 +85,15 @@ type watchedCalls struct {
 // middlewareWatchingCalls is middlewareFor with the onCall seam wired, which
 // the shared helper passes nil for. It is here rather than beside that helper
 // because only these tests assert on it.
-func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, watch *watchedCalls) *policyMiddleware {
+func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, watch *watchedCalls) *kernelFixture {
 	t.Helper()
 	reg := realRegistry(t)
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
 		watch.seen = append(watch.seen, c)
 		return nil
-	})
+	}, toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
-		t.Fatalf("newPolicyMiddleware: %v", err)
+		t.Fatalf("newKernelFixture: %v", err)
 	}
 	return mw
 }
@@ -285,11 +285,11 @@ func TestExecuteFilesMutations_HandTheCapabilityRefusalToTheKernelSeam(t *testin
 			if !ok {
 				t.Fatalf("%s not registered", tc.tool)
 			}
-			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, agenttools.RunContext{})
+			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, localRunContext())
 			if err != nil {
 				t.Fatalf("ResolveResources: %v", err)
 			}
-			capability, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+			capability, err := decl.Narrow(grant, refs, localRunContext())
 			if err != nil {
 				t.Fatalf("Narrow: %v", err)
 			}

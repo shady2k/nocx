@@ -11,7 +11,7 @@
  * nothing else calls `agent.status`.
  *
  * The ordering rule is the other half. Two refreshes racing is the ORDINARY
- * case here — adding an endpoint and immediately choosing a model is one
+ * case here — changing an agent model twice is one
  * gesture apart — so each refresh carries a monotonically increasing
  * sequence and a reply at or below the last APPLIED one is discarded. The
  * alternative (cancel the in-flight call) is not available: a JSON-RPC call
@@ -19,15 +19,16 @@
  * the only end we control.
  */
 import type { AgentStatusResult } from './generated/agent.status'
+import { t } from './i18n/locale-model'
 import { agentStatusLine } from './agent-status-line'
 
 /** What the chip in the composer's chrome row says right now (nocx-rikz5).
- *  'ready' names the pair that will answer — two chips, two destinations.
+ *  'ready' names the agent and model that will answer.
  *  'action' is the rung of the ladder the person is on, in the ladder's own
  *  words; `page` is null for a rung no page repairs. */
 export type ModelChipState =
-  | { kind: 'ready'; endpoint: string; model: string }
-  | { kind: 'action'; text: string; page: 'endpoints' | 'roles' | null }
+  | { kind: 'ready'; agentId: string; model: string }
+  | { kind: 'action'; text: string; page: 'agent-installed' | null }
 
 /** The one call this store makes. An interface rather than the concrete
  *  AgentClient so a surface test can hand it a source without a socket —
@@ -51,6 +52,16 @@ export class AgentReadiness {
   private readonly listeners = new Set<(status: AgentStatusResult | null) => void>()
 
   constructor(private readonly source: AgentStatusSource) {}
+
+  /** Refresh before an AI gesture changes the pane. A refusal shares the chip's
+   * sentence and repair destination, rather than allocating a failed answer. */
+  async ensureReady(openAgentSettings: (reason: string) => void): Promise<boolean> {
+    const status = await this.refresh()
+    if (status.answering.ready) return true
+    const line = agentStatusLine(status)
+    if (line) openAgentSettings(line.text)
+    return false
+  }
 
   get status(): AgentStatusResult | null {
     return this._status
@@ -98,12 +109,13 @@ export class AgentReadiness {
 export function modelChipState(status: AgentStatusResult | null): ModelChipState | null {
   if (!status) return null
   const answering = status.answering
-  // The pair, when there is one. The null checks are not defensive noise:
-  // the contract says both are non-null when `ready`, and a chip is the
-  // wrong place to discover otherwise — falling through to the rung shows
-  // the person a sentence rather than the word "null".
-  if (answering.ready && answering.endpoint !== null && answering.model !== null) {
-    return { kind: 'ready', endpoint: answering.endpoint, model: answering.model }
+  // A null model means the agent's own default, not an unresolved role.
+  if (answering.ready && answering.agentId !== null) {
+    return {
+      kind: 'ready',
+      agentId: answering.agentId,
+      model: answering.model ?? t('roles.agentDefault', 'Agent default'),
+    }
   }
   const line = agentStatusLine(status)
   if (!line) return null

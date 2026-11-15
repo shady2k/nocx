@@ -17,6 +17,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { AgentInstalledSection } from './agent-installed-section'
 import { setActiveLocale } from './i18n/locale-model'
 import type { Agent } from './generated/agentRecords.detect'
+import { RolesClient } from './roles-client'
+import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { AgentRecordsClient } from './agent-records-client'
 
 const PI: Agent = {
@@ -61,6 +64,47 @@ describe('AgentInstalledSection', () => {
   afterEach(() => {
     cleanup()
     setActiveLocale('en')
+  })
+
+  it('lets a person choose the answering model inside its installed agent row', async () => {
+    const { api, catalogue } = client()
+    catalogue.mockResolvedValue({
+      agents: [
+        {
+          id: 'pi',
+          readiness: { state: 'ready', message: '' },
+          models: [{ id: 'pi/alpha', name: 'Alpha' }],
+        },
+      ],
+    })
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
+    const call = vi.spyOn(dispatcher, 'call').mockImplementation((method, params) =>
+      Promise.resolve({
+        agentId: 'pi',
+        roles: [
+          {
+            role: 'answering',
+            model: method === 'roles.assign' ? (params as { model: string }).model : null,
+          },
+        ],
+      }),
+    )
+    const view = render(() => (
+      <AgentInstalledSection client={api} rolesClient={new RolesClient(dispatcher)} />
+    ))
+    const select = await screen.findByRole('combobox', { name: 'Answering' })
+    expect(row(view.container, 'pi').contains(select)).toBe(true)
+    fireEvent.change(select, { target: { value: 'pi/alpha' } })
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith('roles.assign', {
+        agentId: 'pi',
+        role: 'answering',
+        model: 'pi/alpha',
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole<HTMLSelectElement>('combobox').value).toBe('pi/alpha'),
+    )
   })
 
   it('lists every agent the backend answered, with its version and what it says about being ready', async () => {

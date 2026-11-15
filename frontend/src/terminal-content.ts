@@ -141,12 +141,7 @@ import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
 import { openBlockMenuAt } from './scrollback/blocks'
-import type {
-  AnswerToolCall,
-  BlockRecord,
-  DumpSource,
-  RunningBlockActions,
-} from './scrollback/blocks'
+import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -917,11 +912,6 @@ export interface TerminalContentHooks {
    *  and the toolbar menu use (AD-8: one owner for what a snippet becomes). */
   onSnippetAccepted?: (snippetId: string) => void
 
-  /** A question was refused because no endpoint is configured: open the
-   *  endpoint editor so the refusal comes with its repair — wired by
-   *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
-   *  by the model chip's `endpoints` destination (nocx-rikz5). */
-  onCreateEndpoint?: () => void
   /** What a session is called TO A PERSON — the pane's own display title,
    *  the words already on the tab (nocx-vnzek). A tool-call line in an
    *  answer names the session it touched with this instead of the session
@@ -931,14 +921,12 @@ export interface TerminalContentHooks {
    *  tool alone. */
   sessionName?: (sessionId: string) => string | null
   /** The model chip's other destination: the Roles page, where the model
-   *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
-  onOpenRoles?: () => void
+  onOpenAgentSettings?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
-   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
-   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
   /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
@@ -1317,7 +1305,6 @@ export class TerminalContent extends BasePaneContent {
   /** The running-state footer (decision §1, "Running-state gap"), mounted
    *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
    *  — never both surfaces visible at once. */
-  private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
    *  dispatcher — the sealed-access seam it carries is already installed at
@@ -3322,7 +3309,6 @@ export class TerminalContent extends BasePaneContent {
       }
 
       const agentClient = new AgentClient(this.client.dispatcher)
-      this.dumpSource = (entryId) => agentClient.dump(entryId)
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -3378,7 +3364,6 @@ export class TerminalContent extends BasePaneContent {
         // `text` children joined — never an artifact of its own, which since
         // ADR-0040 it does not have (nocx-3dteo).
         answerText: (entryId) => answerTextForTurn(this.client, entryId),
-        dump: (entryId) => agentClient.dump(entryId),
         // What a tool call returned, read back from the action entry it was
         // recorded under — the handle agent.runToolCall sends instead of the
         // bytes (nocx-hp8p2.13).
@@ -3696,7 +3681,10 @@ export class TerminalContent extends BasePaneContent {
       // to be here was `() => new AgentClient(…).status()` handed to the
       // ask target — a function called at refusal time, which no surface
       // can render and nothing can repaint.
-      const readiness = new AgentReadiness(agentClient)
+      const readiness = new AgentReadiness({
+        // Match agent.ask's session; the backend resolves its durable pane pin.
+        status: () => agentClient.status(this.session?.sessionId),
+      })
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
       // And a write to the configuration behind that chip, whenever it lands
@@ -3897,7 +3885,7 @@ export class TerminalContent extends BasePaneContent {
             },
           }
         },
-        // The no-endpoint refusal is visible in the product, never only in
+        // An unavailable-agent refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
         onRefusal: (message) => {
@@ -3907,17 +3895,9 @@ export class TerminalContent extends BasePaneContent {
         onTurnEnd: () => {
           if (!this._summoned) this.clearAutomaticFrozenFrame()
         },
-        // The typed readiness fact behind a refusal (agent.status), so the
-        // target never has to read the reason out of the message text.
-        // Through the store, not around it: a refusal is exactly when the
-        // facts are freshest and the chip most needs to catch up, and a
-        // second caller of agent.status would be a second owner of the
-        // answer (AD-8).
-        status: () => readiness.refresh(),
-        // No endpoint: the toast says what is wrong and this opens where it
-        // is fixed. A refusal with nowhere to go is how a person concludes
-        // the feature is broken rather than unconfigured.
-        onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        // Both preflight and a raced backend refusal use the same readiness
+        // owner, so the reason, chip and Settings destination stay together.
+        ensureReady: () => this.ensureAgentReady(),
         // Where a standing answer is managed, for the receipt the turn
         // draws when one is saved (nocx-2019q).
         openPermissions: () => this.hooks.onManagePermissions?.(),
@@ -4142,10 +4122,7 @@ export class TerminalContent extends BasePaneContent {
       // The model chip's two destinations (nocx-rikz5). The endpoints one
       // is the seam a refusal already uses — one owner for "open where an
       // endpoint is fixed", reused rather than duplicated.
-      this.editor.onModelChipClick((page) => {
-        if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
-        else this.hooks.onOpenRoles?.()
-      })
+      this.editor.onModelChipClick(() => this.hooks.onOpenAgentSettings?.())
       // Shell is active at start, so this paints the chip's absence — the
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()
@@ -7312,7 +7289,6 @@ export class TerminalContent extends BasePaneContent {
               () => {},
               snapshotStore,
               this.runningActions,
-              this.dumpSource ?? undefined,
             ),
             b.entryId,
           ),
@@ -7373,7 +7349,6 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
                 // A text child owns its single text/plain artifact; it must
                 // never borrow the enclosing turn's assembled answer.
                 (entryId) => answerTextForEntry(this.client, entryId),
@@ -7413,7 +7388,6 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
               )
               // A RESTORED CALL EXPANDS THE SAME WAY A LIVE ONE DOES
               // (nocx-hp8p2.13). The result is on the action entry, which is
@@ -7441,13 +7415,11 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
               ),
               caused.entryId,
             )
           },
           this.runningActions,
-          this.dumpSource ?? undefined,
           (entryId) => answerTextForTurn(this.client, entryId),
         ),
       )
@@ -8833,6 +8805,14 @@ export class TerminalContent extends BasePaneContent {
     return grant === null ? null : { ...grant, state: 'running', automatic: true }
   }
 
+  private async ensureAgentReady(): Promise<boolean> {
+    if (!this.readiness) return false
+    return this.readiness.ensureReady((message) => {
+      showToast({ level: 'warning', message })
+      this.hooks.onOpenAgentSettings?.()
+    })
+  }
+
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
    *  The accepted backend frame is the one owner of the visible grid. Capture
@@ -8857,6 +8837,7 @@ export class TerminalContent extends BasePaneContent {
     // The accepted frame carries the viewport's absolute base row. Alternate
     // buffers begin at zero; normal-buffer captures keep their shared row anchor.
     try {
+      if (!(await this.ensureAgentReady())) return false
       const frame = await this.captureLiveFrame()
       // The command may have finished, the tab may have closed, or another
       // path may have shown the editor while capture was in flight. All are

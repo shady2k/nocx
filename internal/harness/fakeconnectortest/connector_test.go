@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -27,7 +28,7 @@ func TestFakeProcessChecks(t *testing.T) {
 func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture {
 	t.Helper()
 	path := func(name string) string { return filepath.Join(setup.Dir, name) }
-	script := protocol.Script{EnvironmentFile: path("environment"), PIDFile: path("agent.pid"), PromptFile: path("prompt"), ResultFile: path("result"), HangFile: path("hang")}
+	script := protocol.Script{ProbeEnvironment: true, EnvironmentFile: path("environment"), PIDFile: path("agent.pid"), PromptFile: path("prompt"), ResultFile: path("result"), HangFile: path("hang")}
 	end := protocol.Step{Kind: protocol.StepEnd, Model: "fake-model", Usage: &protocol.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2}}
 	switch setup.Scenario {
 	case harnesstest.ModelPin:
@@ -57,8 +58,22 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	waitFile := func(name string) {
 		waittest.WaitFor(t, "fixture "+name, func() bool { raw, err := os.ReadFile(path(name)); return err == nil && len(raw) > 0 })
 	}
+	var base harness.Base
+	if setup.Scenario == harnesstest.CancelTool {
+		gate := path("cancel-tool")
+		if err := syscall.Mkfifo(gate, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		base.Tools = func(context.Context, harness.SessionInfo) (harness.ToolSession, harness.ToolBridge, error) {
+			bridge := harness.ToolBridge{Command: []string{setup.ToolServerPath}, Env: []string{
+				"MCP_BLOCK=1", "MCP_BLOCKEDFILE=" + path("blocked"), "MCP_CANCEL_GATE=" + gate,
+				"MCP_PIDFILE=" + path("server.pid"), "NOCX_TEST_SECRET=bridge-only-secret",
+			}}
+			return &cancelToolSession{gate: gate}, bridge, nil
+		}
+	}
 	return harnesstest.Fixture{
-		Harness: fakeconnectortest.New(fakeconnectortest.Config{AgentPath: setup.AgentPath, Script: script}), Model: "fake-model", ToolName: "probe",
+		Harness: fakeconnectortest.New(fakeconnectortest.Config{AgentPath: setup.AgentPath, Script: script, Base: base}), Model: "fake-model", ToolName: "probe",
 		ChangeDefaultModel: func() string {
 			if err := os.WriteFile(script.DefaultModelFile, []byte("changed-model"), 0o600); err != nil {
 				t.Fatal(err)
@@ -114,10 +129,26 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	}
 }
 
+// cancelToolSession supplies the fixture endpoint's cancellation boundary.
+// Its server returns a cancelled result before the agent reports tool_finished.
+type cancelToolSession struct {
+	gate string
+	once sync.Once
+	err  error
+}
+
+func (*cancelToolSession) BeginTurn(harness.TurnAuthority) error { return nil }
+func (s *cancelToolSession) EndTurn(context.Context) error {
+	s.once.Do(func() { s.err = os.WriteFile(s.gate, []byte("cancel"), 0o600) })
+	return s.err
+}
+func (*cancelToolSession) Pending() bool                { return false }
+func (*cancelToolSession) Retire(context.Context) error { return nil }
+
 func TestProtocolCommandsAndResponse(t *testing.T) {
 	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
-	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7})
+	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7}, harness.Launch{})
 	setup := codec.Setup()
 	if len(setup) != 1 || setup[0].Command.Name != "initialize" || setup[0].Prompt || setup[0].Check == nil {
 		t.Fatalf("setup: %+v", setup)
@@ -180,9 +211,9 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 func TestCodecsArePerIncarnation(t *testing.T) {
 	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
-	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1})
-	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2})
-	restarted := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 3})
+	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1}, harness.Launch{})
+	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2}, harness.Launch{})
+	restarted := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 3}, harness.Launch{})
 	if first == second || first == restarted || second == restarted {
 		t.Fatal("codec instances shared")
 	}

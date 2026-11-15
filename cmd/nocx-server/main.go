@@ -140,6 +140,7 @@ func run(logger *slog.Logger) error {
 		// internal/toolendpoint is the one owner of the socket's name
 		// (AD-8) and this is the only call site outside it that needs to
 		// know the value.
+		a.BindAssistantEndpoint(workerSocket)
 		a.SetLocalToolSocketPath(workerSocket.SocketPath())
 		defer func() {
 			if closeErr := workerSocket.Close(); closeErr != nil {

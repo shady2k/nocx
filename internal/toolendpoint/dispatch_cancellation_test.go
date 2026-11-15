@@ -79,3 +79,30 @@ func TestEndpointRealDispatcherPreservesAbandonment(t *testing.T) {
 		})
 	}
 }
+
+// Settlement is held behind the response: only the request's context can win
+// the terminal election, before EndTurn gets to cancel accepted calls.
+func TestEndpointPersonCancelledTurnContextWinsSettlement(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	dispatch := &testDispatcher{started: started, cancelled: cancelled, release: release}
+	auth := &testAuthorizer{inv: assistant.ToolInvocation{Context: ctx}}
+	cfg := endpointConfig(t, auth, dispatch)
+	cfg.Logger = logtest.Slog(t)
+	ep := startEndpoint(t, cfg)
+	conn := dialEndpoint(t, ep)
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"session.run","params":{"command":"long command"}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancel(assistant.TurnEndedCause(content.TermUserKilled))
+	<-cancelled
+	close(release)
+	response := readResponse(t, conn)
+	// Let settlement proceed only after the context route has delivered.
+	ep.SettleAdmissions(testAdmissionSession, testAdmissionEpoch)
+	if response.Error == nil || response.Error.Data.Reason != "The person cancelled this call before it finished. Do not repeat it unless they ask." {
+		t.Fatalf("cancelled turn answer = %+v", response.Error)
+	}
+}

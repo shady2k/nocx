@@ -503,7 +503,7 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // (ADR-0085), 23 added the panel a tab shows to the tabs row
 // (nocx-ouru5.1.18), and 24 retires the skill_checks table with the skill
 // library (ADR-anntnxdj §7).
-const schemaVersion = 24
+const schemaVersion = 25
 
 // schema22EntriesByEndedAtIndexDDL is the one index definition introduced by
 // the 21→22 edge. Keep it immutable: a future schema gets its own DDL and rung
@@ -567,6 +567,8 @@ const schema22EntriesByEndedAtIndexDDL = `CREATE INDEX IF NOT EXISTS entries_by_
 //     retained content (§5.4), and physical disk use is the separate
 //     Budget.DiskCeiling number.
 const schemaV1 = `
+` + agentConversationsDDL + `
+
 -- The layout chain (nocx-isoph.1, tabs-panes-and-blocks §3): workspace → tab
 -- → pane. A workspace is FLAT — it has no column naming another workspace, so
 -- nesting is unrepresentable rather than merely unused; depth comes from

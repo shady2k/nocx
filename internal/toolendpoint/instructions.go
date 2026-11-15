@@ -59,6 +59,7 @@ package toolendpoint
 import (
 	"encoding/json"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 )
 
@@ -88,6 +89,15 @@ func instructionsFor(grant content.Grant) string {
 //
 // Params are ignored on purpose, exactly as tools.catalogue ignores them: the
 // grant is the admitted invocation's, never an argument a caller can name.
+// buildDispatcherInstructions lets the assistant bind fixed initialization
+// text, while pane callers retain the authority-derived role instructions.
+func buildDispatcherInstructions(dispatch assistant.ToolDispatcher, grant content.Grant) ([]byte, error) {
+	if source, ok := dispatch.(interface{ Instructions() string }); ok {
+		return json.Marshal(instructionsResult{Instructions: source.Instructions()})
+	}
+	return buildInstructions(grant)
+}
+
 func buildInstructions(grant content.Grant) ([]byte, error) {
 	return json.Marshal(instructionsResult{Instructions: instructionsFor(grant)})
 }

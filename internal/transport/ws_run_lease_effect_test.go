@@ -1,8 +1,8 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,7 +87,7 @@ func readRunState(t *testing.T, tap *socketTap, wantRunID int64) string {
 		if err := json.Unmarshal(notification.Params, &state); err != nil {
 			t.Fatalf("agent.runState unmarshal: %v\nraw: %s", err, notification.Params)
 		}
-		if state.RunID != wantRunID || state.State != "failed" {
+		if state.RunID != wantRunID || (state.State != "interrupted" && state.State != "failed") {
 			continue
 		}
 		return state.Error
@@ -100,7 +100,6 @@ func readRunState(t *testing.T, tap *socketTap, wantRunID int64) string {
 // shell remains usable while neither the command nor a signal exists.
 func TestRunLease_BoundBeforeForkLeavesNoProcessOrSignal(t *testing.T) {
 	h := newRunLeaseHarness(t, RunLeaseConfig{WallClock: time.Hour})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 
 	dir := t.TempDir()
@@ -132,7 +131,7 @@ func TestRunLease_BoundBeforeForkLeavesNoProcessOrSignal(t *testing.T) {
 		func(Conn, string, json.RawMessage) error {
 			deliverOnce.Do(func() { close(deliverStarted) })
 			<-releaseDeliver
-			return errors.New("delivery held before command submission")
+			return context.Canceled
 		},
 	)
 	h.ws.broker = broker

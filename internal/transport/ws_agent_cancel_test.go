@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -19,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -27,42 +26,8 @@ import (
 // it. These tests use the real local session behind that request so cancelling
 // the model turn can be proved independent from stopping its foreground child.
 
-type cancelBlockingClient struct {
-	started chan struct{}
-	emitted chan struct{}
-	stopped chan struct{}
-	once    sync.Once
-	mu      sync.Mutex
-	discard []string
-}
-
-func newCancelBlockingClient() *cancelBlockingClient {
-	return &cancelBlockingClient{
-		started: make(chan struct{}),
-		emitted: make(chan struct{}),
-		stopped: make(chan struct{}),
-	}
-}
-
-func (c *cancelBlockingClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{}, nil
-}
-
-func (c *cancelBlockingClient) Ask(ctx context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	c.once.Do(func() { close(c.started) })
-	if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "received before stop"}); err != nil {
-		return err
-	}
-	close(c.emitted)
-	<-ctx.Done()
-	close(c.stopped)
-	return ctx.Err()
-}
-
-func (c *cancelBlockingClient) Discard(runID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.discard = append(c.discard, runID)
+func cancelStreamScript() protocol.Script {
+	return protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "received before stop"}, {Kind: protocol.StepHang}}}
 }
 
 func TestAgentCancel_DTOConformsToContract(t *testing.T) {
@@ -76,9 +41,7 @@ func TestAgentCancel_DTOConformsToContract(t *testing.T) {
 }
 
 func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
-	client := newCancelBlockingClient()
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, cancelStreamScript())
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "cancel-ask-1", "sessionId": sid, "question": "stop this", "cwd": "/repo", "attachedContent": []any{},
@@ -86,16 +49,8 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	if errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
-	select {
-	case <-client.started:
-	case <-time.After(time.Second):
-		t.Fatal("assistant did not start streaming")
-	}
-	select {
-	case <-client.emitted:
-	case <-time.After(time.Second):
-		t.Fatal("assistant did not emit the prose that must survive cancellation")
-	}
+	h.waitHung()
+	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 
 	resp, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 2)
 	var env struct {
@@ -139,19 +94,13 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 		t.Fatalf("ordinary cancelled runState = %s, want no error sentence", notifications[len(notifications)-1])
 	}
 
-	select {
-	case <-client.stopped:
-	case <-time.After(time.Second):
-		t.Fatal("assistant stream did not stop after cancellation")
+	waitChildDead(t, h.pid())
+	stateOnDisk, stateErr := h.db.Ledger().RunState(t.Context(), res.RunID)
+	if stateErr != nil || stateOnDisk == nil || *stateOnDisk != content.RunCancelled {
+		t.Fatalf("cancelled ledger: %v %v", stateOnDisk, stateErr)
 	}
 	if prose := proseUnder(t, h.db.Ledger(), res.EntryID); len(prose) != 1 || prose[0].text != "received before stop" {
 		t.Fatalf("persisted prose = %+v, want the text received before cancellation", prose)
-	}
-	client.mu.Lock()
-	discarded := append([]string(nil), client.discard...)
-	client.mu.Unlock()
-	if len(discarded) != 1 || discarded[0] != fmt.Sprintf("%d", res.RunID) {
-		t.Fatalf("discard calls = %v, want run %d", discarded, res.RunID)
 	}
 
 	second := jsonrpcCallWithID(t, h.conn, "agent.cancel", map[string]any{"runId": res.RunID}, 3)
@@ -167,9 +116,7 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 }
 
 func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T) {
-	client := newCancelBlockingClient()
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, cancelStreamScript())
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "cancel-unsupported-1", "sessionId": sid, "question": "stop remote work", "cwd": "/repo", "attachedContent": []any{},
@@ -177,11 +124,7 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	if errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
-	select {
-	case <-client.emitted:
-	case <-time.After(time.Second):
-		t.Fatal("assistant did not emit before cancellation")
-	}
+	h.waitHung()
 
 	h.ws.pendingRunsMu.Lock()
 	rc := h.ws.pendingRuns[res.RunID]
@@ -192,7 +135,7 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	}
 	rc.leaseDegradation.Add(assistant.RunLeaseBoundInactivity)
 	lease.sess = nil
-	lease.cancel = func() {} // armed RequestRun: the renderer execution exists
+	lease.cancel = func(error) {} // armed RequestRun: the renderer execution exists
 	if !rc.control.attachRunLease(lease) {
 		h.ws.pendingRunsMu.Unlock()
 		t.Fatal("active run refused its exact lease")
@@ -233,11 +176,7 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	if !reflect.DeepEqual(state.UnarmedBounds, wantUnarmed) {
 		t.Fatalf("runState unarmedBounds = %v, want %v", state.UnarmedBounds, wantUnarmed)
 	}
-	select {
-	case <-client.stopped:
-	case <-time.After(time.Second):
-		t.Fatal("provider stream did not close when signalling was unsupported")
-	}
+	waitChildDead(t, h.pid())
 }
 
 // TestAgentRun_StopReachesTheForegroundCommand proves the renderer's Stop
@@ -250,7 +189,6 @@ func TestAgentRun_StopReachesTheForegroundCommand(t *testing.T) {
 		Inactivity:  time.Minute,
 		SignalGrace: 100 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	pidTmp := pidFile + ".tmp"
@@ -353,7 +291,6 @@ func TestAgentCancel_StopsAssistantRunChildBeforeResponse(t *testing.T) {
 		Inactivity:  time.Minute,
 		SignalGrace: 100 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	pidTmp := pidFile + ".tmp"
@@ -439,7 +376,7 @@ func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {
 }
 
 func TestAgentCancel_RejectsInvalidAndUnknownRuns(t *testing.T) {
-	h := newAskHarness(t, newCancelBlockingClient())
+	h := newAskHarness(t, protocol.Script{})
 	for _, tc := range []struct {
 		name   string
 		runID  any
@@ -531,39 +468,6 @@ func (f *blockedFetchFetcher) FetchText(ctx context.Context, req apifetch.TextRe
 	case <-f.release:
 		return apifetch.TextDocument{URL: req.URL, ContentType: "text/plain", Text: blockedFetchText}, nil
 	}
-}
-
-// fetchCallingProvider is the model fake: the first request proposes
-// fetch.url, every later one answers. It keeps every request body, because
-// "no tool result reached the model" is a fact about the bytes it was sent.
-type fetchCallingProvider struct {
-	mu     sync.Mutex
-	bodies []string
-}
-
-func (p *fetchCallingProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	p.mu.Lock()
-	p.bodies = append(p.bodies, string(body))
-	n := len(p.bodies)
-	p.mu.Unlock()
-	if n == 1 {
-		streamToolCallChunk(w, "fetch.url", `{"url":"https://example.test/page"}`)
-		return
-	}
-	streamAnswerChunk(w, "The page answered.")
-}
-
-func (p *fetchCallingProvider) toolResultBodies() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var out []string
-	for _, body := range p.bodies {
-		if strings.Contains(body, `"role":"tool"`) {
-			out = append(out, body)
-		}
-	}
-	return out
 }
 
 // wireFrame is one frame the tap read: a response (id) or a notification
@@ -760,17 +664,20 @@ func fetchActionAttempt(t *testing.T, led content.LedgerRepository) *content.Led
 // call reaches the model afterwards, no run-bound notification except approval
 // retirement cleanup follows cancellation, and the next question works.
 func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
-	provider := &fetchCallingProvider{}
-	model := httptest.NewServer(provider)
-	defer model.Close()
+	script := protocol.Script{Turns: [][]protocol.Step{
+		{{Kind: protocol.StepTool, Name: "fetch.url", Arguments: map[string]any{"url": "https://example.test/page"}}, {Kind: protocol.StepAnswer, Text: "The page answered."}, {Kind: protocol.StepEnd}},
+		{{Kind: protocol.StepAnswer, Text: "The next answer."}, {Kind: protocol.StepEnd}},
+	}}
 	fetcher := &blockedFetchFetcher{
 		started: make(chan struct{}),
 		stopped: make(chan time.Time, 1),
 		release: make(chan struct{}),
 	}
-	h := newAskHarnessWithOpts(t, mustClient(t),
-		WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
-	h.createEndpointAt(model.URL)
+	router := &runLeaseActor{}
+	h := newAskHarnessWithOpts(t, script,
+		WithAgentHarness("fixture", router), WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
+	router.Harness = h.agent.harness
+
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "cancel-in-executor", "sessionId": sid, "question": "fetch that page", "cwd": "/repo",
@@ -832,6 +739,7 @@ func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 	// observation window: every frame between the cancelled state and this
 	// turn's completion has been read, so "nothing followed" is a statement
 	// about a closed interval rather than about a moment.
+	router.Harness = newScriptedAgent(t, answerScript("The next answer.")).harness
 	askReq, askErr := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 23, "method": "agent.ask", "params": map[string]any{
 			"askId": "after-cancel", "sessionId": sid, "question": "now answer me plainly",
@@ -859,8 +767,8 @@ func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 
 	// NOTHING OF THE CALL REACHED THE MODEL: the stopped call's result would be
 	// the only thing that could put a tool message in a request.
-	if bodies := provider.toolResultBodies(); len(bodies) != 0 {
-		t.Fatalf("the model was sent %d tool result(s) after the stop: %s", len(bodies), bodies[0])
+	if raw, err := os.ReadFile(h.script.ResultFile); err == nil && len(raw) != 0 {
+		t.Fatalf("the stopped call returned a tool result: %s", raw)
 	}
 }
 
@@ -869,17 +777,18 @@ func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
 // result reaches the model. Without it, "the result was withheld" would also
 // be true of a call that never produced one.
 func TestAgentCancel_TheSameCallWithoutAStopCompletesOnce(t *testing.T) {
-	provider := &fetchCallingProvider{}
-	model := httptest.NewServer(provider)
-	defer model.Close()
+	script := protocol.Script{Turns: [][]protocol.Step{
+		{{Kind: protocol.StepTool, Name: "fetch.url", Arguments: map[string]any{"url": "https://example.test/page"}}, {Kind: protocol.StepAnswer, Text: "The page answered."}, {Kind: protocol.StepEnd}},
+		{{Kind: protocol.StepAnswer, Text: "The next answer."}, {Kind: protocol.StepEnd}},
+	}}
 	fetcher := &blockedFetchFetcher{
 		started: make(chan struct{}),
 		stopped: make(chan time.Time, 1),
 		release: make(chan struct{}),
 	}
-	h := newAskHarnessWithOpts(t, mustClient(t),
+	h := newAskHarnessWithOpts(t, script,
 		WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
-	h.createEndpointAt(model.URL)
+
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "complete-in-executor", "sessionId": sid, "question": "fetch that page", "cwd": "/repo",
@@ -908,9 +817,10 @@ func TestAgentCancel_TheSameCallWithoutAStopCompletesOnce(t *testing.T) {
 	default:
 	}
 	waittest.WaitForTimeout(t, "the result to reach the model", 10*time.Second, func() bool {
-		return len(provider.toolResultBodies()) == 1
+		raw, err := os.ReadFile(h.script.ResultFile)
+		return err == nil && strings.Contains(string(raw), blockedFetchText)
 	})
-	if !strings.Contains(provider.toolResultBodies()[0], blockedFetchText) {
+	if !strings.Contains(h.toolResult(), blockedFetchText) {
 		t.Fatalf("the model's tool result does not carry what the page said")
 	}
 }

@@ -43,12 +43,6 @@ type Connector struct {
 	manager       *harness.SessionManager
 }
 
-// New keeps pi's own provider configuration. env supplies process overrides,
-// including PI_CODING_AGENT_DIR for isolated installations and tests.
-func New(dataDir string, env []string) *Connector {
-	return NewWithBase(dataDir, env, harness.Base{})
-}
-
 func (*Connector) Facts() harness.Facts {
 	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ContinuesConversationByID: true, ReportsAnsweringModel: true}
 }

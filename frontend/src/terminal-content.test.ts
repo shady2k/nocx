@@ -13788,13 +13788,10 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         // predated that field and omitted it, which is a payload the
         // backend cannot send.
         return Promise.resolve({
-          endpointConfigured: status.endpointConfigured ?? true,
-          credential: status.credential ?? 'resolvable',
-          lastProbe: null,
           answering: status.answering ?? {
             ready: true,
             reason: null,
-            endpoint: 'openrouter',
+            agentId: 'openrouter',
             model: 'm-a',
           },
         })
@@ -14703,21 +14700,70 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('with no endpoint configured, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
+  it('asks in the pinned conversation when the new-conversation role is unavailable', async () => {
     const client = makeClient()
+    const fallback = client.dispatcher.call.getMockImplementation()!
+    const openSettings = vi.fn()
+    let roleUnavailable = false
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'agent.status') {
+        const conversation = (params as { sessionId?: string }).sessionId
+        return Promise.resolve({
+          answering: {
+            ready: !roleUnavailable || Boolean(conversation),
+            reason: roleUnavailable && !conversation ? 'model-gone' : null,
+            agentId: 'fixture',
+            model: conversation ? 'pinned' : 'removed-choice',
+          },
+          message: 'Choose an available model',
+        })
+      }
+      return fallback(method, params)
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onOpenAgentSettings: openSettings } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      typeAndAsk(ed, content, 'first turn')
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call).toHaveBeenCalledWith('agent.ask', expect.anything()),
+      )
+      client.dispatcher.call.mockClear()
+      roleUnavailable = true
+      typeAndAsk(ed, content, 'continue the conversation')
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call).toHaveBeenCalledWith(
+          'agent.ask',
+          expect.objectContaining({ question: 'continue the conversation' }),
+        ),
+      )
+      expect(openSettings).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with no answering agent installed, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
+    const client = makeClient()
+    const openSettings = vi.fn()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []
     client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
       dispatcherCalls.push({ method, params })
-      if (method === 'agent.ask') {
-        const err = new Error('no endpoint configured') as Error & { code?: number }
-        err.code = -32603
-        return Promise.reject(err)
+      if (method === 'agent.status') {
+        return Promise.resolve({
+          answering: { ready: false, reason: 'not-installed', agentId: null, model: null },
+          message: 'Install an answering agent first',
+        })
       }
       return Promise.resolve({ frameId: 'frame-1' })
     })
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
-      { attachToDocument: true },
+      { attachToDocument: true, hooks: { onOpenAgentSettings: openSettings } },
       client,
     )
     try {
@@ -14736,12 +14782,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       typeAndAsk(ed, content, 'why did it fail?')
 
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
-      })
+      await vi.waitFor(() => expect(openSettings).toHaveBeenCalledOnce())
+      expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(false)
       await vi.waitFor(() => {
         expect(showToast).toHaveBeenCalledWith(
-          expect.objectContaining({ level: 'warning', message: 'no endpoint configured' }),
+          expect.objectContaining({
+            level: 'warning',
+            message: 'Install an answering agent first',
+          }),
         )
       })
       expect(marked.dataset.granted).toBe('true')
@@ -17208,25 +17256,25 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
   const READY_ANSWERING: AgentStatusResult['answering'] = {
     ready: true,
     reason: null,
-    endpoint: 'openrouter',
+    agentId: 'openrouter',
     model: 'm-a',
   }
-  const UNASSIGNED_ANSWERING: AgentStatusResult['answering'] = {
+  const MISSING_MODEL_ANSWERING: AgentStatusResult['answering'] = {
     ready: false,
-    reason: 'unassigned',
-    endpoint: null,
+    reason: 'model-gone',
+    agentId: null,
     model: null,
   }
-  const NO_ENDPOINTS_ANSWERING: AgentStatusResult['answering'] = {
+  const NOT_INSTALLED_ANSWERING: AgentStatusResult['answering'] = {
     ready: false,
-    reason: 'no-endpoints',
-    endpoint: null,
+    reason: 'not-installed',
+    agentId: null,
     model: null,
   }
 
   /** A client whose agent.status answer is whatever `answering` currently
    *  holds — so a test can change the FACTS and then make the surface ask
-   *  again, exactly as adding an endpoint does. */
+   *  again, exactly as changing an agent model does. */
   function statusClient(initial: AgentStatusResult['answering']) {
     const client = makeClient()
     const state = { answering: initial, asks: 0 }
@@ -17234,10 +17282,8 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       if (method === 'agent.status') {
         state.asks += 1
         return Promise.resolve({
-          endpointConfigured: state.answering.ready,
-          credential: state.answering.ready ? 'resolvable' : null,
-          lastProbe: null,
           answering: state.answering,
+          message: null,
         })
       }
       return Promise.resolve({
@@ -17364,12 +17410,14 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     }
   })
 
-  it('offers the rung, not the model, when nothing is chosen', async () => {
-    const { client } = statusClient(UNASSIGNED_ANSWERING)
+  it('offers the repair action when the chosen model is missing', async () => {
+    const { client } = statusClient(MISSING_MODEL_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       switchToAsk(content)
-      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      await vi.waitFor(() =>
+        expect(chipsOf(content)).toEqual(['The answering agent is unavailable.']),
+      )
     } finally {
       teardown()
     }
@@ -17377,36 +17425,36 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
 
   it('opens the page the rung names', async () => {
     const opened: string[] = []
-    const { client } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { client } = statusClient(NOT_INSTALLED_ANSWERING)
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       {
         hooks: {
-          onCreateEndpoint: () => opened.push('endpoints'),
-          onOpenRoles: () => opened.push('roles'),
+          onOpenAgentSettings: () => opened.push('agent-installed'),
         },
       },
       client,
     )
     try {
       switchToAsk(content)
-      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
-      clickChip(content, 'Add an endpoint first')
-      expect(opened).toEqual(['endpoints'])
+      await vi.waitFor(() =>
+        expect(chipsOf(content)).toEqual(['The answering agent is unavailable.']),
+      )
+      clickChip(content, 'The answering agent is unavailable.')
+      expect(opened).toEqual(['agent-installed'])
     } finally {
       teardown()
     }
   })
 
-  it('opens Endpoints from the provider and Roles from the model', async () => {
+  it('opens agent settings from either ready chip', async () => {
     const opened: string[] = []
     const { client } = statusClient(READY_ANSWERING)
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       {
         hooks: {
-          onCreateEndpoint: () => opened.push('endpoints'),
-          onOpenRoles: () => opened.push('roles'),
+          onOpenAgentSettings: () => opened.push('agent-installed'),
         },
       },
       client,
@@ -17416,7 +17464,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
       clickChip(content, 'openrouter')
       clickChip(content, 'm-a')
-      expect(opened).toEqual(['endpoints', 'roles'])
+      expect(opened).toEqual(['agent-installed', 'agent-installed'])
     } finally {
       teardown()
     }
@@ -17427,11 +17475,13 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     // read "Add an endpoint first" after an endpoint had been added. The
     // pane coming back to the front is the moment the facts can have
     // changed — the Endpoints form lives in another pane.
-    const { client, state } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { client, state } = statusClient(NOT_INSTALLED_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       switchToAsk(content)
-      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+      await vi.waitFor(() =>
+        expect(chipsOf(content)).toEqual(['The answering agent is unavailable.']),
+      )
 
       // An endpoint was added and a model chosen on the Settings pane;
       // the person comes back to the composer.
@@ -17444,11 +17494,13 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
   })
 
   it('asks again when the socket comes back', async () => {
-    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { client, state } = statusClient(MISSING_MODEL_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       switchToAsk(content)
-      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      await vi.waitFor(() =>
+        expect(chipsOf(content)).toEqual(['The answering agent is unavailable.']),
+      )
       state.answering = READY_ANSWERING
       client._fireReconnect()
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
@@ -17464,12 +17516,14 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     // ever issued. The write announces its own landing now, and this is that
     // announcement, made while the chip is on screen and nobody is
     // navigating anywhere.
-    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { client, state } = statusClient(MISSING_MODEL_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       content.setVisible(true)
       switchToAsk(content)
-      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      await vi.waitFor(() =>
+        expect(chipsOf(content)).toEqual(['The answering agent is unavailable.']),
+      )
       const before = state.asks
 
       state.answering = READY_ANSWERING
@@ -17572,14 +17626,12 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       await vi.waitFor(() => expect(pending.length).toBe(2))
 
       const body = (answering: AgentStatusResult['answering']) => ({
-        endpointConfigured: answering.ready,
-        credential: answering.ready ? 'resolvable' : null,
-        lastProbe: null,
         answering,
+        message: null,
       })
       pending[1](body(READY_ANSWERING)) // the newer ask answers FIRST
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
-      pending[0](body(NO_ENDPOINTS_ANSWERING)) // the older ask answers LAST
+      pending[0](body(NOT_INSTALLED_ANSWERING)) // the older ask answers LAST
       await Promise.resolve()
       await Promise.resolve()
       expect(chipsOf(content)).toEqual(['openrouter', 'm-a'])
@@ -17673,10 +17725,11 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
   /** ⌘/Ctrl+Enter, dispatched where a person's keystroke lands while the
    *  grid owns input: on the live grid, so it travels the same path. */
-  async function summonChord(content: TerminalContent): Promise<void> {
+  async function summonChord(content: TerminalContent, waitForCapture = false): Promise<void> {
     if (!Object.prototype.hasOwnProperty.call(content, 'captureLiveFrame')) {
       content.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
     }
+    const capture = vi.spyOn(content, 'captureLiveFrame')
     gridOf(content).dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -17685,7 +17738,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         cancelable: true,
       }),
     )
-    await Promise.resolve()
+    await vi.waitFor(() => {
+      if (waitForCapture) expect(capture).toHaveBeenCalledOnce()
+      else expect(editorOf(content).isVisible).toBe(true)
+    })
   }
 
   function escapeOn(el: HTMLElement): void {
@@ -18158,6 +18214,65 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('refuses an unready summon before capturing or changing the live pane', async () => {
+    const client = makeClient()
+    const fallback = client.dispatcher.call.getMockImplementation()!
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'agent.status')
+        return Promise.resolve({
+          answering: { ready: false, reason: 'not-installed', agentId: null, model: null },
+          message: 'Install an answering agent first',
+        })
+      return fallback(method, params)
+    })
+    const openSettings = vi.fn()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onOpenAgentSettings: openSettings },
+      },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const capture = vi.fn().mockResolvedValue(defaultPinnedFrame())
+      content.captureLiveFrame = capture
+      const session = sessionOf(content)
+      session.sendResize.mockClear()
+      vi.mocked(showToast).mockClear()
+      gridOf(content).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await vi.waitFor(() => expect(openSettings).toHaveBeenCalledOnce())
+      expect(showToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warning',
+          message: 'Install an answering agent first',
+        }),
+      )
+      expect(capture).not.toHaveBeenCalled()
+      expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+        false,
+      )
+      expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(paneOf(content).querySelector('.nocx-summon-stack')).toBeNull()
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   it('waits for the pinned frame before showing the editor or marker', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
@@ -18177,7 +18292,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           }),
       )
 
-      await summonChord(content)
+      await summonChord(content, true)
       expect(ed.isVisible).toBe(false)
       expect(content.pinnedFrame()).toBeNull()
       expect(ed.root.querySelector('[role="status"]')).toBeNull()
@@ -18204,7 +18319,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       startCommand(client)
       content.captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
 
-      await summonChord(content)
+      await summonChord(content, true)
       expect(ed.isVisible).toBe(false)
       expect(ed.root.dataset.placement).toBe('inline')
       expect(content.pinnedFrame()).toBeNull()
@@ -18274,9 +18389,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { ed, content, teardown } = await mountTerminal(
@@ -19039,7 +19152,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         expect(document.activeElement).toBe(document.body)
 
         chordOn(document.body)
-        await Promise.resolve()
+        await vi.waitFor(() => expect(ed.isVisible).toBe(true))
 
         expect(ed.isVisible).toBe(true)
         expect(targetNamed(ed)).toBe('agent')
@@ -21412,9 +21525,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -21503,9 +21614,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -21555,9 +21664,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId, entryId: `entry-${runId}`, model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { ed, content, teardown } = await mountTerminal(
@@ -21570,6 +21677,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const handler = startCommand(client)
       const editorRoot = ed.root
       await summon(content)
+      await vi.waitFor(() => expect(sessionOf(content).sendResize).toHaveBeenCalled())
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
       const session = sessionOf(content)
       session.send.mockClear()
@@ -21676,9 +21784,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { ed, content, teardown } = await mountTerminal(
@@ -21849,9 +21955,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return asks === 1 ? firstAsk : secondAsk
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { ed, content, teardown } = await mountTerminal(
@@ -21911,9 +22015,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return asks === 1 ? firstAsk : secondAsk
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -21994,9 +22096,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22044,9 +22144,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { ed, content, teardown } = await mountTerminal(
@@ -22131,9 +22229,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     let teardown: (() => void) | undefined
@@ -22212,9 +22308,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22264,9 +22358,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22359,9 +22451,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22453,9 +22543,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22557,9 +22645,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.ask')
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22654,6 +22740,26 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(attached).toHaveLength(1)
       expect(attached[0]).toMatchObject({ start: 1, count: 2, automatic: true })
 
+      // Finish the answer before returning to the composer's grant control.
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+
+      // A successful ask consumed its marks. Mark the band again for the next question.
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button'),
+        ).not.toBeNull(),
+      )
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      await vi.waitFor(() => expect(chip?.textContent).toContain('· 1'))
+
       // And dismissing the row mark leaves the whole screen attached: the
       // person took back the narrowing, not the attachment.
       chip!.click()
@@ -22684,9 +22790,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22767,9 +22871,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       }
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22807,9 +22909,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.ask')
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22851,9 +22951,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.ask')
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22896,9 +22994,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 43, state: 'cancelled', cancelled: true })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -22960,9 +23056,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.ask')
         return Promise.resolve({ runId: 44, entryId: 'entry-44', model: 'test-model' })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -23047,9 +23141,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       if (method === 'agent.ask')
         return Promise.resolve({ runId: 45, entryId: 'entry-45', model: 'test-model' })
       return Promise.resolve({
-        endpointConfigured: true,
-        credential: 'resolvable',
-        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+        answering: { ready: true, reason: null, agentId: 'test', model: 'test-model' },
       })
     })
     const { content, teardown } = await mountTerminal(
@@ -24815,11 +24907,19 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       typeIntoPane(content, 'x')
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
       resize(776)
-      await vi.waitFor(() => expect(fits()).toHaveLength(before + 1))
-      const resized = fits()[fits().length - 1]
       // The pane grew by a hundred pixels: 744px above the header is 46 rows,
       // and the program is told all 46 — no margin row is taken from it.
-      expect(resized).toEqual({ cols: 115, rows: 46, xpixel: 920, ypixel: 736 })
+      // A pending report for the previous grid is not the resize completing.
+      await vi.waitFor(() =>
+        expect(fits()[fits().length - 1]).toEqual({
+          cols: 115,
+          rows: 46,
+          xpixel: 920,
+          ypixel: 736,
+        }),
+      )
+      expect(fits()).toHaveLength(before + 1)
+      const resized = fits()[fits().length - 1]
       session.fireScreenFrame(screenFrame(12, ['PRIMARY'], { cols: 40, rows: 20 }))
       expect(sb.mode).toBe('running')
       expect(fits()).toHaveLength(before + 1)

@@ -152,8 +152,7 @@ const (
 	// call may name. The frontend renders roughly 40 rows; 512 is far above
 	// that and still bounds a call that iterates the list server-side.
 	maxStatusProfileIDs = 512
-	// maxOpenURLRunes bounds the shell.openUrl target. Wire-cost bound, the
-	// same order as endpoints.probe's URL bound.
+	// maxOpenURLRunes bounds the shell.openUrl target's wire cost.
 	maxOpenURLRunes = 2_000
 )
 

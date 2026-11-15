@@ -82,7 +82,7 @@ func validatePasswordResolvedRaw(raw json.RawMessage) string {
 	default:
 		return "outcome must be one of submitted, cancelled"
 	}
-	if utf8.RuneCountInString(p.Password) > maxProbeKeyRunes {
+	if utf8.RuneCountInString(p.Password) > maxSecretSettingRunes {
 		return "password exceeds the length bound"
 	}
 	if hasControlChars(p.Password) {

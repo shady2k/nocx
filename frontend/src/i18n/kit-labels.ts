@@ -13,7 +13,6 @@ import type { CollisionLabels } from '../ui/collision-dialog'
 import type { CodeBlockCopy } from '../ui/code-block'
 import type { SecretChipTitles } from '../ui/secret-chip'
 import type { BlockReceiptLabels } from '../ui/block-receipt'
-import type { DumpLabels } from '../ui/dump-panel'
 import type { FileReadoutLabels } from '../ui/file-readout'
 import type { FolderPickerLabels } from '../ui/folder-picker'
 
@@ -26,19 +25,6 @@ export const collisionLabels = (): CollisionLabels => ({
   applyOne: t('ui.collision.applyOne', 'Apply to the 1 remaining file'),
   applyMany: (count: number) =>
     tPlural('ui.collision.applyMany', count, 'Apply to the {count} remaining files'),
-})
-
-export const dumpLabels = (): DumpLabels => ({
-  title: t('kit.dump.title', 'Model dump'),
-  openPage: t('kit.dump.openPage', 'Open full page'),
-  searchAria: t('kit.dump.search.aria', 'Search dump'),
-  searchPh: t('kit.dump.search.ph', 'Search dump'),
-  request: t('kit.dump.request', 'Request'),
-  response: t('kit.dump.response', 'Response'),
-  rawChunks: t('kit.dump.rawChunks', 'Raw chunks'),
-  truncated: t('kit.dump.truncated', 'Truncated at the 1 MiB capture limit.'),
-  noDrive: t('kit.dump.noDrive', 'No recorded drive.'),
-  noMatch: t('kit.dump.noMatch', 'No dump content matches this search.'),
 })
 
 export const fileReadoutLabels = (): FileReadoutLabels => ({

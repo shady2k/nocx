@@ -16,7 +16,7 @@ import (
 // caller with an error instead is only better if the prompt never appears.
 func TestResolverRefusesAnOperationReadInsideTheAnsweringGate(t *testing.T) {
 	store := &stancedStore{sealed: true, secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	ctx := credential.WithUnlockAnswerGate(t.Context(), "vault")
 	_, err := resolver.Resolve(ctx, "sec:v1:file:test", credential.Operation("audit a skill"))
@@ -37,7 +37,7 @@ func TestResolverRefusesAnOperationReadInsideTheAnsweringGate(t *testing.T) {
 // property of WHERE the read happens, not of the read.
 func TestResolverAllowsTheSameReadOutsideTheGate(t *testing.T) {
 	store := &stancedStore{sealed: true, secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	got, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Operation("audit a skill"))
 	if err != nil {
@@ -48,22 +48,5 @@ func TestResolverAllowsTheSameReadOutsideTheGate(t *testing.T) {
 	}
 	if got.IsEmpty() {
 		t.Fatal("the secret is empty")
-	}
-}
-
-// A REPORT READ IS UNTOUCHED BY THE FENCE, and deliberately: it never waits
-// for anybody, so there is no unlock to answer. Config reads that describe
-// vault state run inside exactly this gate and must keep working.
-func TestReportReadIsNotFencedInsideTheAnsweringGate(t *testing.T) {
-	store := &stancedStore{sealed: true, secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, func(err error) bool { return errors.Is(err, errSealed) }, store)
-
-	ctx := credential.WithUnlockAnswerGate(t.Context(), "vault")
-	_, err := resolver.Resolve(ctx, "sec:v1:file:test", credential.Report())
-	if !errors.Is(err, credential.ErrSealedQuiet) {
-		t.Fatalf("Resolve error = %v, want ErrSealedQuiet", err)
-	}
-	if store.ensureCalls != 0 {
-		t.Fatalf("a report read raised an unlock: %d calls", store.ensureCalls)
 	}
 }

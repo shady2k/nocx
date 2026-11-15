@@ -12,6 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/toolendpoint"
+	"github.com/shady2k/nocx/internal/turnbearer"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -184,6 +185,16 @@ type toolAuthorizer struct {
 	// sessionKeys for the identical reason. Nil until the composition root
 	// wires it.
 	sessionMessages any
+	// turnGrants resolves a session bearer to the turn running at admission
+	// (ADR-4khgzeyp decision 5). Nil means no session was ever minted, and then
+	// a connection presenting a bearer is refused: the third way in exists
+	// only where the composition root wired a minter.
+	turnGrants turnbearer.Registry
+	// turnSlots is the turn's own caller slot, kept apart from slots so the
+	// assistant's bridge never competes with a pane's caller for the pane's
+	// seat. One live connection per turn; a reconnect after it ends is a new
+	// acquisition.
+	turnSlots workerCallerSlots
 }
 
 // BindRevoker wires the subtree revocation retire triggers. Called once at
@@ -240,6 +251,22 @@ func (a *toolAuthorizer) BindSessionMessages(m any) {
 		return
 	}
 	a.sessionMessages = m
+}
+
+// BindTurnGrants wires the session registry that binds connections to turns.
+// Called once at the composition root, beside the minter that fills it, and
+// BEFORE the endpoint starts accepting: the accept path reads the field to
+// decide whether a bearer preamble is worth reading.
+func (a *toolAuthorizer) BindTurnGrants(turns turnbearer.Registry) {
+	if a == nil {
+		return
+	}
+	a.turnGrants = turns
+}
+
+// AdmitsTurnBearer implements toolendpoint.TurnBearerAdmitter.
+func (a *toolAuthorizer) AdmitsTurnBearer() bool {
+	return a != nil && a.turnGrants != nil
 }
 
 // BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
@@ -484,6 +511,20 @@ func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {
 // endpoint, so this grants nothing and the caller is told what a peer outside
 // an enrolled pane is told — because that is now the fact.
 func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
+	// THE THIRD WAY IN, DECIDED BEFORE THE TWO THAT PREDATE IT
+	// (ADR-anntnxdj decision 3). A connection off the helper's lane that
+	// presented a bearer is the assistant turn's bridge: it claims a turn, and
+	// it is admitted as that turn or not at all. It is NOT retried as a
+	// process tree when the bearer names no live turn — a bridge that presents
+	// a retired value must be refused, and the tree rule would admit it as
+	// whatever pane happened to be its ancestor.
+	//
+	// The arm lives here rather than in admittedPeer because admittedPeer
+	// answers with a session, and a turn is not a session: it has a run id, a
+	// pane, its own pane access and its own grant.
+	if peer.Pane == "" && peer.Token != "" {
+		return a.admitTurn(peer.Token, publish)
+	}
 	admitted, admittedSession, epoch, refusal := a.admittedPeer(peer)
 	if refusal != nil {
 		// THE NAMED REFUSAL TRAVELS. `Admit` used to answer every failure with
@@ -562,6 +603,44 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	if !publish(string(admitted), epoch) {
 		release()
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+	}
+	return invocation, release, nil
+}
+
+// admitTurn binds a connection to the turn's existing assistant kernel. Its
+// admission method invokes the run's grant owner and carries its complete bound
+// context unchanged. Publication and EndTurn share the turn's lifetime lock.
+// The turn owns a slot distinct from the pane caller's slot.
+func (a *toolAuthorizer) admitTurn(token string, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
+	if a == nil || a.turnGrants == nil {
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
+	}
+	turn, live := a.turnGrants.Lookup(token)
+	if !live {
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
+	}
+	ctx, done, live := turn.StartAdmission(context.Background())
+	if !live {
+		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
+	}
+	releaseSlot, acquired := a.turnSlots.acquire(session.ID(turn.Tools.RunContext().RunID))
+	if !acquired {
+		return assistant.ToolInvocation{}, done, toolendpoint.ErrSessionCallerActive
+	}
+	// The endpoint owns this cleanup even on refusal: the unpublished socket
+	// must close before turn settlement can report that admission has ended.
+	release := func() {
+		releaseSlot()
+		done()
+	}
+	invocation, err := turn.Tools.Admit(ctx)
+	if err != nil {
+		return assistant.ToolInvocation{}, release, err
+	}
+	if !turn.Publish(func() bool {
+		return publish(toolendpoint.TurnScope(turn.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+	}) {
+		return assistant.ToolInvocation{}, release, toolendpoint.ErrTurnBearerRefused
 	}
 	return invocation, release, nil
 }

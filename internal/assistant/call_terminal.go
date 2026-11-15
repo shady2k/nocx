@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -43,8 +44,9 @@ func (t *CallTerminal) Complete(ctx context.Context, dispatchErr error) error {
 
 func (t *CallTerminal) complete(ctx context.Context, dispatchErr error) error {
 	if !t.decided {
-		if cause := context.Cause(ctx); cause != nil {
-			dispatchErr = cause
+		var lease *RunLeaseError
+		if (ctx.Err() != nil || errors.Is(dispatchErr, context.Canceled)) && !errors.As(dispatchErr, &lease) {
+			dispatchErr = callCancellationCause(ctx, dispatchErr)
 			t.cancelled = true
 		}
 		t.decided, t.err = true, dispatchErr

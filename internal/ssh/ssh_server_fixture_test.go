@@ -496,7 +496,7 @@ func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credent
 }
 
 func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
+	return credential.NewResolver(s, nil).Resolve(ctx, id, why)
 }
 
 func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {

@@ -803,3 +803,23 @@ describe('AgentInputTarget standing-answer receipt routing (nocx-2019q)', () => 
     expect(handle.notice).not.toHaveBeenCalled()
   })
 })
+
+it('opens agent settings before allocating an answer or calling ask when no agent is ready', async () => {
+  const dispatcher = new FakeDispatcher()
+  const openAnswer = vi.fn()
+  const ensureReady = vi.fn(() => Promise.resolve(false))
+  const target = new AgentInputTarget({
+    dispatcher: dispatcher as never,
+    cancel: vi.fn(),
+    sessionId: () => 'session-a',
+    cwd: () => '/repo',
+    grants: () => [],
+    openAnswer,
+    onRefusal: vi.fn(),
+    ensureReady,
+  })
+  await expect(target.submit('help')).rejects.toThrow('The answering agent is not ready')
+  expect(ensureReady).toHaveBeenCalledOnce()
+  expect(openAnswer).not.toHaveBeenCalled()
+  expect(dispatcher.calls).toEqual([])
+})

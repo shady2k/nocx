@@ -67,7 +67,7 @@ done
 				t.Fatal(err)
 			}
 			modelLog := filepath.Join(dir, "selected-model")
-			c := New(t.TempDir(), []string{"PATH=" + dir, "MODEL_LOG=" + modelLog})
+			c := newTestConnector(t.TempDir(), []string{"PATH=" + dir, "MODEL_LOG=" + modelLog})
 			got := c.Readiness(context.Background())
 			selected, err := os.ReadFile(modelLog) //nolint:gosec // private test file
 			if err != nil || string(selected) != tc.expected {

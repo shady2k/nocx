@@ -32,10 +32,18 @@ func sweepOrphanConfigs(ctx context.Context, dataDir string) {
 		return
 	}
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() && !entry.IsDir() {
 			continue
 		}
-		name, ok := strings.CutPrefix(entry.Name(), "session-")
+		configName := entry.Name()
+		if entry.IsDir() {
+			var ok bool
+			configName, ok = strings.CutSuffix(configName, ".d")
+			if !ok {
+				continue
+			}
+		}
+		name, ok := strings.CutPrefix(configName, "session-")
 		if !ok || !strings.HasSuffix(name, ".json") {
 			continue
 		}
@@ -47,8 +55,12 @@ func sweepOrphanConfigs(ctx context.Context, dataDir string) {
 		if !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+		path := filepath.Join(dir, configName)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.From(ctx).Warn("pi orphan config removal failed", "error", err)
+		}
+		if err := os.RemoveAll(path + ".d"); err != nil {
+			log.From(ctx).Warn("pi orphan prompt removal failed", "error", err)
 		}
 	}
 }

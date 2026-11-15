@@ -25,8 +25,9 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	agentharness "github.com/shady2k/nocx/internal/harness"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -76,10 +77,6 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	defer f.mu.Unlock()
 	f.finish = &in
 	return nil
-}
-
-func (f *fakeAgentService) PriorTurns(_ context.Context, _, _ string) ([]content.PriorTurn, error) {
-	return nil, nil
 }
 
 func (f *fakeAgentService) OpenProse(_ context.Context, turnID string, _ int64) (content.ProseBlock, error) {
@@ -195,15 +192,17 @@ func (r *gapResponder) TryNotify(method string, params json.RawMessage) error {
 
 // newGapHandlers builds the agentHandlers the unit tests drive directly,
 // with the real stream logic and a recording store.
-func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *assistant.ApprovalStore) agentHandlers {
-	return agentHandlers{
+func newGapHandlers(svc *fakeAgentService, backend agentharness.Harness, approvals *assistant.ApprovalStore) agentHandlers {
+	h := agentHandlers{
 		op:            &directAgentOp{svc: svc},
 		log:           log.NewSlogAdapter(nil),
-		client:        client,
+		harness:       backend,
 		approvals:     approvals,
 		pendingRuns:   make(map[int64]askRunContext),
 		pendingRunsMu: &sync.Mutex{},
 	}
+
+	return h
 }
 
 func gapRunContext() askRunContext {
@@ -212,9 +211,6 @@ func gapRunContext() askRunContext {
 		entryID:  "turn-1",
 		question: "q",
 		control:  &agentRunControl{cancelDone: make(chan struct{})},
-		// The stream resolves endpoint material up front; a keyless endpoint
-		// resolves to nothing, keeping these unit tests on the delta path.
-		endpoint: profile.Endpoint{NoKey: true},
 	}
 }
 
@@ -226,8 +222,8 @@ func gapRunContext() askRunContext {
 // persisted before the notify refused it.
 func TestAgentAsk_DroppedDeltaIsVisibleOnTheTerminalState(t *testing.T) {
 	svc := &fakeAgentService{}
-	client := &scriptedAssistantClient{deltas: []string{"hello", " ", "world"}}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "hello"}, {Kind: protocol.StepAnswer, Text: " "}, {Kind: protocol.StepAnswer, Text: "world"}, {Kind: protocol.StepEnd}}}
+	h := newGapHandlers(svc, newScriptedAgent(t, script).harness, assistant.NewApprovalStore())
 	r := &gapResponder{failDeltaTimes: 3} // the wire refuses EVERY delta
 
 	h.runAskStream(context.Background(), gapRunContext(), r)
@@ -256,8 +252,8 @@ func TestAgentAsk_DroppedDeltaIsVisibleOnTheTerminalState(t *testing.T) {
 // own ascending seq, never the delivered count.
 func TestAgentAsk_SeqAdvancesPastDroppedDeltas(t *testing.T) {
 	svc := &fakeAgentService{}
-	client := &scriptedAssistantClient{deltas: []string{"a", "b", "c"}}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "a"}, {Kind: protocol.StepAnswer, Text: "b"}, {Kind: protocol.StepAnswer, Text: "c"}, {Kind: protocol.StepEnd}}}
+	h := newGapHandlers(svc, newScriptedAgent(t, script).harness, assistant.NewApprovalStore())
 	r := &gapResponder{failDeltaTimes: 1} // only the FIRST delta is refused
 
 	h.runAskStream(context.Background(), gapRunContext(), r)
@@ -351,7 +347,10 @@ func notificationParams(data []byte, method string) (json.RawMessage, bool) {
 
 // outboundNotifyResponder is wsConn's write surface over a real bounded
 // outbound.Conn — the delta path a real renderer sits behind.
-type outboundNotifyResponder struct{ c *outbound.Conn }
+type outboundNotifyResponder struct {
+	c          *outbound.Conn
+	firstDelta <-chan struct{}
+}
 
 func (r outboundNotifyResponder) TryResult(id json.RawMessage, result json.RawMessage) error {
 	return r.c.TryEnqueueResponse(mustMarshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result}))
@@ -362,41 +361,11 @@ func (r outboundNotifyResponder) TryError(id json.RawMessage, rpcErr RPCError) e
 }
 
 func (r outboundNotifyResponder) TryNotify(method string, params json.RawMessage) error {
-	return r.c.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}))
-}
-
-// barrierAskClient emits N deltas, signals emitted, then blocks until the
-// test releases it — the deterministic stand-in for "the stream is still
-// producing while the consumer has stopped reading".
-type barrierAskClient struct {
-	n           int
-	emitted     chan struct{}
-	release     chan struct{}
-	pumpStarted <-chan struct{}
-	deltaCnt    int
-}
-
-func (b *barrierAskClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true}, nil
-}
-
-// Discard implements assistant.Client. This fake holds no suspended
-// state, so there is nothing to drop.
-func (*barrierAskClient) Discard(string) {}
-
-func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	for i := 0; i < b.n; i++ {
-		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: fmt.Sprintf("d%d", i)}); err != nil {
-			return err
-		}
-		b.deltaCnt++
-		if i == 0 && b.pumpStarted != nil {
-			<-b.pumpStarted
-		}
+	err := r.c.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}))
+	if method == "agent.runDelta" && r.firstDelta != nil {
+		<-r.firstDelta
 	}
-	close(b.emitted)
-	<-b.release
-	return nil
+	return err
 }
 
 // A consumer that stops reading must not make the server's memory grow
@@ -414,24 +383,17 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 	}
 	conn := outbound.New(sock, outbound.Config{})
 	t.Cleanup(conn.Close)
-	client := &barrierAskClient{
-		n:           deltas,
-		emitted:     make(chan struct{}),
-		release:     make(chan struct{}),
-		pumpStarted: sock.writeStarted,
+	steps := make([]protocol.Step, 0, deltas+2)
+	for i := range deltas {
+		steps = append(steps, protocol.Step{Kind: protocol.StepAnswer, Text: fmt.Sprintf("d%d", i)})
 	}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
-	t.Cleanup(func() {
-		select {
-		case <-client.release:
-		default:
-			close(client.release)
-		}
-	})
+	steps = append(steps, protocol.Step{Kind: protocol.StepGate}, protocol.Step{Kind: protocol.StepEnd})
+	agent := newScriptedAgent(t, protocol.Script{Steps: steps})
+	h := newGapHandlers(svc, agent.harness, assistant.NewApprovalStore())
 
 	streamDone := make(chan struct{})
 	go func() {
-		h.runAskStream(context.Background(), gapRunContext(), outboundNotifyResponder{c: conn})
+		h.runAskStream(context.Background(), gapRunContext(), outboundNotifyResponder{c: conn, firstDelta: sock.writeStarted})
 		close(streamDone)
 	}()
 	select {
@@ -443,11 +405,8 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 	// The producer emitted every delta while the pump was blocked: the queue
 	// refused the overflow (counted, not buffered) and the stream kept going —
 	// the producer never waits on the consumer.
-	select {
-	case <-client.emitted:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the stream never finished emitting — a full outbound queue wedged the producer")
-	}
+	waittest.WaitFor(t, "all deltas durable while the consumer is blocked", func() bool { return svc.appendCount() == deltas })
+
 	if !conn.Stalled() {
 		t.Error("connection not marked outbound-stalled after the overflow")
 	}
@@ -475,7 +434,7 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 
 	// With the queue drained, the terminal runState gets through and carries
 	// the count: the drop surfaces (criterion 1).
-	close(client.release)
+	agent.release()
 	waittest.WaitForTimeout(t, "terminal runState on the wire", 10*time.Second, func() bool {
 		return sock.runStateFrame() != nil
 	})
@@ -597,9 +556,8 @@ func strictNotify(t *testing.T, tap *strictTap, method string, timeout time.Dura
 // the binary plane carries nothing that is not a session data frame — and
 // nothing that contains the model's answer. AD-1 asserted, not assumed.
 func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"hello", " ", "world"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "hello"}, {Kind: protocol.StepAnswer, Text: " "}, {Kind: protocol.StepAnswer, Text: "world"}, {Kind: protocol.StepEnd}}}
+	h := newAskHarness(t, script)
 	sid := openLocalSession(t, h.conn)
 
 	// The strict reader owns the socket from here on; the wire calls go
@@ -621,7 +579,7 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 	}
 
 	// The whole stream flows over the text plane.
-	for range client.deltaCount() {
+	for range 3 {
 		if raw := strictNotify(t, tap, "agent.runDelta", 5*time.Second); len(raw) == 0 {
 			t.Fatal("empty runDelta notification")
 		}
@@ -663,97 +621,57 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 
 // ── criterion 1: two concurrent runs interleave without corrupting ────────
 
-// interleavedAskClient streams two concurrent Ask calls with strictly
-// alternating deltas: the wire order genuinely interleaves the runs, which
-// is the point the acceptance criterion drives.
-//
-// Each script is keyed by the QUESTION its ask carries, never by arrival
-// order. agent.ask answers "prepared" and the run streams on its own
-// goroutine, so which of the two runs reaches Ask first is the scheduler's
-// choice and nothing the product promises; a counter here handed the
-// second run's script to whichever goroutine won, and every assertion
-// about which text belongs to which run then reported the swap as
-// corruption (nocx-sxvnh).
-type interleavedAskClient struct {
-	mu          sync.Mutex
-	scripts     map[string][]string
-	started     int
-	bothStarted chan struct{}
-	turn        chan struct{}
-}
-
-func newInterleavedAskClient(scripts map[string][]string) *interleavedAskClient {
-	turn := make(chan struct{}, 1)
-	turn <- struct{}{}
-	return &interleavedAskClient{
-		scripts:     scripts,
-		bothStarted: make(chan struct{}),
-		turn:        turn,
-	}
-}
-
-func (c *interleavedAskClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true}, nil
-}
-
-// Discard implements assistant.Client. This fake holds no suspended
-// state, so there is nothing to drop.
-func (*interleavedAskClient) Discard(string) {}
-
-// askQuestion is the question one ask carries. The transport assembles the
-// standing prompt, then the prior turn, then the run's own question last
-// (ws_agent.go), so the final user message is this ask's question and the
-// only part of AskParams that distinguishes two runs of the same session
-// against the same endpoint.
-func askQuestion(p assistant.AskParams) string {
-	q := ""
-	for _, m := range p.Messages {
-		if m.Role == "user" {
-			q = m.Content
-		}
-	}
-	return q
-}
-
-func (c *interleavedAskClient) Ask(_ context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	question := askQuestion(p)
-	c.mu.Lock()
-	script, ok := c.scripts[question]
-	c.started++
-	if c.started == 2 {
-		close(c.bothStarted)
-	}
-	c.mu.Unlock()
-	if !ok {
-		// Counted as started above, so an unscripted question fails this
-		// ask instead of wedging the other one on the barrier.
-		return fmt.Errorf("interleavedAskClient: no script for question %q", question)
-	}
-	<-c.bothStarted // both runs are streaming before either emits
-	for _, d := range script {
-		<-c.turn
-		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: d}); err != nil {
-			c.turn <- struct{}{}
-			return err
-		}
-		c.turn <- struct{}{}
-	}
-	return nil
-}
-
 // Two runs in flight at once, both streaming: each entry's seq ascends
 // independently and no text lands on the wrong entryId. The whole flow is
 // read through ONE tap: a terminal runState can arrive while the deltas
 // are still being read, and a reader that consumes it (readNotification)
 // would make the test race the streams.
+// conversationHarness selects a real actor fixture by the server-owned conversation.
+type conversationHarness struct {
+	agentharness.Harness
+	second       agentharness.Harness
+	conversation string
+}
+
+func (h *conversationHarness) Run(ctx context.Context, spec agentharness.TurnSpec) (agentharness.Turn, error) {
+	if spec.ConversationID == h.conversation {
+		return h.second.Run(ctx, spec)
+	}
+	return h.Harness.Run(ctx, spec)
+}
+
 func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) {
-	client := newInterleavedAskClient(map[string][]string{
-		"first?":  {"aaa1", "aaa2", "aaa3"},
-		"second?": {"bbb1", "bbb2", "bbb3"},
-	})
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openLocalSession(t, h.conn)
+	scriptA := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "aaa1"}, {Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "aaa2"}, {Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "aaa3"}, {Kind: protocol.StepEnd}}}
+	scriptB := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "bbb1"}, {Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "bbb2"}, {Kind: protocol.StepGate}, {Kind: protocol.StepAnswer, Text: "bbb3"}, {Kind: protocol.StepEnd}}}
+	agentA := newScriptedAgent(t, scriptA)
+	agentB := newScriptedAgent(t, scriptB)
+	const secondPane = "0193b41a-8000-7000-8000-000000000002"
+	router := &conversationHarness{Harness: agentA.harness, second: agentB.harness, conversation: secondPane}
+	h := newAskHarnessWithOpts(t, scriptA, WithAgentHarness("scripted", router))
+	if _, err := h.db.Layout().CreateWorkspace(t.Context(),
+		content.Workspace{ID: "ws-concurrent-b", Name: "concurrent b"},
+		content.Tab{ID: "tab-concurrent-b", WorkspaceID: "ws-concurrent-b", Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: secondPane, TabID: "tab-concurrent-b", Cwd: "/repo", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatal(err)
+	}
+	openPane := func(pane string, id int) string {
+		raw := jsonrpcCallWithID(t, h.conn, "open", map[string]any{
+			"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "paneId": pane,
+		}, id)
+		var response struct {
+			Result struct {
+				SessionID string `json:"sessionId"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil || response.Result.SessionID == "" {
+			t.Fatalf("open pane %s: %v (%s)", pane, err, raw)
+		}
+		return response.Result.SessionID
+	}
+	sid := openPane(askPaneID, 1)
+	sidB := openPane(secondPane, 2)
+
 	tap := newSocketTap(h.conn)
 
 	askARaw := tapCall(t, h.conn, tap, 11, "agent.ask", map[string]any{
@@ -768,7 +686,7 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 	}
 	resA := askARes.Result
 	askBRaw := tapCall(t, h.conn, tap, 12, "agent.ask", map[string]any{
-		"askId": "ask-b", "sessionId": sid, "question": "second?", "cwd": "/repo",
+		"askId": "ask-b", "sessionId": sidB, "question": "second?", "cwd": "/repo",
 		"attachedContent": []any{},
 	})
 	var askBRes struct {
@@ -778,6 +696,7 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 		t.Fatalf("second ask response: %v (%s)", err, askBRaw)
 	}
 	resB := askBRes.Result
+	agentA.release()
 	if resA.State != "prepared" || resB.State != "prepared" {
 		t.Fatalf("ask states = %q/%q, want prepared/prepared", resA.State, resB.State)
 	}
@@ -791,6 +710,8 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 	seqs := map[int64][]int{}
 	texts := map[int64]string{}
 	states := map[int64]string{}
+	order := []int64{resA.RunID, resB.RunID, resA.RunID, resB.RunID, resA.RunID, resB.RunID}
+	seen := 0
 	deadline := time.Now().Add(15 * time.Second)
 	for (len(seqs[resA.RunID]) < 3 || len(seqs[resB.RunID]) < 3 || states[resA.RunID] == "" || states[resB.RunID] == "") && time.Now().Before(deadline) {
 		select {
@@ -811,8 +732,19 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 				if json.Unmarshal(n.Params, &d) != nil {
 					continue
 				}
+				if seen >= len(order) || d.RunID != order[seen] {
+					t.Fatalf("delta %d belongs to run %d, want interleaved order %v", seen, d.RunID, order)
+				}
 				seqs[d.RunID] = append(seqs[d.RunID], d.Seq)
 				texts[d.RunID] += d.Text
+				seen++
+				if seen < len(order) {
+					if order[seen] == resA.RunID {
+						agentA.release()
+					} else {
+						agentB.release()
+					}
+				}
 			case "agent.runState":
 				var st struct {
 					RunID int64  `json:"runId"`

@@ -63,7 +63,7 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 }
 
 // NewCodec allocates wire state for one process incarnation.
-func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
+func (c *Connector) NewCodec(info harness.SessionInfo, _ harness.Launch) harness.Codec {
 	return &codec{info: info}
 }
 
@@ -84,7 +84,16 @@ func (c *codec) Setup() []harness.Step {
 
 func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 	return []harness.Step{
-		{Command: harness.Command{Name: "get_state"}, Barrier: true},
+		{Command: harness.Command{Name: "get_state"}, Barrier: true, Check: func(payload any) error {
+			if spec.Model == "" {
+				model, ok := payload.(string)
+				if !ok {
+					return fmt.Errorf("fakeconnector: missing admission model")
+				}
+				spec.Model = model
+			}
+			return nil
+		}, Model: func() string { return spec.Model }},
 		{Command: harness.Command{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}, Prompt: true},
 	}
 }

@@ -25,12 +25,10 @@ import {
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
-import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { UpdatesSection } from './updates-section'
 import { reconcileRailPages, type SettingsPage } from './settings-rail-pages'
 import type { SnippetsStore } from './snippets/snippets-store'
-import { RolesSection } from './roles-section'
 import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
 import { AgentAccessSection } from './agent-access-section'
@@ -47,7 +45,7 @@ import type { CalibrationClient } from './calibration-client'
 import type { TypingClient } from './typing-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
-import type { EndpointClient } from './endpoints'
+import type { RolesClient } from './roles-client'
 import type { ProfileClient, SSHProfile } from './profiles'
 import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
@@ -192,11 +190,6 @@ export interface SettingsComponentHandle {
    */
   newSecret(name?: string, value?: string): void
   /**
-   * Show the Endpoints page with the editor open on a blank endpoint — the
-   * ask surface's repair for "no endpoint configured".
-   */
-  newEndpoint(): void
-  /**
    * Show a component page by its registry id, with nothing else asked for —
    * the general form of the three above, for a surface that only wants the
    * page ("Manage snippets…", nocx-d346). An id no page carries shows the
@@ -215,16 +208,16 @@ export interface SettingsComponentProps {
   vaultController?: import('./vault').VaultController
   vaultClient?: import('./vault-client').VaultClient
   /** The one secret picker source (nocx-3o0ed.4) — the panel behind every
-   *  value field's lock, on this pane's Connections and Endpoints pages as
+   *  value field's lock, on this pane's Connections page as
    *  much as in the API workbench. */
   secretSource?: import('./ui/secret-picker').SecretPickerSource
   dialogClient?: DialogClient
   /** Remote footprint (nocx-mlm7 P10) for the Connections page. Absent in
    *  the dev-web harness; the section then renders nothing. */
   footprintClient?: FootprintClient
-  endpointsClient?: EndpointClient
+  rolesClient?: RolesClient
   /** The assistant's control-plane client (nocx-edio). Absent in the
-   *  dev-web harness; the endpoints section then shows no status line. */
+   *  dev-web harness; agent status is then unavailable. */
   agentClient?: AgentClient
   /** The snippet library (nocx-gjnr) — the SAME store the palette reads, so
    *  a snippet saved here is in the next fire without a notification on the
@@ -304,7 +297,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
-  const [newEndpointRequest, setNewEndpointRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
   const [newSecretValue, setNewSecretValue] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
@@ -634,38 +626,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    const endpointsPage: SettingsPage = {
-      kind: 'component',
-      id: 'endpoints',
-      title: t('settings.fallback.endpoints.title', 'Endpoints'),
-      groupId: 'assistant',
-      scrollMode: 'contained',
-      // Registered unconditionally for the same reason vaultPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable. The guard is the client being absent.
-      renderContent: () => (
-        <Show
-          when={props.endpointsClient}
-          fallback={
-            <PageSection title={t('settings.fallback.endpoints.title', 'Endpoints')}>
-              {t(
-                'settings.fallback.endpoints.body',
-                'AI endpoints are not available in this window.',
-              )}
-            </PageSection>
-          }
-        >
-          <EndpointsSection
-            client={props.endpointsClient!}
-            agentClient={props.agentClient}
-            vaultController={props.vaultController}
-            vaultClient={props.vaultClient}
-            secretSource={props.secretSource}
-            addEndpointRequest={newEndpointRequest()}
-          />
-        </Show>
-      ),
-    }
     const snippetsPage: SettingsPage = {
       kind: 'component',
       id: 'snippets',
@@ -689,29 +649,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    const rolesPage: SettingsPage = {
-      kind: 'component',
-      id: 'roles',
-      title: t('settings.fallback.roles.title', 'Roles'),
-      groupId: 'assistant',
-      scrollMode: 'page',
-      // Registered unconditionally for the same reason endpointsPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable. The guard is the client being absent.
-      renderContent: () => (
-        <Show
-          when={props.endpointsClient}
-          fallback={
-            <PageSection title={t('settings.fallback.roles.title', 'Roles')}>
-              {t('settings.fallback.roles.body', 'Model roles are not available in this window.')}
-            </PageSection>
-          }
-        >
-          <RolesSection client={props.endpointsClient} />
-        </Show>
-      ),
-    }
-
     const policyPage: SettingsPage = {
       kind: 'component',
       id: 'policy',
@@ -819,7 +756,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </PageSection>
           }
         >
-          <AgentInstalledSection client={props.agentRecordsClient!} />
+          <AgentInstalledSection
+            client={props.agentRecordsClient!}
+            rolesClient={props.rolesClient}
+          />
         </Show>
       ),
     }
@@ -968,9 +908,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       backupPage,
       vaultPage,
       secretsPage,
-      endpointsPage,
       snippetsPage,
-      rolesPage,
       policyPage,
       // Beside the permissions page because both are about what may act, and
       // after it because the assistant is ours and these are the programs a
@@ -1338,14 +1276,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // person's secret must not appear in this person's form.
       setNewSecretValue(value ?? '')
       setNewSecretRequest((n) => n + 1)
-    },
-    newEndpoint(): void {
-      // Same reason as newConnection: an active search hides the page the
-      // request is addressed to.
-      setSearchQuery('')
-      setSectionFilter(null)
-      setActiveComponentPage('endpoints')
-      setNewEndpointRequest((n) => n + 1)
     },
     openPage(id: string): void {
       // Same reason as newConnection: an active search or section filter

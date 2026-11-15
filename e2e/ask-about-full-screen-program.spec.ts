@@ -32,15 +32,16 @@ import {
   standalone as base,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
-  createAiEndpoint,
   promptReady,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 
@@ -49,8 +50,6 @@ const INPUT = '.pane.active .nocx-editor-input'
 const GRID = '.pane.active .terminal-live-container'
 const FREEZE = '.pane.active .nocx-freeze-frame'
 const RUNNING_BLOCK = '.pane.active .cmd-block.cmd-block-running'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 const test = base
@@ -60,7 +59,6 @@ const DURING = `NOCX-DURING-FREEZE-${nonce}`
 const READY = `fullscreen-ready-${nonce}`
 const ARMED = `fullscreen-armed-${nonce}`
 const DURING_READY = `during-freeze-ready-${nonce}`
-const ENDPOINT_NAME = `E2E Full Screen Ask ${nonce}`
 const KEY_READY = `fullscreen-key-ready-${nonce}`
 const KEY_QUESTION = 'Can I still control this full-screen program?'
 
@@ -116,7 +114,7 @@ test.beforeAll(async () => {
   const root = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-fullscreen-'))
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 
   scriptPath = join(fixtureDir, 'fullscreen-job.sh')
   probePath = join(fixtureDir, 'probe')
@@ -352,6 +350,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -451,33 +451,14 @@ async function summonStackGeometry(page: Page): Promise<{
   })
 }
 
-async function configureAssistant(page: Page, endpointName: string): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-  await page.locator(SETTINGS_POLICY_NAV).click()
+async function configureAssistant(page: Page): Promise<void> {
+  await openSettings(page, SETTINGS_POLICY_NAV)
+  // Allow screen reads through the same policy page a person uses.
   await answerPermission(page, 'observe', 'Allowed')
 }
 
 function answerFromPinnedFrame(body: string): string[] {
-  let seen = ''
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
-    seen = (parsed.messages ?? [])
-      .filter((message) => message.role !== 'system' && message.role !== 'user')
-      .map((message) => message.content ?? '')
-      .join('\n')
-  } catch {
-    seen = ''
-  }
+  const seen = toolResults(body).join('\n')
   if (!seen.includes(INITIAL) || seen.includes(DURING)) {
     return ['The pinned screen was not the expected frame.']
   }
@@ -494,7 +475,7 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     test.setTimeout(120_000)
     await recordFrames(page)
     await openApp(page)
-    await configureAssistant(page, `${ENDPOINT_NAME} — stack`)
+    await configureAssistant(page)
     await backToTerminal(page)
     await promptReady(page)
     // Obtain the real session id from the product's own ask payload. The
@@ -819,7 +800,7 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     test.setTimeout(120_000)
     await recordFrames(page)
     await openApp(page)
-    await configureAssistant(page, `${ENDPOINT_NAME} — recovery`)
+    await configureAssistant(page)
     await backToTerminal(page)
     await promptReady(page)
 

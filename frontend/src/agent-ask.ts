@@ -11,7 +11,6 @@ import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunReasoning } from './generated/agent.runReasoning'
 import type { AgentRunToolCall } from './generated/agent.runToolCall'
 import type { AgentRunState } from './generated/agent.runState'
-import type { AgentStatusResult } from './generated/agent.status'
 import type { InputTarget } from './input-target'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
@@ -33,13 +32,12 @@ export interface AgentAskSeams {
    *  overlay can change presentation without hiding itself on refusal. */
   onTurnAccepted?: (askId: string) => void
   onTurnEnd?: (askId: string) => void
-  onNoEndpoint?: () => void
+  ensureReady?: () => Promise<boolean>
   /** Open the page where standing answers are managed — the receipt's second
    *  action. Injected because a pane cannot know where Settings lives; absent
    *  in a bare-bones embedding, and then the receipt simply does not offer
    *  what nothing can do. */
   openPermissions?: () => void
-  status?: () => Promise<AgentStatusResult>
   editorExtensions?: () => Extension[]
 }
 
@@ -71,11 +69,9 @@ export class AgentInputTarget implements InputTarget {
 
   constructor(private readonly seams: AgentAskSeams) {}
 
-  private async offerEndpointRepair(): Promise<void> {
-    if (!this.seams.status || !this.seams.onNoEndpoint) return
+  private async offerAgentRepair(): Promise<void> {
     try {
-      const st = await this.seams.status()
-      if (!st.endpointConfigured) this.seams.onNoEndpoint()
+      await this.seams.ensureReady?.()
     } catch {
       // The refusal is already visible; only the repair offer is lost.
     }
@@ -86,6 +82,9 @@ export class AgentInputTarget implements InputTarget {
   }
 
   async submit(doc: string): Promise<void> {
+    if (this.seams.ensureReady && !(await this.seams.ensureReady())) {
+      throw new Error('The answering agent is not ready')
+    }
     this.ensureSubscribed()
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
@@ -136,7 +135,7 @@ export class AgentInputTarget implements InputTarget {
         handle.el.remove()
         const message = err instanceof Error ? err.message : String(err)
         this.seams.onRefusal(message)
-        void this.offerEndpointRepair()
+        void this.offerAgentRepair()
         throw err
       })
     this.seams.onTurnAccepted?.(askId)

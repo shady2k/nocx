@@ -56,8 +56,7 @@ type VaultPurger interface {
 
 // SecretReferenceStore is the config store seen from here: the two bulk
 // operations over secret references and nothing else. The store holds
-// profiles, groups and AI endpoints (ADR-0030); the endpoint references
-// count and clear alongside the profile ones (ADR-0031).
+// profiles and groups.
 type SecretReferenceStore interface {
 	CountSecretReferences() (profile.SecretReferenceImpact, error)
 	ClearAllSecretReferences() (profile.SecretReferenceImpact, error)
@@ -65,20 +64,16 @@ type SecretReferenceStore interface {
 
 // Impact is what a reset costs, in the quantities that answer different
 // questions: what is destroyed, and what behaves differently afterwards.
-// The counts are per record kind on purpose (ADR-0031) — "9 connections"
-// and "2 endpoints" are different sentences because they are different
-// questions.
+// The counts distinguish secrets from affected connections.
 type Impact struct {
-	SecretCount   int
-	ProfileCount  int
-	EndpointCount int
+	SecretCount  int
+	ProfileCount int
 }
 
 func impactFrom(i profile.SecretReferenceImpact) Impact {
 	return Impact{
-		SecretCount:   i.SecretCount,
-		ProfileCount:  i.ProfileCount,
-		EndpointCount: i.EndpointCount,
+		SecretCount:  i.SecretCount,
+		ProfileCount: i.ProfileCount,
 	}
 }
 

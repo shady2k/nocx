@@ -112,7 +112,7 @@ func TestNarrowFilesRead_ProductionFenceReadsARealFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("real\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	capability, err := narrowFilesRead(runFenceGrant(runFencePolicy()), pathRef(path), RunContext{})
+	capability, err := narrowFilesRead(runFenceGrant(runFencePolicy()), pathRef(path), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestNarrowFilesRead_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 	f := newEscapeFixture(t)
 	grant := runFenceGrant(runFencePolicy(f.root))
 
-	capability, err := narrowFilesRead(grant, pathRef(f.link), RunContext{})
+	capability, err := narrowFilesRead(grant, pathRef(f.link), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestNarrowFilesRead_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 // scope, a real file inside it, and the read works.
 func TestNarrowFilesRead_RowScopedFenceReadsAFileInsideTheRow(t *testing.T) {
 	f := newEscapeFixture(t)
-	capability, err := narrowFilesRead(runFenceGrant(runFencePolicy(f.root)), pathRef(f.real), RunContext{})
+	capability, err := narrowFilesRead(runFenceGrant(runFencePolicy(f.root)), pathRef(f.real), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestNarrowFilesEdit_ProductionFenceEditsARealFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy()), pathRef(path), RunContext{})
+	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy()), pathRef(path), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestNarrowFilesEdit_ProductionFenceEditsARealFile(t *testing.T) {
 
 func TestNarrowFilesEdit_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 	f := newEscapeFixture(t)
-	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy(f.root)), pathRef(f.link), RunContext{})
+	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy(f.root)), pathRef(f.link), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestNarrowFilesEdit_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 
 func TestNarrowFilesEdit_RowScopedFenceEditsAFileInsideTheRow(t *testing.T) {
 	f := newEscapeFixture(t)
-	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy(f.root)), pathRef(f.real), RunContext{})
+	capability, err := narrowFilesEdit(runFenceGrant(runFencePolicy(f.root)), pathRef(f.real), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestNarrowFilesEdit_RowScopedFenceEditsAFileInsideTheRow(t *testing.T) {
 
 func TestNarrowFilesCreate_ProductionFenceCreatesAFile(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "new.txt")
-	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy()), pathRef(target), RunContext{})
+	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy()), pathRef(target), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestNarrowFilesCreate_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 	}
 	target := filepath.Join(dirLink, "new.txt")
 
-	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy(root)), pathRef(target), RunContext{})
+	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy(root)), pathRef(target), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestNarrowFilesCreate_RowScopedFenceRefusesASymlinkEscape(t *testing.T) {
 func TestNarrowFilesCreate_RowScopedFenceCreatesInsideTheRow(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "new.txt")
-	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy(root)), pathRef(target), RunContext{})
+	capability, err := narrowFilesCreate(runFenceGrant(runFencePolicy(root)), pathRef(target), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestNarrowedCapabilityRootsAreCanonicalized(t *testing.T) {
 	}
 	grant := runFenceGrant(runFencePolicy(aliasRoot))
 
-	readCap, err := narrowFilesRead(grant, pathRef(inside), RunContext{})
+	readCap, err := narrowFilesRead(grant, pathRef(inside), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestNarrowedCapabilityRootsAreCanonicalized(t *testing.T) {
 		t.Fatalf("read through the canonical spelling of a symlinked row scope: %v", readErr)
 	}
 
-	outsideCap, err := narrowFilesRead(grant, pathRef(outside), RunContext{})
+	outsideCap, err := narrowFilesRead(grant, pathRef(outside), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead outside: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestNarrowedCapabilityRootsAreCanonicalized(t *testing.T) {
 		t.Fatalf("read outside the row scope error = %v, want ErrOutOfScope", readErr)
 	}
 
-	editCap, err := narrowFilesEdit(grant, pathRef(inside), RunContext{})
+	editCap, err := narrowFilesEdit(grant, pathRef(inside), localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}

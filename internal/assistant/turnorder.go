@@ -31,7 +31,8 @@ type TurnOrder struct {
 	// release for it.
 	slot chan struct{}
 
-	mu sync.Mutex
+	mu   sync.Mutex
+	tail <-chan struct{}
 	// declined is the first decline of this turn, and the sentence every
 	// call behind it is refused with. The first one stands: the later calls
 	// are refused because of it, and their own refusals must not overwrite
@@ -49,25 +50,64 @@ func newTurnOrder() *TurnOrder {
 // ends while waiting ends the wait: a queued call does not outlive the turn it
 // was queued in.
 func (o *TurnOrder) enter(ctx context.Context) (func(), *Declined, error) {
-	// An already-ended context whose turn is free takes the slot: the
-	// pipeline leaves such a call to its caller (the kernel's run lease ends
-	// the run context as an OUTCOME to record), and refusing it here would
-	// stop that record from being written. A context that ends while the
-	// call is QUEUED does stop the wait.
-	select {
-	case o.slot <- struct{}{}:
-	default:
+	reservation, finish := o.reserve()
+	release, declined, err := reservation.enter(ctx)
+	if err != nil {
+		finish()
+		return nil, nil, err
+	}
+	return func() { release(); finish() }, declined, nil
+}
+
+// turnReservation fixes arrival order without blocking the endpoint read loop.
+type turnReservation struct {
+	order    *TurnOrder
+	previous <-chan struct{}
+}
+
+func (o *TurnOrder) reserve() (*turnReservation, func()) {
+	o.mu.Lock()
+	previous := o.tail
+	done := make(chan struct{})
+	o.tail = done
+	o.mu.Unlock()
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			// A cancelled queued call cannot release the call behind it past
+			// the still-running predecessor.
+			select {
+			case <-previous:
+				close(done)
+			default:
+				if previous == nil {
+					close(done)
+				} else {
+					go func() { <-previous; close(done) }()
+				}
+			}
+		})
+	}
+	return &turnReservation{order: o, previous: previous}, finish
+}
+
+func (r *turnReservation) enter(ctx context.Context) (func(), *Declined, error) {
+	if r.previous != nil {
 		select {
-		case o.slot <- struct{}{}:
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+		case <-r.previous:
+		default:
+			select {
+			case <-r.previous:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
 		}
 	}
-	release := func() { <-o.slot }
-	o.mu.Lock()
-	declined := o.declined
-	o.mu.Unlock()
-	return release, declined, nil
+	r.order.slot <- struct{}{}
+	r.order.mu.Lock()
+	declined := r.order.declined
+	r.order.mu.Unlock()
+	return func() { <-r.order.slot }, declined, nil
 }
 
 // declinedBy records a person's no as this turn's answer for the calls behind

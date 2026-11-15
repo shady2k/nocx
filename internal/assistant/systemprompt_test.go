@@ -5,7 +5,6 @@ package assistant
 // terminal items, and the precedence of personal instructions.
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -74,14 +73,6 @@ func TestSystemPrompt_ExplainsBareInputAndNeverGuesses(t *testing.T) {
 	}
 }
 
-func quoted(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
-// TestSystemPrompt_IsAFunctionOfItsFacts is the table: what each shape of
-// pane produces, and what it must never produce. No I/O, nothing read from
-// the host — the caller owns every fact, including the OS.
 func TestSystemPrompt_IsAFunctionOfItsFacts(t *testing.T) {
 	host := "build.example.com"
 	remote := content.Environment{Kind: content.EnvSSH, Endpoint: &host}
@@ -99,7 +90,7 @@ func TestSystemPrompt_IsAFunctionOfItsFacts(t *testing.T) {
 				Env: content.Environment{Kind: content.EnvLocal}, OS: "darwin",
 			},
 			want:   []string{"/repo", "darwin", "local"},
-			unwant: []string{"ssh", "attached"},
+			unwant: []string{"ssh", "Attached terminal content"},
 		},
 		{
 			name: "an ssh pane names the host and states no OS for it",
@@ -252,7 +243,7 @@ func TestSystemPrompt_AttachedContentSentenceIsConditional(t *testing.T) {
 	base.AttachedContent = []AttachedContentItem{{ItemID: "item-1", Command: "git status", State: "exited"}}
 	with := SystemPrompt(base)
 
-	if strings.Contains(without, "attached") {
+	if strings.Contains(without, "Attached terminal content") {
 		t.Errorf("a zero-reference ask claims attached content:\n%s", without)
 	}
 	if !strings.Contains(with, "Attached terminal content") {
@@ -370,54 +361,6 @@ func isPromptHeading(line string) bool {
 		return false
 	}
 	return !strings.HasSuffix(l, ".") && !strings.HasSuffix(l, ":") && !strings.Contains(l, ": ")
-}
-
-// TestSystemPrompt_DoesNotForbidReadingWhatItAttached is the prompt read as
-// one document rather than as sections (nocx-hp8p2.4).
-//
-// The owner asked "Привет! Что это?" over a running `top` whose screen the
-// product had attached, and the model answered "I don't have enough context"
-// without ever calling session.read. Its reasoning named the attachment, so
-// it had read the section — and then obeyed the later line: "When the intent
-// is not plain, ask one question and stop. Do not guess, and do not call a
-// tool to check first; notes.create is the requested write for questionless
-// text, not a check." An unclear question is exactly when that line fires,
-// and the attachment is exactly what it forbade reading.
-//
-// The rule is about going OUTSIDE for something nobody offered. What was
-// attached to this very question is not a check; it is the reason the
-// question was asked here at all. So when there is attached content, the
-// prompt must say so rather than leave the model to resolve a contradiction.
-func TestSystemPrompt_DoesNotForbidReadingWhatItAttached(t *testing.T) {
-	attached := SystemPrompt(SystemPromptFacts{
-		Cwd: "/repo",
-		Env: content.Environment{Kind: content.EnvLocal},
-		OS:  "linux",
-		AttachedContent: []AttachedContentItem{{
-			ItemID:    "attempt-top",
-			Command:   "top",
-			State:     "running",
-			Automatic: true,
-		}},
-	})
-	if strings.Contains(attached, "do not call a tool to check first.") {
-		t.Errorf("the prompt attaches a screen and then forbids reading it:\n%s", attached)
-	}
-	if !strings.Contains(attached, "what is attached above is already yours") {
-		t.Errorf("the prompt does not exempt its own attachment from the rule:\n%s", attached)
-	}
-
-	// With nothing attached the rule keeps its whole force: there is nothing
-	// to exempt, and "go and look before answering" would be the guessing
-	// this rule exists to prevent.
-	bare := SystemPrompt(SystemPromptFacts{
-		Cwd: "/repo",
-		Env: content.Environment{Kind: content.EnvLocal},
-		OS:  "linux",
-	})
-	if !strings.Contains(bare, "do not call a tool to check first") {
-		t.Errorf("the rule lost its force where nothing was attached:\n%s", bare)
-	}
 }
 
 // TestSystemPrompt_AutomaticFrameIsWhatTheQuestionIsAbout states the one fact
@@ -564,4 +507,32 @@ func sectionOf(t *testing.T, prompt, heading string) string {
 		return rest[:end]
 	}
 	return rest
+}
+
+func TestStandingSystemPrompt_AllowsAttachmentsNamedInTurnMessage(t *testing.T) {
+	standing := StandingSystemPrompt("")
+	intake := sectionOf(t, standing, "What a person's input means")
+	for _, want := range []string{"turn's message", "attached", "read it before you answer", "notes.create"} {
+		if !strings.Contains(intake, want) {
+			t.Errorf("standing intake rule lacks %q:\n%s", want, intake)
+		}
+	}
+	for _, automatic := range []bool{false, true} {
+		facts := SystemPromptFacts{AttachedContent: []AttachedContentItem{{
+			ItemID: "turn-only-item", Command: "top", State: "running", Automatic: automatic,
+		}}}
+		message := TurnContext(facts)
+		if !strings.Contains(message, "Attached terminal content") || !strings.Contains(message, "turn-only-item") {
+			t.Fatalf("turn message lacks attachment facts:\n%s", message)
+		}
+		if got := sectionOf(t, SystemPrompt(facts), "What a person's input means"); got != intake {
+			t.Errorf("attachment facts changed standing instructions:\n%s", got)
+		}
+	}
+	if strings.Contains(standing, "turn-only-item") || strings.Contains(standing, "Attached terminal content") {
+		t.Fatalf("standing prompt contains per-turn attachment facts:\n%s", standing)
+	}
+	if strings.Contains(TurnContext(SystemPromptFacts{}), "Attached terminal content") {
+		t.Fatal("turn without attachments claims attached content")
+	}
 }

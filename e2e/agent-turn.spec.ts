@@ -58,26 +58,22 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   standalone as base,
+  ensureAssistantVault,
   answerPermission,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
-  openControlPlane,
   promptReady,
-  readVaultState,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 const SETTINGS_AGENTS_NAV = '.ui-grouped-nav__item[data-item="agents"]'
 /* `run` is mutate-destructive and session.read observe (registry.go). */
@@ -86,7 +82,6 @@ const APPROVAL_TITLE = 'This action needs your approval'
 const test = base
 const nonce = Date.now().toString(36)
 
-const ENDPOINT_NAME = `E2E Turn ${nonce}`
 /** The command the run call executes — its own block's header. */
 const RUN_CMD = `echo ran-${nonce}`
 /** What the command prints — the marker the block's real output must show. */
@@ -118,10 +113,8 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-dc2fr-e2e-'))
-  // `true` = no Secret Service: the container has no keychain to ask, and
-  // the derived content key makes the vault available without user setup.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -249,18 +242,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
-}
-
-async function unsealVaultIfSealed(page: Page): Promise<void> {
-  if ((await readVaultState(endpoint)) !== 'sealed') return
-
-  const wire = await openControlPlane(endpoint.port, endpoint.token)
-  try {
-    await wire.call('vault.unseal', { means: 'passphrase', secret: `vault-pass-${nonce}` })
-  } finally {
-    wire.close()
-  }
-  await expect(page.getByRole('dialog', { name: 'Unlock the vault' })).toHaveCount(0)
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -321,21 +304,9 @@ async function childTops(page: Page, question: string): Promise<number[]> {
   return tops
 }
 
-/** The assistant is usable end to end: endpoint, default model, and both
- *  rows Allowed so the proposed run and session.read execute rather than ask. */
-async function configureAssistant(page: Page, endpointName = ENDPOINT_NAME): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-  await page.locator(SETTINGS_POLICY_NAV).click()
+/** Allow the proposed run and screen read through the policy surface. */
+async function configureAssistant(page: Page): Promise<void> {
+  await openSettings(page, SETTINGS_POLICY_NAV)
   for (const effect of ['observe', 'mutate-destructive'] as const) {
     await answerPermission(page, effect, 'Allowed')
   }
@@ -471,6 +442,8 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await bindEndpoint(page, endpoint)
     await page.reload()
     await appReadyForInput(page)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+    await backToTerminal(page)
     await expect(page.locator('.pane.active .cmd-block[data-restored="true"]').first()).toBeVisible(
       { timeout: 90_000 },
     )
@@ -527,7 +500,6 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     chmodSync(command, 0o700)
 
     await openApp(page)
-    await unsealVaultIfSealed(page)
     await openSettings(page, SETTINGS_AGENTS_NAV)
     await page.getByLabel('Agent ID').fill(runID)
     await page.getByLabel('Display name').last().fill(`Configured ${runID}`)

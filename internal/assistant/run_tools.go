@@ -1,0 +1,226 @@
+package assistant
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sync"
+
+	"github.com/google/uuid"
+	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
+)
+
+// TurnTools is the bound authority of one assistant turn, independent of its carrier.
+// Admit must return promptly when its context ends; turn settlement waits for it.
+type TurnTools interface {
+	RunContext() agenttools.RunContext
+	Admit(ctx context.Context) (ToolInvocation, error)
+}
+
+// RunTools exposes the existing assistant kernel to the tool endpoint.
+// Its state, ordering, approvals and screens belong to one run.
+type RunTools struct {
+	kernel          *effectKernel
+	turnContext     context.Context
+	fatal           chan error
+	identityMu      sync.Mutex
+	agentCallIDs    bool
+	startedIDs      []string
+	identityWaiters []chan string
+}
+
+// BindRunTools binds the same run inputs the in-process assistant uses.
+// FreshGrant is required: authority is minted at admission, not at binding.
+func BindRunTools(ctx context.Context, c Client, p AskParams, onCall func(ToolCall) error) (*RunTools, error) {
+	owner, ok := c.(*client)
+	if !ok {
+		return nil, errors.New("assistant tools: client cannot bind run tools")
+	}
+	if p.FreshGrant == nil {
+		return nil, errors.New("assistant tools: admission requires a grant mint")
+	}
+	k, err := owner.bindRunKernel(nil, p, onCall)
+	if err != nil {
+		return nil, err
+	}
+	return &RunTools{kernel: k, turnContext: ctx, fatal: make(chan error, 1)}, nil
+}
+
+// UseAgentCallIDs makes this turn use identities from the ordered agent stream.
+// Call it before admitting requests.
+func (r *RunTools) UseAgentCallIDs() {
+	r.identityMu.Lock()
+	r.agentCallIDs = true
+	r.identityMu.Unlock()
+}
+
+// StartToolCall binds the next endpoint invocation to an agent's tool-start event.
+// It never waits for endpoint admission or execution.
+func (r *RunTools) StartToolCall(id string) {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	if len(r.identityWaiters) != 0 {
+		waiter := r.identityWaiters[0]
+		r.identityWaiters = r.identityWaiters[1:]
+		waiter <- id
+		return
+	}
+	r.startedIDs = append(r.startedIDs, id)
+}
+
+func (r *RunTools) reserveCallIdentity() <-chan string {
+	r.identityMu.Lock()
+	defer r.identityMu.Unlock()
+	if !r.agentCallIDs {
+		return nil
+	}
+	waiter := make(chan string, 1)
+	if len(r.startedIDs) != 0 {
+		waiter <- r.startedIDs[0]
+		r.startedIDs = r.startedIDs[1:]
+	} else {
+		r.identityWaiters = append(r.identityWaiters, waiter)
+	}
+	return waiter
+}
+
+// ReserveInvocation fixes this call's position while the endpoint still reads
+// requests in arrival order. Waiting remains in dispatch so cancels can be read.
+func (r *RunTools) ReserveInvocation(invocation ToolInvocation) (ToolInvocation, func()) {
+	reservation, release := r.kernel.order.reserve()
+	invocation.orderReservation = reservation
+	// Discovery requests have no agent tool-start event. The endpoint sets Method
+	// before reserving so they cannot consume a call identity.
+	if invocation.Method != "tools.instructions" && invocation.Method != "tools.catalogue" {
+		invocation.agentCallID = r.reserveCallIdentity()
+	}
+	return invocation, release
+}
+
+// RunContext returns the complete context bound once for the run.
+func (r *RunTools) RunContext() agenttools.RunContext { return r.kernel.runCtx }
+
+// Admit mints authority from the run's existing refresh owner, including its floor.
+func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolInvocation{}, err
+	}
+	grant, ok := r.kernel.mintGrantAfterAnswer()
+	if err := ctx.Err(); err != nil {
+		return ToolInvocation{}, err
+	}
+	if !ok {
+		return ToolInvocation{}, errors.New("assistant tools: admission grant unavailable")
+	}
+	return ToolInvocation{Context: context.WithValue(ctx, turnEndingContextKey{}, r.turnContext), RunContext: r.RunContext(), Grant: grant, Dispatcher: r}, nil
+}
+
+// Dispatch uses the kernel's own per-turn order and complete authority chain.
+func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
+	invocation.RunContext = r.RunContext()
+	callID := uuid.NewString()
+	if invocation.agentCallID == nil {
+		invocation.agentCallID = r.reserveCallIdentity()
+	}
+	if invocation.agentCallID != nil {
+		select {
+		case callID = <-invocation.agentCallID:
+		case <-invocation.Context.Done():
+			return "", invocation.Context.Err()
+		}
+	}
+	out, err := r.kernel.invokeInvocation(invocation, callID)
+	var declined *ScreenDeclinedError
+	var screening *EgressScreeningError
+	if errors.As(err, &declined) || errors.As(err, &screening) {
+		select {
+		case r.fatal <- err:
+		default:
+		}
+	}
+	if err == nil && out.kind == modelNocxMessage {
+		return "", &DispatchRefusalError{Method: invocation.Method, Reason: out.text}
+	}
+	if err == nil && !json.Valid([]byte(out.text)) {
+		// Raw tool results already passed their contract in the kernel.
+		// Product-authored outcomes such as a delivered lease bound are
+		// plain text; the endpoint carries them as a JSON string.
+		encoded, marshalErr := json.Marshal(out.text)
+		return string(encoded), marshalErr
+	}
+	return out.text, err
+}
+
+// Fatal reports a screen outcome that the agent cannot overrule. The turn driver
+// must cancel and join the turn before returning this error.
+func (r *RunTools) Fatal() <-chan error { return r.fatal }
+
+// Catalogue keeps the assistant's MCP prefix fixed across changes in authority.
+// The pipeline still decides each call against its fresh grant.
+func (r *RunTools) Catalogue(_ content.Grant) []agenttools.Tool {
+	var tools []agenttools.Tool
+	for _, tool := range r.kernel.registry.All() {
+		if tool.Narrow != nil {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
+}
+
+// Instructions is fixed for assistant turns; pane dispatchers keep their
+// grant-derived endpoint instructions.
+func (r *RunTools) Instructions() string {
+	return "This assistant runs inside nocx. Use nocx's tools for actions on the pane and its host. " +
+		"The tool list is fixed; each call is checked against the current authority and may be refused with a reason."
+}
+
+func (c *client) bindRunKernel(logger log.Logger, p AskParams, onCall func(ToolCall) error) (*effectKernel, error) {
+	if p.Grant == nil {
+		return nil, errors.New("assistant tools: run requires authority")
+	}
+	grant := *p.Grant
+	grant.Policy = grant.Policy.WithFloor(c.floor)
+	// The approval store is the client's own (process-lifetime, one
+	// per client, keyed by the exact proposal); a caller may pass one
+	// explicitly.
+	approvals := p.Approvals
+	if approvals == nil {
+		approvals = c.approvals
+	}
+	// The fresh grant of ADR-anntnxdj §3: the caller's mint, wearing the
+	// floor every grant this engine hands a run wears. The floor is the
+	// ENGINE's (it is the build's), and a mint that came back without it
+	// would be a second, weaker authority for the calls after an answer.
+	var freshGrant func() *content.Grant
+	if p.FreshGrant != nil {
+		freshGrant = func() *content.Grant {
+			minted := p.FreshGrant()
+			if minted == nil {
+				return nil
+			}
+			fresh := *minted
+			fresh.Policy = fresh.Policy.WithFloor(c.floor)
+			return &fresh
+		}
+	}
+	return newEffectKernel(logger, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, onCall, toolSeams{
+		sessions:          p.SessionSource,
+		screenCapture:     p.ScreenCapture,
+		noteOperation:     p.NoteOperation,
+		snippetOperation:  p.SnippetOperation,
+		fetcher:           p.Fetcher,
+		snapshots:         c.snapshots,
+		runID:             p.RunID,
+		expansions:        p.Expansions,
+		workerStore:       p.Workers,
+		workerEnvironment: p.WorkerEnvironment,
+		scripts:           p.Scripts,
+		cwd:               p.Cwd,
+		paneAccessBinder:  p.PaneAccessBinder,
+		paneEnvironment:   p.Environment,
+		questioner:        p.Questioner,
+		freshGrant:        freshGrant,
+	})
+}

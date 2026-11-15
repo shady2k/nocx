@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -19,17 +20,6 @@ import (
 // through it is the answer to "which reference does this row name".
 type RowResolver interface {
 	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
-}
-
-// EndpointSecrets is the vault surface the endpoint write paths need
-// (ADR-0030): mint a secret from its value, rotate the material behind the
-// endpoint's own secret (same id, same name — ADR-0017 §2's rotate), and
-// destroy the material behind one. Satisfied by *vault.Vault. Narrow on
-// purpose — endpoint CRUD touches nothing else in the vault.
-type EndpointSecrets interface {
-	CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
-	ReplaceSecret(ctx context.Context, row string, value credential.Secret, inputs []vault.CredentialInventory) error
-	Delete(ctx context.Context, id credential.SecretID) error
 }
 
 // ConfigService is the config domain surface: profiles, groups, settings
@@ -79,79 +69,20 @@ type ConfigService interface {
 	// deletion (ADR-0011 §4).
 	ClearSecretRefs(ref string) error
 
-	// Endpoints (ADR-0030, nocx-rzjw). The write methods take the endpoint
-	// record in WIRE form — CredentialRef and header ValueRefs are renderer
-	// row handles (secrow:...) the service resolves to stored references
-	// before anything is written, exactly like profile options — plus the
-	// API key as an input: a credential.Secret that is minted (create),
-	// rotated (update with a new key) or left alone (update without one).
-	// A key and a key row are mutually exclusive. The key never survives
-	// the call, never crosses back, and never appears in a result. The ctx
-	// bounds the vault calls (mint, rotate, material delete), exactly as
-	// TabbyImportService.CreateSecret's does.
-	ListEndpoints() ([]profile.Endpoint, error)
-	// GetEndpoint returns the stored endpoint with the given id — the
-	// single-record lookup the Test button's credential resolution needs
-	// (nocx-reu5): the probe names the endpoint and the backend resolves
-	// the credential it owns, exactly as connections.test resolves a
-	// profile by its id. profile.ErrEndpointNotFound when none exists.
-	GetEndpoint(id string) (profile.Endpoint, error)
-	// ResolveSecretRow maps a renderer row handle to its stored reference —
-	// the endpoints.probe draft headers are wire form (row handles) and
-	// must resolve before the probe dials, so the probe handler can resolve
-	// them without ever holding the vault.
-	ResolveSecretRow(row string) (string, error)
-	// CreateEndpoint stores the endpoint, minting key into the vault first
-	// when it is non-empty: the material must exist before the record
-	// references it (ADR-0011 §4's order, ADR-0030). A row handle in
-	// e.CredentialRef references an existing secret instead of minting.
-	CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error)
-	// UpdateEndpoint replaces the record. A nil or empty key keeps the
-	// existing credential — "absent or empty" means "keep the existing
-	// material", never "erase it" (design §4.5.4); a non-empty one rotates
-	// the material behind the endpoint's OWN secret (same id, same name)
-	// or mints when the endpoint had none; a row handle in e.CredentialRef
-	// references an existing secret instead.
-	UpdateEndpoint(ctx context.Context, e profile.Endpoint, key *credential.Secret) (profile.Endpoint, error)
-	// DeleteEndpoint removes the record (clearing its reference from every
-	// remaining record in the same write) and then deletes the material,
-	// metadata-first.
-	DeleteEndpoint(ctx context.Context, id string) error
-
 	// AtomicImport merges profiles and groups into the store atomically.
 	AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult
 
 	// Settings is the settings surface of the config domain.
 	Settings() SettingsService
 
-	// Model roles (bead nocx-e6kn2): the layer above endpoints — a named
-	// role resolves to one (endpoint, model) pair, and a feature asks for
-	// a role, never for a model id. The roles surface and the ask
-	// transaction both go through the service, so ResolveRole is the ONE
-	// resolution path in the product.
+	// Model roles resolve an agent's role choice against its model catalogue.
+	// The roles surface and the ask transaction use the same resolver.
 	// ListRoleAssignments returns the stored assignments; the wire's
 	// roles.list completes them to the closed role set, so an unassigned
 	// role is a visible null row, never an absent one.
 	ListRoleAssignments() ([]profile.RoleAssignment, error)
-	// AssignRole upserts ONE role's (endpoint, model) pair.
 	AssignRole(a profile.RoleAssignment) error
-	// ResolveRole maps a role to its assigned endpoint and model, or
-	// refuses (profile.ErrRoleUnassigned / ErrRoleEndpointGone /
-	// ErrRoleModelGone) — resolution is the truth-teller: a deleted
-	// endpoint or removed model stays a refusal, never a neighbour hop.
-	ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error)
-	// DefaultModel returns the one pair every role WITHOUT an assignment
-	// of its own resolves through (bead nocx-rikz5), or the zero value
-	// when the person has chosen none. Unset is a value, not an error.
-	DefaultModel() (profile.DefaultModel, error)
-	// SetDefaultModel replaces the default; the empty pair clears it. A
-	// pair naming an endpoint that does not exist, or a model that
-	// endpoint does not offer, is REFUSED and nothing is stored: a
-	// dangling default breaks every unassigned role at once, and nothing
-	// on screen names which choice did it. The refusal comes from the
-	// store, which checks and writes under one lock — see
-	// profile.RoleRepository.SetDefaultModel.
-	SetDefaultModel(d profile.DefaultModel) error
+	ResolveRole(role profile.ModelRole, agentID string, models []harness.Model) (string, error)
 }
 
 // ConfigOperation is the typed operation for the config domain. Its admission
@@ -176,15 +107,13 @@ func NewConfigOperation(
 	stores control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
-	endpoints profile.EndpointRepository,
 	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
-	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](Direct("ConfigOperation"), stores, g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
+	return newOperation[ConfigService](Direct("ConfigOperation"), stores, g, newConfigService(g, profiles, groups, roles, svc, reg, rows))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -194,36 +123,30 @@ func newConfigService(
 	g *guard,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
-	endpoints profile.EndpointRepository,
 	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
-	secrets EndpointSecrets,
 ) *configService {
 	return &configService{
-		guard:     g,
-		profiles:  profiles,
-		groups:    groups,
-		endpoints: endpoints,
-		roles:     roles,
-		svc:       svc,
-		settings:  reg,
-		rows:      rows,
-		secrets:   secrets,
+		guard:    g,
+		profiles: profiles,
+		groups:   groups,
+		roles:    roles,
+		svc:      svc,
+		settings: reg,
+		rows:     rows,
 	}
 }
 
 type configService struct {
-	guard     *guard
-	profiles  profile.ProfileRepository
-	groups    profile.GroupRepository
-	endpoints profile.EndpointRepository
-	roles     profile.RoleRepository
-	svc       *profile.ProfileService
-	settings  *settings.Registry
-	rows      RowResolver
-	secrets   EndpointSecrets
+	guard    *guard
+	profiles profile.ProfileRepository
+	groups   profile.GroupRepository
+	roles    profile.RoleRepository
+	svc      *profile.ProfileService
+	settings *settings.Registry
+	rows     RowResolver
 }
 
 func (s *configService) ListProfiles() ([]profile.SSHProfile, error) {
@@ -397,243 +320,6 @@ func (s *configService) ClearSecretRefs(ref string) error {
 	return pc.ClearSecretRefs(ref)
 }
 
-func (s *configService) ListEndpoints() ([]profile.Endpoint, error) {
-	if err := s.guard.check(); err != nil {
-		return nil, err
-	}
-	return s.endpoints.LoadEndpoints()
-}
-
-// GetEndpoint returns one stored endpoint by id, or a wrapped
-// profile.ErrEndpointNotFound when none exists — the Test button's
-// credential resolution names a record and the backend resolves its
-// credential (nocx-reu5), so the lookup must be distinguishable from a
-// store failure.
-func (s *configService) GetEndpoint(id string) (profile.Endpoint, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.Endpoint{}, err
-	}
-	ep, err := s.loadEndpoint(id)
-	if err != nil {
-		return profile.Endpoint{}, err
-	}
-	if ep == nil {
-		return profile.Endpoint{}, fmt.Errorf("%s: %w", id, profile.ErrEndpointNotFound)
-	}
-	return *ep, nil
-}
-
-// ResolveSecretRow maps a renderer row handle to its stored reference — the
-// probe's draft header rows (nocx-lyyk). A read that REPORTS: the resolution
-// needs the same inventory inputs the write paths use, so it lives on the
-// service, and the probe handler calls it without ever holding the vault.
-func (s *configService) ResolveSecretRow(row string) (string, error) {
-	if err := s.guard.check(); err != nil {
-		return "", err
-	}
-	return s.rowToRef(row)
-}
-
-// CreateEndpoint stores the endpoint, minting the key into the vault FIRST
-// when one is given: the material must exist before the record references
-// it, so a crash between the two leaves an ownerless secret the vault's
-// journal retires rather than a record pointing at a secret that cannot
-// exist (ADR-0011 §4's order, ADR-0030). The record is validated BEFORE
-// the mint — a bad record must not orphan a freshly-minted key.
-//
-// The endpoint may instead REFERENCE a secret the vault already holds: the
-// renderer's row handle in e.CredentialRef (and in header ValueRefs) is
-// resolved to the stored reference before anything is written, exactly as
-// profile options resolve today. A typed key and a key row are mutually
-// exclusive — one source per credential, checked here as the backstop to the
-// wire's own check (nocx-rzjw).
-func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.Endpoint{}, err
-	}
-	if err := profile.ValidateEndpoint(e); err != nil {
-		return profile.Endpoint{}, err
-	}
-	if e.NoKey && !key.IsEmpty() {
-		return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
-	}
-	// Row handles resolve BEFORE the mint or the write: a bad row must not
-	// orphan a freshly-minted key (the same ordering as validation).
-	headers, err := s.resolveEndpointHeaders(e.Headers)
-	if err != nil {
-		return profile.Endpoint{}, err
-	}
-	e.Headers = headers
-	if e.CredentialRef != "" {
-		if !key.IsEmpty() {
-			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")
-		}
-		ref, rowErr := s.rowToRef(e.CredentialRef)
-		if rowErr != nil {
-			return profile.Endpoint{}, rowErr
-		}
-		e.CredentialRef = ref
-	} else if !key.IsEmpty() {
-		if s.secrets == nil {
-			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
-		}
-		id, err := s.secrets.CreateNamed(ctx, key, vault.SecretMeta{
-			Name: endpointKeyName(e.Name),
-			Kind: vault.KindPassword,
-		})
-		if err != nil {
-			return profile.Endpoint{}, fmt.Errorf("store endpoint key: %w", err)
-		}
-		e.CredentialRef = string(id)
-	}
-	if err := s.endpoints.CreateEndpoint(e); err != nil {
-		return profile.Endpoint{}, err
-	}
-	return e, nil
-}
-
-// resolveEndpointHeaders converts every renderer row handle in the
-// wire-form header list to its stored reference — the header-value half of
-// the row-resolution contract, exactly like resolveOptions for profile
-// options. Literal values pass through untouched.
-func (s *configService) resolveEndpointHeaders(headers []profile.EndpointHeader) ([]profile.EndpointHeader, error) {
-	if len(headers) == 0 {
-		return headers, nil
-	}
-	out := make([]profile.EndpointHeader, len(headers))
-	for i, h := range headers {
-		if h.ValueRef == "" {
-			out[i] = h
-			continue
-		}
-		ref, err := s.rowToRef(h.ValueRef)
-		if err != nil {
-			return nil, fmt.Errorf("header %q: %w", h.Name, err)
-		}
-		out[i] = profile.EndpointHeader{Name: h.Name, Value: h.Value, ValueRef: ref}
-	}
-	return out, nil
-}
-
-// UpdateEndpoint replaces the record. Three credential sources, one per
-// update:
-//
-//   - e.CredentialRef names a row handle (the form's "use an existing
-//     secret" choice, nocx-rzjw): it is resolved and referenced. The swap
-//     touches no material — nothing is minted, rotated or deleted — and an
-//     abandoned owned key simply stops being referenced, staying visible on
-//     the Secrets page where ADR-0016 makes ownerless secrets first-class.
-//   - A nil or empty key keeps the existing credential (design §4.5.4).
-//   - A non-empty key rotates the material behind the endpoint's OWN secret —
-//     same id, same name (ADR-0017 §2's rotate, which is why an update never
-//     orphans a key and never dangles another record that happens to share
-//     the secret) — or mints when the endpoint had no credential.
-//
-// Vault-first for the key paths: the rotation's reference never changes, so
-// a record write that fails afterwards leaves the endpoint with its old
-// fields and the rotated material — consistent, and the user retries.
-func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, key *credential.Secret) (profile.Endpoint, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.Endpoint{}, err
-	}
-	if err := profile.ValidateEndpoint(e); err != nil {
-		return profile.Endpoint{}, err
-	}
-
-	existing, err := s.loadEndpoint(e.ID)
-	if err != nil {
-		return profile.Endpoint{}, err
-	}
-	if existing == nil {
-		return profile.Endpoint{}, fmt.Errorf("%s: %w", e.ID, profile.ErrEndpointNotFound)
-	}
-
-	headers, err := s.resolveEndpointHeaders(e.Headers)
-	if err != nil {
-		return profile.Endpoint{}, err
-	}
-	e.Headers = headers
-
-	switch {
-	case e.NoKey:
-		if key != nil && !key.IsEmpty() {
-			return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
-		}
-		// The declaration is an explicit replacement for the previous
-		// credential choice, so it clears the old reference before storage.
-		e.CredentialRef = ""
-	case e.CredentialRef != "":
-		if key != nil && !key.IsEmpty() {
-			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")
-		}
-		ref, rowErr := s.rowToRef(e.CredentialRef)
-		if rowErr != nil {
-			return profile.Endpoint{}, rowErr
-		}
-		e.CredentialRef = ref
-	case key != nil && !key.IsEmpty():
-		if s.secrets == nil {
-			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
-		}
-		if existing.CredentialRef == "" {
-			// The endpoint had no key; this update adds one. mintID and
-			// mintErr are distinct names on purpose: err already lives at
-			// function scope, and the repo's lint gate flags the shadow.
-			mintID, mintErr := s.secrets.CreateNamed(ctx, *key, vault.SecretMeta{
-				Name: endpointKeyName(e.Name),
-				Kind: vault.KindPassword,
-			})
-			if mintErr != nil {
-				return profile.Endpoint{}, fmt.Errorf("store endpoint key: %w", mintErr)
-			}
-			e.CredentialRef = string(mintID)
-		} else {
-			// Rotate the material behind the endpoint's own secret. The
-			// catalogue record resolves the row without inventory inputs.
-			if err := s.secrets.ReplaceSecret(ctx, vault.RowFor(credential.SecretID(existing.CredentialRef)), *key, nil); err != nil {
-				return profile.Endpoint{}, fmt.Errorf("rotate endpoint key: %w", err)
-			}
-			e.CredentialRef = existing.CredentialRef
-		}
-	default:
-		// Keep the existing credential, whatever it is.
-		e.CredentialRef = existing.CredentialRef
-	}
-
-	if err := s.endpoints.UpdateEndpoint(e); err != nil {
-		return profile.Endpoint{}, err
-	}
-	return e, nil
-}
-
-// DeleteEndpoint removes the record — one atomic store write that also
-// clears its reference from every remaining record (ADR-0030) — then
-// deletes the material through the vault, metadata-first (ADR-0011 §4).
-//
-// The record deletion never depends on the vault: the endpoint is the
-// user's intent, and a keyless endpoint needs no vault at all. The
-// material delete is best-effort exactly as vault.deleteSecret's is: a
-// provider failure leaves the vault's journaled pending delete, retried by
-// Reconcile at the next start, and a sealed vault refuses before
-// journaling, leaving the secret visible and deletable on the Secrets
-// page. When the vault seam is missing (impossible in the production
-// composition root, which always wires the vault), the record is still
-// removed and the secret remains visible on the Secrets page.
-func (s *configService) DeleteEndpoint(ctx context.Context, id string) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	ref, err := s.endpoints.DeleteEndpoint(id)
-	if err != nil {
-		return err
-	}
-	if ref == "" || s.secrets == nil {
-		return nil // no credential to remove, or no vault to remove it with
-	}
-	_ = s.secrets.Delete(ctx, credential.SecretID(ref))
-	return nil
-}
-
 func (s *configService) ListRoleAssignments() ([]profile.RoleAssignment, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
@@ -644,10 +330,7 @@ func (s *configService) ListRoleAssignments() ([]profile.RoleAssignment, error) 
 	return s.roles.LoadRoleAssignments()
 }
 
-// AssignRole upserts ONE role's (endpoint, model) pair (bead nocx-e6kn2).
-// The assignment references the endpoint and model by NAME — nothing
-// secret — so this is a config-domain write like any endpoint write, with
-// no vault involvement.
+// AssignRole persists one agent's role choice.
 func (s *configService) AssignRole(a profile.RoleAssignment) error {
 	if err := s.guard.check(); err != nil {
 		return err
@@ -658,102 +341,13 @@ func (s *configService) AssignRole(a profile.RoleAssignment) error {
 	return s.roles.AssignRole(a)
 }
 
-// ResolveRole is the config domain's one role→(endpoint, model) resolution
-// (bead nocx-e6kn2): it loads the assignments, the default and the endpoints
-// and calls
-// profile.ResolveRole — the pure, storage-free resolver — so the refusal
-// rules (unassigned, endpoint gone, model gone) live in exactly one place
-// and every consumer (agent.ask, the classifier bead, the roles surface
-// itself) sees the same answers. Re-read per call: an assignment made a
-// moment ago is picked up by the next ask (acceptance: "picks up the
-// change").
-func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	if s.roles == nil {
-		return profile.Endpoint{}, "", errors.New("role store not wired")
-	}
-	assignments, err := s.roles.LoadRoleAssignments()
+// ResolveRole reads current choices through the one pure resolver.
+func (s *configService) ResolveRole(role profile.ModelRole, agentID string, models []harness.Model) (string, error) {
+	assignments, err := s.ListRoleAssignments()
 	if err != nil {
-		return profile.Endpoint{}, "", err
+		return "", err
 	}
-	// The default is READ here and handed to the resolver as an input, so
-	// the resolution itself stays in one place (bead nocx-rikz5). Its error
-	// is RETURNED, never swallowed into "no default": a store that cannot
-	// answer must not look like a person who chose nothing, or an unreadable
-	// file renders as an honest "choose a model" and sends someone to
-	// re-choose what they already chose.
-	def, err := s.roles.LoadDefaultModel()
-	if err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	eps, err := s.endpoints.LoadEndpoints()
-	if err != nil {
-		return profile.Endpoint{}, "", err
-	}
-	return profile.ResolveRole(role, assignments, def, eps)
-}
-
-// DefaultModel returns the chosen default, or the zero value when nobody
-// has chosen one (bead nocx-rikz5). It is a plain config read: the pair
-// names an endpoint and a model by identity, nothing secret.
-func (s *configService) DefaultModel() (profile.DefaultModel, error) {
-	if err := s.guard.check(); err != nil {
-		return profile.DefaultModel{}, err
-	}
-	if s.roles == nil {
-		return profile.DefaultModel{}, errors.New("role store not wired")
-	}
-	return s.roles.LoadDefaultModel()
-}
-
-// SetDefaultModel replaces the default in one write, refusing a pair whose
-// endpoint does not exist or whose model that endpoint does not offer
-// (bead nocx-rikz5).
-//
-// Those two refusals are the STORE's, not this layer's, and that is the
-// correction: this method used to load the endpoint list, decide, and then
-// call the store, which reloads and writes under its own lock. Between the
-// decision and the write a concurrent DeleteEndpoint could land, and the
-// write would then store a default naming an endpoint that is gone — the
-// state the design's interval forbids. Only the holder of the lock can make
-// the checks and the write one operation, so the invariant lives with the
-// lock (profile.JSONStore.SetDefaultModel) and this layer keeps what is
-// genuinely its own: the config guard and the wiring check. In-process
-// callers are serialized by ConfigOperation, so the window needed an
-// external writer to bite; an invariant that holds only because somebody
-// else takes a lock is not held.
-func (s *configService) SetDefaultModel(d profile.DefaultModel) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	if s.roles == nil {
-		return errors.New("role store not wired")
-	}
-	return s.roles.SetDefaultModel(d)
-}
-
-// loadEndpoint returns the stored endpoint with the given id, or nil when
-// none exists.
-func (s *configService) loadEndpoint(id string) (*profile.Endpoint, error) {
-	all, err := s.endpoints.LoadEndpoints()
-	if err != nil {
-		return nil, err
-	}
-	for i := range all {
-		if all[i].ID == id {
-			return &all[i], nil
-		}
-	}
-	return nil, nil
-}
-
-// endpointKeyName derives the auto-name of an endpoint's minted key
-// (ADR-0016: the name is generated from what is already known — the
-// endpoint's display name — never from the material).
-func endpointKeyName(endpointName string) string {
-	return fmt.Sprintf("%s API key", endpointName)
+	return profile.ResolveRole(role, agentID, assignments, models)
 }
 
 func (s *configService) AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult {

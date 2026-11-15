@@ -1,125 +1,42 @@
 package transport
 
 import (
-	"errors"
-	"net/http"
-	"strings"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/assistant"
-	"github.com/shady2k/nocx/internal/providertest"
+	"github.com/shady2k/nocx/internal/content"
 )
 
-func TestAskFailure_UnexecutedToolCallEnvelopeDialectsFailAtTransportPayload(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload string
-	}{
-		{
-			name:    "xml",
-			payload: "<tool_call><function=session.run><parameter=command>df -h</parameter></function></tool_call>",
-		},
-		{
-			name:    "json",
-			payload: `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`,
-		},
-		{
-			name:    "multiple mixed dialect envelopes",
-			payload: "<tool_call>{\"name\":\"session.run\",\"arguments\":{\"command\":\"df -h\"}}</tool_call>\n\n<tool_call><function=session.run><parameter=command>du -sh .</parameter></function></tool_call>",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !providertest.ConsumeRequestBeforeResponse(w, r) {
-					return
-				}
-				streamAnswerChunk(w, tt.payload)
-			}))
-			if state != "failed" {
-				t.Fatalf("runState = %q, want failed", state)
-			}
-			var envelopeErr *assistant.UnexecutedToolCallError
-			if !errors.As(engineErr, &envelopeErr) {
-				t.Fatalf("engine error = %v, want UnexecutedToolCallError", engineErr)
-			}
-			if sentence != assistant.UnexecutedToolCallSentence {
-				t.Fatalf("runState sentence = %q, want %q", sentence, assistant.UnexecutedToolCallSentence)
-			}
-			if strings.Contains(sentence, "<tool_call>") {
-				t.Fatalf("runState sentence leaked the provider envelope: %q", sentence)
-			}
-		})
-	}
-}
-
 func TestAskFailure_OrdinaryProseThatMentionsToolCallCompletes(t *testing.T) {
-	state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !providertest.ConsumeRequestBeforeResponse(w, r) {
-			return
-		}
-		streamAnswerChunk(w, "The answer quotes <tool_call> but gives a real explanation.")
-	}))
-	if state != "completed" {
-		t.Fatalf("runState = %q, want completed", state)
+	const answer = "The answer quotes <tool_call> but gives a real explanation."
+	h := newAskHarness(t, answerScript(answer))
+	sid := openLocalSession(t, h.conn)
+	turn := askAndWaitForState(t, h, sid, "what does it mean?")
+	if got := proseBodyOf(t, h.db.Ledger(), turn); got != answer {
+		t.Fatalf("ordinary prose=%q", got)
 	}
-	if sentence != "" {
-		t.Fatalf("completed run sentence = %q, want empty", sentence)
-	}
-	if engineErr != nil {
-		t.Fatalf("ordinary prose returned error: %v", engineErr)
+	entry, err := h.db.Ledger().Entry(t.Context(), turn)
+	if err != nil || entry == nil || len(entry.Executions) != 1 || entry.Executions[0].State == nil || *entry.Executions[0].State != content.RunCompleted {
+		t.Fatalf("ordinary prose run: %+v, %v", entry, err)
 	}
 }
 
-func TestAgentAsk_FailedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T) {
+// A harness owns its tool syntax. Text that resembles another provider's
+// envelope cannot execute a command without a bridge call.
+func TestAgentAsk_TextEnvelopeDoesNotExecuteATool(t *testing.T) {
 	const envelope = `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`
-	client := &conversationClient{
-		scripts: [][]assistant.AskEvent{
-			{answerEvent(envelope)},
-			{answerEvent("try again")},
-		},
-		fail: []error{&assistant.UnexecutedToolCallError{}, nil},
-	}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, answerScript(envelope))
 	sid := openSessionInAskPane(t, h.conn, 1)
-
-	askAndSettle(t, h, sid, "ask-envelope", "how much disk space is free?", 2)
-	askAndSettle(t, h, sid, "ask-follow-up", "please answer that", 3)
-
-	follow := client.nth(t, 1)
-	for _, msg := range follow.Messages {
-		if strings.Contains(msg.Content, "<tool_call>") {
-			t.Fatalf("follow-up payload replayed the provider envelope in a %s message: %q", msg.Role, msg.Content)
+	turn := askAndWaitForState(t, h, sid, "how much disk space is free?")
+	kids, err := h.db.Ledger().Caused(t.Context(), turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kid := range kids {
+		if kid.Kind != content.EntryText {
+			t.Fatalf("text executed a tool: %+v", kids)
 		}
 	}
-	if answer := theAnswerIn(t, follow.Messages); answer != proseUnexecutedToolCallNotice {
-		t.Fatalf("failed turn reads %q, want the explicit notice %q", answer, proseUnexecutedToolCallNotice)
-	}
-}
-
-func TestAgentAsk_CompletedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T) {
-	const envelope = `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`
-	client := &conversationClient{
-		scripts: [][]assistant.AskEvent{
-			{answerEvent(envelope)},
-			{answerEvent("try again")},
-		},
-	}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	sid := openSessionInAskPane(t, h.conn, 1)
-
-	askAndSettle(t, h, sid, "ask-completed-envelope", "how much disk space is free?", 2)
-	askAndSettle(t, h, sid, "ask-completed-follow-up", "please answer that", 3)
-
-	follow := client.nth(t, 1)
-	for _, msg := range follow.Messages {
-		if strings.Contains(msg.Content, "<tool_call>") {
-			t.Fatalf("follow-up payload replayed the provider envelope in a %s message: %q", msg.Role, msg.Content)
-		}
-	}
-	if answer := theAnswerIn(t, follow.Messages); answer != proseUnexecutedToolCallNotice {
-		t.Fatalf("completed envelope reads %q, want the explicit notice %q", answer, proseUnexecutedToolCallNotice)
+	if got := proseBodyOf(t, h.db.Ledger(), turn); got != envelope {
+		t.Fatalf("harness prose changed: %q", got)
 	}
 }

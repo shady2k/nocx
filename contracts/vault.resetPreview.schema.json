@@ -5,26 +5,15 @@
   "description": "Result of the vault.resetPreview JSON-RPC method: what resetting the vault would cost, and whether every store can actually be cleared. Changes nothing. Works while the vault is sealed, which is the only state a reset is ever wanted in.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "secretCount",
-    "profileCount",
-    "endpointCount",
-    "systemKeychainReachable",
-    "vaultInitialized"
-  ],
+  "required": ["secretCount", "profileCount", "systemKeychainReachable", "vaultInitialized"],
   "properties": {
     "secretCount": {
-      "description": "Distinct stored secrets that will be destroyed. A secret shared by two connections counts once — it is one thing the user loses.",
+      "description": "Distinct stored secrets that will be destroyed. A secret shared by two connections counts once \u2014 it is one thing the user loses.",
       "type": "integer",
       "minimum": 0
     },
     "profileCount": {
-      "description": "Connections holding at least one of those secrets. Connections that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing. Each of these will ask for a password again afterwards.",
-      "type": "integer",
-      "minimum": 0
-    },
-    "endpointCount": {
-      "description": "AI endpoints holding at least one of those secrets (ADR-0030). Endpoints that store no credential are not counted, because they lose nothing. Counted separately from profileCount: the endpoint clause is a different sentence answering a different question (ADR-0031).",
+      "description": "Connections holding at least one of those secrets. Connections that store nothing \u2014 agent auth, a key read from a path \u2014 are not counted, because they lose nothing. Each of these will ask for a password again afterwards.",
       "type": "integer",
       "minimum": 0
     },
@@ -33,7 +22,7 @@
       "type": "boolean"
     },
     "vaultInitialized": {
-      "description": "False when there is no vault to reset. The action is still offered — a reset interrupted part-way leaves no vault document and references that still need clearing.",
+      "description": "False when there is no vault to reset. The action is still offered \u2014 a reset interrupted part-way leaves no vault document and references that still need clearing.",
       "type": "boolean"
     }
   }

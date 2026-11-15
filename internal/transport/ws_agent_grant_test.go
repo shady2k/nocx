@@ -1,12 +1,9 @@
 package transport
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -14,32 +11,15 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
-	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
-	"github.com/shady2k/nocx/internal/providertest"
 	"github.com/shady2k/nocx/internal/snippet"
 )
 
-type grantPromptClient struct {
-	seen chan assistant.AskParams
-}
-
-func (*grantPromptClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true, Model: "test-model"}, nil
-}
-
-func (*grantPromptClient) Discard(string) {}
-
-func (c *grantPromptClient) Ask(_ context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	c.seen <- p
-	return onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "answer"})
-}
-
 func TestAgentAsk_GrantsAreNamedWithoutInlining_OverTheWire(t *testing.T) {
-	client := &grantPromptClient{seen: make(chan assistant.AskParams, 1)}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, answerScript("answer"))
 	askPaneIn(t, h.db)
 	resp := jsonrpcCallWithID(t, h.conn, "open", map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "paneId": askPaneID,
@@ -71,11 +51,9 @@ func TestAgentAsk_GrantsAreNamedWithoutInlining_OverTheWire(t *testing.T) {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
 
-	params := <-client.seen
-	if len(params.Messages) == 0 || params.Messages[0].Role != "system" {
-		t.Fatalf("engine messages = %+v, want a standing system prompt", params.Messages)
-	}
-	prompt := params.Messages[0].Content
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	p := h.prompt()
+	prompt := p.SystemPrompt + p.Text
 	for _, want := range []string{first, second, third, "git status", "npm test", "make ci", "state: exited", "state: running", "session.read"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt lacks %q:\n%s", want, prompt)
@@ -125,7 +103,12 @@ func TestRunGrantForOffersContentTools(t *testing.T) {
 }
 
 func TestAgentAskReceivesContentOperationsFromCompositionRoot(t *testing.T) {
-	client := &grantPromptClient{seen: make(chan assistant.AskParams, 1)}
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "notes.create", Arguments: map[string]any{"body": "created through assistant operation"}},
+		{Kind: protocol.StepTool, Name: "snippets.create", Arguments: map[string]any{"title": "Assistant", "body": "created through assistant operation"}},
+		{Kind: protocol.StepAnswer, Text: "answer"},
+		{Kind: protocol.StepEnd, Model: "test-model"},
+	}}
 
 	key := make([]byte, 32)
 	for i := range key {
@@ -150,12 +133,11 @@ func TestAgentAskReceivesContentOperationsFromCompositionRoot(t *testing.T) {
 		return fmt.Sprintf("snippet-%d", snippetID)
 	})
 
-	h := newAskHarnessWithOpts(t, client,
+	h := newAskHarnessWithOpts(t, script,
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithNotes(noteSvc),
 		WithSnippets(snippetSvc),
 	)
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-content-operations",
@@ -166,36 +148,14 @@ func TestAgentAskReceivesContentOperationsFromCompositionRoot(t *testing.T) {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
 
-	params := <-client.seen
-	if params.NoteOperation == nil {
-		t.Fatal("assistant AskParams.NoteOperation is nil")
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	notes, err := noteSvc.Search(t.Context(), "created through assistant operation")
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("notes created via real bridge = %+v (%v)", notes, err)
 	}
-	if params.SnippetOperation == nil {
-		t.Fatal("assistant AskParams.SnippetOperation is nil")
-	}
-
-	var createdNote note.Note
-	if err := params.NoteOperation.Run(t.Context(), func(ctx context.Context, svc capability.NoteService) error {
-		var err error
-		createdNote, err = svc.Create(ctx, "created through assistant operation")
-		return err
-	}); err != nil {
-		t.Fatalf("note operation create: %v", err)
-	}
-	if createdNote.Body != "created through assistant operation" {
-		t.Fatalf("note operation created %+v", createdNote)
-	}
-
-	var createdSnippet snippet.Snippet
-	if err := params.SnippetOperation.Run(t.Context(), func(_ context.Context, svc capability.SnippetService) error {
-		var err error
-		createdSnippet, err = svc.Create("Assistant", "created through assistant operation")
-		return err
-	}); err != nil {
-		t.Fatalf("snippet operation create: %v", err)
-	}
-	if createdSnippet.Title != "Assistant" || createdSnippet.Body != "created through assistant operation" {
-		t.Fatalf("snippet operation created %+v", createdSnippet)
+	snippets, err := snippetSvc.List()
+	if err != nil || len(snippets) != 1 || snippets[0].Title != "Assistant" || snippets[0].Body != "created through assistant operation" {
+		t.Fatalf("snippets via real bridge = %+v (%v)", snippets, err)
 	}
 }
 
@@ -275,7 +235,7 @@ func TestAgentAsk_RejectsMalformedAttachedContent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newAskHarness(t, &grantPromptClient{seen: make(chan assistant.AskParams, 1)})
+			h := newAskHarness(t, answerScript("answer"))
 			sid := openLocalSession(t, h.conn)
 			_, errObj := askOverWire(t, h.conn, map[string]any{
 				"askId": "malformed-" + tc.name, "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -289,7 +249,7 @@ func TestAgentAsk_RejectsMalformedAttachedContent(t *testing.T) {
 }
 
 func TestAgentAsk_RejectsLegacyReferencesField(t *testing.T) {
-	h := newAskHarness(t, &grantPromptClient{seen: make(chan assistant.AskParams, 1)})
+	h := newAskHarness(t, answerScript("answer"))
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "legacy-references", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -300,36 +260,17 @@ func TestAgentAsk_RejectsLegacyReferencesField(t *testing.T) {
 	}
 }
 
-type missingGrantProvider struct {
-	session   string
-	missingID string
-}
-
-func (p *missingGrantProvider) serve(w http.ResponseWriter, r *http.Request) {
-	if !providertest.ConsumeRequestBeforeResponse(w, r) {
-		return
-	}
-	streamToolCallChunk(w, "session.read", fmt.Sprintf(
-		`{"id":%q,"start":0,"count":20}`, p.missingID))
-}
-
 func TestAgentAsk_MissingGrantedItemTerminalizesWithReason(t *testing.T) {
 	const missingID = "0198f2b0-0000-7000-8000-0000000000ff"
-	provider := &missingGrantProvider{missingID: missingID}
-	server := httptest.NewServer(http.HandlerFunc(provider.serve))
-	defer server.Close()
-
-	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(server.URL)
+	h := newAskHarnessWithOpts(t, approvalToolScript("session.read", map[string]any{"id": missingID, "start": 0, "count": 20}), WithAgentPolicy(autonomousPolicyStore(t)))
 	seedPaneChain(t, h.db, blockPaneThis, blockPaneOther)
 	sid, err := openSessionInPane(t, h.conn, blockPaneThis, 1)
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
-	provider.session = sid
 	waitPastMilli(sessionOpenedAt(t, h.ws, sid))
 
-	if _, errObj := askOverWire(t, h.conn, map[string]any{
+	askResult, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "0198f2b0-0000-7000-8000-0000000000fa",
 		"sessionId": sid,
 		"question":  "what did the cleared command do?",
@@ -337,7 +278,8 @@ func TestAgentAsk_MissingGrantedItemTerminalizesWithReason(t *testing.T) {
 		"attachedContent": []any{
 			map[string]any{"itemId": missingID, "command": "git status", "state": "exited"},
 		},
-	}, 2); errObj != nil {
+	}, 2)
+	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
 
@@ -353,7 +295,27 @@ func TestAgentAsk_MissingGrantedItemTerminalizesWithReason(t *testing.T) {
 	if state.State != "failed" {
 		t.Fatalf("runState = %#v, want failed after missing session item", state)
 	}
-	if !strings.Contains(state.Error, "session.read") || !strings.Contains(state.Error, "no such item") {
-		t.Fatalf("runState error = %q, want the deliberate missing-item reason", state.Error)
+	if !strings.Contains(state.Error, "tools/call") {
+		t.Fatalf("runState error = %q, want safe bridge failure", state.Error)
+	}
+	entries, ledgerErr := h.db.Ledger().Caused(t.Context(), askResult.EntryID)
+	if ledgerErr != nil {
+		t.Fatal(ledgerErr)
+	}
+	failedRead := false
+	for _, caused := range entries {
+		entry, err := h.db.Ledger().Entry(t.Context(), caused.EntryID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Kind == content.EntryAction && entry.Intent == "session.read" && entry.Status == content.EntryFailure {
+			failedRead = true
+		}
+	}
+	if !failedRead {
+		t.Fatal("missing-item read attempt was not recorded as failed")
+	}
+	if logs := h.agent.endpointLogs.String(); !strings.Contains(logs, "session.read: no such item") {
+		t.Fatalf("missing-item reason absent from endpoint diagnostics: %s", logs)
 	}
 }

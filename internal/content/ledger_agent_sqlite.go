@@ -36,6 +36,8 @@ const artifactChunkSize = 64 << 10
 // 32 hex chars from crypto/rand, the same shape as session.NewID. The
 // frame id and its artifact id are minted here, never supplied by the
 // renderer.
+const agentLane = "agent"
+
 func mintID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -651,6 +653,18 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		}
 		if err != nil {
 			return err
+		}
+		if in.Model != "" {
+			var facts map[string]any
+			if err := json.Unmarshal([]byte(payload), &facts); err != nil {
+				return err
+			}
+			facts["model"] = in.Model
+			encoded, err := json.Marshal(facts)
+			if err != nil {
+				return err
+			}
+			payload = string(encoded)
 		}
 		if in.Error != "" {
 			var m map[string]any

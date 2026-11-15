@@ -34,9 +34,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -64,29 +61,6 @@ func askPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
 	return store
 }
 
-// authorisedRunServer is the fake provider for the authorised exchange:
-// request 1 streams the run tool call the policy escalates on, and every
-// later request streams the answer.
-//
-// It used to stream the call on requests 1 AND 2, because the resume asked
-// the model to propose it again. Since nocx-igu4y it does not: the resume
-// restores the proposal from the checkpoint and spends no model request at
-// all, so a second scripted proposal would be a NEW call — with a new call
-// id, escalating again, and the run would never finish. The engine-level
-// shape is TestAsk_ApprovedResumeRunsAsSubsequentAttempt.
-func authorisedRunServer(args string) (*runToolCallingServer, *httptest.Server) {
-	s := &runToolCallingServer{args: args}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		if s.requests.Add(1) == 1 {
-			streamToolCallChunk(w, "session.run", s.args)
-			return
-		}
-		streamOKChunks(w)
-	}))
-	return s, srv
-}
-
 // driveOneCompletedRun performs one ordinary GRANTED exchange over the real
 // socket: an ask whose first model response proposes the run tool, the
 // grant permits it (no person involved), the renderer (this test) answers
@@ -108,19 +82,8 @@ func driveOneCompletedRun(t *testing.T) (*askHarness, askWireResult, string) {
 // (it submits through ledger.open before it answers).
 func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarness, sid string) string) (*askHarness, askWireResult, string) {
 	t.Helper()
-	fake, srv := newRunToolCallingServer("")
-	t.Cleanup(srv.Close)
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(srv.URL)
-
+	h := newAskHarnessWithOpts(t, bridgeToolScript("session.run", map[string]any{"command": "ls -la"}, "ok"), WithAgentPolicy(autonomousPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
-	fake.args = `{"command":"ls -la"}`
-
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-thread-1",
 		"sessionId": sid,
@@ -135,7 +98,7 @@ func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarne
 	// it with the completed run body.
 	raw := readNotification(t, h.conn, "agent.runRequest", 10*time.Second)
 	if raw == nil {
-		t.Fatalf("no runRequest within 10s; provider requests=%d", fake.requests.Load())
+		t.Fatal("no runRequest within 10s")
 	}
 	var req struct {
 		RequestID string `json:"requestId"`
@@ -216,17 +179,8 @@ type approvalBinding struct {
 // result and the streamed answer text.
 func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, approvalBinding) {
 	t.Helper()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(askPolicyStore(t)))
-
+	h := newAskHarnessWithOpts(t, bridgeToolScript("session.run", map[string]any{"command": "ls -la"}, "ok"), WithAgentPolicy(askPolicyStore(t)))
 	sid := openLocalSession(t, h.conn)
-	fake, srv := authorisedRunServer(`{"command":"ls -la"}`)
-	t.Cleanup(srv.Close)
-	h.createEndpointAt(srv.URL)
-
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-thread-authorised",
 		"sessionId": sid,
@@ -240,7 +194,7 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	// The policy asks a person: the notification carries the exact binding.
 	raw := readNotification(t, h.conn, "agent.approvalRequested", 10*time.Second)
 	if raw == nil {
-		t.Fatalf("no approvalRequested within 10s; provider requests=%d", fake.requests.Load())
+		t.Fatal("no approvalRequested within 10s")
 	}
 	var ap approvalBinding
 	if err := json.Unmarshal(raw, &ap); err != nil {
@@ -265,7 +219,7 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	// before the approval — the escalation interrupted before the call.
 	raw = readNotification(t, h.conn, "agent.runRequest", 10*time.Second)
 	if raw == nil {
-		t.Fatalf("no runRequest after the approval; provider requests=%d", fake.requests.Load())
+		t.Fatal("no runRequest after approval")
 	}
 	var req struct {
 		RequestID string `json:"requestId"`
@@ -320,9 +274,6 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	}
 	if st.RunID != res.RunID || st.State != "completed" {
 		t.Fatalf("runState = runId %d state %q, want %d completed", st.RunID, st.State, res.RunID)
-	}
-	if fake.requests.Load() < 2 {
-		t.Fatalf("provider received %d requests, want >= 2 — escalate, then the answer after the RESTORED call ran (the resume spends no model request; nocx-igu4y)", fake.requests.Load())
 	}
 	return h, res, answer, ap
 }

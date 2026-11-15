@@ -234,6 +234,14 @@ func (s *Stub) Close() error {
 var _ LedgerRepository = (*ledgerStub)(nil)
 
 // ledgerStub implements LedgerRepository for the stub.
+func (s *ledgerStub) PinConversationModel(context.Context, string, string, string) error {
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) ConversationModel(context.Context, string, string) (string, error) {
+	return "", ErrNotImplemented
+}
+
 type ledgerStub struct {
 	log log.Logger
 }
@@ -433,11 +441,6 @@ func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFr
 func (s *ledgerStub) OpenProse(_ context.Context, turnID string, runID int64) (ProseBlock, error) {
 	s.log.Info("content stub: LedgerRepository.OpenProse", "turn", turnID, "run", runID)
 	return ProseBlock{}, ErrNotImplemented
-}
-
-func (s *ledgerStub) PriorTurns(_ context.Context, paneID, beforeEntryID string) ([]PriorTurn, error) {
-	s.log.Info("content stub: LedgerRepository.PriorTurns", "pane", paneID, "before", beforeEntryID)
-	return nil, ErrNotImplemented
 }
 
 func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {

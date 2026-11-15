@@ -240,13 +240,26 @@ export function systemPrompt(body: string): string {
   return (request.messages ?? []).find((message) => message.role === 'system')?.content ?? ''
 }
 
+/** The current turn's facts and question, as pi sent them to the model. */
+export function terminalContext(body: string): string {
+  const request = JSON.parse(body) as {
+    messages?: { role?: string; content?: string | { type?: string; text?: string }[] }[]
+  }
+  const content = (request.messages ?? []).findLast((message) => message.role === 'user')?.content
+  if (typeof content === 'string') return content
+  return (content ?? [])
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text ?? '')
+    .join('\n')
+}
+
 /**
- * The attached item id, read from the model's ACTUAL system prompt. A scripted
- * model must call tools with this id and never with one the spec invented, so a
- * successful call proves the grant survived the frontend-to-ledger join.
+ * The attached item id, read from the model's actual current-turn facts. A
+ * scripted model must use this id rather than one the spec invented, proving
+ * the grant survived the frontend-to-ledger join.
  */
 export function attachedItemID(body: string): string {
-  const match = systemPrompt(body).match(/\n- id: ([^;]+); state: (?:running|exited)/)
+  const match = terminalContext(body).match(/\n- id: ([^;]+); state: (?:running|exited)/)
   if (!match) throw new Error('model request has no attached terminal item id')
   return match[1]
 }
@@ -255,9 +268,19 @@ export function attachedItemID(body: string): string {
 export function toolResults(body: string): string[] {
   try {
     const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
+    const messages = parsed.messages ?? []
+    const turnStart = messages.findLastIndex((message) => message.role === 'user')
+    return messages
+      .slice(turnStart + 1)
+      .filter((message) => message.role === 'tool')
+      .map((message) => {
+        if (typeof message.content === 'string') return message.content
+        if (!Array.isArray(message.content)) return ''
+        return message.content
+          .filter((part: { type?: string }) => part.type === 'text')
+          .map((part: { text?: string }) => part.text ?? '')
+          .join('\n')
+      })
   } catch {
     return []
   }

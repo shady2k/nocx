@@ -58,17 +58,15 @@ import {
   resolveBackend,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
-  createAiEndpoint,
-  openControlPlane,
-  readVaultState,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 /** The two rows the measurement is taken from, and a wait long enough to look
  *  at them before Ctrl+C ends the command. */
@@ -288,14 +286,11 @@ test('a running ssh command’s header is on the column its output is on', async
 const agentTest = standalone
 const AGENT_TITLE = '.nocx-tab-title'
 const AGENT_INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 const agentNonce = Date.now().toString(36)
 /** One per run of the nested test, so a repeat is a fresh run. */
 let agentRun = 0
-const AGENT_ENDPOINT = `E2E Header Column ${agentNonce}`
 /** A one-turn dialogue asked first only to let the product's own mechanics
  *  settle the session the run call executes in (ADR-7). */
 const AGENT_CONFIRM = `Are you there, ${agentNonce}?`
@@ -450,19 +445,8 @@ async function openAgentSettings(page: Page, navSelector: string): Promise<void>
   await page.locator(navSelector).click()
 }
 
-async function configureAssistant(page: Page, baseUrl: string, name: string): Promise<void> {
-  await openAgentSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name,
-    baseUrl,
-    models: ['e2e-model'],
-    key: `e2e-key-${agentNonce}`,
-    vaultPassphrase: `vault-pass-${agentNonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, name, 'e2e-model')
-  await page.locator(SETTINGS_POLICY_NAV).click()
+async function configureAssistant(page: Page): Promise<void> {
+  await openAgentSettings(page, SETTINGS_POLICY_NAV)
   for (const effect of ALLOWED_EFFECTS) {
     await answerPermission(page, effect, 'Allowed')
   }
@@ -475,31 +459,12 @@ agentTest.describe('a running command nested in a turn', () => {
   let fake: FakeOpenAI
   let endpoint: { port: number; token: string }
 
-  /**
-   * THE VAULT SEALS WHEN THE LAST CLIENT LEAVES (design D9), so a repeat of this
-   * test finds it sealed and the endpoint save would wait on an unlock sheet
-   * `createAiEndpoint` does not answer. Unsealing through the control plane is
-   * the same door agent-turn.spec.ts uses for its second phase.
-   */
-  async function unsealIfSealed(page: Page): Promise<void> {
-    if ((await readVaultState(endpoint)) !== 'sealed') return
-    const wire = await openControlPlane(endpoint.port, endpoint.token)
-    try {
-      await wire.call('vault.unseal', { means: 'passphrase', secret: `vault-pass-${agentNonce}` })
-    } finally {
-      wire.close()
-    }
-    await expect(page.getByRole('dialog', { name: 'Unlock the vault' })).toHaveCount(0)
-  }
-
   agentTest.beforeAll(async () => {
     fake = new FakeOpenAI()
     await fake.start()
     const root = mkdtempSync(path.join(tmpdir(), 'nocx-header-column-turn-'))
-    // `true` = no Secret Service: the container has no keychain to ask, and the
-    // derived content key makes the vault available without user setup.
     backend = new VaultBackend(readStand().server, { root })
-    endpoint = await backend.start()
+    endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
   })
 
   agentTest.afterAll(async () => {
@@ -509,11 +474,8 @@ agentTest.describe('a running command nested in a turn', () => {
 
   agentTest('puts its header on the column its own output is on', async ({ page }) => {
     agentTest.setTimeout(240_000)
-    // A REPEAT IS A FRESH RUN against the same backend: the endpoint's name and
-    // the turn's words are the run's own, so nothing this file left behind can
-    // be mistaken for it, and the vault it sealed on its way out is unsealed.
+    // A repeat uses fresh turn text, so earlier blocks cannot satisfy it.
     const run = ++agentRun
-    const endpointName = `${AGENT_ENDPOINT} ${run}`
     const confirm = `${AGENT_CONFIRM} ${run}`
     const question = `${AGENT_QUESTION} ${run}`
     const asks = recordAskSessions(page)
@@ -522,8 +484,9 @@ agentTest.describe('a running command nested in a turn', () => {
     await page.goto('/')
     await expect(page.locator(AGENT_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
     await appReadyForInput(page)
-    await unsealIfSealed(page)
-    await configureAssistant(page, fake.baseUrl(), endpointName)
+    await ensureAssistantVault(page, endpoint, `vault-pass-${agentNonce}`)
+    await page.locator(AGENT_TITLE).first().click()
+    await configureAssistant(page)
 
     // The confirming turn settles the session; the real turn's run call then
     // executes in it, exactly as agent-turn.spec.ts drives it.

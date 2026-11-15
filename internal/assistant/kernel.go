@@ -41,7 +41,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -99,6 +98,15 @@ const (
 	// and it is why the refusal comes BEFORE the attempt is opened rather
 	// than after.
 	RefusedExpired PolicyRefusalReason = "refused-expired"
+	// RefusedRemotePane: this call's tool acts on THE MACHINE NOCX RUNS ON
+	// (files.read, files.edit, files.create are built on local.New()), and
+	// the pane the person asked from is on another one. Until stage 8 gives
+	// those tools the pane's own provider there is no capability that could
+	// do the work, so the call is refused and says the remote file tools are
+	// coming — the sentence a person and a model both read. It is not about
+	// this call's arguments, so proposing the same call differently changes
+	// nothing.
+	RefusedRemotePane PolicyRefusalReason = "refused-remote-pane"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
 	// not be read again to check (nocx-4h0m7.5). Without substitution there
@@ -229,13 +237,6 @@ const (
 type modelResult struct {
 	text string
 	kind modelResultKind
-}
-
-func (r modelResult) forModel(frame func(string) string) string {
-	if r.kind == modelNocxMessage {
-		return r.text
-	}
-	return frame(r.text)
 }
 
 // ApprovalRequest is the user-facing ask (design §7.2): what was proposed,
@@ -509,6 +510,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		runCtx: agenttools.RunContext{
 			RunID:                 runID,
 			Session:               sessionID,
+			Environment:           runSeams.paneEnvironment,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 			ControllerIdentity:    controllerIdentity,
@@ -639,6 +641,7 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 		},
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
+			kernelPaneGuard{kernel: k},
 			kernelPolicyGuard{state: state},
 			kernelFloorGuard{kernel: k},
 			kernelEvidenceGuard{state: state},
@@ -912,6 +915,31 @@ func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
 		return "", false
 	}
 	return refusalResult(call.Tool(), RefusedExpired, ""), true
+}
+
+// kernelPaneGuard refuses a tool that acts on THIS machine's disk when the
+// run's pane is on another one (ADR-anntnxdj §5, decision 3): until stage 8
+// files.read, files.edit and files.create are built on local.New(), and on an
+// SSH pane they would read and write the local disk instead of the host the
+// person is working on.
+//
+// It is a GUARD and not a PreCall because it can only refuse — the policy may
+// well permit this call and that is not the question being asked — and it is
+// the ANSWER half of one fact whose GUARANTEE half is the capability
+// constructor (agenttools.narrow.go's localPaneOnly): the guard is what makes
+// the model read our sentence instead of a failure about a constructor, the
+// same split RefusedExpired uses. A chain that forgot this link still cannot
+// reach the disk, because no capability comes into existence.
+type kernelPaneGuard struct{ kernel *effectKernel }
+
+func (g kernelPaneGuard) Refuse(_ context.Context, call Call) (string, bool) {
+	if !agenttools.ReachesLocalDisk(call.Tool()) {
+		return "", false
+	}
+	if g.kernel.runCtx.Environment.Kind == content.EnvLocal {
+		return "", false
+	}
+	return refusalResult(call.Tool(), RefusedRemotePane, ""), true
 }
 
 // kernelFloorGuard is the fixed floor and the raw-command floor: the operations
@@ -1412,28 +1440,6 @@ func canonicalArgHash(raw string) string {
 // removes every class a declared tool can reach. The rows are named so a person
 // can understand the omission and change the policy, rather than seeing a
 // completed turn that silently skipped the tool.
-func withheldToolResult(tool string, effects []content.Effect) string {
-	rows := make([]string, 0, len(effects))
-	for _, effect := range effects {
-		rows = append(rows, string(effect))
-	}
-	return fmt.Sprintf("REFUSED: nocx did not offer tool %q: every effect it can reach is refused by policy (%s).", tool, strings.Join(rows, ", "))
-}
-
-// refusalResult is the TOOL RESULT a refused call returns to the model
-// (nocx-uvac6.1): the refusal is an answer, not a fault. The system prompt
-// promises exactly this — "A refusal is an answer: say what you could not do
-// and what you would need" — and a non-error tool result is how the promise
-// is kept: the refused call's own slot in the conversation carries the
-// refusal, the run continues, and the model answers in words, or proposes
-// something else. The text is OURS, written per reason (nocx-avogl.3: never
-// the framework's stringification), and it says nothing the policy keeps
-// from the person — no effect lattice, no scope list, no error internals.
-//
-// kind is the declined proposal's standing half (the person's own no); empty
-// for a policy refusal, which is standing only when the matrix row says so.
-// detail is supplied only by the fixed floor, whose sentence names the
-// operation rather than exposing policy internals.
 func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, detail ...string) string {
 	switch reason {
 	case RefusedOutOfScope:
@@ -1466,6 +1472,11 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		// keep trying. Only the person can start a turn, so the answer is
 		// to say so in words.
 		return "REFUSED: nocx did not run your call to " + tool + ": the authority this question was given has expired. Nothing further will run under it. Say what you were about to do, in words, so the person can ask again."
+	case RefusedRemotePane:
+		// The sentence names the reason the call has no capability at all,
+		// and what a model can still do: the pane's own shell is reachable
+		// (session.run acts where the pane is), the local disk is not.
+		return "REFUSED: nocx did not run your call to " + tool + ": this pane is on another machine, and nocx's file tools act on the machine nocx runs on — the remote file tools are coming. Use session.run to do the work in the pane, or say in words what you would need."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {
@@ -1891,6 +1902,11 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 }
 
 func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
+	return k.invokeInvocation(ToolInvocation{Context: ctx, Method: name, RunContext: k.runCtx, Grant: k.currentGrant(), RawParams: []byte(rawArgs)}, callID)
+}
+
+func (k *effectKernel) invokeInvocation(request ToolInvocation, callID string) (modelResult, error) {
+	ctx, name := request.Context, request.Method
 	// The call runs through the authority pipeline (nocx-a62cl.3.2). What the
 	// kernel used to do in one gate closure is the chain's points now:
 	// command classification is a fact preparation derived, the matrix,
@@ -1899,7 +1915,14 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// attempt opens between them and the narrowed capability, and the
 	// approver is an adapter that keeps the kernel's own suspension exactly
 	// until nocx-a62cl.3.4 replaces it with a service that blocks.
-	release, declined, enterErr := k.order.enter(ctx)
+	var release func()
+	var declined *Declined
+	var enterErr error
+	if request.orderReservation != nil {
+		release, declined, enterErr = request.orderReservation.enter(ctx)
+	} else {
+		release, declined, enterErr = k.order.enter(ctx)
+	}
 	if enterErr != nil {
 		return modelResult{}, &PipelineRefusal{
 			Call:   Call{runID: k.runID, tool: name},
@@ -1915,19 +1938,13 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 		return modelResult{text: reason, kind: modelNocxMessage}, nil
 	}
+	request.Grant = k.currentGrant()
 	state := &kernelCall{kernel: k}
 	chain := k.authorityChain(state)
 	// The kernel retains the slot through outcome recording, beyond run.
 	pipeline, pipelineErr := NewPipeline(k.dispatcher, chain)
 	if pipelineErr != nil {
 		return modelResult{}, pipelineErr
-	}
-	request := ToolInvocation{
-		Context:    ctx,
-		Method:     name,
-		RunContext: k.runCtx,
-		Grant:      k.grant,
-		RawParams:  []byte(rawArgs),
 	}
 	outcome, dispatchErr := pipeline.runOrdered(request, k.attempt, callID, true)
 	if dispatchErr != nil {

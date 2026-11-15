@@ -17,13 +17,17 @@ import (
 // session and grant are already bound by the caller adapter; method params
 // cannot add authority to either one.
 type ToolInvocation struct {
+	// Dispatcher selects the admitted run's own authority pipeline.
+	Dispatcher ToolDispatcher
 	// Terminal is shared by cancellation, attempt recording and delivery.
-	Terminal   *CallTerminal
-	Context    context.Context
-	Method     string
-	RunContext agenttools.RunContext
-	Grant      content.Grant
-	RawParams  json.RawMessage
+	Terminal         *CallTerminal
+	orderReservation *turnReservation
+	agentCallID      <-chan string
+	Context          context.Context
+	Method           string
+	RunContext       agenttools.RunContext
+	Grant            content.Grant
+	RawParams        json.RawMessage
 }
 
 // ToolDispatcher is the common operation used by the in-process assistant and
@@ -31,6 +35,12 @@ type ToolInvocation struct {
 // validation, resource, capability, executor and result-contract pipeline.
 type ToolDispatcher interface {
 	Dispatch(ToolInvocation) (string, error)
+}
+
+// ToolRequestReserver reserves a call's position before asynchronous dispatch.
+// The carrier releases the reservation after dispatch, including on cancellation.
+type ToolRequestReserver interface {
+	ReserveInvocation(ToolInvocation) (ToolInvocation, func())
 }
 
 // ToolCatalogue projects the executable declarations admitted by a grant.

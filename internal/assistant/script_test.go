@@ -83,32 +83,6 @@ func runGrantIn(dir string) content.Grant {
 // provider proposing session.run, the real engine, the real gate — to the
 // question a person is shown. Not the middleware on its own: the question is
 // what this bead is about, and a person reaches it through Ask.
-func askAbout(t *testing.T, source ScriptSource, dir, command string) *ApprovalRequest {
-	t.Helper()
-	args, err := json.Marshal(map[string]string{"command": command})
-	if err != nil {
-		t.Fatalf("marshal args: %v", err)
-	}
-	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.run", args: string(args)}))
-	t.Cleanup(srv.Close)
-	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	grant := runGrantIn(dir)
-	p := askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore())
-	p.Scripts = source
-	p.Cwd = dir
-	q, askErr := withPerson(t, cl, p, Declined{Reason: "not this one"}, DeclineCallOnce)
-	if askErr != nil {
-		t.Fatalf("proposal %q: err = %v, want the person's no as the call's answer", command, askErr)
-	}
-	if len(q.asked) != 1 {
-		t.Fatalf("proposal %q: the person was asked %d times, want exactly 1", command, len(q.asked))
-	}
-	return q.asked[0]
-}
-
 func readingFor(t *testing.T, req *ApprovalRequest, path string) ScriptReading {
 	t.Helper()
 	for _, reading := range req.Scripts {
@@ -172,8 +146,8 @@ func TestApprovalQuestion_TheScriptChangesNothingAboutTheBinding(t *testing.T) {
 	if with.ArgHash != without.ArgHash {
 		t.Fatalf("argHash moved when a file was read: %q vs %q", with.ArgHash, without.ArgHash)
 	}
-	if with.CallID != without.CallID || with.Attempt != without.Attempt {
-		t.Fatal("the call id or attempt moved when a file was read")
+	if with.CallID == "" || without.CallID == "" || with.Attempt != without.Attempt {
+		t.Fatal("the call lost its identity or its attempt moved when a file was read")
 	}
 }
 
@@ -374,4 +348,31 @@ func executeOf(path string) content.Invocation {
 	return content.Invocation{Parsed: true, Resources: content.ResourceReport{Resources: []content.Resource{
 		{Path: path, Verb: content.ResourceExecute},
 	}}}
+}
+
+func askAbout(t *testing.T, source ScriptSource, dir, command string) *ApprovalRequest {
+	t.Helper()
+	args, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := runGrantIn(dir)
+	cl, _, err := NewClientAndRegistry(nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewApprovalStore()
+	q := &recordingQuestioner{store: store, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWith("", &grant, &fakeLedger{}, store, &fakeKnownMaterial{}, nil)
+	p.Scripts, p.Cwd, p.Questioner = source, dir, q
+	p.FreshGrant = func() *content.Grant { return &grant }
+	bound, err := BindRunTools(context.Background(), cl, p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = invokePaneTool(bound, "session.run", "call-1", string(args))
+	if len(q.asked) != 1 {
+		t.Fatalf("proposal %q: got %d questions, want 1", command, len(q.asked))
+	}
+	return q.asked[0]
 }

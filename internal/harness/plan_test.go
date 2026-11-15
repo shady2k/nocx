@@ -23,7 +23,7 @@ func (p *planProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	return Launch{Argv: []string{"/bin/sh", "-c", p.script}}, nil
 }
 
-func (p *planProtocol) NewCodec(info SessionInfo) Codec {
+func (p *planProtocol) NewCodec(info SessionInfo, _ Launch) Codec {
 	p.sessions <- info
 	if p.barrierFixture {
 		return &barrierCodec{}

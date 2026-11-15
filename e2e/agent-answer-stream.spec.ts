@@ -52,26 +52,23 @@ import {
   standalone as base,
   answerPermission,
   appReadyForInput,
+  ensureAssistantVault,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome, readScreenTool } from './pi-home'
 
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
-const nonce = Date.now().toString(36)
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -82,7 +79,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-shxv0-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -108,10 +105,12 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, 'vault-pass-answer-stream')
+  await page.locator(TITLE).first().click()
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
-  await page.keyboard.press('Meta+,')
+  await page.keyboard.press('ControlOrMeta+,')
   await settingsReady(page)
   await page.locator(navSelector).click()
 }
@@ -145,29 +144,13 @@ async function answerFinished(page: Page, question: string): Promise<void> {
   })
 }
 
-async function configureAssistant(page: Page, endpointName: string): Promise<void> {
-  await openSettings(page, SETTINGS_AI_NAV)
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-}
-
-const ENDPOINT_NAME = `E2E Answer Stream ${nonce}`
-
 test.describe('the assistant’s tool call is visible, where it happened (nocx-shxv0)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
   test('the call appears in the answer, before the text written from it', async ({ page }) => {
     const asks = recordAskSessions(page)
     await openApp(page)
-    await configureAssistant(page, ENDPOINT_NAME)
+    await openSettings(page, SETTINGS_POLICY_NAV)
 
     // The `observe` row is set to Allowed through the page a person uses, so
     // the proposed session.read EXECUTES instead of asking. (An unset row asks
@@ -189,11 +172,19 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
 
     // A real tool-calling run is TWO model responses: the proposal, then the
     // answer written from the result.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
-    fake.setScript({ chunks: ['The screen ', 'is empty.'] })
+    fake.setScript({ chunks: [], toolCalls: readScreenTool })
+    fake.setScript({ chunks: ['The screen ', 'is empty.'], holdAfter: 1 })
 
     const QUESTION = 'What command did I run?'
+    const beforeTool = fake.requests().length
     await askFromPrompt(page, QUESTION)
+    const requests = await fake.waitForRequests(beforeTool + 2)
+    const response = requests[beforeTool + 1]
+    await fake.waitForState(response.id, 'streaming')
+    const partial = answerBlock(page, QUESTION)
+    await expect(partial).toContainText('The screen')
+    await expect(partial).not.toHaveAttribute('data-outcome', 'success')
+    fake.release(response.id)
     await answerFinished(page, QUESTION)
     // Nobody was asked: the row is Allowed, so the run went straight
     // through. Asserted AFTER the terminal chip, so the absence is a fact

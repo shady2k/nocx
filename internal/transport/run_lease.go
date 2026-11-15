@@ -243,7 +243,7 @@ type runLease struct {
 	parkC chan struct{}
 
 	mu                sync.Mutex
-	cancel            context.CancelFunc
+	cancel            context.CancelCauseFunc
 	wallTimer         *time.Timer
 	wallDeadline      time.Time
 	inactTimer        *time.Timer
@@ -255,6 +255,7 @@ type runLease struct {
 	done              bool
 	suspended         bool
 	cancelStarted     bool
+	cancelReason      content.TerminationReason
 	// parked is set by the quiet bound and never cleared: it is a fact about
 	// THIS wait, and a resumed wait is a new one. renewals counts how many
 	// times the model answered "keep waiting" on this execution — carried on
@@ -290,7 +291,7 @@ func (l *runLease) setParkedEnd(end func(reason content.TerminationReason) foreg
 // find neither of them. It refuses when the run has already ended — a bound
 // fired, the person cancelled the turn — which is what the continuation
 // reports instead of waiting on an execution that is gone.
-func (l *runLease) takeBack(cancel context.CancelFunc) bool {
+func (l *runLease) takeBack(cancel context.CancelCauseFunc) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.done || l.firedReason != "" || l.cancelStarted {
@@ -348,7 +349,7 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 		cfg.SignalGrace = defaultRunSignalGrace
 	}
 	enabled := cfg.WallClock > 0 || cfg.Inactivity > 0 || cfg.OutputBudget > 0
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	// A PARKED LEASE IS NOT TORN DOWN. Its wall timer is the person's
 	// ceiling, armed once at the first submission and never re-armed, so it
 	// keeps running while the model is being asked and across every renewal
@@ -360,7 +361,7 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 		if l.isParked() {
 			return
 		}
-		cancel()
+		cancel(nil)
 		l.disarm()
 	}()
 
@@ -371,9 +372,10 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	l.mu.Lock()
 	l.cancel = cancel
 	if l.cancelStarted {
+		reason := l.cancelReason
 		l.mu.Unlock()
-		cancel()
-		return context.Canceled
+		cancel(assistant.TurnEndedCause(reason))
+		return context.Cause(ctx)
 	}
 	if enabled {
 		if cfg.WallClock > 0 {
@@ -444,7 +446,7 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 			errors.Is(err, ErrRequestUndelivered)) {
 		l.escalate()
 	}
-	return err
+	return runRequestCause(ctx, err)
 }
 
 // superviseResume supervises a CONTINUATION of an execution that is already
@@ -458,11 +460,12 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 // new caller's context (a bound firing must reach the goroutine that is
 // actually waiting) and leaves every timer exactly as it was.
 func (l *runLease) superviseResume(ctx context.Context, fn func(ctx context.Context) error) error {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	if !l.takeBack(cancel) {
-		cancel()
+		cancel(nil)
 		l.mu.Lock()
 		reason := l.firedReason
+		cancelReason := l.cancelReason
 		l.mu.Unlock()
 		if reason != "" {
 			// A bound fired in the instant this continuation was taking the
@@ -471,13 +474,16 @@ func (l *runLease) superviseResume(ctx context.Context, fn func(ctx context.Cont
 			// nobody caused.
 			return &assistant.RunLeaseError{Reason: reason, Err: context.Canceled}
 		}
+		if cancelReason != "" {
+			return assistant.TurnEndedCause(cancelReason)
+		}
 		return context.Canceled
 	}
 	defer func() {
 		if l.isParked() {
 			return
 		}
-		cancel()
+		cancel(nil)
 		l.disarm()
 	}()
 
@@ -503,6 +509,15 @@ func (l *runLease) superviseResume(ctx context.Context, fn func(ctx context.Cont
 		errors.Is(err, ErrRequestDisconnected) ||
 		errors.Is(err, ErrRequestUndelivered)) {
 		l.escalate()
+	}
+	return runRequestCause(ctx, err)
+}
+
+// runRequestCause preserves why a broker request was withdrawn. The broker
+// observes ctx.Err(), while the terminal decision needs the chosen cause.
+func runRequestCause(ctx context.Context, err error) error {
+	if errors.Is(err, context.Canceled) && context.Cause(ctx) != nil {
+		return context.Cause(ctx)
 	}
 	return err
 }
@@ -534,7 +549,7 @@ func (l *runLease) fire(reason content.TerminationReason) {
 		return
 	}
 	if cancel != nil {
-		cancel()
+		cancel(nil)
 	}
 }
 
@@ -732,13 +747,14 @@ func (l *runLease) escalate() foregroundOutcome {
 // claim is taken AND again after the withdrawal, because those are two
 // different instants and the request can finish between them — so a late turn
 // cancellation can never signal a command the person started afterwards.
-func (l *runLease) cancelExecution() foregroundOutcome {
+func (l *runLease) cancelExecution(reason content.TerminationReason) foregroundOutcome {
 	l.mu.Lock()
 	if l.done || l.cancelStarted {
 		l.mu.Unlock()
 		return foregroundNothingRunning
 	}
 	l.cancelStarted = true
+	l.cancelReason = reason
 	cancel := l.cancel
 	parkedEnd := l.parkedEnd
 	l.mu.Unlock()
@@ -746,7 +762,7 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 	// withdraws the request and runs the ladder. Going round it here would
 	// leave the broker request pending with nobody able to resolve it.
 	if parkedEnd != nil {
-		return parkedEnd(content.TermUserKilled)
+		return parkedEnd(reason)
 	}
 	if cancel == nil {
 		// The control attached this lease before supervise armed the broker
@@ -769,11 +785,11 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 	if l.sess == nil {
 		l.log.Warn("run lease: no local process group to signal — the execution keeps running",
 			"session_id", string(l.sid))
-		cancel()
+		cancel(assistant.TurnEndedCause(reason))
 		return foregroundUnsupported
 	}
 	pgid, outcome, named := foregroundJob(l.log, l.sid, l.sess)
-	cancel()
+	cancel(assistant.TurnEndedCause(reason))
 	if !named {
 		return outcome
 	}

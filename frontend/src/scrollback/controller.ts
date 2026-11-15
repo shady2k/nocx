@@ -17,7 +17,6 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { StoredBlockRows } from './block-rows'
 import { gridRows, publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
-import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
@@ -119,7 +118,6 @@ export interface ScrollbackControllerOpts {
    *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
   answerText?: (entryId: string) => Promise<string | null>
   /** The recorded provider drives for one finished answer turn. */
-  dump?: (entryId: string) => Promise<AgentDump>
   /** Reads back what a tool call returned, for the call's own expansion
    *  (nocx-hp8p2.13). Absent and a call draws none. */
   toolResult?: (actionEntryId: string) => Promise<string | null>
@@ -329,7 +327,6 @@ export class ScrollbackController {
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
-      dump: opts.dump,
       toolResult: opts.toolResult,
       runningActions: opts.runningActions,
     })

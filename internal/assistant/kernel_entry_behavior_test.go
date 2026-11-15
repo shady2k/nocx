@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -78,4 +79,13 @@ func (s *kernelEntrySessionSource) ListSessionItems(_ context.Context, _ string,
 
 func (*kernelEntrySessionSource) ReadSessionItem(context.Context, string, string, int, int) (SessionItemRead, error) {
 	return SessionItemRead{}, errors.New("unexpected session.read call")
+}
+
+func TestClientHasNoInProcessModelLoop(t *testing.T) {
+	typ := reflect.TypeOf((*Client)(nil)).Elem()
+	for _, name := range []string{"Ask", "Probe"} {
+		if _, ok := typ.MethodByName(name); ok {
+			t.Errorf("Client still exposes %s", name)
+		}
+	}
 }

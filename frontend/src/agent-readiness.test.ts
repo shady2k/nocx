@@ -4,7 +4,7 @@
 // the store is a stored fact with a refresh, not a function called at
 // refusal time — the shape terminal-content.ts had, which cannot repaint
 // anything. The second is the ordering rule: two refreshes racing is the
-// ORDINARY case (add an endpoint, then immediately choose a model is one
+// ORDINARY case (configure an agent, then immediately choose a model is one
 // gesture apart), so a reply that resolves late must never repaint over a
 // newer one.
 import { describe, it, expect, vi } from 'vitest'
@@ -15,27 +15,21 @@ import type { AgentStatusResult } from './generated/agent.status'
  *  state; every test names only the facts it is about. */
 function status(over: Partial<AgentStatusResult> = {}): AgentStatusResult {
   return {
-    endpointConfigured: true,
-    credential: 'resolvable',
-    lastProbe: null,
-    answering: { ready: true, reason: null, endpoint: 'openrouter', model: 'm-a' },
+    message: null,
+    answering: { ready: true, reason: null, agentId: 'openrouter', model: 'm-a' },
     ...over,
   }
 }
 
 const READY = status()
-const UNASSIGNED = status({
-  credential: null,
-  answering: { ready: false, reason: 'unassigned', endpoint: null, model: null },
+const MISSING_MODEL = status({
+  answering: { ready: false, reason: 'model-gone', agentId: null, model: null },
 })
-const NO_ENDPOINTS = status({
-  endpointConfigured: false,
-  credential: null,
-  answering: { ready: false, reason: 'no-endpoints', endpoint: null, model: null },
+const NOT_INSTALLED = status({
+  answering: { ready: false, reason: 'not-installed', agentId: null, model: null },
 })
 const UNAVAILABLE = status({
-  credential: null,
-  answering: { ready: false, reason: 'unavailable', endpoint: null, model: null },
+  answering: { ready: false, reason: 'unavailable', agentId: null, model: null },
 })
 
 /** A source whose answers are queued: each call takes the next deferred,
@@ -74,15 +68,15 @@ describe('AgentReadiness — the one owner of the readiness fact (AD-8)', () => 
     const readiness = new AgentReadiness({ status: () => Promise.resolve(answer) })
     const unsub = readiness.subscribe((st) => seen.push(st))
     await readiness.refresh()
-    answer = UNASSIGNED
+    answer = MISSING_MODEL
     await readiness.refresh()
-    expect(seen).toEqual([READY, UNASSIGNED])
+    expect(seen).toEqual([READY, MISSING_MODEL])
     unsub()
-    answer = NO_ENDPOINTS
+    answer = NOT_INSTALLED
     await readiness.refresh()
-    expect(seen).toEqual([READY, UNASSIGNED])
+    expect(seen).toEqual([READY, MISSING_MODEL])
     // The store itself still moved — only the listener stopped hearing.
-    expect(readiness.status).toEqual(NO_ENDPOINTS)
+    expect(readiness.status).toEqual(NOT_INSTALLED)
   })
 
   it('discards a late reply that would repaint an older state', async () => {
@@ -93,7 +87,7 @@ describe('AgentReadiness — the one owner of the readiness fact (AD-8)', () => 
     const seen: Array<AgentStatusResult | null> = []
     readiness.subscribe((st) => seen.push(st))
 
-    // Two asks in flight: the first carries the OLD facts (no endpoint),
+    // Two asks in flight: the first carries the OLD facts (no agent ready),
     // the second the new ones. The second answers first.
     const first = readiness.refresh()
     const second = readiness.refresh()
@@ -101,7 +95,7 @@ describe('AgentReadiness — the one owner of the readiness fact (AD-8)', () => 
     await second
     expect(readiness.status).toEqual(READY)
 
-    settle(0, NO_ENDPOINTS)
+    settle(0, NOT_INSTALLED)
     await first
     // The older answer arrived last and changed nothing: no repaint, and
     // no second notification.
@@ -133,32 +127,77 @@ describe('AgentReadiness — the one owner of the readiness fact (AD-8)', () => 
 })
 
 describe('modelChipState — the chip reads the ladder, it does not invent words', () => {
-  it('names the endpoint and the model when the answering role resolves', () => {
-    expect(modelChipState(READY)).toEqual({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+  it('names the agent and the model when the answering role resolves', () => {
+    expect(modelChipState(READY)).toEqual({ kind: 'ready', agentId: 'openrouter', model: 'm-a' })
   })
 
   it("offers the rung's own sentence and the page that fixes it", () => {
-    expect(modelChipState(UNASSIGNED)).toEqual({
+    expect(modelChipState(MISSING_MODEL)).toEqual({
       kind: 'action',
-      text: 'Choose a model',
-      page: 'roles',
+      text: 'The answering agent is unavailable.',
+      page: 'agent-installed',
     })
-    expect(modelChipState(NO_ENDPOINTS)).toEqual({
+    expect(modelChipState(NOT_INSTALLED)).toEqual({
       kind: 'action',
-      text: 'Add an endpoint first',
-      page: 'endpoints',
+      text: 'The answering agent is unavailable.',
+      page: 'agent-installed',
     })
   })
 
   it('gives a rung no page when no page repairs it', () => {
     expect(modelChipState(UNAVAILABLE)).toEqual({
       kind: 'action',
-      text: 'Settings could not be read — the assistant is unavailable',
-      page: null,
+      text: 'The answering agent is unavailable.',
+      page: 'agent-installed',
     })
   })
 
   it('has nothing to say before a status has been read', () => {
     expect(modelChipState(null)).toBeNull()
+  })
+})
+
+it('shows Agent default as ready when the harness does not name an explicit model', () => {
+  expect(
+    modelChipState(
+      status({ answering: { ready: true, reason: null, agentId: 'pi', model: null } }),
+    ),
+  ).toEqual({ kind: 'ready', agentId: 'pi', model: 'Agent default' })
+})
+
+describe('AgentReadiness invocation gate', () => {
+  it.each([
+    ['not-installed', 'Install pi to use the assistant.'],
+    ['not-configured', 'Configure a provider in pi.'],
+    ['not-configured', 'The provider credentials are invalid.'],
+    ['model-gone', 'The chosen model is no longer available.'],
+  ] as const)(
+    'opens agent settings with the %s reason before invoking',
+    async (reason, message) => {
+      const readiness = new AgentReadiness({
+        status: () =>
+          Promise.resolve(
+            status({
+              answering: { ready: false, reason, agentId: 'pi', model: null },
+              message,
+            }),
+          ),
+      })
+      const repair = vi.fn()
+      expect(await readiness.ensureReady(repair)).toBe(false)
+      expect(repair).toHaveBeenCalledExactlyOnceWith(message)
+      expect(modelChipState(readiness.status)).toEqual({
+        kind: 'action',
+        text: message,
+        page: 'agent-installed',
+      })
+    },
+  )
+
+  it('allows a ready agent without opening settings', async () => {
+    const readiness = new AgentReadiness({ status: () => Promise.resolve(READY) })
+    const repair = vi.fn()
+    expect(await readiness.ensureReady(repair)).toBe(true)
+    expect(repair).not.toHaveBeenCalled()
   })
 })

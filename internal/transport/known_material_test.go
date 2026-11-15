@@ -51,9 +51,7 @@ func createSecret(t *testing.T, v *vault.Vault, name, value string) {
 }
 
 func adapterKnownMaterial(v *vault.Vault) assistant.KnownMaterial {
-	resolver := credential.NewResolver(v, func(err error) bool {
-		return errors.Is(err, vault.ErrVaultSealed)
-	}, v)
+	resolver := credential.NewResolver(v, v)
 	return NewVaultKnownMaterial(v, resolver, v)
 }
 

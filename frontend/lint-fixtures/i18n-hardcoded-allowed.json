@@ -41,30 +41,6 @@
       "reason": "the trailing question mark of a composed question title; the words come from t(), the punctuation is the template literal static (same shape as the secrets name-composites)"
     },
     {
-      "file": "src/endpoints-section.tsx",
-      "context": "attr:placeholder",
-      "snippet": "X-Title",
-      "reason": "example value — a header name the person replaces"
-    },
-    {
-      "file": "src/endpoints-section.tsx",
-      "context": "attr:placeholder",
-      "snippet": "gpt-4o",
-      "reason": "example value — a model name the person replaces"
-    },
-    {
-      "file": "src/endpoints-section.tsx",
-      "context": "attr:placeholder",
-      "snippet": "https://api.example.com/v1",
-      "reason": "example value — a sample URL"
-    },
-    {
-      "file": "src/endpoints-section.tsx",
-      "context": "attr:placeholder",
-      "snippet": "nocx",
-      "reason": "example value — the product's own name"
-    },
-    {
       "file": "src/environment-commands.ts",
       "context": "prop:label",
       "snippet": "su",
@@ -116,12 +92,6 @@
       "context": "prop:message",
       "snippet": "\"\"",
       "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
-    },
-    {
-      "file": "src/ui/dump-panel.tsx",
-      "context": "dom:textContent",
-      "snippet": "[DONE]",
-      "reason": "wire sentinel — the stream's own end marker, printed as the protocol spells it"
     }
   ]
 }

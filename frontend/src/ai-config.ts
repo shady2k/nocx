@@ -13,7 +13,7 @@
  * answers that is not true.
  *
  * So a write that lands announces itself, here. Every write to this
- * configuration already goes through one place (`EndpointClient`), which is
+ * configuration already goes through one place (`RolesClient`), which is
  * where the announcement is raised; the terminal pane listens while it is in
  * front and asks again. It is not a poll and not a timer: it fires on the
  * reply to the write, which is the moment the fact changed.

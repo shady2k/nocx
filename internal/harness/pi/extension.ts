@@ -18,6 +18,6 @@ export default function (pi) {
     })
   }
   pi.on('before_agent_start', (event) => ({
-    systemPrompt: event.systemPrompt + '\n\n' + session.systemPrompt,
+    systemPrompt: event.systemPrompt + '\n\n' + readFileSync(session.promptFile, 'utf8'),
   }))
 }

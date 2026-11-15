@@ -41,12 +41,12 @@ var countPrefixRe = regexp.MustCompile(`^\d+ operations need the vault: `)
 // sealed, wired to the real WSServer's RequestUnlock as its prompt carrier,
 // with a real renderer connection attached.
 type sealedUnlockHarness struct {
-	h *endpointHarness
+	h *configVaultHarness
 }
 
 func newSealedUnlockHarness(t *testing.T) *sealedUnlockHarness {
 	t.Helper()
-	h := newEndpointHarness(t)
+	h := newConfigVaultHarness(t)
 	h.setupAndUnseal()
 	h.v.Seal()
 	if h.v.State() != vault.StateSealed {

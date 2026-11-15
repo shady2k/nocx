@@ -15,9 +15,8 @@
  * streamOK/chunkJSON): each content delta is one
  * `data: {chat.completion.chunk JSON}\n\n` frame carrying
  * delta.role/content and finish_reason ("" on content chunks, "stop" on the
- * last), then a `data: [DONE]\n\n` terminator. The eino adapter is the
- * single consumer of both, so a drift here would be a second protocol
- * variant with a delay fuse — the whole reason the shapes must match.
+ * last), then a `data: [DONE]\n\n` terminator. Real pi consumes these
+ * responses using the provider configured in the disposable home.
  *
  * AND THE MODEL CAN PROPOSE A TOOL. `toolCalls` scripts one
  * `delta.tool_calls` frame finishing the response with `tool_calls` — the
@@ -118,6 +117,19 @@ export interface StreamScript {
   toolCalls?: ScriptedToolCall[] | ((body: string) => ScriptedToolCall[])
 }
 
+/** Match semantic tool scripts to the MCP names the agent actually offered. */
+function scriptedCalls(body: string, script: StreamScript): ScriptedToolCall[] {
+  const calls =
+    typeof script.toolCalls === 'function' ? script.toolCalls(body) : (script.toolCalls ?? [])
+  const request = JSON.parse(body) as { tools?: { function: { name: string } }[] }
+  return calls.map((call) => {
+    const advertised = request.tools?.find(
+      (tool) => tool.function.name === `mcp__nocx__${call.name.replaceAll('.', '_')}`,
+    )
+    return advertised ? { ...call, name: advertised.function.name } : call
+  })
+}
+
 const CHUNK_ID = 'chatcmpl-e2e'
 
 /** One OpenAI chat.completion.chunk frame, byte-identical in shape to
@@ -143,12 +155,8 @@ function chunkFrame(model: string, content: string, finish: string): string {
  *  delta into `[]openai.ToolCall` and maps it to `schema.ToolCall`
  *  (eino-ext/libs/acl/openai chat_model.go, toMessageToolCalls), so `id`
  *  becomes the call id the approval binding names, `type` must be
- *  "function", and `function.arguments` is a STRING the middleware
- *  validates against the tool's params schema. `index` is deliberately
- *  ABSENT: eino concatenates a stream's tool calls by index and a call
- *  delivered whole in one frame needs no merging (eino schema/message.go,
- *  concatToolCalls appends an index-less chunk as it stands) — which is
- *  exactly what both Go fakes do.
+ *  "function", and `function.arguments` is a STRING. `index` identifies the
+ *  call within the streamed response, as pi's OpenAI client requires.
  *
  *  A REAL provider may split one call's arguments across several frames.
  *  This fake does not, because nothing in this suite tests eino's
@@ -166,6 +174,7 @@ function toolCallFrame(model: string, calls: readonly ScriptedToolCall[]): strin
         delta: {
           role: 'assistant',
           tool_calls: calls.map((c, i) => ({
+            index: i,
             id: c.id ?? `call_${i + 1}`,
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.arguments) },
@@ -390,10 +399,7 @@ export class FakeOpenAI {
       )
       return
     }
-    const calls =
-      typeof script.toolCalls === 'function'
-        ? script.toolCalls(record.body)
-        : (script.toolCalls ?? [])
+    const calls = scriptedCalls(record.body, script)
     const model = script.model ?? 'e2e-model'
     const message: Record<string, unknown> = {
       role: 'assistant',
@@ -436,10 +442,7 @@ export class FakeOpenAI {
     res.flushHeaders()
 
     const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
-    const calls =
-      typeof script.toolCalls === 'function'
-        ? script.toolCalls(record.body)
-        : (script.toolCalls ?? [])
+    const calls = scriptedCalls(record.body, script)
     const model = script.model ?? 'e2e-model'
     const holdAfter = script.holdAfter ?? chunks.length
     let i = 0

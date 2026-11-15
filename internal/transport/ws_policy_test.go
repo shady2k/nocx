@@ -28,19 +28,10 @@ import (
 func newPolicyHarness(t *testing.T) (*askHarness, *assistant.GlobalPolicyStore) {
 	t.Helper()
 	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
-	return newAskHarnessWithOpts(t, mustClient(t),
+	return newAskHarnessWithOpts(t, answerScript("done"),
 		WithAgentPolicy(store),
 		WithLiveEffects(agenttools.LiveEffects()),
 	), store
-}
-
-func mustClient(t *testing.T) assistant.Client {
-	t.Helper()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	return client
 }
 
 // TestPolicyGet_ReturnsTheEffectivePolicy checks the matrix travels whole:
@@ -143,7 +134,7 @@ func TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem(t *testing.T
 	if err != nil {
 		t.Fatalf("seed rule: %v", err)
 	}
-	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(store))
+	h := newAskHarnessWithOpts(t, answerScript("done"), WithAgentPolicy(store))
 
 	raw := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
 		"policy": map[string]any{
@@ -197,7 +188,7 @@ func TestPolicySet_NoConfigurationPathNamesATool(t *testing.T) {
 // TestPolicyGet_UnwiredIsUnavailable: without the composition root's seam,
 // the methods answer method-not-found — the state before a policy is named.
 func TestPolicyGet_UnwiredIsUnavailable(t *testing.T) {
-	h := newAskHarness(t, mustClient(t)) // no WithAgentPolicy
+	h := newAskHarness(t, answerScript("done")) // no WithAgentPolicy
 	raw := jsonrpcCall(t, h.conn, "policy.get", nil)
 	var env struct {
 		Error *jsonrpcErrorObj `json:"error"`
@@ -305,7 +296,7 @@ func TestPolicyResult_LiveIsNeverANull(t *testing.T) {
 // [] on the wire out.
 func TestPolicyGet_UnnamedLiveEffectsIsAnEmptyListNotANull(t *testing.T) {
 	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
-	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(store)) // no WithLiveEffects
+	h := newAskHarnessWithOpts(t, answerScript("done"), WithAgentPolicy(store)) // no WithLiveEffects
 
 	raw := jsonrpcCall(t, h.conn, "policy.get", nil)
 	var env struct {
@@ -637,7 +628,7 @@ func TestPolicySetRule_NoConfigurationPathNamesATool(t *testing.T) {
 // TestPolicyRuleMethods_UnwiredAreUnavailable: without the composition root's
 // seam both answer method-not-found, the same way policy.get does.
 func TestPolicyRuleMethods_UnwiredAreUnavailable(t *testing.T) {
-	h := newAskHarness(t, mustClient(t)) // no WithAgentPolicy
+	h := newAskHarness(t, answerScript("done")) // no WithAgentPolicy
 	for method, params := range map[string]map[string]any{
 		"policy.setRule":    {"rule": exactRuleParams("df", "-h")},
 		"policy.forgetRule": {"id": "0123456789abcdef0123456789abcdef"},

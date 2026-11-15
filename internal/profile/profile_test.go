@@ -60,7 +60,6 @@ func TestMintedIDsRespectThe128RuneBound(t *testing.T) {
 		"profile unicode name":   func() string { return NewProfileID("ssh", longUnicode) },
 		"profile long namespace": func() string { return NewProfileID(longUnicode, "host") },
 		"group":                  func() string { return NewGroupID(longASCII) },
-		"endpoint":               func() string { return NewEndpointID(longASCII) },
 	}
 	for name, mint := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -84,7 +83,6 @@ func TestMintedIDSlugBudgetsAreInclusive(t *testing.T) {
 	}{
 		{name: "profile", budget: 84, mint: func(name string) string { return NewProfileID("ssh", name) }},
 		{name: "group", budget: 82, mint: NewGroupID},
-		{name: "endpoint", budget: 79, mint: NewEndpointID},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

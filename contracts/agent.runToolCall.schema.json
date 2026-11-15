@@ -72,7 +72,15 @@
         "kind": {
           "description": "The resource kind, from the ledger's closed set.",
           "type": "string",
-          "enum": ["path", "session", "environment", "credential", "destination"]
+          "enum": [
+            "path",
+            "session",
+            "environment",
+            "credential",
+            "destination",
+            "content",
+            "workspace"
+          ]
         },
         "id": { "description": "The resource's id.", "type": "string", "minLength": 1 }
       }

@@ -1,12 +1,8 @@
 package transport
 
-// agent.ask end to end (nocx-x8s2.2): the run the f4s5 transaction prepares
-// is driven by the assistant engine, the answer streams into the ledger and
-// over the wire, and the run terminalizes. The engine under test is a
-// SCRIPTED stub — the real streaming against a fake OpenAI SSE server is
-// proven in internal/assistant; here the orchestration (endpoint resolve,
-// transaction, notifications, terminal states, ledger writes) is proven
-// without dialling anything.
+// agent.ask runs through a real persistent fake-agent process, session actor,
+// tool endpoint and MCP bridge. Scripts control agent output; transport,
+// authority, notifications and ledger writes stay on the production path.
 
 import (
 	"bytes"
@@ -24,7 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
@@ -50,62 +46,22 @@ func (b *synchronizedBuffer) String() string {
 	return b.buf.String()
 }
 
-// scriptedAssistantClient is the injected engine: Ask plays back a script of
-// deltas and an outcome, so the orchestration is deterministic.
-type scriptedAssistantClient struct {
-	mu             sync.Mutex
-	deltas         []string
-	err            error // terminal error Ask returns after the deltas
-	received       []assistant.Message
-	receivedParams assistant.AskParams
-	aborted        bool // onDelta returned an error and Ask aborted
-	release        <-chan struct{}
-	askCalls       int // how many times Ask ran — the "was the model called" fact
-}
-
-func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true, Model: p.Model}, nil
-}
-
-// Discard implements assistant.Client. This fake holds no suspended
-// state, so there is nothing to drop.
-func (*scriptedAssistantClient) Discard(string) {}
-
-func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.release != nil {
-		select {
-		case <-s.release:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	s.askCalls++
-	s.received = append([]assistant.Message(nil), p.Messages...)
-	s.receivedParams = p
-	for _, d := range s.deltas {
-		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: d}); err != nil {
-			s.aborted = true
-			return err
-		}
-	}
-	return s.err
-}
-
 // askHarness is a full transport env for the ask flow: real content store,
-// real vault, real profile store, scripted engine.
+// real vault, real profile store, and a subprocess agent.
 type askHarness struct {
-	t    *testing.T
-	v    *vault.Vault
-	db   content.ContentDB
-	ws   *WSServer
-	conn *websocket.Conn
-	logs *synchronizedBuffer
+	t        *testing.T
+	v        *vault.Vault
+	db       content.ContentDB
+	profiles storage.DocumentStore
+	ws       *WSServer
+	conn     *websocket.Conn
+	logs     *synchronizedBuffer
+	agent    *scriptedAgentFixture
+	script   protocol.Script
 }
 
-func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
-	return newAskHarnessWithOpts(t, client)
+func newAskHarness(t *testing.T, script protocol.Script) *askHarness {
+	return newAskHarnessWithOpts(t, script)
 }
 
 // newAskHarnessWithOpts is newAskHarness with additional WSServerOptions —
@@ -135,7 +91,7 @@ func askHarnessParallel(t *testing.T) {
 
 var askHarnessParallelised sync.Map
 
-func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSServerOption) *askHarness {
+func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
 	askHarnessParallel(t)
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
@@ -170,16 +126,27 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 	t.Cleanup(func() { _ = db.Close() })
 	askPaneIn(t, db)
 
+	agent := newScriptedAgent(t, script)
+	// The real client binds the run kernel; model turns still use the subprocess harness.
+	kernel, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	opts := []WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
 		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
-		WithAssistantClient(client),
-		WithAssistantProbeStore(assistant.NewProbeStore()),
+		WithAgentHarness("fixture", agent.harness),
+		WithAssistantClient(kernel),
 	}
 	opts = append(opts, extra...)
 	serverLogs := &synchronizedBuffer{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("ask server logs:\n%s", serverLogs.String())
+		}
+	})
 	serverLogger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(serverLogs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	ws := NewWSServer(serverLogger, newRegWithStub(serverLogger), opts...)
 	ctx := t.Context()
@@ -189,34 +156,31 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &askHarness{t: t, v: v, db: db, ws: ws, conn: conn, logs: serverLogs}
+	return &askHarness{t: t, v: v, db: db, profiles: docStore, ws: ws, conn: conn, logs: serverLogs, agent: agent, script: agent.script}
 }
 
-// createEndpoint makes one endpoint with a resolvable key.
-func (h *askHarness) createEndpoint() {
+// seedLegacyRole writes the endpoint-based format left by older installs.
+// It is deliberately not sent to roles.assign: new writes require an agentId.
+func (h *askHarness) seedLegacyRole(endpointID, model string) {
 	h.t.Helper()
-	e, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Local",
-		"baseUrl": "http://127.0.0.1:11434/v1",
-		"schema":  "openai-compatible",
-		"key":     "sk-test-123",
-		"models":  []map[string]any{{"name": "qwen3"}},
-	}))
-	if code != 0 {
-		h.t.Fatalf("endpoints.create: code %d", code)
+	var document map[string]any
+	if _, err := h.profiles.Read("p.json", &document); err != nil {
+		h.t.Fatalf("read legacy profile document: %v", err)
 	}
-	// The ask now resolves through the ANSWERING ROLE (bead nocx-e6kn2),
-	// so the ordinary path's fixture assigns the role as well: an endpoint
-	// with models but no role assignment is refused, by design.
-	assign := jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
-		"role":       "answering",
-		"endpointId": e.ID,
-		"model":      "qwen3",
-	})
-	if isErrorResponse(h.t, assign) {
-		h.t.Fatalf("roles.assign: %s", assign)
+	if document == nil {
+		document = map[string]any{}
+	}
+	document["roles"] = []map[string]any{{"role": "answering", "endpointId": endpointID, "model": model}}
+	if err := h.profiles.Write("p.json", document); err != nil {
+		h.t.Fatalf("write legacy role assignment: %v", err)
 	}
 }
+
+func (h *askHarness) prompt() protocol.Prompt { return h.agent.prompt() }
+func (h *askHarness) toolResult() string      { return h.agent.toolResult() }
+func (h *askHarness) release()                { h.agent.release() }
+func (h *askHarness) waitHung()               { h.agent.waitHung() }
+func (h *askHarness) pid() int                { return h.agent.pid() }
 
 // ── the happy path: ask → deltas on the right entry → terminal completed ──
 
@@ -226,9 +190,8 @@ func (h *askHarness) createEndpoint() {
 // entry id; runDelta carries runId + entryId + ascending seq + text;
 // runState closes the run.
 func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"hello", " ", "world"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	script := answerScript("hello", " ", "world")
+	h := newAskHarness(t, script)
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
@@ -247,15 +210,15 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	if res.EntryID == "" {
 		t.Fatal("ask result carries no answerEntryId — the renderer cannot place the answer block")
 	}
-	if res.Model != "qwen3" {
-		t.Errorf("ask result model = %q, want qwen3 — the person must be able to tell which model answered (nocx-e6kn2)", res.Model)
+	if res.Model != "" {
+		t.Errorf("prepared ask model = %q, want unset before the harness answers", res.Model)
 	}
 
 	// The deltas arrive as agent.runDelta with ascending seq, routed by
 	// runId and entryId.
 	wantSeq := 0
 	var streamed string
-	for range client.deltaCount() {
+	for range len(script.Steps) - 1 {
 		raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 		var d struct {
 			RunID   int64  `json:"runId"`
@@ -285,7 +248,8 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	// No terminal output is inlined into the prompt. The old frame-reference
 	// path is gone; marked items are described by metadata and read through
 	// session.read instead.
-	messages := client.messages()
+	prompt := h.prompt()
+	messages := []struct{ Role, Content string }{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
 	var full string
 	for _, m := range messages {
 		full += m.Content + "\n"
@@ -360,10 +324,10 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	}
 }
 
-// ── no endpoint configured: the ask is a refusal the surface can render ──
+// ── a harness ask does not require legacy endpoint configuration ──
 
-func TestAgentAsk_NoEndpointIsARefusal(t *testing.T) {
-	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"x"}})
+func TestAgentAsk_NoLegacyEndpointStillUsesHarness(t *testing.T) {
+	h := newAskHarness(t, answerScript("x"))
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":           "ask-1",
@@ -372,28 +336,20 @@ func TestAgentAsk_NoEndpointIsARefusal(t *testing.T) {
 		"cwd":             "/repo",
 		"attachedContent": []any{},
 	}, 2)
-	if errObj == nil {
-		t.Fatal("ask with no endpoint succeeded, want a refusal")
+	if errObj != nil {
+		t.Fatalf("ask without legacy endpoint: %+v", errObj)
 	}
-	// The refusal names the ANSWERING ROLE and its repair: resolution goes
-	// through the role (bead nocx-e6kn2) — a role with no assignment is a
-	// visible refusal, never a silent fallback to some other model.
-	if !strings.Contains(errObj.Message, "answering role") {
-		t.Errorf("refusal message = %q, want it to name the answering role", errObj.Message)
-	}
-	if !strings.Contains(errObj.Message, "Roles") {
-		t.Errorf("refusal message = %q, want it to name the repair (Settings → Roles)", errObj.Message)
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if got := h.prompt().Text; !strings.HasPrefix(got, "q") {
+		t.Fatalf("harness prompt = %q, want question", got)
 	}
 }
 
-// ── failure: the model fails mid-stream → failed with a renderable reason ─
-
 func TestAgentAsk_ModelFailureTerminalizesFailed(t *testing.T) {
-	h := newAskHarness(t, &scriptedAssistantClient{
-		deltas: []string{"partial"},
-		err:    &assistant.StreamError{Message: "the model returned no text"},
-	})
-	h.createEndpoint()
+	h := newAskHarness(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "partial"},
+		{Kind: protocol.StepFail, Reason: "the model returned no text"},
+	}})
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":           "ask-1",
@@ -431,68 +387,11 @@ func TestAgentAsk_ModelFailureTerminalizesFailed(t *testing.T) {
 	}
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────
-
-func (s *scriptedAssistantClient) messages() []assistant.Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.received
-}
-
-func (s *scriptedAssistantClient) askCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.askCalls
-}
-
-func (s *scriptedAssistantClient) deltaCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.deltas)
-}
-
-var (
-	_ = websocket.TextMessage
-	_ = credential.NewSecret
-)
-
-// blockingAskClient emits ONE delta then blocks until released — the test
-// closes the connection mid-stream and watches the run terminalize (a
-// refused socket write must not wedge the run: the connection context
-// cancels the stream and the run closes failed, "the connection was lost").
-type blockingAskClient struct {
-	firstDone chan struct{} // closed after the first delta is emitted
-	release   chan struct{} // the test closes this to unblock
-}
-
-func (b *blockingAskClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
-	return assistant.ProbeResult{OK: true}, nil
-}
-
-// Discard implements assistant.Client. This fake holds no suspended
-// state, so there is nothing to drop.
-func (*blockingAskClient) Discard(string) {}
-
-func (b *blockingAskClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
-	if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "first"}); err != nil {
-		return err
-	}
-	close(b.firstDone)
-	select {
-	case <-b.release:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// The connection dies mid-stream: the stream's task context cancels, the
-// run terminalizes failed with the renderable reason, and the ledger is the
-// record — a reconnect reads the terminal state, never waits forever.
 func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
-	client := &blockingAskClient{firstDone: make(chan struct{}), release: make(chan struct{})}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	h := newAskHarness(t, protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepAnswer, Text: "first"},
+		{Kind: protocol.StepHang},
+	}})
 	conn := h.conn
 	sid := openLocalSession(t, conn)
 	res, errObj := askOverWire(t, conn, map[string]any{
@@ -510,13 +409,8 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	// The connection dies: close the socket. The stream's task context
 	// derives from the connection, so the cancellation propagates.
 	_ = conn.Close()
-	select {
-	case <-client.firstDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stream never started")
-	}
 
-	// The run terminalizes failed with the renderable reason. Poll the
+	// The run terminalizes interrupted with the renderable reason. Poll the
 	// ledger — the runState notification goes to a dead socket and is
 	// dropped; the record is what a reconnect reads.
 	var terminalState *content.RunState
@@ -553,8 +447,8 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	if entryErr != nil {
 		t.Fatalf("question entry: %v", entryErr)
 	}
-	if *terminalState != content.RunFailed {
-		t.Fatalf("run state = %v, want failed", *terminalState)
+	if *terminalState != content.RunInterrupted {
+		t.Fatalf("run state = %v, want interrupted", *terminalState)
 	}
 	// The failure sentence is recorded on the run's payload — the ledger is
 	// the record, and the reconnect reads the reason there.
@@ -571,9 +465,8 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 //    about nothing pointed at — zero references, and the ask still streams ──
 
 func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"sure"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+	script := answerScript("sure")
+	h := newAskHarness(t, script)
 	sid := openLocalSession(t, h.conn)
 
 	// No captureFrame at all: the gesture for a general question is type +
@@ -592,14 +485,15 @@ func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 		t.Fatalf("ask state = %q, want prepared", res.State)
 	}
 
-	for range client.deltaCount() {
+	for range len(script.Steps) - 1 {
 		raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 		_ = raw
 	}
 
 	// The engine received the question and NO frame text — nothing was
 	// pointed at, so nothing may ride the prompt.
-	messages := client.messages()
+	prompt := h.prompt()
+	messages := []struct{ Role, Content string }{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
 	var full string
 	for _, m := range messages {
 		full += m.Content + "\n"
@@ -618,7 +512,7 @@ func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 	// old constant in place.
 	if len(messages) != 2 ||
 		messages[0].Role != "system" ||
-		messages[1].Role != "user" || messages[1].Content != "what is the capital of France?" {
+		messages[1].Role != "user" || !strings.HasPrefix(messages[1].Content, "what is the capital of France?") {
 		t.Errorf("engine received %d message(s), want the standing prompt and the question: %#v", len(messages), messages)
 	}
 	if strings.Contains(messages[0].Content, "attached to this question") {
@@ -637,33 +531,11 @@ func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 	}
 }
 
-// ── the answering ROLE is the resolution (bead nocx-e6kn2) ─────────────
-
-// A person assigns a model to the answering role and the ask picks it up —
-// WITHOUT the ask ever naming a model id. The engine receives the ASSIGNED
-// pair, even when another endpoint's model is first in the list.
-func TestAgentAsk_UsesTheAnsweringRoleAssignment(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"x"}}
-	h := newAskHarness(t, client)
-	// TWO endpoints; the FIRST is the one the old eps[0] path would have
-	// picked. The role names the SECOND.
-	firstRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "First", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-1", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	first, _ := decodeEndpointResult(t, firstRaw)
-	secondRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Second", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
-		"key": "sk-2", "models": []map[string]any{{"name": "gpt-4o"}, {"name": "gpt-4o-mini"}},
-	})
-	second, _ := decodeEndpointResult(t, secondRaw)
-	if err := isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": second.ID, "model": "gpt-4o",
-	})); err {
-		t.Fatal("roles.assign refused")
-	}
-	_ = first
-
+// Legacy endpoint configuration does not select the harness model.
+func TestAgentAsk_HarnessDefaultIgnoresLegacyRoleAssignment(t *testing.T) {
+	script := answerScript("x")
+	h := newAskHarness(t, script)
+	h.seedLegacyRole("legacy-second", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	askRes, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-role", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -672,39 +544,27 @@ func TestAgentAsk_UsesTheAnsweringRoleAssignment(t *testing.T) {
 	if errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}
-	// The answer carries the model attribution on the wire: a person can
-	// tell WHICH model answered without reading the assignment.
-	if askRes.Model != "gpt-4o" {
-		t.Errorf("ask result model = %q, want the assigned gpt-4o", askRes.Model)
+	if askRes.Model != "" {
+		t.Fatalf("prepared model = %q, want harness default deferred", askRes.Model)
 	}
-	// The stream runs asynchronously; its terminal notification is the
-	// synchronization point before the params are asserted.
 	readNotification(t, h.conn, "agent.runState", 5*time.Second)
-	if got := client.receivedParams.BaseURL; got != "https://api.example.com/v1" {
-		t.Errorf("engine base URL = %q, want the ASSIGNED endpoint's", got)
+	if got := h.prompt().Model; got != "" {
+		t.Fatalf("harness model override = %q, want default independent of endpoint role", got)
 	}
-	if got := client.receivedParams.Model; got != "gpt-4o" {
-		t.Errorf("engine model = %q, want the ASSIGNED model, not the first endpoint's first model", got)
+	entry, err := h.db.Ledger().Entry(t.Context(), askRes.EntryID)
+	if err != nil || entry == nil || len(entry.Executions) != 1 {
+		t.Fatalf("answering entry = %+v, err %v", entry, err)
+	}
+	var facts content.RunFacts
+	if err := json.Unmarshal([]byte(entry.Executions[0].Payload), &facts); err != nil || facts.Model != "fixture-model" {
+		t.Fatalf("answering model attribution = %+v, err %v", facts, err)
 	}
 }
 
-// A reassignment is picked up by the NEXT ask: the role resolves from the
-// store on every ask, so "the feature picks up the change" holds with no
-// model id named anywhere but the assignment.
-func TestAgentAsk_ReassignmentIsPickedUp(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"x"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint() // "Local" with model qwen3, answering → qwen3
-	otherRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Other", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
-		"key": "sk", "models": []map[string]any{{"name": "gpt-4o"}},
-	})
-	other, _ := decodeEndpointResult(t, otherRaw)
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": other.ID, "model": "gpt-4o",
-	})) {
-		t.Fatal("reassign refused")
-	}
+func TestAgentAsk_LegacyReassignmentDoesNotOverrideHarness(t *testing.T) {
+	script := answerScript("x")
+	h := newAskHarness(t, script)
+	h.seedLegacyRole("legacy-other", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-re", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -713,109 +573,49 @@ func TestAgentAsk_ReassignmentIsPickedUp(t *testing.T) {
 		t.Fatalf("agent.ask after reassignment: %+v", errObj)
 	}
 	readNotification(t, h.conn, "agent.runState", 5*time.Second)
-	if got := client.receivedParams.Model; got != "gpt-4o" {
-		t.Errorf("engine model after reassignment = %q, want gpt-4o", got)
+	if got := h.prompt().Model; got != "" {
+		t.Errorf("harness override after legacy reassignment = %q, want default", got)
 	}
 }
 
-// A deleted endpoint leaves the role unresolvable and the refusal names it
-// — never a hop to the OTHER endpoint that still exists.
-func TestAgentAsk_DeletedEndpointLeavesTheRoleARefusal(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"x"}}
-	h := newAskHarness(t, client)
-	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	created, code := decodeEndpointResult(t, raw)
-	if code != 0 {
-		t.Fatalf("endpoints.create: code %d", code)
-	}
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": created.ID, "model": "qwen3",
-	})) {
-		t.Fatal("assign refused")
-	}
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "endpoints.delete", map[string]any{"id": created.ID})) {
-		t.Fatal("delete refused")
-	}
+func TestAgentAsk_DeletedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
+	script := answerScript("x")
+	h := newAskHarness(t, script)
+	h.seedLegacyRole("deleted-endpoint", "qwen3")
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-d", "sessionId": sid, "question": "q", "cwd": "/repo",
 		"attachedContent": []any{},
 	}, 2)
-	if errObj == nil {
-		t.Fatal("ask after endpoint delete succeeded, want a refusal")
+	if errObj != nil {
+		t.Fatalf("legacy endpoint change must not refuse a harness ask: %+v", errObj)
 	}
-	if !strings.Contains(errObj.Message, "no longer exists") {
-		t.Errorf("refusal message = %q, want it to name the deleted endpoint", errObj.Message)
-	}
-	if !strings.Contains(errObj.Message, "answering") {
-		t.Errorf("refusal message = %q, want it to name the role", errObj.Message)
-	}
-	if client.askCount() != 0 {
-		t.Error("the model must never be called when the role cannot resolve")
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if got := h.prompt().Model; got != "" {
+		t.Fatalf("harness model = %q, want its default", got)
 	}
 }
 
-// A model removed from the assigned endpoint leaves the role unresolvable
-// and the refusal names the model — never the endpoint's next model.
-func TestAgentAsk_RemovedModelLeavesTheRoleARefusal(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"x"}}
-	h := newAskHarness(t, client)
-	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}, {"name": "gpt-4o"}},
-	})
-	created, _ := decodeEndpointResult(t, raw)
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": created.ID, "model": "gpt-4o",
-	})) {
-		t.Fatal("assign refused")
-	}
-	// The update drops gpt-4o from the model list — "qwen3" remains, and
-	// must NOT be silently substituted.
-	up := jsonrpcCall(t, h.conn, "endpoints.update", map[string]any{
-		"id": created.ID, "name": "Local", "baseUrl": "http://127.0.0.1:11434/v1",
-		"schema": "openai-compatible", "key": "", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	if isErrorResponse(t, up) {
-		t.Fatalf("endpoints.update: %s", up)
-	}
+func TestAgentAsk_RemovedLegacyModelDoesNotBlockHarness(t *testing.T) {
+	script := answerScript("x")
+	h := newAskHarness(t, script)
+	h.seedLegacyRole("legacy-endpoint-without-model", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-m", "sessionId": sid, "question": "q", "cwd": "/repo",
 		"attachedContent": []any{},
 	}, 2)
-	if errObj == nil {
-		t.Fatal("ask with a removed model succeeded, want a refusal")
+	if errObj != nil {
+		t.Fatalf("legacy endpoint change must not refuse a harness ask: %+v", errObj)
 	}
-	if !strings.Contains(errObj.Message, "gpt-4o") {
-		t.Errorf("refusal message = %q, want it to name the removed model", errObj.Message)
-	}
-	if client.askCount() != 0 {
-		t.Error("the model must never run after the assigned model was removed")
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if got := h.prompt().Model; got != "" {
+		t.Fatalf("harness model = %q, want its default", got)
 	}
 }
 
-// ── the turn's anchor comes from the SESSION (nocx-4em1z) ─────────────────
-
-// A question asked in a pane is anchored to that pane, and the backend is
-// what anchors it — the renderer never sends one.
-//
-// This is the same rule the shell path states in its own comment
-// (ws_ledger.go's open): "a paneId on the envelope would put the same input
-// under a second owner, and the renderer's copy would be the one nobody
-// checked". The backend already resolved which pane a session is the pipe
-// of, so an ask that names its session has named its pane.
-//
-// It matters because the restore read is BY PANE. Before this the ask wrote
-// session_id and nothing else, and a session is gone by the time a restore
-// runs (D5) — so every question and every answer vanished from a restored
-// tab, which is what the owner reported.
 func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
-	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hi"}})
-	h.createEndpoint()
+	h := newAskHarness(t, answerScript("hi"))
 
 	// A session that IS the pipe of a pane, which is what the product opens.
 	resp := jsonrpcCallWithID(t, h.conn, "open", map[string]any{
@@ -851,39 +651,27 @@ func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
 	}
 }
 
-func TestAgentAsk_SealedVaultUnlocksAndContinuesTheRun(t *testing.T) {
-	release := make(chan struct{})
-	client := &scriptedAssistantClient{deltas: []string{"after unlock"}, release: release}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
+func TestAgentAsk_SealedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
+	h := newAskHarness(t, answerScript("without endpoint unlock"))
 	h.v.Seal()
 	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "sealed-ask", "sessionId": sid, "question": "answer after unlock",
+		"askId": "sealed-ask", "sessionId": sid, "question": "answer without endpoint unlock",
 		"cwd": "/repo", "attachedContent": []any{},
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
-	frame := readUnlockRequestFrame(t, h.conn)
-	if frame.Reason != "answer the ask" {
-		t.Fatalf("unlock reason = %q, want %q", frame.Reason, "answer the ask")
-	}
-	if err := h.v.Unseal(t.Context(), vault.UnsealRequest{Passphrase: "test"}); err != nil {
-		t.Fatalf("Unseal: %v", err)
-	}
-	answerUnlock(t, h.conn, frame.RequestID, "unsealed")
-	close(release)
 
 	raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 	var delta agentRunDelta
 	if err := json.Unmarshal(raw, &delta); err != nil {
 		t.Fatalf("runDelta: %v", err)
 	}
-	if delta.RunID != res.RunID || delta.Text != "after unlock" {
-		t.Fatalf("runDelta = %+v, want run %d after unlock", delta, res.RunID)
+	if delta.RunID != res.RunID || delta.Text != "without endpoint unlock" {
+		t.Fatalf("runDelta = %+v, want run %d without endpoint unlock", delta, res.RunID)
 	}
 	raw = readNotification(t, h.conn, "agent.runState", 5*time.Second)
 	var state agentRunState
@@ -892,45 +680,5 @@ func TestAgentAsk_SealedVaultUnlocksAndContinuesTheRun(t *testing.T) {
 	}
 	if state.RunID != res.RunID || state.State != string(content.RunCompleted) {
 		t.Fatalf("runState = %+v, want run %d completed", state, res.RunID)
-	}
-}
-
-func TestAgentAsk_CancelledUnlockCancelsTheDurableRun(t *testing.T) {
-	client := &scriptedAssistantClient{deltas: []string{"must not run"}}
-	h := newAskHarness(t, client)
-	h.createEndpoint()
-	h.v.Seal()
-	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
-	sid := openLocalSession(t, h.conn)
-
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "cancelled-ask", "sessionId": sid, "question": "cancel this",
-		"cwd": "/repo", "attachedContent": []any{},
-	}, 2)
-	if errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-	frame := readUnlockRequestFrame(t, h.conn)
-	answerUnlock(t, h.conn, frame.RequestID, "cancelled")
-
-	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
-	var state agentRunState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("runState: %v", err)
-	}
-	if state.RunID != res.RunID || state.State != string(content.RunCancelled) {
-		t.Fatalf("runState = %+v, want run %d cancelled", state, res.RunID)
-	}
-	if got := client.messages(); len(got) != 0 {
-		t.Fatalf("model received %d messages after unlock cancellation", len(got))
-	}
-
-	entry, err := h.db.Ledger().Entry(t.Context(), res.EntryID)
-	if err != nil {
-		t.Fatalf("ledger entry: %v", err)
-	}
-	if len(entry.Executions) != 1 || entry.Executions[0].State == nil ||
-		*entry.Executions[0].State != content.RunCancelled {
-		t.Fatalf("durable run state = %+v, want cancelled", entry.Executions)
 	}
 }

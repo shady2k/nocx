@@ -48,6 +48,11 @@ type Steerer interface {
 	Steer(ctx context.Context, text string) error
 }
 
+// ModelReadiness checks a specific chosen model instead of the native default.
+type ModelReadiness interface {
+	ReadinessForModel(ctx context.Context, model string) Readiness
+}
+
 // Cataloguer is an optional capability: the models an agent can run, for the
 // role picker. A connector without it runs on the agent's own default.
 type Cataloguer interface {
@@ -183,6 +188,10 @@ type Outcome struct {
 // here; nocx's system prompt does not, because it is the same bytes on every
 // turn and the cache prefix depends on that.
 type TurnSpec struct {
+	// ModelSelected records the resolved model at admission, before any prompt.
+	// A recording failure prevents the prompt from reaching the agent.
+	ModelSelected func(context.Context, string) error
+
 	// ConversationID names the conversation whose agent session this turn
 	// continues.
 	ConversationID string

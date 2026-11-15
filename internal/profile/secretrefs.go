@@ -25,18 +25,11 @@ type SecretReferenceImpact struct {
 	// Profiles that store nothing — agent auth, a key read from a path —
 	// are not affected and are not counted.
 	ProfileCount int
-	// EndpointCount is AI endpoints holding at least one reference
-	// (ADR-0030). Endpoints that store no credential are not affected and
-	// are not counted. Counted separately from ProfileCount on purpose:
-	// "9 connections" and "2 endpoints" answer different questions
-	// (ADR-0031).
-	EndpointCount int
 }
 
 func impactOf(d *storeData) SecretReferenceImpact {
 	distinct := make(map[string]struct{})
 	heldByProfiles := make(map[string]struct{})
-	heldByEndpoints := make(map[string]struct{})
 
 	for i := range d.Profiles {
 		o := &d.Profiles[i].Options
@@ -51,34 +44,10 @@ func impactOf(d *storeData) SecretReferenceImpact {
 			heldByProfiles[d.Profiles[i].ID] = struct{}{}
 		}
 	}
-	for i := range d.Endpoints {
-		ep := &d.Endpoints[i]
-		holds := ep.CredentialRef != ""
-		if !holds {
-			for j := range ep.Headers {
-				if ep.Headers[j].ValueRef != "" {
-					holds = true
-					break
-				}
-			}
-		}
-		if holds {
-			heldByEndpoints[ep.ID] = struct{}{}
-		}
-		if ep.CredentialRef != "" {
-			distinct[ep.CredentialRef] = struct{}{}
-		}
-		for j := range ep.Headers {
-			if ref := ep.Headers[j].ValueRef; ref != "" {
-				distinct[ref] = struct{}{}
-			}
-		}
-	}
 
 	return SecretReferenceImpact{
-		SecretCount:   len(distinct),
-		ProfileCount:  len(heldByProfiles),
-		EndpointCount: len(heldByEndpoints),
+		SecretCount:  len(distinct),
+		ProfileCount: len(heldByProfiles),
 	}
 }
 
@@ -131,18 +100,6 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 		o.KeySecret = ""
 		o.KeyPassphraseSecret = ""
 	}
-	for i := range d.Endpoints {
-		ep := &d.Endpoints[i]
-		ep.CredentialRef = ""
-		kept := ep.Headers[:0]
-		for _, h := range ep.Headers {
-			if h.ValueRef != "" {
-				continue
-			}
-			kept = append(kept, h)
-		}
-		ep.Headers = kept
-	}
 
 	if err := s.writeLocked(d); err != nil {
 		return SecretReferenceImpact{}, err
@@ -174,8 +131,7 @@ func (s *JSONStore) ClearSecretRefs(secretID string) error {
 }
 
 // clearSecretRefLocked removes every reference to secretID from every
-// record kind in d — profile options, group defaults and endpoint
-// credentials — reporting whether anything changed. The caller holds s.mu
+// record kind in d — profile options and group defaults — reporting whether anything changed. The caller holds s.mu
 // and owns the subsequent write.
 func clearSecretRefLocked(d *storeData, secretID string) bool {
 	changed := false
@@ -212,27 +168,6 @@ func clearSecretRefLocked(d *storeData, secretID string) bool {
 			sp.KeyPassphraseSecret = nil
 			changed = true
 		}
-	}
-	for i := range d.Endpoints {
-		ep := &d.Endpoints[i]
-		if ep.CredentialRef == secretID {
-			ep.CredentialRef = ""
-			changed = true
-		}
-		kept := ep.Headers[:0]
-		for _, h := range ep.Headers {
-			if h.ValueRef == secretID {
-				// The row goes: a header whose value was the deleted secret
-				// can no longer produce a value, must not be sent, and a
-				// stored row with no source could not be validated anyway.
-				// Inventing a literal here would store material the user
-				// never typed.
-				changed = true
-				continue
-			}
-			kept = append(kept, h)
-		}
-		ep.Headers = kept
 	}
 	return changed
 }

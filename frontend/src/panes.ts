@@ -990,18 +990,11 @@ export class PaneManager {
   /** The prompt picker's "Add a secret…" row — opens Settings → Secrets
    *  with the add dialog up. */
   onCreateSecret?: (name: string) => void
-  /** A question refused for want of an endpoint — opens Settings →
-   *  Endpoints with the editor up on a blank one, so the refusal carries
-   *  its repair. */
-  onCreateEndpoint?: () => void
-  /** The composer's model chip, clicked on the model — opens Settings →
-   *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
-   *  beside onCreateEndpoint, which the chip's other destination reuses. */
-  onOpenRoles?: () => void
+  /** Open Settings → Agents, where the answering model is chosen. */
+  onOpenAgentSettings?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
-   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
-   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
   /** Called when the user performs a UI action that should reset the
@@ -1906,8 +1899,7 @@ export class PaneManager {
         onSnippetChord: this.onSnippetChord,
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
-        onCreateEndpoint: this.onCreateEndpoint,
-        onOpenRoles: this.onOpenRoles,
+        onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state, children) =>
@@ -2087,8 +2079,7 @@ export class PaneManager {
         onSnippetChord: this.onSnippetChord,
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
-        onCreateEndpoint: this.onCreateEndpoint,
-        onOpenRoles: this.onOpenRoles,
+        onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
       },
     )

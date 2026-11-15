@@ -16,21 +16,20 @@ import {
   standalone as base,
   answerPermission,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
+  ensureAssistantVault,
   settingsReady,
   showSidebarView,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { toolResults } from './ask-gesture'
 
 const test = base
 const nonce = Date.now().toString(36)
 const INPUT = '.pane.active .nocx-editor-input'
 const TITLE = '.nocx-tab-title'
-const ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 const PAGE_MARKER = `ASSISTANT_INTAKE_PAGE_${nonce}`
@@ -63,7 +62,7 @@ test.beforeAll(async () => {
 
   const root = mkdtempSync(join(tmpdir(), 'nocx-p5rjv-e2e-'))
   backend = new VaultBackend(readStand().server, { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -78,26 +77,11 @@ async function openApp(page: Page): Promise<void> {
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
 }
 
-async function configureAssistant(
-  page: Page,
-  endpointName: string,
-  allowMutations = false,
-): Promise<void> {
+async function configureAssistant(page: Page, allowMutations = false): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator(ENDPOINTS_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: endpointName,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-
-  await page.locator(ROLES_NAV).click()
-  await setDefaultModel(page, endpointName, 'e2e-model')
-
   if (allowMutations) {
     await page.locator(POLICY_NAV).click()
     await answerPermission(page, 'mutate-reversible', 'Allowed')
@@ -149,7 +133,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
   test('a bare link is fetched and summarised', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Link ${nonce}`)
+    await configureAssistant(page)
 
     const base = chatRequests().length
     fake.setScript({
@@ -158,7 +142,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(PAGE_MARKER)
+        toolResults(body).some((result) => result.includes(PAGE_MARKER))
           ? ['The page says ', PAGE_MARKER]
           : ['The fetch result did not reach the model.'],
     })
@@ -172,13 +156,13 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
     const requests = await waitForChatRequests(base + 2)
     expect(requests[base].body).toContain(pageURL)
-    expect(requests[base + 1].body).toContain(PAGE_MARKER)
+    expect(toolResults(requests[base + 1].body).join('\n')).toContain(PAGE_MARKER)
     await expectCompletedAnswer(page, pageURL, PAGE_MARKER)
   })
 
   test('a bare paragraph becomes a note the person can find', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Note ${nonce}`, true)
+    await configureAssistant(page, true)
 
     const base = chatRequests().length
     fake.setScript({
@@ -187,7 +171,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(NOTE_TEXT)
+        toolResults(body).some((result) => result.includes(NOTE_TEXT))
           ? ['I remembered it: ', NOTE_TEXT]
           : ['The note result did not reach the model.'],
     })
@@ -195,7 +179,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     await askFromPrompt(page, NOTE_TEXT)
     const requests = await waitForChatRequests(base + 2)
     expect(requests[base].body).toContain(NOTE_TEXT)
-    expect(requests[base + 1].body).toContain(NOTE_TEXT)
+    expect(toolResults(requests[base + 1].body).join('\n')).toContain(NOTE_TEXT)
     await expectCompletedAnswer(page, NOTE_TEXT, NOTE_TEXT)
 
     await showSidebarView(page, 'notes')
@@ -211,7 +195,7 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
 
   test('unclear input produces one question and no tool call', async ({ page }) => {
     await openApp(page)
-    await configureAssistant(page, `E2E Intake Unclear ${nonce}`)
+    await configureAssistant(page)
 
     const base = chatRequests().length
     const question = 'What would you like me to do?'
@@ -227,9 +211,8 @@ test.describe('bare input follows the system prompt (nocx-p5rjv)', () => {
     expect(requests[base].body).toContain(
       'When the intent is not plain, ask one question and stop.',
     )
-    const payload = JSON.parse(requests[base].body) as {
-      messages?: { role?: string; content?: unknown }[]
-    }
-    expect(payload.messages?.some((message) => message.role === 'tool')).toBe(false)
+    // pi retains earlier turns, including their tool results. This question
+    // must not call a tool; earlier completed questions are not this turn.
+    expect(toolResults(requests[base].body)).toEqual([])
   })
 })

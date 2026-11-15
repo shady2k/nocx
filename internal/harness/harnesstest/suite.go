@@ -181,7 +181,7 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 			factoryCalls++
 			return tools, harness.ToolBridge{Command: []string{server}, Env: []string{"NOCX_TEST_SECRET=session-bridge"}}, nil
 		}
-		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{Tools: toolFactory}, Script: protocol.Script{PIDFile: pidFile, ResultFile: resultFile, Turns: [][]protocol.Step{
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{Tools: toolFactory}, Script: protocol.Script{ProbeEnvironment: true, PIDFile: pidFile, ResultFile: resultFile, Turns: [][]protocol.Step{
 			{{Kind: protocol.StepEnd, Model: "fake-model"}},
 			{{Kind: protocol.StepTool, Name: "probe"}, {Kind: protocol.StepEnd, Model: "fake-model"}},
 		}}})

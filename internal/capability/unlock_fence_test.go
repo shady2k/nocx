@@ -15,7 +15,7 @@ import (
 // (nocx-0b1n2).
 //
 // This is the defect of nocx-o3606 and nocx-9fzkk written as the thing a
-// handler actually does: take the config operation, and resolve an endpoint's
+// handler does: take the config operation, and resolve a stored
 // credential from inside the callback. The config operation is composed from
 // the vault gate, vault.unseal needs that gate to answer the unlock this
 // read raises, and the person is shown a dialog whose Unlock is refused
@@ -27,13 +27,13 @@ import (
 // unsealer — the thing that shows the dialog — is never called at all.
 func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 	store := &fenceStore{sealed: true}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	op := capability.NewConfigOperation(
 		capability.UnlockAnswering(storePlan(
 			capability.Gate(capability.GateConfig, 1, time.Second),
 			capability.Gate(capability.GateVault, 1, time.Second))),
-		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, newProfileService(t), nil, nil)
 
 	var got error
 	if err := op.Run(context.Background(), func(ctx context.Context, _ capability.ConfigService) error {
@@ -55,13 +55,13 @@ func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 // store, releases, and reads the material outside.
 func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 	store := &fenceStore{sealed: true}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	op := capability.NewConfigOperation(
 		capability.UnlockAnswering(storePlan(
 			capability.Gate(capability.GateConfig, 1, time.Second),
 			capability.Gate(capability.GateVault, 1, time.Second))),
-		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, newProfileService(t), nil, nil)
 
 	ctx := context.Background()
 	if err := op.Run(ctx, func(context.Context, capability.ConfigService) error { return nil }); err != nil {
@@ -82,7 +82,7 @@ func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 // why the gate is declared rather than assumed.
 func TestAnOperationWithoutTheAnsweringGateStillResolves(t *testing.T) {
 	store := &fenceStore{sealed: true}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	op := capability.NewContentOperation(control.NewWaitingSemaphore(capability.GateContent, 1, time.Second), nil)
 

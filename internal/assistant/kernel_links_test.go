@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 )
 
@@ -48,6 +49,8 @@ func guardLinkName(guard Guard) string {
 	switch guard.(type) {
 	case kernelGrantGuard:
 		return "grant guard"
+	case kernelPaneGuard:
+		return "pane guard"
 	case kernelPolicyGuard:
 		return "policy guard"
 	case kernelFloorGuard:
@@ -137,7 +140,7 @@ func TestTheKernelChainComposesEveryLink(t *testing.T) {
 	if _, ok := withService.Approver.(serviceApprover); !ok {
 		t.Fatalf("approver is %T, want serviceApprover", withService.Approver)
 	}
-	wantGuards := []string{"grant guard", "policy guard", "floor guard", "evidence guard"}
+	wantGuards := []string{"grant guard", "pane guard", "policy guard", "floor guard", "evidence guard"}
 	if len(chain.Guards) != len(wantGuards) {
 		t.Fatalf("guards = %d, want %d (%v)", len(chain.Guards), len(wantGuards), wantGuards)
 	}
@@ -345,6 +348,30 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		}
 		if errors.As(err, &refusal) && strings.Contains(refusal.Reason, "expired") {
 			t.Fatalf("without the grant guard the call still answered the expired-authority refusal: %v", err)
+		}
+	})
+
+	// The pane guard's contribution is the ANSWER, not the barrier: the
+	// capability constructor refuses a pane that is not this machine whether
+	// the guard is composed or not, so without the link the call is still
+	// stopped — but as a failure about a constructor rather than as the
+	// sentence the model reads and the person can act on.
+	t.Run("pane guard", func(t *testing.T) {
+		grant, dir := testDirGrant(t, autonomousMatrix())
+		path := filepath.Join(dir, "a.txt")
+		writeFile(t, path, "this machine's copy")
+		args := fmt.Sprintf(`{"path":%q}`, path)
+
+		k := kernelOn(t, grant, remotePaneEnvironment(), &fakeLedger{}, &watchedCalls{})
+		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
+		var refusal *PipelineRefusal
+		if !errors.As(err, &refusal) || !strings.Contains(refusal.Reason, "remote file tools are coming") {
+			t.Fatalf("the full chain = %v, want the refusal answer a model can read", err)
+		}
+		dropped := kernelOn(t, grant, remotePaneEnvironment(), &fakeLedger{}, &watchedCalls{})
+		_, err = runKernelCall(t, dropped, "files.read", "call-1", args, "pane guard")
+		if !errors.Is(err, agenttools.ErrRemoteFileTools) {
+			t.Fatalf("without the pane guard = %v, want the constructor's refusal — the disk is still unreachable", err)
 		}
 	})
 

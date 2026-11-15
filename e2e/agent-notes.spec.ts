@@ -16,18 +16,18 @@ import {
   standalone as base,
   answerPermission,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
+  ensureAssistantVault,
   settingsReady,
   showSidebarView,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI } from './fake-openai'
+import { toolResults } from './ask-gesture'
 
 const test = base
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Notes ${nonce}`
 const NOTE_TITLE = 'Assistant-created note'
 const NOTE_BODY = `${NOTE_TITLE}\nassistant-note-${nonce}`
 const QUESTION = `Create a note for me, ${nonce}.`
@@ -43,7 +43,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-klqjo-e2e-'))
   backend = new VaultBackend(readStand().server, { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -58,21 +58,10 @@ async function openApp(page: Page): Promise<void> {
 }
 
 async function configureAssistant(page: Page): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator('.ui-grouped-nav__item[data-item="endpoints"]').click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-
-  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
-
   await page.locator('.ui-grouped-nav__item[data-item="policy"]').click()
   await answerPermission(page, 'mutate-reversible', 'Allowed')
 
@@ -94,13 +83,7 @@ async function askFromPrompt(page: Page): Promise<void> {
 
 function noteAnswer(body: string): string[] {
   try {
-    const parsed = JSON.parse(body) as {
-      messages?: { role?: string; content?: unknown }[]
-    }
-    const result = (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-      .find((content) => content.includes(`assistant-note-${nonce}`))
+    const result = toolResults(body).find((content) => content.includes(`assistant-note-${nonce}`))
     return result
       ? [`The note was created through the backend: ${NOTE_BODY}`]
       : ['The note tool result was missing.']
@@ -138,12 +121,7 @@ test.describe('assistant notes operations (nocx-klqjo)', () => {
     // fake response, and the follow-up request is the wire evidence that the
     // backend executed that proposal and returned the created note.
     expect(proposal.body).toContain('notes.create')
-    const followUpPayload = JSON.parse(followUp.body) as {
-      messages?: { role?: string; content?: unknown }[]
-    }
-    const toolResult = (followUpPayload.messages ?? []).find(
-      (message) => message.role === 'tool' && typeof message.content === 'string',
-    )?.content as string | undefined
+    const toolResult = toolResults(followUp.body)[0]
     expect(toolResult).toContain('"status":"created"')
 
     const turn = page.locator('.pane.active .cmd-block').filter({ hasText: QUESTION }).first()

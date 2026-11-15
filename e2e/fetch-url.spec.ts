@@ -3,7 +3,7 @@
  * page after one approval (nocx-iqywv).
  *
  * This is written from the bead's acceptance criteria, not from the tool
- * executor: the person configures an endpoint, asks in the composer, sees that
+ * executor: the person asks in the composer, sees that
  * the call reaches the network from this machine, allows it once, and reads an
  * answer derived from a local page fixture. The fake model only says the page
  * marker when the real fetch result reached its second request.
@@ -13,25 +13,17 @@ import { createServer, type Server } from 'node:http'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import {
-  standalone as base,
-  VaultBackend,
-  bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
-  settingsReady,
-} from './harness'
+import { standalone as base, ensureAssistantVault, VaultBackend, bindEndpoint } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
+import { toolResults } from './ask-gesture'
 
 const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 const PAGE_MARKER = 'FETCH_URL_E2E_PAGE_MARKER'
-const nonce = Date.now().toString(36)
 
 const test = base
 let backend: VaultBackend
@@ -60,7 +52,7 @@ test.beforeAll(async () => {
 
   const root = mkdtempSync(join(tmpdir(), 'nocx-iqywv-e2e-'))
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 })
 
 test.afterAll(async () => {
@@ -73,6 +65,8 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await ensureAssistantVault(page, endpoint, 'disposable-assistant-passphrase')
+  await page.locator(TITLE).first().click()
 }
 
 async function askFromPrompt(page: Page, question: string): Promise<void> {
@@ -92,20 +86,6 @@ test.describe('fetch.url reaches the page after one approval (nocx-iqywv)', () =
 
   test('one approval produces an answer from a local page', async ({ page }) => {
     await openApp(page)
-    await page.keyboard.press('Meta+,')
-    await settingsReady(page)
-    await page.locator(SETTINGS_AI_NAV).click()
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-    const endpointName = `E2E Fetch ${nonce}`
-    await createAiEndpoint(page, {
-      name: endpointName,
-      baseUrl: fake.baseUrl(),
-      models: ['e2e-model'],
-      key: `e2e-key-${nonce}`,
-      vaultPassphrase: `vault-pass-${nonce}`,
-    })
-    await page.locator(SETTINGS_ROLES_NAV).click()
-    await setDefaultModel(page, endpointName, 'e2e-model')
     await page.locator(TITLE).first().click()
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
 
@@ -115,7 +95,7 @@ test.describe('fetch.url reaches the page after one approval (nocx-iqywv)', () =
     })
     fake.setScript({
       chunks: (body) =>
-        body.includes(PAGE_MARKER)
+        toolResults(body).some((result) => result.includes(PAGE_MARKER))
           ? ['The page says ', PAGE_MARKER]
           : ['The fetch result did not reach the model.'],
     })
@@ -130,7 +110,7 @@ test.describe('fetch.url reaches the page after one approval (nocx-iqywv)', () =
     await expect(prompt).not.toBeVisible({ timeout: 15_000 })
 
     const requests = await fake.waitForRequests(before + 2)
-    expect(requests[before + 1].body).toContain(PAGE_MARKER)
+    expect(toolResults(requests[before + 1].body).join('\n')).toContain(PAGE_MARKER)
     await expect(page.locator('.cmd-output[data-answer-body]').last()).toContainText(PAGE_MARKER, {
       timeout: 20_000,
     })

@@ -1,13 +1,9 @@
 package assistant
 
-// What the model is told a tool is for. The description it reads used to be
-// the ADR-0020 effect lattice rendered as a string — our vocabulary for
-// authority, which says who may do a thing and nothing at all about what the
-// thing does. These tests pin the replacement at both ends: the sentence the
-// declaration carries reaches the model verbatim, and none of the authority
-// vocabulary reaches it at all.
+// The harness catalogue preserves the canonical descriptions and parameter schemas.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -17,25 +13,24 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// toolDescriptions extracts name → description from the tools array the
-// request actually carried, so the assertion is on what crossed the wire and
-// not on what we intended to build.
-func toolDescriptions(t *testing.T, body string) map[string]string {
+// catalogueWithGrant reads the declarations offered by the harness tool entry.
+func catalogueWithGrant(t *testing.T, grant *content.Grant) []agenttools.Tool {
 	t.Helper()
-	var req struct {
-		Tools []struct {
-			Function struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-			} `json:"function"`
-		} `json:"tools"`
+	cl, _, err := NewClientAndRegistry(nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		t.Fatalf("request body %q: %v", body, err)
+	bound, err := BindRunTools(context.Background(), cl, AskParams{Grant: grant, KnownMaterial: &fakeKnownMaterial{}, FreshGrant: func() *content.Grant { return grant }}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := make(map[string]string, len(req.Tools))
-	for _, tl := range req.Tools {
-		out[tl.Function.Name] = tl.Function.Description
+	return bound.Catalogue(*grant)
+}
+
+func catalogueDescriptions(tools []agenttools.Tool) map[string]string {
+	out := map[string]string{}
+	for _, tool := range tools {
+		out[tool.Name] = tool.Description
 	}
 	return out
 }
@@ -56,7 +51,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 		want[tl.Name] = tl.Description
 	}
 
-	f := askWithGrant(t, &content.Grant{
+	catalogue := catalogueWithGrant(t, &content.Grant{
 		// A grant that reaches EVERYTHING, which is what makes the count
 		// below an assertion about descriptions rather than about
 		// eligibility. delegate and the environment scope are here for
@@ -81,7 +76,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 			{Kind: content.ResourceWorkspace, ID: "workspace/workspace:default"},
 		},
 	})
-	got := toolDescriptions(t, f.body())
+	got := catalogueDescriptions(catalogue)
 	if len(got) != len(want) {
 		t.Fatalf("declared %d tools, want all %d described", len(got), len(want))
 	}
@@ -100,14 +95,14 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 // middleware read. The model never sees them — it was the whole of the old
 // rendering.
 func TestToolDescription_CarriesNoAuthorityVocabulary(t *testing.T) {
-	f := askWithGrant(t, &content.Grant{
+	catalogue := catalogueWithGrant(t, &content.Grant{
 		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
 		},
 	})
-	descriptions := toolDescriptions(t, f.body())
+	descriptions := catalogueDescriptions(catalogue)
 	if len(descriptions) == 0 {
 		t.Fatal("no tools declared; the assertion would pass over an empty set")
 	}
@@ -121,25 +116,15 @@ func TestToolDescription_CarriesNoAuthorityVocabulary(t *testing.T) {
 	}
 }
 
-// toolParameters extracts name → the parameters object the request actually
-// carried, for the same reason toolDescriptions does: the assertion is on
-// what crossed the wire.
-func toolParameters(t *testing.T, body string) map[string]map[string]any {
+func catalogueParameters(t *testing.T, tools []agenttools.Tool) map[string]map[string]any {
 	t.Helper()
-	var req struct {
-		Tools []struct {
-			Function struct {
-				Name       string         `json:"name"`
-				Parameters map[string]any `json:"parameters"`
-			} `json:"function"`
-		} `json:"tools"`
-	}
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		t.Fatalf("request body %q: %v", body, err)
-	}
-	out := make(map[string]map[string]any, len(req.Tools))
-	for _, tl := range req.Tools {
-		out[tl.Function.Name] = tl.Function.Parameters
+	out := map[string]map[string]any{}
+	for _, tool := range tools {
+		var params map[string]any
+		if err := json.Unmarshal(tool.ParamsSchema, &params); err != nil {
+			t.Fatal(err)
+		}
+		out[tool.Name] = params
 	}
 	return out
 }
@@ -178,14 +163,14 @@ func schemaContainsKey(value any, want string) bool {
 // is `command` (nocx-ydu92). So this asserts on the request body: the thing
 // the model receives, not the thing we store.
 func TestToolParameters_CarryNoReturnShape(t *testing.T) {
-	f := askWithGrant(t, &content.Grant{
+	catalogue := catalogueWithGrant(t, &content.Grant{
 		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
 		},
 	})
-	params := toolParameters(t, f.body())
+	params := catalogueParameters(t, catalogue)
 	if len(params) == 0 {
 		t.Fatal("no tools declared; the assertion would pass over an empty set")
 	}

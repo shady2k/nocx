@@ -134,3 +134,21 @@ func TestCallTerminalDeliveryWithholdsUncooperativeCancelledDispatcher(t *testin
 		t.Fatalf("delivery=%v", got)
 	}
 }
+
+func TestCallTerminalCancelledAdmissionPreservesTurnCause(t *testing.T) {
+	turn, stopTurn := context.WithCancelCause(t.Context())
+	defer stopTurn(nil)
+	admission, stopAdmission := context.WithCancel(t.Context())
+	defer stopAdmission()
+	ctx := context.WithValue(admission, turnEndingContextKey{}, turn)
+	stopTurn(TurnEndedCause(content.TermUserKilled))
+	stopAdmission()
+	terminal := &CallTerminal{}
+	got := terminal.Complete(ctx, ctx.Err())
+	if reason, ok := TurnEndedReason(got); !ok || reason != content.TermUserKilled {
+		t.Fatalf("verdict = %v (%q), want person cancellation", got, reason)
+	}
+	if terminal.Cancel(context.Canceled) || terminal.Delivery(ctx, nil) != got {
+		t.Fatal("settlement changed the frozen context verdict")
+	}
+}

@@ -13,12 +13,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -38,27 +34,6 @@ const (
 	locatePaneThis  = "0198f2b0-0000-7000-8000-0000000000c9"
 )
 
-func sessionIDInSystemPrompt(body string) string {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		return ""
-	}
-	for _, m := range req.Messages {
-		if m.Role != "system" {
-			continue
-		}
-		if id := sessionIDShape.FindString(m.Content); id != "" {
-			return id
-		}
-	}
-	return ""
-}
-
 func operatorSessionScopedPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
 	t.Helper()
 	matrix := autonomousMatrixForTests()
@@ -73,72 +48,11 @@ func operatorSessionScopedPolicyStore(t *testing.T) *assistant.GlobalPolicyStore
 	return store
 }
 
-// selfLocatingProvider is the fake model. The test never tells it which
-// session it is in; it finds out the way the real one does, and it answers
-// with what the tool result actually carried — so the answer is evidence
-// about the product rather than about the fake.
-type selfLocatingProvider struct {
-	mu       sync.Mutex
-	marker   string // the line only the renderer's frame can supply
-	requests int
-	learned  string   // the id it read out of the system prompt
-	bodies   []string // every request body, for the failure message
-}
-
-func (p *selfLocatingProvider) serve(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	body := string(raw)
-
-	p.mu.Lock()
-	p.requests++
-	n := p.requests
-	p.bodies = append(p.bodies, body)
-	if n == 1 {
-		p.learned = sessionIDInSystemPrompt(body)
-	}
-	marker := p.marker
-	p.mu.Unlock()
-
-	if n == 1 {
-		streamToolCallChunk(w, "session.read", `{}`)
-		return
-	}
-	if strings.Contains(body, marker) {
-		streamAnswerChunk(w, "the screen says "+marker+" — the key was refused")
-		return
-	}
-	// The tool result did not carry the screen: say so rather than
-	// inventing an answer, so a broken capture reads as a broken capture.
-	streamAnswerChunk(w, "I could not see the screen")
-}
-
-func (p *selfLocatingProvider) state() (int, string, []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.requests, p.learned, append([]string(nil), p.bodies...)
-}
-
-// awaitReadScreenRequest waits for the broker's request the way the
-// renderer does, and reports what happened INSTEAD when it never comes: a
-// run that terminalized first is the refusal path (a call the grant does
-// not cover is refused before the broker is ever asked), and its sentence
-// is the only useful thing to print.
-
 func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	const marker = "(publickey)."
 
-	prov := &selfLocatingProvider{marker: marker}
-	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
-	defer srv.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
 	source := &recordingScreenCapture{body: screenCaptureBody(t, 0, "Permission denied", marker)}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(operatorSessionScopedPolicyStore(t)), WithScreenCaptureSource(source))
-	h.createEndpointAt(srv.URL)
-
+	h := newAskHarnessWithOpts(t, bridgeToolScript("session.read", map[string]any{}, "the screen says "+marker+" — the key was refused"), WithAgentPolicy(operatorSessionScopedPolicyStore(t)), WithScreenCaptureSource(source))
 	// Two real panes on the layout chain, each with a live session as its
 	// pipe. The person is in the second one; the first is the session the
 	// run must NOT reach for.
@@ -173,15 +87,15 @@ func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	// operator-authored policy scope.
 	answer, state, stateErr := collectAnswer(t, h, res.RunID, 20*time.Second)
 	if state != "completed" {
-		reqs, learned, bodies := prov.state()
-		t.Fatalf("run state = %q (%s); answer %q; provider requests=%d learned=%q bodies=%v", state, stateErr, answer, reqs, learned, bodies)
+		t.Fatalf("run state = %q (%s); answer %q; logs: %s", state, stateErr, answer, h.logs.String())
+	}
+	if !strings.Contains(h.toolResult(), marker) {
+		t.Fatalf("backend capture did not reach agent: %s", h.toolResult())
 	}
 	if !strings.Contains(answer, marker) {
-		reqs, learned, bodies := prov.state()
-		t.Fatalf("answer = %q, want it to name %q — the backend screen capture carried it; provider requests=%d learned=%q bodies=%v", answer, marker, reqs, learned, bodies)
+		t.Fatalf("answer = %q, want %q", answer, marker)
 	}
-	_, learned, _ := prov.state()
-	if learned != "" {
+	if learned := sessionIDShape.FindString(h.prompt().SystemPrompt); learned != "" {
 		t.Fatalf("system prompt exposed session id %q; pane identity must stay backend-owned", learned)
 	}
 	calls := source.snapshotCalls()

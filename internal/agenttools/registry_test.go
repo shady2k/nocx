@@ -47,6 +47,18 @@ func mustDirFS(t *testing.T) fs.FS {
 	return fsys
 }
 
+// localPane is the run context of a run whose pane is THIS machine, which every
+// capability test here assumes: the file tools are built on local.New(), and
+// the admitting adapter derives this value from the session's own facts
+// (environmentForSession). A context that names no pane is refused by them on
+// purpose, so a test that expects a capability says where its pane is.
+func localPane() RunContext {
+	return RunContext{Environment: content.Environment{
+		ID:   content.EnvironmentIDFor(content.EnvLocal, ""),
+		Kind: content.EnvLocal,
+	}}
+}
+
 const filesReadSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -1254,7 +1266,7 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 	// literal names declaration coverage and no authority. The assertions
 	// below are unchanged.
 	capability, err := narrowFilesRead(pathScopeGrant(insideRoot, otherRoot),
-		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
+		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -1291,7 +1303,7 @@ func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
 	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
 	grant := pathScopeGrant(insideRoot, otherRoot)
 	resolved := []ResourceRef{{Kind: content.ResourcePath, ID: inside}}
-	capability, err := narrowFilesEdit(grant, resolved, RunContext{})
+	capability, err := narrowFilesEdit(grant, resolved, localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}
@@ -1331,7 +1343,7 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 	other := filepath.Join(otherRoot, "other.txt")
 	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
 	grant := pathScopeGrant(insideRoot, otherRoot)
-	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, RunContext{})
+	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)
 	}
@@ -1350,7 +1362,7 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", symlinkErr)
 	}
 	escapeTarget := filepath.Join(link, "escape.txt")
-	escapeCapability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: escapeTarget}}, RunContext{})
+	escapeCapability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: escapeTarget}}, localPane())
 	if err != nil {
 		t.Fatalf("narrowFilesCreate escape: %v", err)
 	}

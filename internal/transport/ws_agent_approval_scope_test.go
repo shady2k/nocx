@@ -14,17 +14,15 @@ package transport
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/providertest"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -42,116 +40,82 @@ type scopeHarness struct {
 	// by. Kept because a test that wants to check routing cannot rebuild it
 	// afterwards: the proposal has an entry of its own, and the whole class
 	// of defect here is the two being confused.
-	entryID string
-	asked   agentApprovalRequested
+	entryID  string
+	asked    agentApprovalRequested
+	rawAsked json.RawMessage
 }
 
-// suspendedRun leaves a run suspended on a readScreen-shaped policy ask
-// (effect observe) and hands back the binding to answer with.
+// suspendedRun exercises the real non-command policy gate.
 func suspendedRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: policyAsk("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a"), after: []string{"done"}},
-	}}
-	return suspendedRunWith(t, policy, client)
+	return suspendedRunWith(t, policy, approvalToolScript("session.read", map[string]any{}))
 }
 
-// suspendedNonCommandRun leaves a non-command tool without an invocation
-// carrier. Its standing answer must name the classified effect row instead.
+// A declined tool exchange is a valid model answer even when MCP marks it as
+// an error. Observe that exchange explicitly, without treating cancellation as
+// a successful tool result in the shared fixture.
+func suspendedDeclinableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
+	t.Helper()
+	script := approvalToolScript("session.read", map[string]any{})
+	script.ResultFile = filepath.Join(t.TempDir(), "declined-exchange")
+	script.Steps[0].ResultFile = script.ResultFile
+	return suspendedRunWith(t, policy, script)
+}
+
 func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: func(runID string) approvalAsk {
-			return approvalAsk{policy: &assistant.ApprovalRequest{
-				RunID: runID, Attempt: 1, Tool: "session.read", CallID: "call_1",
-				Arguments: `{"sessionId":"session-a"}`, ArgHash: "hash-a",
-				Effect:   content.EffectObserve,
-				Resource: &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
-				EntryID:  proposalEntryID,
-			}}
-		}, after: []string{"done"}},
-	}}
-	return suspendedRunWith(t, policy, client)
+	return suspendedRun(t, policy)
 }
 
-// suspendedUnshowableRun carries a malformed command invocation. This is still
-// a run-shaped proposal, so its standing answer must remain unavailable.
 func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: func(runID string) approvalAsk {
-			return approvalAsk{policy: &assistant.ApprovalRequest{
-				RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
-				Arguments: `{"command":"echo hi"}`, ArgHash: "hash-a",
-				Effect:            content.EffectObserve,
-				Resource:          &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
-				Invocation:        content.Invocation{Parsed: false},
-				CommandInvocation: true,
-				EntryID:           proposalEntryID,
-			}}
-		}, after: []string{"done"}},
-	}}
-	return suspendedRunWith(t, policy, client)
+	return suspendedRunWith(t, policy, approvalToolScript("session.run", map[string]any{"command": "echo 'unterminated"}))
 }
 
-// suspendedCommandRun leaves a run suspended on a COMMAND proposal — the one
-// whose standing answer is an invocation rule.
-//
-// Its EntryID is the PROPOSAL's ledger entry and is deliberately unlike the
-// turn's, which agent.ask answers with — as it is on every builder in this
-// file that carries an ApprovalRequest. In the product the kernel always sets
-// it (kernel.go escalate records the proposal before the latch trips, and its
-// ledger is nil only where the content store is, which agent.ask refuses
-// outright), so a harness leaving it empty describes a run that does not
-// exist — and, worse, makes the two entries indistinguishable in exactly the
-// test that has to tell them apart.
+// The invocation is converted back to model input; classification and the
+// proposal binding are produced only by the real kernel.
 func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
 	t.Helper()
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: func(runID string) approvalAsk {
-			return approvalAsk{policy: &assistant.ApprovalRequest{
-				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
-				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
-				Effect:     content.EffectObserve,
-				Resource:   &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-				Invocation: invocation,
-				EntryID:    proposalEntryID,
-			}}
-		}, after: []string{"done"}},
-	}}
-	return suspendedRunWith(t, policy, client)
+	commands := make([]string, len(invocation.Commands))
+	for i, command := range invocation.Commands {
+		commands[i] = strings.Join(command, " ")
+	}
+	return suspendedRunWith(t, policy, approvalToolScript("session.run", map[string]any{"command": strings.Join(commands, "; ")}))
 }
 
-// proposalEntryID is the ledger entry the PROPOSAL was recorded under — what
-// ws_agent.go sends as `actionEntryId` beside every turn-routed notification,
-// and never as `entryId`.
-const proposalEntryID = "action-entry-1"
-
-// suspendedEgressRun is the same run suspended by the EGRESS gate: the
-// question a standing answer may never be given to.
 func suspendedEgressRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{ask: func(runID string) approvalAsk {
-			return approvalAsk{egress: &assistant.EgressRequest{
-				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
-				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
-				Effect:   content.EffectObserve,
-				Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-				Findings: []assistant.EgressFinding{{
-					Source: assistant.EgressFindingHeuristic, Kind: "openai-api-key",
-					Start: 11, End: 43,
-				}},
-			}}
-		}, after: []string{"done"}},
-	}}
-	return suspendedRunWith(t, policy, client)
+	path := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(path, []byte("api key: sk-proj-abcdefghijklmnopqrstuvwx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The result must reach the egress gate, not stop at the policy gate first.
+	permit := policy.Policy()
+	permit.Observe.Decision = content.DecisionPermit
+	permit.Observe.Scopes = nil
+	h := suspendedRunWith(t, egressPolicy{GlobalPolicy: policy, policy: permit}, approvalToolScript("files.read", map[string]any{"path": path}))
+	h.policy = policy
+	return h
 }
 
-func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, client *scriptedApprovalClient) *scopeHarness {
+type egressPolicy struct {
+	assistant.GlobalPolicy
+	policy content.EffectPolicy
+}
+
+func (p egressPolicy) Policy() content.EffectPolicy { return p.policy }
+
+func approvalToolScript(name string, args map[string]any) protocol.Script {
+	return protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: name, Arguments: args},
+		{Kind: protocol.StepAnswer, Text: "done"},
+		{Kind: protocol.StepEnd, Model: "test-model"},
+	}}
+}
+
+func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, script protocol.Script) *scopeHarness {
 	t.Helper()
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
-	h.createEndpoint()
+	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(policy), WithScreenCaptureSource(&recordingScreenCapture{body: screenCaptureBody(t, 12, "fixture screen")}))
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
@@ -164,10 +128,7 @@ func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, client *scrip
 	if err := json.Unmarshal(raw, &asked); err != nil {
 		t.Fatalf("approvalRequested: %v", err)
 	}
-	return &scopeHarness{
-		askHarness: h, policy: policy, sid: sid,
-		runID: res.RunID, entryID: res.EntryID, asked: asked,
-	}
+	return &scopeHarness{askHarness: h, policy: policy, sid: sid, runID: res.RunID, entryID: res.EntryID, asked: asked, rawAsked: raw}
 }
 
 // answer is the renderer's literal payload for this run's proposal.
@@ -495,8 +456,8 @@ func TestAgentApprove_ScopeAlways_PolicyWriteFailureStillDeclines(t *testing.T) 
 		t.Fatalf("warning = %q, want it to name the failure", res.Warning)
 	}
 	ap := assistant.Approval{
-		RunID: strconv.FormatInt(h.runID, 10), Attempt: 1, Tool: "files.read",
-		CallID: "call_1", ArgHash: "hash-a",
+		RunID: h.asked.RunID, Attempt: h.asked.Attempt, Tool: h.asked.Tool,
+		CallID: h.asked.CallID, ArgHash: h.asked.ArgHash,
 	}
 	if kind, ok := h.ws.agentApprovals.DeclinedKind(ap); !ok || kind != assistant.DeclineCallOnce {
 		t.Fatalf("declined kind = %q/%v, want once/true — a failed standing write must not claim permanence", kind, ok)
@@ -594,15 +555,8 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 // chose. On the scripted path the transport creates the store record itself
 // and could record the effect there; here the record already exists.
 func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) {
-	fake, srv := newToolCallingServer()
-	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
 	policy := askObserveStore(t)
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
-	h.createEndpointAt(srv.URL)
+	h := newAskHarnessWithOpts(t, approvalToolScript("session.read", map[string]any{}), WithAgentPolicy(policy))
 
 	sid := openLocalSession(t, h.conn)
 
@@ -612,9 +566,6 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 		t.Fatalf("ask: %+v", errObj)
 	}
 	raw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
-	if raw == nil {
-		t.Fatalf("no approvalRequested within 15s; provider requests=%d", fake.requests.Load())
-	}
 	var n agentApprovalRequested
 	if uerr := json.Unmarshal(raw, &n); uerr != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", uerr, raw)
@@ -641,23 +592,15 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 // the tool's declared destructive worst case. The stored destructive row
 // starts at ask and must remain ask after "allow always".
 func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t *testing.T) {
-	fake, srv := newRunToolCallingServer("")
-	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
 	policy := askObserveStore(t)
 	initial := policy.Policy()
 	initial.MutateDestructive = content.EffectRow{Decision: content.DecisionAsk}
 	if err := policy.SetPolicy(initial); err != nil {
 		t.Fatalf("seed destructive ask row: %v", err)
 	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
-	h.createEndpointAt(srv.URL)
+	h := newAskHarnessWithOpts(t, approvalToolScript("session.run", map[string]any{"command": "df -h"}), WithAgentPolicy(policy))
 
 	sid := openLocalSession(t, h.conn)
-	fake.args = `{"command":"df -h"}`
 
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-always-1", "sessionId": sid, "question": "how much disk is free?", "cwd": "/repo",
@@ -665,9 +608,6 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 		t.Fatalf("ask: %+v", errObj)
 	}
 	raw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
-	if raw == nil {
-		t.Fatalf("no approvalRequested within 15s; provider requests=%d", fake.requests.Load())
-	}
 	var n agentApprovalRequested
 	if uerr := json.Unmarshal(raw, &n); uerr != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", uerr, raw)
@@ -715,44 +655,20 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 // proves the exact invocation was saved; this test proves a differently-shaped
 // destructive call is not widened by it.
 func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBeforeDestructiveEscalation(t *testing.T) {
-	var sid string
-	var requests atomic.Int64
-	argsFor := func(command string) string {
-		raw, err := json.Marshal(map[string]string{"command": command})
-		if err != nil {
-			t.Fatalf("marshal session.run args: %v", err)
-		}
-		return string(raw)
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !providertest.ConsumeRequestBeforeResponse(w, r) {
-			return
-		}
-		switch requests.Add(1) {
-		case 1:
-			streamToolCallChunk(w, "session.run", argsFor("df -h"))
-		case 2:
-			streamToolCallChunk(w, "session.run", argsFor("rm -rf /"))
-		default:
-			streamOKChunks(w)
-		}
-	}))
-	defer srv.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
+	script := protocol.Script{Steps: []protocol.Step{
+		{Kind: protocol.StepTool, Name: "session.run", Arguments: map[string]any{"command": "df -h"}},
+		{Kind: protocol.StepTool, Name: "session.run", Arguments: map[string]any{"command": "rm -rf /"}},
+		{Kind: protocol.StepEnd, Model: "test-model"},
+	}}
 	policy := askObserveStore(t)
 	initial := policy.Policy()
 	initial.MutateDestructive = content.EffectRow{Decision: content.DecisionAsk}
 	if err := policy.SetPolicy(initial); err != nil {
 		t.Fatalf("seed destructive ask row: %v", err)
 	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
-	h.createEndpointAt(srv.URL)
+	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(policy))
 
-	sid = openLocalSession(t, h.conn)
+	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-read-half", "sessionId": sid, "question": "how much disk is free?", "cwd": "/repo",
 	}, 2); errObj != nil {

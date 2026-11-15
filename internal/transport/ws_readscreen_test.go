@@ -8,14 +8,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,83 +150,6 @@ func hasGrantScope(scopes []content.GrantScope, kind content.ResourceKind, id st
 	return false
 }
 
-type toolCallingServer struct {
-	requests atomic.Int64
-	bodies   []string
-}
-
-func newToolCallingServer() (*toolCallingServer, *httptest.Server) {
-	s := &toolCallingServer{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		n := s.requests.Add(1)
-		s.bodies = append(s.bodies, string(body))
-		if n == 1 {
-			// The exact SSE shape the assistant engine tests use: one chunk
-			// carrying the tool call and finish_reason tool_calls, then the
-			// end-of-stream marker (policy_test.go's streamToolCalls).
-			streamToolCallChunk(w, "session.read", `{}`)
-			return
-		}
-		streamOKChunks(w)
-	}))
-	return s, srv
-}
-
-// streamToolCallChunk writes one SSE completion whose single chunk carries
-// the given tool call and finish_reason tool_calls — the shape the openai
-// adapter's streaming builder consumes (mirrors the assistant tests).
-func streamToolCallChunk(w http.ResponseWriter, name, args string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	d := map[string]any{
-		"id":      "chatcmpl-test",
-		"object":  "chat.completion.chunk",
-		"created": 0,
-		"model":   "probe-model",
-		"choices": []map[string]any{{
-			"index": 0,
-			"delta": map[string]any{
-				"role": "assistant",
-				"tool_calls": []map[string]any{{
-					"id":   "call_readscreen",
-					"type": "function",
-					"function": map[string]any{
-						"name":      name,
-						"arguments": args,
-					},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-	}
-	b, _ := json.Marshal(d)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-}
-
-// streamOKChunks writes one streamed "ok" in two chunks, the way a real
-// streaming completion arrives.
-func streamOKChunks(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	chunk := func(content, finish string) {
-		d := map[string]any{
-			"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 0,
-			"model": "probe-model",
-			"choices": []map[string]any{{
-				"index": 0, "delta": map[string]any{"role": "assistant", "content": content},
-				"finish_reason": finish,
-			}},
-		}
-		b, _ := json.Marshal(d)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-	}
-	chunk("o", "")
-	chunk("k", "stop")
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-}
-
 type screenCaptureCall struct {
 	sessionID string
 	region    *assistant.FrameRegion
@@ -316,26 +234,6 @@ func TestRequestScreen_ReportsMissingBackendSource(t *testing.T) {
 	}
 }
 
-func (h *askHarness) createEndpointAt(baseURL string) {
-	h.t.Helper()
-	created, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Local",
-		"baseUrl": baseURL,
-		"schema":  "openai-compatible",
-		"key":     "sk-test-123",
-		"models":  []map[string]any{{"name": "qwen3"}},
-	}))
-	if code != 0 {
-		h.t.Fatalf("endpoints.create: code %d", code)
-	}
-	// The ask resolves through the ANSWERING ROLE (bead nocx-e6kn2).
-	if isErrorResponse(h.t, jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
-		"role": "answering", "endpointId": created.ID, "model": "qwen3",
-	})) {
-		h.t.Fatalf("roles.assign refused")
-	}
-}
-
 // TestReadScreen_EndToEndOverTheRealSocket is criterion 3: a run whose grant
 // permits readScreen on a live session produces a frame in the model's tool
 // message. The engine is real, the socket is real, the provider is fake; the
@@ -343,16 +241,8 @@ func (h *askHarness) createEndpointAt(baseURL string) {
 // off the socket and answers it with a frame. Everything asserted crossed a
 // wire.
 func TestSessionRead_BackendCaptureOverTheRealSocket(t *testing.T) {
-	fake, srv := newToolCallingServer()
-	defer srv.Close()
-
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
 	source := &recordingScreenCapture{body: screenCaptureBody(t, 12, "hello", "world")}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)), WithScreenCaptureSource(source))
-	h.createEndpointAt(srv.URL)
+	h := newAskHarnessWithOpts(t, bridgeToolScript("session.read", map[string]any{}, "ok"), WithAgentPolicy(autonomousPolicyStore(t)), WithScreenCaptureSource(source))
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
@@ -399,13 +289,7 @@ func TestSessionRead_BackendCaptureOverTheRealSocket(t *testing.T) {
 	if state.RunID != res.RunID || state.State != "completed" {
 		t.Fatalf("runState = runId %d state %q, want %d completed", state.RunID, state.State, res.RunID)
 	}
-	if fake.requests.Load() < 2 {
-		t.Fatalf("provider received %d requests, want at least two", fake.requests.Load())
-	}
-	if len(fake.bodies) < 2 {
-		t.Fatalf("provider bodies = %d, want tool result request", len(fake.bodies))
-	}
-	toolResult := sessionReadToolResult(t, fake.bodies[1])
+	toolResult := sessionReadToolResult(t, h.toolResult())
 	schema := loadSchema(t, "tools/session.read.schema.json#/$defs/result")
 	if err := schema.Validate(toolResult); err != nil {
 		t.Fatalf("actual session.read tool result does not satisfy its schema: %v\nresult: %+v", err, toolResult)
@@ -422,19 +306,14 @@ func TestSessionRead_BackendCaptureOverTheRealSocket(t *testing.T) {
 	}
 }
 
-func sessionReadToolResult(t *testing.T, requestBody string) map[string]any {
+func sessionReadToolResult(t *testing.T, resultBody string) map[string]any {
 	t.Helper()
-	content := lifecycleBlockReadToolResult(requestBody)
-	const openTag = "<tool-output>\n"
-	const closeTag = "\n</tool-output>"
-	start := strings.Index(content, openTag)
-	end := strings.LastIndex(content, closeTag)
-	if start >= 0 && end > start+len(openTag) {
-		var result map[string]any
-		if err := json.Unmarshal([]byte(content[start+len(openTag):end]), &result); err == nil && result["source"] == "backend" {
-			return result
-		}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(resultBody), &result); err != nil {
+		t.Fatalf("decode actual bridge result: %v: %s", err, resultBody)
 	}
-	t.Fatalf("second provider request has no backend session.read tool result: %s", requestBody)
-	return nil
+	if result["source"] != "backend" {
+		t.Fatalf("session.read did not return backend capture: %s", resultBody)
+	}
+	return result
 }

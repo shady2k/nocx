@@ -31,7 +31,7 @@ done
 	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
 		t.Fatal(err)
 	}
-	c := New(t.TempDir(), []string{"PATH=" + dir, "LAUNCH_LOG=" + log})
+	c := newTestConnector(t.TempDir(), []string{"PATH=" + dir, "LAUNCH_LOG=" + log})
 	if ready := c.Readiness(context.Background()); ready.State != harness.Ready {
 		t.Fatalf("Readiness = %+v", ready)
 	}
@@ -51,7 +51,7 @@ done
 }
 
 func TestCatalogueCacheWaitHonorsDeadline(t *testing.T) {
-	c := New(t.TempDir(), nil)
+	c := newTestConnector(t.TempDir(), nil)
 	c.catalogGate <- struct{}{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -72,7 +72,7 @@ func TestCatalogueRejectsFailedAndIncompleteRPC(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "pi"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
 				t.Fatal(err)
 			}
-			c := New(t.TempDir(), []string{"PATH=" + dir})
+			c := newTestConnector(t.TempDir(), []string{"PATH=" + dir})
 			if _, err := c.Models(context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Models error = %v, want %q", err, tc.want)
 			}
@@ -89,7 +89,7 @@ while :; do :; done
 	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
 		t.Fatal(err)
 	}
-	c := New(t.TempDir(), []string{"PATH=" + dir})
+	c := newTestConnector(t.TempDir(), []string{"PATH=" + dir})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	if _, err := c.Models(ctx); !errors.Is(err, context.DeadlineExceeded) {

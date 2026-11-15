@@ -12,7 +12,7 @@ import (
 )
 
 func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
-	c := New(t.TempDir(), []string{"PI_OFFLINE=1"})
+	c := newTestConnector(t.TempDir(), []string{"PI_OFFLINE=1"})
 	spec := harness.TurnSpec{ConversationID: "conversation", SystemPrompt: "exact instructions", Dir: t.TempDir(), Tools: harness.ToolBridge{Command: []string{"bridge", "mcp"}, Env: []string{"BEARER=private"}}}
 	first, err := c.Start(context.Background(), spec)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 	}
 	entries, err := os.ReadDir(first.Dir)
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("workspace not empty: %v %v", entries, err)
+		t.Fatalf("workspace has unexpected files: %v %v", entries, err)
 	}
 	var configs []string
 	for _, launch := range []harness.Launch{first, second} {
@@ -51,15 +51,23 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 			t.Fatalf("config permissions: %v %v", info, statErr)
 		}
 		var data struct {
-			Command      []string          `json:"command"`
-			Env          map[string]string `json:"env"`
-			SystemPrompt string            `json:"systemPrompt"`
+			Command    []string          `json:"command"`
+			Env        map[string]string `json:"env"`
+			PromptFile string            `json:"promptFile"`
 		}
 		if err = json.Unmarshal(raw, &data); err != nil {
 			t.Fatal(err)
 		}
-		if data.Env["BEARER"] != "private" || data.SystemPrompt != spec.SystemPrompt || strings.Join(data.Command, " ") != "bridge mcp" {
+		if data.Env["BEARER"] != "private" || data.PromptFile != launch.PromptPath || strings.Join(data.Command, " ") != "bridge mcp" {
 			t.Fatalf("config: %+v", data)
+		}
+		prompt, err := os.ReadFile(data.PromptFile)
+		if err != nil || string(prompt) != spec.SystemPrompt {
+			t.Fatalf("prompt: %q %v", prompt, err)
+		}
+		info, err = os.Stat(data.PromptFile)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("prompt permissions: %v %v", info, err)
 		}
 		if !strings.Contains(strings.Join(launch.Argv, " "), "--session-dir "+filepath.Join(c.dataDir, "pi", "sessions")) {
 			t.Fatalf("launch: %+v", launch)

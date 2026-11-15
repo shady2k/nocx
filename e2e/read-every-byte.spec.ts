@@ -38,26 +38,21 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   standalone as base,
+  ensureAssistantVault,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,
-  createAiEndpoint,
-  setDefaultModel,
-  settingsReady,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
 
 const test = base
 const nonce = Date.now().toString(36)
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const APPROVAL_TITLE = 'This action needs your approval'
-
-const ENDPOINT_NAME = `E2E Bytes ${nonce}`
 
 /** The script the PROPOSED COMMAND names. */
 const RUN_MARKER = `deployed-${nonce}`
@@ -84,7 +79,7 @@ test.beforeAll(async () => {
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), `nocx-872jc-e2e-${nonce}-`))
   backend = new VaultBackend(readStand().server, { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
 
   // The script the command will name, on the machine the command runs on.
   const workspace = join(backend.isolatedHome, 'workspace')
@@ -103,25 +98,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
   await appReadyForInput(page)
-}
-
-/** The assistant this spec needs, through the surfaces a person uses.
- *  Not what is under test — equipment — so it is the same arrangement
- *  agent-tool-approval.spec.ts makes. The policy is deliberately NOT touched:
- *  an unset policy is the zero matrix, which ASKS, and being asked is the
- *  whole of what this spec watches. */
-async function configureAssistant(page: Page): Promise<void> {
-  await page.locator(SETTINGS_AI_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
 }
 
 async function askFromPrompt(page: Page, question: string): Promise<void> {
@@ -170,9 +148,6 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     page,
   }) => {
     await openApp(page)
-    await page.keyboard.press('Meta+,')
-    await settingsReady(page)
-    await configureAssistant(page)
 
     // ── The script the proposed command names ─────────────────────────────
     await page.locator(TITLE).first().click()
@@ -188,7 +163,7 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     const requestBase = fake.requests().length
     await askFromPrompt(page, QUESTION)
     const proposal = await fake.waitForRequests(requestBase + 1)
-    expect(proposal[requestBase].body).toContain('session.run')
+    expect(proposal[requestBase].body).toContain('mcp__nocx__session_run')
 
     const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
     await expect(prompt).toBeVisible({ timeout: 30_000 })

@@ -15,70 +15,23 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
-// runIDInStillRunning pulls the parked run's handle out of the sentence the
-// model was given. The model has no other source for it, which is the point:
-// a continuation can only name a run nocx told it about.
-var runIDInStillRunning = regexp.MustCompile(`run id ([0-9a-f]+)`)
-
-// scriptQuietAnswer makes the fake provider behave like a model that reads
-// the question and answers it: the first round runs the command, and EVERY
-// round that carries a still-running question is answered with session.wait
-// — for as long as it is asked, which is what a model choosing to keep
-// waiting actually does. Any other round writes the answer and ends the
-// turn.
-//
-// It is driven by what the conversation SAYS rather than by a round number,
-// because a quiet command is asked about again on every renewal and nobody
-// can predict how many rounds that is.
-func scriptQuietAnswer(h *runLeaseHarness, t *testing.T, decision string, seen chan<- string) {
-	var mu sync.Mutex
-	answered := 0
-	h.fake.script = func(n int64, body string) (string, string, bool) {
-		if n == 1 {
-			return "session.run", h.fake.args, true
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		// EACH QUESTION IS ANSWERED ONCE. The body is the whole conversation
-		// so far, so a question asked three rounds ago is still in it; a
-		// script that simply looked for the words would answer the same
-		// question forever and the turn would never end. Counting the
-		// questions against the answers is what a model does — and it is
-		// also what nocx tells the model to do, by putting the renewal count
-		// in the sentence.
-		if strings.Count(body, "STILL RUNNING") <= answered {
-			return "", "", false
-		}
-		m := runIDInStillRunning.FindStringSubmatch(body)
-		if m == nil {
-			t.Errorf("a still-running question names no run id:\n%s", body)
-			return "", "", false
-		}
-		answered++
-		// The FIRST question, kept for the assertion; later renewals ask the
-		// same thing and would only overwrite it. Sent LAST, after every
-		// piece of state this call changes, so nothing a reader of the
-		// channel might go on to check is still being written behind it.
-		select {
-		case seen <- body:
-		default:
-		}
-		return "session.wait", `{"runId":` + strconv.Quote(m[1]) + `,"decision":"` + decision + `"}`, true
-	}
+// scriptQuietAnswer selects the fake process's real MCP continuation loop.
+// The process extracts each continuation handle from the result it received.
+func scriptQuietAnswer(h *runLeaseHarness, t *testing.T, decision string) {
+	t.Helper()
+	h.quietDecision = decision
+	h.quietQuestion = filepath.Join(t.TempDir(), "quiet-question")
 }
 
 // A command that goes quiet for longer than the quiet bound is NOT killed:
@@ -95,7 +48,6 @@ func TestRunLease_AQuietCommandIsAskedAboutAndThenCompletes(t *testing.T) {
 		Inactivity:  1200 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	// Silent for far longer than the quiet bound, then it speaks and exits
@@ -111,10 +63,9 @@ func TestRunLease_AQuietCommandIsAskedAboutAndThenCompletes(t *testing.T) {
 	// ${M}shed keeps the literal out of the echoed line, so the only thing
 	// that can match is what the command actually printed, three seconds in.
 	cmd := "sh -c 'M=fini; echo $$ > " + pidFile + "; sleep 2; echo ${M}shed'"
-	question := make(chan string, 1)
 	// The script is installed BEFORE the ask: the first request reaches the
 	// provider as soon as the stream starts.
-	scriptQuietAnswer(h, t, "continue", question)
+	scriptQuietAnswer(h, t, "continue")
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
@@ -152,16 +103,16 @@ func TestRunLease_AQuietCommandIsAskedAboutAndThenCompletes(t *testing.T) {
 
 	// STEP 1: the model was asked, and the question named the bound and the
 	// continuation.
-	select {
-	case body := <-question:
-		for _, want := range []string{"STILL RUNNING", "has NOT been stopped", "session.wait"} {
-			if !strings.Contains(body, want) {
-				t.Fatalf("the question the model was asked does not say %q:\n%s", want, body)
-			}
-		}
-	default:
-		t.Fatal("the model was never asked about the quiet command")
+	body, err := os.ReadFile(h.quietQuestion)
+	if err != nil {
+		t.Fatalf("quiet question: %v", err)
 	}
+	for _, want := range []string{"STILL RUNNING", "has NOT been stopped", "session.wait"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("question lacks %q: %s", want, body)
+		}
+	}
+
 	// STEP 3: the command's own result reached the model after the wait. The
 	// round it lands in is not fixed — the model is asked again on every
 	// renewal — so what is asserted is that it arrived, not where.
@@ -170,15 +121,10 @@ func TestRunLease_AQuietCommandIsAskedAboutAndThenCompletes(t *testing.T) {
 	// in two halves: `finished` appears nowhere in the command line, nowhere
 	// in the arguments and nowhere in the question, so the only way it can
 	// reach the conversation is as output the command actually produced.
-	gotOutput := false
-	for _, b := range h.fake.bodies {
-		if strings.Contains(b, "finished") {
-			gotOutput = true
-		}
+	if result := h.agent.toolResult(); !strings.Contains(result, "finished") {
+		t.Fatalf("the model never received output after keeping waiting: %s", result)
 	}
-	if !gotOutput {
-		t.Fatalf("the model never received the command's own output after keeping waiting: %v", h.fake.bodies)
-	}
+
 	// And the ledger agrees nothing was bounded: the command completed.
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermCompleted {
@@ -197,11 +143,10 @@ func TestRunLease_TheModelAnsweringStopEndsTheCommandAndTheRunSaysSo(t *testing.
 		Inactivity:  700 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"
-	scriptQuietAnswer(h, t, "stop", make(chan string, 1))
+	scriptQuietAnswer(h, t, "stop")
 	h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
@@ -217,14 +162,10 @@ func TestRunLease_TheModelAnsweringStopEndsTheCommandAndTheRunSaysSo(t *testing.
 	if _, sentence := waitForRunState(t, tap, "completed"); sentence != "" {
 		t.Fatalf("the run carries a run-level error %q; a stop the model chose is a tool outcome, not a failed run", sentence)
 	}
-	waittest.WaitForTimeout(t, "the model to be told the command was stopped", 10*time.Second, func() bool {
-		for _, b := range h.fake.bodies {
-			if strings.Contains(b, "answered stop") {
-				return true
-			}
-		}
-		return false
-	})
+	if result := h.agent.toolResult(); !strings.Contains(result, "answered stop") {
+		t.Fatalf("model was not told of its stop: %s", result)
+	}
+
 	// THE LEDGER REPORTS THE STOP, AND BLAMES NO BOUND. That is the owner's
 	// criterion for this path, and it is stated here as what it is rather
 	// than as "the reason on one particular row": the model may make more

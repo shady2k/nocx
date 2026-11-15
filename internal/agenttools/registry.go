@@ -71,6 +71,16 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
+	// Environment is where the pane this run was asked in is: the identity
+	// the admitting adapter derived from the session's own facts — the
+	// transport's environmentForSession, the one owner of "where is this
+	// session" — never anything a call's parameters could name.
+	//
+	// The zero value names no pane. The file tools refuse that rather than
+	// assume this machine: they are built on local.New() until the pane's
+	// own provider exists (ADR-anntnxdj §5, stage 8), so a capability that
+	// cannot prove the pane is local must not reach this disk.
+	Environment content.Environment
 	// Participant is the worker participant this run IS, when the run belongs
 	// to a worker rather than to a coordinator. Empty for every ordinary run,
 	// and that emptiness is what narrowWorkerParticipant refuses on.

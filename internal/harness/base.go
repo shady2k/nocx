@@ -27,7 +27,7 @@ func (e *TurnError) Error() string { return e.Reason }
 // process incarnation. The actor owns command execution and response matching.
 type Protocol interface {
 	Start(context.Context, TurnSpec) (Launch, error)
-	NewCodec(SessionInfo) Codec
+	NewCodec(SessionInfo, Launch) Codec
 }
 
 // SessionInfo identifies one process incarnation within a conversation.
@@ -53,6 +53,9 @@ type Codec interface {
 // step must set Barrier: its matched response fences output from the previous
 // turn before any new turn events are admitted. Only the final step sets Prompt.
 type Step struct {
+	// Model reports the model resolved by a successful response check.
+	Model func() string
+
 	Command Command
 	Check   func(any) error
 	Barrier bool
@@ -73,9 +76,12 @@ type Decoded struct {
 	Response *Response
 }
 type Launch struct {
-	Argv []string
-	Env  []string
-	Dir  string
+	// PromptPath names the private system-prompt file owned by this launch.
+	// Connectors that use a prompt file pass this exact path to their codec.
+	PromptPath string
+	Argv       []string
+	Env        []string
+	Dir        string
 	// Cleanup releases launch resources after spawn failure or process teardown.
 	// The actor calls it once; it must tolerate resources already consumed by the child.
 	Cleanup func() error

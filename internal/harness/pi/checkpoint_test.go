@@ -81,8 +81,8 @@ func TestCodecCheckpointsFailedAndCancelledFirstTurn(t *testing.T) {
 			if err := os.WriteFile(session, raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			connector := New(dir, nil)
-			codec := connector.NewCodec(harness.SessionInfo{ConversationID: "conversation"})
+			connector := newTestConnector(dir, nil)
+			codec := connector.NewCodec(harness.SessionInfo{ConversationID: "conversation"}, harness.Launch{})
 			plan := codec.BeginTurn(harness.TurnSpec{})
 			if err := plan[0].Check(map[string]any{"sessionFile": session, "messageCount": float64(0)}); err != nil {
 				t.Fatal(err)
@@ -92,7 +92,7 @@ func TestCodecCheckpointsFailedAndCancelledFirstTurn(t *testing.T) {
 			if err := os.WriteFile(session, []byte(`{"type":"session","id":"conversation"}`+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			next := connector.NewCodec(harness.SessionInfo{ConversationID: "conversation"}).BeginTurn(harness.TurnSpec{})
+			next := connector.NewCodec(harness.SessionInfo{ConversationID: "conversation"}, harness.Launch{}).BeginTurn(harness.TurnSpec{})
 			err := next[0].Check(map[string]any{"sessionFile": session, "messageCount": float64(0)})
 			if err == nil || !strings.Contains(err.Error(), "lost") {
 				t.Fatalf("first %s turn left no checkpoint: %v", stop, err)
@@ -102,8 +102,8 @@ func TestCodecCheckpointsFailedAndCancelledFirstTurn(t *testing.T) {
 }
 
 func TestCodecNonemptySessionWithoutRecordIsLost(t *testing.T) {
-	connector := New(t.TempDir(), nil)
-	plan := connector.NewCodec(harness.SessionInfo{ConversationID: "missing-record"}).BeginTurn(harness.TurnSpec{})
+	connector := newTestConnector(t.TempDir(), nil)
+	plan := connector.NewCodec(harness.SessionInfo{ConversationID: "missing-record"}, harness.Launch{}).BeginTurn(harness.TurnSpec{})
 	err := plan[0].Check(map[string]any{"sessionFile": "native.jsonl", "messageCount": float64(2)})
 	if err == nil || !strings.Contains(err.Error(), "lost") {
 		t.Fatalf("unrecorded native history resumed: %v", err)

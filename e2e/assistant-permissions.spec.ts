@@ -110,17 +110,18 @@ import {
   standalone as base,
   appReadyForInput,
   bindEndpoint,
-  createAiEndpoint,
+  ensureAssistantVault,
   expectPermissionRule,
   forgetPermission,
   permissionRule,
   readCommandForPermission,
-  setDefaultModel,
   settingsReady,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
+import { configurePiHome } from './pi-home'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { toolResults } from './ask-gesture'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -129,8 +130,6 @@ const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const NEW_TAB = '[aria-label="New tab"]'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 
 /** The approval prompt is a kit Prompt: a role="dialog" carrying the title a
@@ -168,12 +167,10 @@ const DF_OUTPUT_MARKER = 'Filesystem'
 
 const test = base
 
-/** One nonce per file, so this file's endpoint name and every question in it
- *  are unique in the whole run. Blocks are addressed by their text, so two
+/** One nonce per file, so every question is unique in the whole run. Blocks are addressed by their text, so two
  *  questions reading alike would make one locator resolve to two elements and
  *  fail for the other question's reason (nocx-3xjou). */
 const nonce = Date.now().toString(36)
-const ENDPOINT_NAME = `E2E Permissions ${nonce}`
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -183,11 +180,9 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-0dzqq-e2e-'))
-  // `true` = no Secret Service for this backend: the container has no keychain
-  // to ask, and the derived content key makes the vault available without user
-  // setup — the arrangement agent-ask.spec.ts uses.
+  // This backend and real pi share the disposable home.
   backend = new VaultBackend(serverBin(), { root })
-  endpoint = await backend.start()
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
   // So that the absence of this file MEANS something later. It is outside the
   // disposable $HOME by construction — the command the acceptance criterion
   // names is an absolute path — so a leftover from anything is cleared here
@@ -276,26 +271,12 @@ function approvalPrompt(page: Page): Locator {
   return page.getByRole('dialog', { name: APPROVAL_TITLE })
 }
 
-/** Chat-completion requests after `from`. The endpoint's model-discovery GET
- *  has no messages and must not count as a round. */
+/** Model chat-completion rounds after `from`. */
 function chatRequests(from: number): FakeRequest[] {
   return fake
     .requests()
     .slice(from)
     .filter((request) => request.body.includes('"messages"')) as FakeRequest[]
-}
-
-/** The tool-result slots of one model request, verbatim — what the backend
- *  actually handed back for the calls it was asked to make. */
-function toolResults(body: string): string[] {
-  try {
-    const parsed = JSON.parse(body) as { messages?: { role?: string; content?: unknown }[] }
-    return (parsed.messages ?? [])
-      .filter((message) => message.role === 'tool' && typeof message.content === 'string')
-      .map((message) => message.content as string)
-  } catch {
-    return []
-  }
 }
 
 /**
@@ -346,24 +327,13 @@ async function activePaneId(page: Page): Promise<string> {
   return id
 }
 
-/** Create the endpoint and give its model the answering role, through the
- *  surfaces a person uses. A fresh home has no vault, so the first save stops
- *  on the setup sheet and is retried once the vault exists; createAiEndpoint
- *  reads which of the two happened rather than assuming. */
+/** Open Settings before the journey returns to its original pane.
+ * Real pi is configured before backend startup. */
 async function configureAssistant(page: Page): Promise<void> {
+  await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
+  await page.locator(TITLE).first().click()
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
-  await page.locator(SETTINGS_AI_NAV).click()
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-  await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
-    baseUrl: fake.baseUrl(),
-    models: ['e2e-model'],
-    key: `e2e-key-${nonce}`,
-    vaultPassphrase: `vault-pass-${nonce}`,
-  })
-  await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
 }
 
 /**

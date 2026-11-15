@@ -41,7 +41,7 @@ export interface AgentAsk {
    */
   replayed: boolean
   /**
-   * The model id that answered — the answering role's pair, pinned into the run's facts at ask time (RunFacts.Model, bead nocx-e6kn2). Always present on a result: an ask whose role could not resolve is a refusal, never a result. The renderer shows this beside every answer, so a person can always tell which model answered.
+   * The model id reported by the harness. Empty on the prepared response when the actor has not reported its model yet; the actual answering model is persisted in the run facts when the turn ends. Legacy answering-role assignments do not select this model.
    */
   model: string
 }

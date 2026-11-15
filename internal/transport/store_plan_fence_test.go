@@ -22,7 +22,7 @@ import (
 // nocx-9fzkk — twice burned, which is why this is a test and not a comment).
 func TestTheWiredConfigPlanFencesAnOperationStanceRead(t *testing.T) {
 	store := &fencedStore{sealed: true}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	server := &WSServer{storeGuard: capability.NewStoreGuard(catalog.Declarations(), time.Second)}
 	op, _ := server.buildConfigOp(server.domainGates().configVault)

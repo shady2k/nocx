@@ -29,14 +29,25 @@ func TestConnectorSweepsOnlyDeadOwnerConfigsAtStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := New(data, []string{"PI_OFFLINE=1"})
+	consumedName := fmt.Sprintf("session-%d-consumed.json", dead.Process.Pid)
+	for _, name := range []string{deadName, consumedName, liveName} {
+		if err := os.Mkdir(filepath.Join(configs, name+".d"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newTestConnector(data, []string{"PI_OFFLINE=1"})
 	defer func() { _ = c.Close(context.Background()) }()
 	if _, err := os.Stat(filepath.Join(configs, deadName)); !os.IsNotExist(err) {
 		t.Fatalf("dead owner's credential config remains: %v", err)
 	}
-	for _, name := range []string{liveName, "session-unknown.json", "unrelated.json"} {
+	for _, name := range []string{liveName, liveName + ".d", "session-unknown.json", "unrelated.json"} {
 		if _, err := os.Stat(filepath.Join(configs, name)); err != nil {
 			t.Fatalf("removed unproven orphan %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{deadName, consumedName} {
+		if _, err := os.Stat(filepath.Join(configs, name+".d")); !os.IsNotExist(err) {
+			t.Fatalf("dead owner's prompt directory remains: %v", err)
 		}
 	}
 	// Another incarnation starting must not repeat the connector's startup sweep.

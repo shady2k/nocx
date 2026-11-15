@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -18,14 +21,23 @@ type instrumentLogRecord struct {
 }
 
 type instrumentLogger struct {
-	record instrumentLogRecord
+	record   instrumentLogRecord
+	warnings []instrumentLogRecord
 }
 
 func (l *instrumentLogger) Debug(string, ...any) {}
 func (l *instrumentLogger) Info(message string, args ...any) {
 	l.record = instrumentLogRecord{message: message, args: args}
 }
-func (l *instrumentLogger) Warn(string, ...any)                      {}
+
+func (l *instrumentLogger) Warn(message string, args ...any) {
+	for i := 1; i < len(args); i += 2 {
+		if err, ok := args[i].(error); ok {
+			args[i] = err.Error()
+		}
+	}
+	l.warnings = append(l.warnings, instrumentLogRecord{message, args})
+}
 func (l *instrumentLogger) Error(string, ...any)                     {}
 func (l *instrumentLogger) With(...any) log.Logger                   { return l }
 func (l *instrumentLogger) WithContext(_ context.Context) log.Logger { return l }
@@ -61,14 +73,43 @@ func TestLogAgentStreamEnded_CarriesTheRunsOwnCounts(t *testing.T) {
 func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	svc := &fakeAgentService{sealErr: errors.New("seal failed")}
 	logger := &instrumentLogger{}
-	h := newGapHandlers(svc, &toolCallScript{events: []assistant.AskEvent{
-		answerEvent("before"),
-		callEvent("call-1", "files.read", "action-1"),
-	}}, assistant.NewApprovalStore())
+	// Named-file tools refuse before the kernel on an unavailable session.
+	// Use the own-pane read so the admitted call reaches the prose seal;
+	// the seal must fail before the kernel can execute the read.
+	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "before"}, {Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{}}, {Kind: protocol.StepEnd}}}
+	h := newGapHandlers(svc, newScriptedAgent(t, script).harness, assistant.NewApprovalStore())
+	client, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := content.Open(t.Context(), content.Config{Path: filepath.Join(t.TempDir(), "content.db"), Key: make([]byte, 32), Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8}, Logger: log.NewSlogAdapter(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	h.attemptLedger = db.Ledger()
+	h.client = client
+	h.knownMaterial = adapterKnownMaterial(adapterVault(t))
+	rc := gapRunContext()
+	rc.sessionID = "instrument-session"
+	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: string(rc.sessionID)}})
+	rc.grant = &grant
+	h.grantFor = func(string) *content.Grant { return &grant }
+
 	h.log = logger
 
-	h.runAskStream(context.Background(), gapRunContext(), &gapResponder{})
+	r := &gapResponder{}
+	h.runAskStream(context.Background(), rc, r)
 
+	if svc.finishState() != content.RunFailed {
+		t.Fatalf("run state = %q, want failed after seal failure", svc.finishState())
+	}
+	svc.mu.Lock()
+	sealed := append([]string(nil), svc.sealed...)
+	svc.mu.Unlock()
+	if len(sealed) != 1 || sealed[0] != "turn-1/text-1" {
+		t.Fatalf("sealed prose = %v, want the pre-call prose seal attempt", sealed)
+	}
 	if logger.record.message != "agent ask: the stream ended" {
 		t.Fatalf("message = %q, want stream-ended record", logger.record.message)
 	}
@@ -81,8 +122,8 @@ func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 		values[key] = logger.record.args[i+1]
 	}
 	if values["toolCallsRequested"] != 1 || values["toolCallsExecuted"] != 0 {
-		t.Fatalf("tool counts = requested %v executed %v, want 1/0 after seal failure",
-			values["toolCallsRequested"], values["toolCallsExecuted"])
+		t.Fatalf("tool counts = requested %v executed %v, want 1/0 after seal failure (terminal=%+v warnings=%+v)",
+			values["toolCallsRequested"], values["toolCallsExecuted"], r.runState, logger.warnings)
 	}
 }
 

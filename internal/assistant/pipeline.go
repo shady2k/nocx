@@ -15,6 +15,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -510,6 +511,12 @@ func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID str
 	// run is over. The refusal carries the context's own error, so a caller
 	// records it as the cancellation it is rather than as a tool failure.
 	if refusal := cancelled(ctx, call, enteredCancelled, "while the tool was running"); refusal != nil {
+		// An expired submission is a known product failure, not a caller
+		// abandoning the call. Nothing ran and no result may leave.
+		var lease *RunLeaseError
+		if errors.As(outcome.runErr, &lease) && lease.SubmissionExpired {
+			return outcome, lease
+		}
 		return dispatchOutcome{}, refusal
 	}
 	outbound := Outbound{Text: outcome.output, WasError: outcome.runErr != nil}

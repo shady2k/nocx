@@ -2,6 +2,7 @@ package agenttools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -27,11 +28,53 @@ const (
 	filesWriteRowEffect = content.EffectMutateReversible
 )
 
+// The three file tools are built on THIS machine's filesystem (local.New()
+// below), so a run whose pane is somewhere else must get no capability at all
+// — otherwise an SSH pane reads and writes the local disk, which is the leak
+// ADR-anntnxdj §5 closes until stage 8 gives these tools the pane's own
+// provider through the files binding.
+//
+// Refusing HERE is the guarantee, not the answer: the constructor declining to
+// construct is what makes "the tool cannot exceed what it was given" true by
+// the same mechanism the grant's deadline uses (withinGrantLifetime). A caller
+// that wants the model to READ a refusal composes a guard over the same two
+// facts — the tool's name (ReachesLocalDisk) and the run's pane — so the
+// sentence is ours rather than a failure about a constructor.
+var ErrRemoteFileTools = errors.New("nocx's file tools reach this machine's disk only; the remote file tools are coming")
+
+// ReachesLocalDisk reports whether the declaration's capability is this
+// machine's filesystem: files.read, files.edit and files.create, whose
+// constructors call local.New(). It is the one answer to "does this tool need
+// the pane to be local", read by the constructors below and by the guard that
+// turns their refusal into a sentence — so the two cannot disagree about which
+// tools the fact is about. It goes with local.New() when the file tools move
+// to the pane's own provider (ADR-anntnxdj stage 8).
+func ReachesLocalDisk(name string) bool {
+	switch name {
+	case "files.read", "files.edit", "files.create":
+		return true
+	}
+	return false
+}
+
+// localPaneOnly is why a file tool has no capability on a pane that is not
+// this machine. The zero Environment names no pane and is refused with it: a
+// caller that never said where the run is has not said it is here.
+func localPaneOnly(tool string, runCtx RunContext) error {
+	if runCtx.Environment.Kind == content.EnvLocal {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", tool, ErrRemoteFileTools)
+}
+
 // narrowFilesRead is the files.read row's capability constructor. It receives
 // the resources resolved from this call and keeps only the path identities
 // that are also in the grant; other grant paths are not authority for this
 // call.
 func narrowFilesRead(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if err := localPaneOnly("files.read", runCtx); err != nil {
+		return nil, err
+	}
 	paths := resourceIDs(grant, resources, content.ResourcePath)
 	r, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(), filesystemRoots(grant, filesReadRowEffect), paths)
 	if err != nil {
@@ -67,6 +110,9 @@ func filesystemRoots(grant content.Grant, effect content.Effect) []string {
 }
 
 func narrowFilesEdit(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if err := localPaneOnly("files.edit", runCtx); err != nil {
+		return nil, err
+	}
 	paths := resourceIDs(grant, resources, content.ResourcePath)
 	editor, err := filesystem.NewScopedEditorWithExactFiles(context.Background(), local.New(), filesystemRoots(grant, filesWriteRowEffect), paths)
 	if err != nil {
@@ -76,6 +122,9 @@ func narrowFilesEdit(grant content.Grant, resources []ResourceRef, runCtx RunCon
 }
 
 func narrowFilesCreate(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if err := localPaneOnly("files.create", runCtx); err != nil {
+		return nil, err
+	}
 	// A new target cannot itself be canonicalized until it exists. Bind the
 	// capability to the existing parent directories of the resolved targets;
 	// ScopedEditor.Create canonicalizes that parent before writing.

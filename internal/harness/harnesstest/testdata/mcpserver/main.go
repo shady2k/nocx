@@ -49,7 +49,25 @@ func main() {
 		case "tools/call":
 			if os.Getenv("MCP_BLOCK") == "1" {
 				_ = os.WriteFile(os.Getenv("MCP_BLOCKEDFILE"), []byte("tools/call"), 0o600)
-				// Keep scanning: one reader owns requests and observes EOF.
+				gate := os.Getenv("MCP_CANCEL_GATE")
+				if gate == "" {
+					// Keep scanning: one reader owns requests and observes EOF.
+					continue
+				}
+				cancel, err := os.Open(gate)
+				if err != nil {
+					return
+				}
+				var signal [1]byte
+				_, _ = cancel.Read(signal[:])
+				_ = cancel.Close()
+				_ = out.Encode(map[string]any{
+					"jsonrpc": "2.0", "id": request.ID,
+					"result": map[string]any{
+						"content": []map[string]any{{"type": "text", "text": "cancelled"}},
+						"isError": true,
+					},
+				})
 				continue
 			}
 			agentSecret, _ := request.Params.Arguments["agent_secret"].(string)

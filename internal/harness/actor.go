@@ -55,13 +55,18 @@ func (m *SessionManager) Run(ctx context.Context, spec TurnSpec) (Turn, error) {
 
 func (m *SessionManager) CloseConversation(ctx context.Context, id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	s := m.sessions[id]
-	delete(m.sessions, id)
-	m.mu.Unlock()
 	if s == nil {
 		return nil
 	}
-	return s.close(ctx)
+	// Keep the incarnation registered until its bearer and process settle.
+	// A reconnect must not start another actor with the same generation.
+	if err := s.close(ctx); err != nil {
+		return err
+	}
+	delete(m.sessions, id)
+	return nil
 }
 
 func (m *SessionManager) Close(ctx context.Context) error {
@@ -318,6 +323,7 @@ type (
 		child      *child
 		tools      ToolSession
 		bridge     ToolBridge
+		launch     Launch
 		err        error
 	}
 )
@@ -348,6 +354,7 @@ func (s *session) loop() {
 	var tools ToolSession
 	var bridge ToolBridge
 	var barrierPassed bool
+	var pinnedModel string
 	var current *actorTurn
 	var queue []*actorTurn
 	var generation, turnNumber, serial uint64
@@ -357,6 +364,8 @@ func (s *session) loop() {
 	var terminal *Event
 	var plan []Step
 	var cancelCommands []Command
+	var cancelPrepared bool
+	var pendingTools map[string]struct{}
 	var pending *pendingStep
 	var frame []byte
 	var frameWritten int
@@ -495,6 +504,7 @@ func (s *session) loop() {
 			return
 		}
 		cancelling = true
+		cancelPrepared = false
 		deadline = time.Now().Add(bound)
 		observe("cancel", nil)
 		delivery = nil
@@ -513,10 +523,15 @@ func (s *session) loop() {
 			retire(false)
 			return
 		}
-		cancelCommands = codec.CancelSequence()
+		// The agent must receive tool cancellation results before abort can
+		// abandon its MCP waiters. The existing deadline still bounds settlement.
 	}
 	begin := func(t *actorTurn) {
+		if pinnedModel != "" {
+			t.spec.Model = pinnedModel
+		}
 		current = t
+		pendingTools = make(map[string]struct{})
 		cancelling = false
 		promptWritten = false
 		barrierPassed = false
@@ -543,6 +558,12 @@ func (s *session) loop() {
 		}
 	}
 	for {
+		// Endpoint settlement confirms response delivery, not that the agent has
+		// consumed it. Wait for its tool-finished events before abandoning waiters.
+		if cancelling && settlementDone && len(pendingTools) == 0 && !cancelPrepared && terminal == nil && codec != nil {
+			cancelPrepared = true
+			cancelCommands = codec.CancelSequence()
+		}
 		// Publication is the only point at which Wait and Events become terminal.
 		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 {
 			observe("terminal", nil)
@@ -553,6 +574,9 @@ func (s *session) loop() {
 			pending = nil
 			frame = nil
 			idleAt = time.Now().Add(idle)
+		}
+		if closing && current == nil && (process != nil || starting) && !retiring {
+			retire(false)
 		}
 		if closing && current == nil && !starting && !retiring && process == nil {
 			return
@@ -623,6 +647,21 @@ func (s *session) loop() {
 							return
 						}
 					}
+					if step.Model != nil {
+						if model := step.Model(); model != "" {
+							if pinnedModel != "" && model != pinnedModel {
+								fail("agent changed the conversation's pinned model")
+								return
+							}
+							if current.spec.ModelSelected != nil {
+								if err := current.spec.ModelSelected(context.WithoutCancel(current.ctx), model); err != nil {
+									fail(fmt.Sprint("record conversation model: ", err))
+									return
+								}
+							}
+							pinnedModel = model
+						}
+					}
 					if step.Barrier {
 						barrierPassed = true
 						observe("barrier-passed", nil)
@@ -640,6 +679,14 @@ func (s *session) loop() {
 				if terminal != nil {
 					fail("agent output after the turn terminal")
 					return
+				}
+				if ev.Tool != nil {
+					switch ev.Kind {
+					case EventToolStarted:
+						pendingTools[ev.Tool.ID] = struct{}{}
+					case EventToolFinished:
+						delete(pendingTools, ev.Tool.ID)
+					}
 				}
 				if ev.Kind == EventEnd || ev.Kind == EventFailure {
 					choose(ev)
@@ -719,7 +766,7 @@ func (s *session) loop() {
 				fail(fmt.Sprint(result.err))
 				continue
 			}
-			codec = s.protocol.NewCodec(SessionInfo{ConversationID: current.spec.ConversationID, Generation: generation})
+			codec = s.protocol.NewCodec(SessionInfo{ConversationID: current.spec.ConversationID, Generation: generation}, result.launch)
 			spec := current.spec
 			if len(result.bridge.Command) > 0 {
 				spec.Tools = result.bridge
@@ -818,7 +865,11 @@ func (s *session) loop() {
 					generation++
 					retired = false
 					retirementErr = nil
+					if pinnedModel != "" {
+						t.spec.Model = pinnedModel
+					}
 					current = t
+					pendingTools = make(map[string]struct{})
 					cancelling = false
 					promptWritten = false
 					settling = false
@@ -849,7 +900,7 @@ func (s *session) loop() {
 						if err == nil {
 							child, err = spawn(ctx, s.base, launch)
 						}
-						result := incarnationStart{generation: info.Generation, child: child, tools: ts, bridge: bridge, err: err}
+						result := incarnationStart{generation: info.Generation, child: child, tools: ts, bridge: bridge, launch: launch, err: err}
 						select {
 						case starts <- result:
 						case <-ctx.Done():

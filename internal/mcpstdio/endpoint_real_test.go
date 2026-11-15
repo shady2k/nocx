@@ -309,3 +309,37 @@ func TestAConnectionRefusalReachesTheCallerAsItsReason(t *testing.T) {
 		})
 	}
 }
+
+// Turn settlement must deliver cancellation to the agent, not lose the socket
+// while a tool is still waiting for its answer.
+func TestTurnSettlementAnswersBlockedCallBeforeClosingEndpoint(t *testing.T) {
+	dispatcher := &heldDispatcher{held: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{})}
+	endpoint := startRealEndpoint(t, &slotAuthorizer{}, dispatcher)
+	driver := startStdio(t, endpoint.SocketPath())
+	initialization(driver)
+	driver.send(2, "tools/call", `{"name":"alpha.hold"}`)
+	<-dispatcher.held
+	driver.send(3, "tools/call", `{"name":"alpha.hold"}`)
+	// This answer fences acceptance of both blocked calls on the shared socket.
+	driver.send(4, "tools/call", `{"name":"alpha.screen"}`)
+	if text := toolText(t, driver.nextID(4)); text != `{"screen":true}` {
+		t.Fatalf("fence = %s", text)
+	}
+	settled := make(chan struct{})
+	go func() { endpoint.SettleAdmissions("session", 1); close(settled) }()
+	seen := make(map[string]bool)
+	for range 2 {
+		response := driver.next()
+		id := string(response["id"])
+		if (id != "2" && id != "3") || seen[id] {
+			t.Fatalf("unexpected response: %v", response)
+		}
+		seen[id] = true
+		reason := toolRefusal(t, response)
+		if reason != "The person cancelled this call before it finished. Do not repeat it unless they ask." {
+			t.Fatalf("cancelled call = %q", reason)
+		}
+	}
+	<-dispatcher.stopped
+	<-settled
+}

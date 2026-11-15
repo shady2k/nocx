@@ -352,47 +352,58 @@ func TestObservationsReachTheLease(t *testing.T) {
 // so no part of this test rests on a pause. The person's evidence is unchanged —
 // a silent hop answers no look either way.
 func TestASecondLookIsNotStartedWhileTheFirstOnesWorkIsStillOut(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	var mu sync.Mutex
-	var at []monoclock.Nanos
-	// The look returns at once, as a cancelled one does, and reports that the
-	// work it started is still out there.
-	link.look = func() error {
-		mu.Lock()
-		at = append(at, clock.Now())
-		mu.Unlock()
-		link.lookParked.Store(true)
-		return errors.New("the hop is silent")
-	}
-	looks := func() []monoclock.Nanos {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]monoclock.Nanos(nil), at...)
-	}
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	acquire(t, mgr, hostconn.HoldsPlainShell)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		defer link.release()
+		var mu sync.Mutex
+		var at []monoclock.Nanos
+		// The look returns at once, as a cancelled one does, and reports that the
+		// work it started is still out there.
+		link.look = func() error {
+			mu.Lock()
+			at = append(at, clock.Now())
+			mu.Unlock()
+			link.lookParked.Store(true)
+			return errors.New("the hop is silent")
+		}
+		looks := func() []monoclock.Nanos {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]monoclock.Nanos(nil), at...)
+		}
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
 
-	// Stalled by a probe that never comes back, so the look cadence starts.
-	clock.Advance(hostconn.ProbeInterval)
-	clock.Advance(hostconn.ProbeDeadline)
-	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
-	waittest.WaitFor(t, "the first look", func() bool { return len(looks()) == 1 })
+		// Stalled by a probe that never comes back, so the look cadence starts.
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeDeadline)
+		synctest.Wait()
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		waittest.WaitFor(t, "the first look", func() bool { return len(looks()) == 1 })
 
-	// Three whole intervals pass with the first look's work still out there.
-	clock.Advance(3 * hostconn.LookInterval)
+		// Three whole intervals pass with the first look's work still out there.
+		synctest.Wait()
+		clock.Advance(3 * hostconn.LookInterval)
+		synctest.Wait()
 
-	// The work ends — the hop's connection does, in the product — and the clock
-	// moves one more interval, which is when the next look goes out.
-	link.lookParked.Store(false)
-	clock.Advance(hostconn.LookInterval)
-	waittest.WaitFor(t, "the next look once the first one's work ended", func() bool { return len(looks()) >= 2 })
+		// The work ends — the hop's connection does, in the product — and the clock
+		// moves one more interval, which is when the next look goes out.
+		link.lookParked.Store(false)
+		synctest.Wait()
+		clock.Advance(hostconn.LookInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "the next look once the first one's work ended", func() bool { return len(looks()) >= 2 })
 
-	// TWO, and never more: the first look's fake reports parked on every call, so
-	// with the bound in place the second look is the last one that can start. A
-	// guard that ignored the bound starts one per overdue interval — four at the
-	// same instant here — which is the accumulation.
-	if got := len(looks()); got != 2 {
-		t.Fatalf("%d looks went out, want 2: %v after the first", got, looks()[1:])
-	}
+		// TWO, and never more: the first look's fake reports parked on every call, so
+		// with the bound in place the second look is the last one that can start. A
+		// guard that ignored the bound starts one per overdue interval — four at the
+		// same instant here — which is the accumulation.
+		if got := len(looks()); got != 2 {
+			t.Fatalf("%d looks went out, want 2: %v after the first", got, looks()[1:])
+		}
+	})
 }

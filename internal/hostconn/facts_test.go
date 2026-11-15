@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -135,20 +136,25 @@ func TestAStalledFactCarriesTheLookAndReturnsOnTheAnswer(t *testing.T) {
 // TestASlowAnswerCarriesItsGrade: the measurement rides the fact, and the grade
 // is the one function that decides it.
 func TestASlowAnswerCarriesItsGrade(t *testing.T) {
-	clock := hostconntest.New()
-	link := newQuietLink()
-	link.memoryLink.probe = func() (time.Duration, error) { return 600 * time.Millisecond, nil }
-	mgr, sup := managerOn(t, quietCarrier(link), clock)
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link := newQuietLink()
+		link.memoryLink.probe = func() (time.Duration, error) { return 600 * time.Millisecond, nil }
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
 
-	var log factLog
-	stop := sup.Watch(log.add)
-	defer stop()
+		var log factLog
+		stop := sup.Watch(log.add)
+		defer stop()
 
-	acquire(t, mgr, hostconn.HoldsNone)
-	clock.Advance(hostconn.ProbeInterval)
-	waittest.WaitFor(t, "a measured observation", func() bool {
-		f, ok := log.find(func(f hostconn.Facts) bool { return f.Measured })
-		return ok && f.Slow && f.RoundTrip == 600*time.Millisecond
+		lease := acquire(t, mgr, hostconn.HoldsNone)
+		defer lease.Release()
+		synctest.Wait()
+		clock.Advance(hostconn.ProbeInterval)
+		synctest.Wait()
+		waittest.WaitFor(t, "a measured observation", func() bool {
+			f, ok := log.find(func(f hostconn.Facts) bool { return f.Measured })
+			return ok && f.Slow && f.RoundTrip == 600*time.Millisecond
+		})
 	})
 }
 

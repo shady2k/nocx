@@ -323,6 +323,7 @@ type (
 		child      *child
 		tools      ToolSession
 		bridge     ToolBridge
+		launch     Launch
 		err        error
 	}
 )
@@ -765,7 +766,7 @@ func (s *session) loop() {
 				fail(fmt.Sprint(result.err))
 				continue
 			}
-			codec = s.protocol.NewCodec(SessionInfo{ConversationID: current.spec.ConversationID, Generation: generation})
+			codec = s.protocol.NewCodec(SessionInfo{ConversationID: current.spec.ConversationID, Generation: generation}, result.launch)
 			spec := current.spec
 			if len(result.bridge.Command) > 0 {
 				spec.Tools = result.bridge
@@ -899,7 +900,7 @@ func (s *session) loop() {
 						if err == nil {
 							child, err = spawn(ctx, s.base, launch)
 						}
-						result := incarnationStart{generation: info.Generation, child: child, tools: ts, bridge: bridge, err: err}
+						result := incarnationStart{generation: info.Generation, child: child, tools: ts, bridge: bridge, launch: launch, err: err}
 						select {
 						case starts <- result:
 						case <-ctx.Done():

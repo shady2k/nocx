@@ -47,12 +47,18 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 		return harness.Launch{}, err
 	}
 	configPath := config.Name()
-	promptPath := filepath.Join(dir, "prompt.txt")
+	privateDir := configPath + ".d"
+	if err = os.Mkdir(privateDir, 0o700); err != nil {
+		_ = config.Close()
+		_ = os.Remove(configPath)
+		return harness.Launch{}, err
+	}
+	promptPath := filepath.Join(privateDir, "prompt.txt")
 	ready := false
 	defer func() {
 		if !ready {
 			_ = os.Remove(configPath)
-			_ = os.Remove(promptPath)
+			_ = os.RemoveAll(privateDir)
 		}
 	}()
 	env := make(map[string]string, len(spec.Tools.Env))
@@ -103,21 +109,21 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 	}
 	argv = append(argv, "-e", extensionPath)
 	ready = true
-	return harness.Launch{Argv: argv, Dir: dir, Env: append(append([]string(nil), c.env...), "NOCX_PI_SESSION_FILE="+configPath), Cleanup: func() error {
+	return harness.Launch{PromptPath: promptPath, Argv: argv, Dir: dir, Env: append(append([]string(nil), c.env...), "NOCX_PI_SESSION_FILE="+configPath), Cleanup: func() error {
 		var errs []error
-		for _, path := range []string{configPath, promptPath} {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
-			}
+		if err := os.Remove(configPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+		if err := os.RemoveAll(privateDir); err != nil {
+			errs = append(errs, err)
 		}
 		return errors.Join(errs...)
 	}}, nil
 }
 
-func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
+func (c *Connector) NewCodec(info harness.SessionInfo, launch harness.Launch) harness.Codec {
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(info.ConversationID)))
-	promptPath, _ := filepath.Abs(filepath.Join(c.dataDir, "pi", "workspaces", key, "prompt.txt"))
-	codec := &codec{markerPath: filepath.Join(c.dataDir, "pi", "resume", key+".json"), promptPath: promptPath}
+	codec := &codec{markerPath: filepath.Join(c.dataDir, "pi", "resume", key+".json"), promptPath: launch.PromptPath}
 	raw, err := os.ReadFile(codec.markerPath) //nolint:gosec // connector-owned conversation metadata
 	if err == nil {
 		codec.markerErr = json.Unmarshal(raw, &codec.expected)

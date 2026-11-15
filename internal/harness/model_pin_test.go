@@ -12,7 +12,7 @@ type admissionProtocol struct {
 	models chan string
 }
 
-func (p admissionProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p admissionProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (p admissionProtocol) BeginTurn(spec TurnSpec) []Step {
 	p.models <- spec.Model
 	return []Step{{Command: Command{Name: "barrier"}, Barrier: true, Model: func() string { return "native" }}, {Command: Command{Name: "prompt"}, Prompt: true}}

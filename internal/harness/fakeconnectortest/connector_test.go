@@ -148,7 +148,7 @@ func (*cancelToolSession) Retire(context.Context) error { return nil }
 func TestProtocolCommandsAndResponse(t *testing.T) {
 	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
-	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7})
+	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7}, harness.Launch{})
 	setup := codec.Setup()
 	if len(setup) != 1 || setup[0].Command.Name != "initialize" || setup[0].Prompt || setup[0].Check == nil {
 		t.Fatalf("setup: %+v", setup)
@@ -211,9 +211,9 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 func TestCodecsArePerIncarnation(t *testing.T) {
 	c := fakeconnectortest.New(fakeconnectortest.Config{})
 	defer func() { _ = c.Close(context.Background()) }()
-	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1})
-	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2})
-	restarted := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 3})
+	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1}, harness.Launch{})
+	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2}, harness.Launch{})
+	restarted := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 3}, harness.Launch{})
 	if first == second || first == restarted || second == restarted {
 		t.Fatal("codec instances shared")
 	}

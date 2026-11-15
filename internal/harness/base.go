@@ -27,7 +27,7 @@ func (e *TurnError) Error() string { return e.Reason }
 // process incarnation. The actor owns command execution and response matching.
 type Protocol interface {
 	Start(context.Context, TurnSpec) (Launch, error)
-	NewCodec(SessionInfo) Codec
+	NewCodec(SessionInfo, Launch) Codec
 }
 
 // SessionInfo identifies one process incarnation within a conversation.
@@ -76,9 +76,12 @@ type Decoded struct {
 	Response *Response
 }
 type Launch struct {
-	Argv []string
-	Env  []string
-	Dir  string
+	// PromptPath names the private system-prompt file owned by this launch.
+	// Connectors that use a prompt file pass this exact path to their codec.
+	PromptPath string
+	Argv       []string
+	Env        []string
+	Dir        string
 	// Cleanup releases launch resources after spawn failure or process teardown.
 	// The actor calls it once; it must tolerate resources already consumed by the child.
 	Cleanup func() error

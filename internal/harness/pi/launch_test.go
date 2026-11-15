@@ -27,7 +27,7 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 		t.Fatalf("unstable private cwd: %q %q pane %q", first.Dir, second.Dir, spec.Dir)
 	}
 	entries, err := os.ReadDir(first.Dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != "prompt.txt" {
+	if err != nil || len(entries) != 0 {
 		t.Fatalf("workspace has unexpected files: %v %v", entries, err)
 	}
 	var configs []string
@@ -58,7 +58,7 @@ func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
 		if err = json.Unmarshal(raw, &data); err != nil {
 			t.Fatal(err)
 		}
-		if data.Env["BEARER"] != "private" || data.PromptFile != filepath.Join(first.Dir, "prompt.txt") || strings.Join(data.Command, " ") != "bridge mcp" {
+		if data.Env["BEARER"] != "private" || data.PromptFile != launch.PromptPath || strings.Join(data.Command, " ") != "bridge mcp" {
 			t.Fatalf("config: %+v", data)
 		}
 		prompt, err := os.ReadFile(data.PromptFile)

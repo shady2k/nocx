@@ -24,7 +24,7 @@ esac
 done`}}, nil
 }
 
-func (p shellProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p shellProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 
 func (shellProtocol) Setup() []Step { return nil }
 
@@ -167,7 +167,7 @@ func TestSessionBoundsLines(t *testing.T) {
 
 type brokenProtocol struct{ shellProtocol }
 
-func (p brokenProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p brokenProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 
 func (brokenProtocol) Decode([]byte) (Decoded, error) { return Decoded{}, errors.New("invalid line") }
 
@@ -463,7 +463,7 @@ func (prematureFailureProtocol) Start(context.Context, TurnSpec) (Launch, error)
 	return Launch{Argv: []string{"/bin/sh", "-c", `echo failure; exec sleep 30`}}, nil
 }
 
-func (prematureFailureProtocol) NewCodec(SessionInfo) Codec {
+func (prematureFailureProtocol) NewCodec(SessionInfo, Launch) Codec {
 	return &interleaveProtocol{mode: "hold", decoded: make(chan struct{}, 1)}
 }
 
@@ -495,7 +495,7 @@ func (p partialDrainProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	return Launch{Argv: []string{"/bin/sh", "-c", `read -r id name; echo "response $id"; read x < "$1"; cat >/dev/null`, "agent", p.gate}}, nil
 }
 
-func (partialDrainProtocol) NewCodec(SessionInfo) Codec {
+func (partialDrainProtocol) NewCodec(SessionInfo, Launch) Codec {
 	return &interleaveProtocol{mode: "blocked", decoded: make(chan struct{}, 1)}
 }
 
@@ -612,7 +612,7 @@ type closeCancelProtocol struct {
 	ignore bool
 }
 
-func (p closeCancelProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p closeCancelProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (p closeCancelProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	script := `while read -r id name; do
 case "$name" in
@@ -712,7 +712,7 @@ type settlementCancelProtocol struct {
 	pendingAtCancel chan bool
 }
 
-func (p settlementCancelProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p settlementCancelProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (p settlementCancelProtocol) CancelSequence() []Command {
 	p.pendingAtCancel <- p.tools.Pending()
 	return p.closeCancelProtocol.CancelSequence()
@@ -759,7 +759,7 @@ type receivedToolProtocol struct {
 	cancelCalled chan struct{}
 }
 
-func (p receivedToolProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p receivedToolProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (p receivedToolProtocol) Start(ctx context.Context, spec TurnSpec) (Launch, error) {
 	if p.gate == "" {
 		return p.closeCancelProtocol.Start(ctx, spec)

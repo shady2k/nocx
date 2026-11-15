@@ -9,7 +9,7 @@ import (
 
 type responseEventProtocol struct{ shellProtocol }
 
-func (p responseEventProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p responseEventProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (responseEventProtocol) Decode(line []byte) (Decoded, error) {
 	return Decoded{Response: &Response{ID: strings.TrimPrefix(string(line), "response ")}, Events: []Event{{Kind: EventEnd, End: &End{Model: "unsupported"}}}}, nil
 }

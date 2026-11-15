@@ -63,7 +63,7 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 }
 
 // NewCodec allocates wire state for one process incarnation.
-func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
+func (c *Connector) NewCodec(info harness.SessionInfo, _ harness.Launch) harness.Codec {
 	return &codec{info: info}
 }
 

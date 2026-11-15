@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,8 +49,8 @@ func TestPromptFileRewrittenBeforeEachPromptAndRemovedOnCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codec := c.NewCodec(harness.SessionInfo{ConversationID: spec.ConversationID})
-	path := filepath.Join(launch.Dir, "prompt.txt")
+	codec := c.NewCodec(harness.SessionInfo{ConversationID: spec.ConversationID}, launch)
+	path := launch.PromptPath
 	for _, instructions := range []string{"old instructions", "new instructions", "new instructions"} {
 		spec.SystemPrompt = instructions
 		plan := codec.BeginTurn(spec)
@@ -86,5 +87,70 @@ func TestPromptWriteFailurePreventsPromptEncoding(t *testing.T) {
 	raw, err := c.Encode("prompt", plan[len(plan)-1].Command)
 	if err == nil || raw != nil {
 		t.Fatalf("failed prompt write produced command: %s %v", raw, err)
+	}
+}
+
+// A cancelled startup may finish disposing only after its replacement has
+// encoded a prompt. Order these boundaries explicitly, without timing sleeps.
+func TestOverlappingIncarnationsKeepTheirOwnPrompt(t *testing.T) {
+	c := newTestConnector(t.TempDir(), nil)
+	spec := harness.TurnSpec{ConversationID: "overlapping", SystemPrompt: "old instructions"}
+	old, err := c.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = old.Cleanup() })
+	oldCodec := c.NewCodec(harness.SessionInfo{ConversationID: spec.ConversationID}, old)
+	spec.SystemPrompt = "new instructions intact"
+	next, err := c.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = next.Cleanup() })
+	nextCodec := c.NewCodec(harness.SessionInfo{ConversationID: spec.ConversationID}, next)
+	promptFile := func(launch harness.Launch) string {
+		t.Helper()
+		for _, entry := range launch.Env {
+			if path, ok := strings.CutPrefix(entry, "NOCX_PI_SESSION_FILE="); ok {
+				raw, readErr := os.ReadFile(path) //nolint:gosec // generated config in isolated test directory
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				var config struct {
+					PromptFile string `json:"promptFile"`
+				}
+				if decodeErr := json.Unmarshal(raw, &config); decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				return config.PromptFile
+			}
+		}
+		t.Fatal("no extension config")
+		return ""
+	}
+	oldPath, nextPath := promptFile(old), promptFile(next)
+	encode := func(codec harness.Codec, instructions string) {
+		t.Helper()
+		plan := codec.BeginTurn(harness.TurnSpec{SystemPrompt: instructions})
+		if _, encodeErr := codec.Encode("prompt", plan[len(plan)-1].Command); encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+	}
+	encode(nextCodec, spec.SystemPrompt)
+	// A late old write must not replace what the new extension will read.
+	encode(oldCodec, "late old instructions")
+	raw, err := os.ReadFile(nextPath) //nolint:gosec // generated prompt in isolated test directory
+	if err != nil || string(raw) != spec.SystemPrompt {
+		t.Fatalf("replacement prompt after old write: %q %v", raw, err)
+	}
+	if err = old.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(nextPath) //nolint:gosec // generated prompt in isolated test directory
+	if err != nil || string(raw) != spec.SystemPrompt {
+		t.Fatalf("replacement prompt after old cleanup: %q %v", raw, err)
+	}
+	if oldPath == nextPath {
+		t.Fatal("incarnations share prompt path")
 	}
 }

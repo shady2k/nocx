@@ -39,7 +39,7 @@ func (p *interleaveProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	}
 	return Launch{Argv: []string{"/bin/sh", "-c", script}}, nil
 }
-func (p *interleaveProtocol) NewCodec(SessionInfo) Codec { return p }
+func (p *interleaveProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (p *interleaveProtocol) Setup() []Step {
 	if p.mode == "blocked" {
 		return nil

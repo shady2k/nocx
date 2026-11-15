@@ -15915,14 +15915,13 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
 // A FAILED inventory or reclaim is uncertainty, never proof the shell ended.
 // The pane this rule is about was restored while the coordinator still held
 // its shell; opening a second shell over it is what duplicated ten helpers
-// into eighteen. The pane therefore takes the SAME recovery card a failed
-// reattach already uses (mountAttachOffer), and its retry re-asks the one
-// question that was left unanswered — never "open a replacement".
+// into eighteen. The pane therefore offers an inventory retry, which re-asks
+// the one question left unanswered — never "open a replacement".
 describe('an uncertain adoption keeps the pane and opens no replacement', () => {
   const UNCERTAIN =
     'The coordinator could not say whether this tab\u2019s session is still running. No new shell was started.'
 
-  it('opens no replacement shell, and has no second recovery card to offer', async () => {
+  it('keeps an inventory retry that reclaims the same session without opening a replacement', async () => {
     const client = makeClient()
     const adopted = makeSession()
     let attempts = 0
@@ -15945,11 +15944,58 @@ describe('an uncertain adoption keeps the pane and opens no replacement', () => 
       expect(client.openSession).not.toHaveBeenCalled()
       expect(client._sessions).toHaveLength(0)
       expect(content.sessionLost()).toBe(false)
-      // The retry card belonged to the renderer's attachment state, which is
-      // gone (task 5.5). What is left is the truth: nothing was opened and
-      // nothing is claimed.
-      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      const offer = tab.pane.querySelector('.nocx-attach-offer')
+      expect(offer?.textContent).toContain(UNCERTAIN)
+      const retry = offer?.querySelector('button')
+      expect(retry?.textContent).toBe('Retry attachment')
       expect(attempts).toBe(1)
+      retry?.click()
+      await vi.waitFor(() => {
+        expect(content.sessionId()).toBe(adopted.sessionId)
+        expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      })
+      expect(attempts).toBe(2)
+      expect(client.openSession).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the offer after another unanswered inventory and serializes the retry', async () => {
+    const client = makeClient()
+    const adopted = makeSession()
+    let resolveRetry: ((session: SessionHandle) => void) | undefined
+    const adopt = vi
+      .fn<() => Promise<SessionHandle | null>>()
+      .mockRejectedValueOnce(new LiveSessionUncertainError(UNCERTAIN))
+      .mockRejectedValueOnce(new LiveSessionUncertainError(UNCERTAIN))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve
+          }),
+      )
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { adoptSession: adopt } },
+      client,
+    )
+    try {
+      const button = () => tab.pane.querySelector<HTMLButtonElement>('.nocx-attach-offer button')
+      button()?.click()
+      await vi.waitFor(() => {
+        expect(adopt).toHaveBeenCalledTimes(2)
+        expect(button()).not.toBeNull()
+      })
+      const retry = button()
+      retry?.click()
+      retry?.click()
+      expect(tab.pane.querySelector('.nocx-attach-offer button')).toBeNull()
+      await vi.waitFor(() => expect(adopt).toHaveBeenCalledTimes(3))
+      resolveRetry?.(asSessionHandleForTest(adopted))
+      await vi.waitFor(() => expect(content.sessionId()).toBe(adopted.sessionId))
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      expect(client.openSession).not.toHaveBeenCalled()
     } finally {
       teardown()
     }

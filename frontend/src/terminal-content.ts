@@ -89,6 +89,10 @@ import type { SessionPublishFailed } from './generated/session.publishFailed'
 import type { SessionEffect } from './generated/session.effect'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark, type ConnectionMark } from './connection-mark'
+import {
+  mountSessionInventoryOffer,
+  type SessionInventoryOfferHandle,
+} from './session-inventory-offer'
 import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from './opening-card'
 import type { WakeObservation } from './wake-report'
 import { connectionWarning, type ConnectionCondition } from './connection-condition'
@@ -784,7 +788,7 @@ interface HeldWindow {
  * the question was not answered — and the helper's shell may be alive behind
  * every one of them. So this is the one error an adoption may throw that the
  * pane must NOT answer with a replacement shell. The pane keeps its surface,
- * says so with the same card a failed reattach uses (mountAttachOffer), and
+ * says so with the inventory retry offer (mountSessionInventoryOffer), and
  * the card's retry asks again; only an ANSWERED absence opens a fresh shell.
  */
 export class LiveSessionUncertainError extends Error {
@@ -2300,6 +2304,10 @@ export class TerminalContent extends BasePaneContent {
    *  decided (LiveSessionUncertainError). It is what tells the attach card's
    *  retry which question to ask again — and what keeps the pane from opening
    *  a replacement shell. */
+  private _pendingAdoption = false
+  private _inventoryRetrying = false
+  private _inventoryOffer: SessionInventoryOfferHandle | null = null
+
   /** This pane's files binding, opened on the FIRST upload and reused. A
    *  terminal does not need one to run, so it is not opened at mount: a
    *  binding is a provider, a pooled SSH reference and a watch set, and a
@@ -3178,6 +3186,44 @@ export class TerminalContent extends BasePaneContent {
    *  openRequestedSession's retry; a profile-backed connection never sets
    *  this, since its answer was written to the connection itself. */
   private _sessionDesiredModeOverride: IntegrationMethod | undefined
+
+  private _showInventoryOffer(message: string): void {
+    if (!this._paneTarget || this._disposed) return
+    if (this._inventoryOffer) this._inventoryOffer.set(message)
+    else {
+      this._inventoryOffer = mountSessionInventoryOffer(this._paneTarget, message, () => {
+        void this._retryInventoryAdoption()
+      })
+    }
+    this.scheduleLiveResize()
+  }
+
+  /** Re-ask the unanswered inventory/claim, not the SSH connection owner.
+   * Only a confirmed absence may take openSession's existing fresh-shell path. */
+  private async _retryInventoryAdoption(): Promise<void> {
+    if (!this._pendingAdoption || this._inventoryRetrying || this._disposed) return
+    const signal = this.mountAbortController?.signal
+    if (!signal || signal.aborted) return
+    this._inventoryRetrying = true
+    this._adoptAttempted = false
+    this._inventoryOffer?.set(null)
+    try {
+      await this._bindSession(signal, 'recover')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      log.warn('nocx: the recovery attempt for this pane failed', {
+        pane: this.pane.paneId,
+        error: message,
+      })
+      this._showInventoryOffer(
+        t('app.restore.couldNotRestore', 'This tab’s session could not be restored ({error}).', {
+          error: message,
+        }),
+      )
+    } finally {
+      this._inventoryRetrying = false
+    }
+  }
 
   /**
    * Take back the session the coordinator is already running for this pane,
@@ -5286,7 +5332,7 @@ export class TerminalContent extends BasePaneContent {
    */
   private async _bindSession(
     signal: AbortSignal,
-    mode: 'first' | 'rebind',
+    mode: 'first' | 'rebind' | 'recover',
     /** The open result already registered by the client. */
     preset?: SessionHandle,
   ): Promise<'bound' | 'uncertain' | 'aborted'> {
@@ -5573,18 +5619,16 @@ export class TerminalContent extends BasePaneContent {
         if (!(err instanceof LiveSessionUncertainError)) throw err
         // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
         // (nocx-3an1s.1.5). This pane keeps its surface and its scrollback and
-        // offers the SAME retry a failed reattach offers; the retry re-asks the
-        // inventory and the claim. The alternative — the fallback this replaces
+        // offers a retry that re-asks the inventory and the claim. This is not
+        // the SSH connection head's replacement offer. The fallback this replaces
         // — put a second shell beside every live one on a single transient
         // failure and exhausted the helper's window budget doing it.
         log.warn('nocx: this pane\u2019s session could not be established or ruled out', {
           pane: this.pane.paneId,
           error: err.message,
         })
-        // NOT AN ABSENCE, so nothing is opened in its place. There is no
-        // retry card any more (task 5.5): the connection owner says what the
-        // pane's connection is doing, and a new open is the head's offer when
-        // the backend provides one.
+        this._pendingAdoption = true
+        this._showInventoryOffer(err.message)
         return this._finishBind('uncertain')
       }
     }
@@ -5613,6 +5657,9 @@ export class TerminalContent extends BasePaneContent {
     this._publishNoticeDismissed = false
     this.snapshotStore.reset()
     this.session = session
+    this._pendingAdoption = false
+    this._inventoryOffer?.dispose()
+    this._inventoryOffer = null
     this._boundSessionId = session.sessionId
     // READ THE ACK'S OWN VERDICT THE MOMENT THE SESSION NAMES IT. A store
     // observation can arrive between here and the integration subscription
@@ -10654,6 +10701,8 @@ export class TerminalContent extends BasePaneContent {
     this._connectionMark = null
     this._connectionHead?.dispose()
     this._connectionHead = null
+    this._inventoryOffer?.dispose()
+    this._inventoryOffer = null
     this._connectionUnsub()
     this._connectionStore.dispose()
     this._openedUnsub()

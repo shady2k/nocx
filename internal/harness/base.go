@@ -74,6 +74,13 @@ type Codec interface {
 // decision 3). ok is false for a response that is not such an answer.
 type SteerRecovery interface {
 	DroppedSteers(payload any) (texts []string, ok bool)
+	// QueueClear is the command that asks the agent what it still holds for
+	// steering, and whose answer DroppedSteers reads. A turn that ends with a
+	// message whose delivery is unknown asks this once, so the message is
+	// settled by the agent's own answer rather than by the actor's guess — and
+	// so nothing left in the agent's queue leaks into the next turn
+	// (ADR-4khgzeyp decision 3).
+	QueueClear() Command
 }
 
 // Step is a response-dependent command. Check may inspect the matched response

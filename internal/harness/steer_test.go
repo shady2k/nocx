@@ -435,13 +435,16 @@ type queueProtocol struct {
 
 func (p queueProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 	script := `q="` + p.dir + `/queue"; a="` + p.dir + `/answer"; d="` + p.dir + `/deliver"
+f="` + p.dir + `/finish"; x="` + p.dir + `/exit"
 while read -r id name text; do
 case "$name" in
 barrier|prompt) echo "response $id" ;;
 abort) echo "response $id"; echo end ;;
 steer)
   if [ ! -f "$d" ]; then printf '%s\n' "$text" >> "$q"; fi
-  if [ -f "$a" ]; then echo "response $id"; fi ;;
+  if [ -f "$a" ]; then echo "response $id"; fi
+  [ -f "$x" ] && exit 3
+  [ -f "$f" ] && echo end ;;
 clear_queue)
   list=$(awk 'NF{printf "%s\"%s\"",(n++?",":""),$0}' "$q")
   echo "response $id [$list]"
@@ -486,6 +489,10 @@ func (p queueProtocol) Decode(line []byte) (Decoded, error) {
 	}
 	return Decoded{Response: response}, nil
 }
+
+// QueueClear asks the fake agent what it still holds: the same command its
+// cancel sequence starts with.
+func (p queueProtocol) QueueClear() Command { return Command{Name: "clear_queue"} }
 
 // DroppedSteers reads the fake agent's queue answer: the messages it removed.
 func (p queueProtocol) DroppedSteers(payload any) ([]string, bool) {
@@ -655,6 +662,192 @@ func TestAnAcknowledgedSteerTheCancelDroppedIsListedOnce(t *testing.T) {
 	}
 	if _, err := turn.Wait(ctx); !errors.Is(err, ErrCancelled) {
 		t.Fatalf("Wait = %v", err)
+	}
+	dropped := droppedSteersOf(t, turn)
+	if len(dropped) != 1 || dropped[0] != "queued and then dropped" {
+		t.Fatalf("droppedSteers = %v, want exactly the message the agent never used", dropped)
+	}
+}
+
+// ── I1 at a NORMAL end, and at the agent's exit (nocx-a62cl.6.3) ──────────
+//
+// A message the actor wrote is the agent's until the agent says what became of
+// it — and the turn that ends normally is not the place to guess. The agent's
+// own queue answer is the authority, exactly as it is at a cancel: named, the
+// message was never used and is asked next; missing, it was delivered.
+
+// The turn ends on its own while the message it was given has not been
+// answered and is still queued: it is asked next, once, and the queue the agent
+// was holding is emptied so nothing leaks into the next turn.
+func TestATurnEndingNaturallyHandsBackWhatTheAgentStillHeld(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stop()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "finish"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, written, done := steerRun(t, ctx, dir, nil)
+	defer done()
+	steer := make(chan error, 1)
+	go func() {
+		steerer, ok := turn.(Steerer)
+		if !ok {
+			steer <- ErrNotSteerable
+			return
+		}
+		steer <- steerer.Steer(ctx, "ask this next")
+	}()
+	select {
+	case <-written:
+	case <-ctx.Done():
+		t.Fatal("the message was never written to the agent")
+	}
+	// The agent settles without answering the message it was given.
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("the turn: %v", err)
+	}
+	select {
+	case err := <-steer:
+		if !errors.Is(err, ErrSteerNotTaken) {
+			t.Fatalf("a message the agent still held = %v, want ErrSteerNotTaken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the message was never answered")
+	}
+	if dropped := droppedSteersOf(t, turn); len(dropped) != 0 {
+		t.Fatalf("droppedSteers = %v: the same message was handed back twice", dropped)
+	}
+	// AND IT DOES NOT LEAK: the agent's queue was emptied by the same answer
+	// that named it.
+	queue, err := os.ReadFile(filepath.Join(dir, "queue")) //nolint:gosec // the fixture's own directory, from t.TempDir
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(string(queue))) != 0 {
+		t.Fatalf("the agent still holds %q for the next turn", strings.TrimSpace(string(queue)))
+	}
+}
+
+// The same turn, but the agent used the message and kept nothing: nothing is
+// asked again.
+func TestATurnEndingNaturallyKeepsWhatTheAgentUsed(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stop()
+	dir := t.TempDir()
+	for _, name := range []string{"finish", "deliver"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn, written, done := steerRun(t, ctx, dir, nil)
+	defer done()
+	steer := make(chan error, 1)
+	go func() {
+		steerer, ok := turn.(Steerer)
+		if !ok {
+			steer <- ErrNotSteerable
+			return
+		}
+		steer <- steerer.Steer(ctx, "this one arrived")
+	}()
+	select {
+	case <-written:
+	case <-ctx.Done():
+		t.Fatal("the message was never written to the agent")
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("the turn: %v", err)
+	}
+	select {
+	case err := <-steer:
+		if err != nil {
+			t.Fatalf("a message the agent used = %v, want it taken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the message was never answered")
+	}
+	if dropped := droppedSteersOf(t, turn); len(dropped) != 0 {
+		t.Fatalf("droppedSteers = %v, want nothing: the agent had used it", dropped)
+	}
+}
+
+// The agent EXITS while the message it was given has not been answered: the
+// agent can say nothing, so the message is handed back — a duplicate is the
+// lesser harm, and losing the person's words is not (ADR-4khgzeyp decision 3).
+func TestAnAgentExitingUnderAWrittenMessageHandsItBack(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stop()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "exit"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, written, done := steerRun(t, ctx, dir, nil)
+	defer done()
+	steer := make(chan error, 1)
+	go func() {
+		steerer, ok := turn.(Steerer)
+		if !ok {
+			steer <- ErrNotSteerable
+			return
+		}
+		steer <- steerer.Steer(ctx, "ask this next")
+	}()
+	select {
+	case <-written:
+	case <-ctx.Done():
+		t.Fatal("the message was never written to the agent")
+	}
+	if _, err := turn.Wait(ctx); err == nil {
+		t.Fatal("the turn succeeded although its agent exited")
+	}
+	select {
+	case err := <-steer:
+		if !errors.Is(err, ErrSteerNotTaken) {
+			t.Fatalf("a message under an exited agent = %v, want ErrSteerNotTaken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the message was never answered")
+	}
+}
+
+// The same natural end, but the agent had ACKNOWLEDGED the message and then not
+// used it: its sender was already told the turn had taken it, so the run's own
+// record is the only channel left, and it names it exactly once.
+func TestATurnEndingNaturallyListsAnAcknowledgedMessageTheAgentKept(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+	defer stop()
+	dir := t.TempDir()
+	for _, name := range []string{"finish", "answer"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn, written, done := steerRun(t, ctx, dir, nil)
+	defer done()
+	steer := make(chan error, 1)
+	go func() {
+		steerer, ok := turn.(Steerer)
+		if !ok {
+			steer <- ErrNotSteerable
+			return
+		}
+		steer <- steerer.Steer(ctx, "queued and then dropped")
+	}()
+	select {
+	case <-written:
+	case <-ctx.Done():
+		t.Fatal("the message was never written to the agent")
+	}
+	select {
+	case err := <-steer:
+		if err != nil {
+			t.Fatalf("an acknowledged message = %v, want it taken", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the acknowledgement never came")
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("the turn: %v", err)
 	}
 	dropped := droppedSteersOf(t, turn)
 	if len(dropped) != 1 || dropped[0] != "queued and then dropped" {

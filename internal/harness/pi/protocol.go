@@ -224,6 +224,11 @@ func (*codec) CancelSequence() []harness.Command {
 	return []harness.Command{{Name: "clear_queue"}, {Name: "abort"}}
 }
 
+// QueueClear is pi's own: it removes the steering and follow-up messages still
+// queued and answers with their text, so a message the turn never used comes
+// back here instead of waiting for the next turn.
+func (*codec) QueueClear() harness.Command { return harness.Command{Name: "clear_queue"} }
+
 // DroppedSteers reads what pi's clear_queue removed: its answer lists the
 // steering AND follow-up texts it dropped, and only the steering ones are a
 // person's message to this turn. The queue's own answer is the authority on

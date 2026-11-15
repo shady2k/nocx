@@ -402,6 +402,17 @@ func resolveDroppedSteers(texts []string, acknowledged map[string]int, written *
 		}
 		returned = append(returned, text)
 	}
+	// A written message the answer does NOT name was DELIVERED: the agent had
+	// it before the turn stopped, and asking the same words again would run them
+	// twice. This is the one place that decides, and the cancel's answer and the
+	// turn's own end both come through here.
+	if current := *written; current != nil {
+		current.ack <- nil
+		*written = nil
+		if pending != nil {
+			pending.steerAck = nil
+		}
+	}
 	return returned
 }
 
@@ -484,6 +495,12 @@ func (s *session) loop() {
 	// queueRecovered records that the agent answered the command that clears
 	// its queue: from then on a missing message means delivered, not unknown.
 	var queueRecovered bool
+	// recovering holds a turn's terminal back while the agent is asked what
+	// became of the messages it was given: a turn that ends with a message whose
+	// delivery is unknown must not publish "asked next" over an agent that may
+	// have used it. recoverDeadline bounds that wait by the turn's own bound.
+	var recovering bool
+	var recoverDeadline time.Time
 	var frame []byte
 	var frameWritten int
 	var frameStep Step
@@ -593,31 +610,44 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
-		// The turn is ending: settle every message it still holds, ONCE each.
-		// Never-written messages were never the agent's to lose, so they are
-		// handed back. A WRITTEN message the agent never acknowledged is
-		// settled by what the agent said about its queue: named by the cancel's
-		// answer, it was never used and is handed back; missing from that
-		// answer, it was delivered before the turn stopped. With no answer at
-		// all (the agent died under it), the honest reading is that it was not
-		// taken.
+		// The turn is ending: settle every message it holds, ONCE each.
+		//
+		// A message the actor never WROTE was never the agent's to lose, so it
+		// is handed back now. A message it WROTE is settled by the agent's own
+		// queue answer wherever the agent can still give one — at a cancel that
+		// is the cancel sequence's clear_queue, and at a turn that ends on its
+		// own the actor ASKS for it before publishing anything. Only when no
+		// answer is possible (the process is gone, the bound passed) is the
+		// missing acknowledgement read as "not taken".
 		for _, steer := range steers {
 			steer.ack <- ErrSteerNotTaken
 		}
 		steers = nil
-		if writtenSteer != nil {
-			if cancelling && queueRecovered {
-				writtenSteer.ack <- nil
-			} else {
-				writtenSteer.ack <- ErrSteerNotTaken
-			}
-			writtenSteer = nil
-			if pending != nil {
-				pending.steerAck = nil
+		if writtenSteer != nil || len(acknowledged) > 0 {
+			_, canRecover := codec.(SteerRecovery)
+			switch {
+			case recovering:
+				// Already asking; the answer (or the bound) settles it.
+			case !cancelling && canRecover && process != nil && !retiring && !queueRecovered:
+				// THE TURN ENDED WITH A MESSAGE WHOSE DELIVERY IS UNKNOWN. Ask
+				// the agent what it still holds, and do not publish the terminal
+				// until it answers or the turn's bound passes: a message the
+				// agent used must not be asked again, and one it kept must not be
+				// left in its queue for the next turn.
+				recovering = true
+				recoverDeadline = time.Now().Add(bound)
+				observe("steer-recovering", nil)
+			default:
+				if writtenSteer != nil {
+					writtenSteer.ack <- ErrSteerNotTaken
+					writtenSteer = nil
+					if pending != nil && pending.steerAck != nil {
+						pending = nil
+					}
+				}
+				acknowledged = nil
 			}
 		}
-		acknowledged = nil
-		queueRecovered = false
 		if ev.Outcome == nil {
 			snapshot := outcome
 			ev.Outcome = &snapshot
@@ -628,6 +658,10 @@ func (s *session) loop() {
 		}
 		terminal = &ev
 		plan = nil
+		// The recovery asks the agent's own queue, and THAT answer is the
+		// authority for a message whose acceptance never came: the message's
+		// caller is still held by writtenSteer, so the outstanding match for its
+		// command is dropped here rather than waited for.
 		pending = nil
 		// A selected terminal prevents new work. A partially written work frame
 		// cannot be reused by any later command.
@@ -681,6 +715,7 @@ func (s *session) loop() {
 		pendingTools = make(map[string]struct{})
 		acknowledged = make(map[string]int)
 		queueRecovered = false
+		recovering = false
 		cancelling = false
 		promptWritten = false
 		barrierPassed = false
@@ -741,7 +776,7 @@ func (s *session) loop() {
 			cancelCommands = codec.CancelSequence()
 		}
 		// Publication is the only point at which Wait and Events become terminal.
-		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 {
+		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 && !recovering {
 			observe("terminal", nil)
 			publish(current, *terminal)
 			current = nil
@@ -750,6 +785,9 @@ func (s *session) loop() {
 			plan = nil
 			pending = nil
 			frame = nil
+			recovering = false
+			acknowledged = nil
+			queueRecovered = false
 			idleAt = time.Now().Add(idle)
 		}
 		if closing && current == nil && (process != nil || starting) && !retiring {
@@ -871,6 +909,24 @@ func (s *session) loop() {
 							acknowledged[writtenSteer.text]++
 						}
 						writtenSteer = nil
+					}
+					// THE RECOVERY'S ANSWER, and the one place a written message's
+					// fate is decided when the turn ends without one: named by the
+					// agent's queue → never used (handed back once); missing →
+					// delivered. The same function serves the cancel.
+					if recovering {
+						if recovery, ok := codec.(SteerRecovery); ok {
+							if texts, dropped := recovery.DroppedSteers(response.Payload); dropped {
+								queueRecovered = true
+								returned := resolveDroppedSteers(texts, acknowledged, &writtenSteer, nil)
+								if len(returned) > 0 {
+									current.dropped = append(current.dropped, returned...)
+									observe("steer-dropped", []byte(strings.Join(returned, "\n")))
+								}
+								recovering = false
+								observe("steer-recovered", nil)
+							}
+						}
 					}
 					if step.Barrier {
 						barrierPassed = true
@@ -1079,6 +1135,42 @@ func (s *session) loop() {
 				steers[0].ack <- ErrSteerNotTaken
 				steers = steers[1:]
 			}
+			// RECOVERY: a turn that ended with a message the agent has not
+			// settled asks the agent what it still holds, once, and the answer
+			// decides. The wait is the turn's own bound; an agent that cannot or
+			// will not answer hands the message back (it is the person's, and a
+			// duplicate is the lesser harm — ADR-4khgzeyp decision 3).
+			if recovering {
+				if !now.Before(recoverDeadline) {
+					if writtenSteer != nil {
+						writtenSteer.ack <- ErrSteerNotTaken
+						writtenSteer = nil
+						if pending != nil && pending.steerAck != nil {
+							pending = nil
+						}
+					}
+					acknowledged = nil
+					recovering = false
+					observe("steer-recovery-expired", nil)
+				} else if pending == nil && len(frame) == 0 && codec != nil && process != nil && !retiring && !queueRecovered {
+					if recovery, ok := codec.(SteerRecovery); ok && current != nil {
+						serial++
+						id := strconv.FormatUint(generation, 10) + "/" + strconv.FormatUint(current.number, 10) + "/" + strconv.FormatUint(serial, 10)
+						command := recovery.QueueClear()
+						encoded, err := codec.Encode(id, command)
+						if err != nil {
+							fail(fmt.Sprint(err))
+						} else {
+							ask := Step{Command: command}
+							frame = encoded
+							frameWritten = 0
+							frameStep = ask
+							pending = &pendingStep{id: id, generation: generation, turn: current.number, step: ask}
+							observe("steer-asked", nil)
+						}
+					}
+				}
+			}
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
 				retire(false)
@@ -1110,8 +1202,7 @@ func (s *session) loop() {
 					pendingTools = make(map[string]struct{})
 					acknowledged = make(map[string]int)
 					queueRecovered = false
-					acknowledged = make(map[string]int)
-					queueRecovered = false
+					recovering = false
 					cancelling = false
 					promptWritten = false
 					settling = false
@@ -1166,7 +1257,9 @@ func (s *session) loop() {
 			}
 			// A dead agent's turn is already ending; its stdin is not a place to
 			// learn that, and a broken pipe would replace the exit as its cause.
-			if process == nil || current == nil || terminal != nil || !exitBy.IsZero() {
+			// A turn in RECOVERY is past its terminal and still writing: the one
+			// command it asks the agent is the queue answer above.
+			if process == nil || current == nil || (terminal != nil && !recovering) || !exitBy.IsZero() {
 				continue
 			}
 			if len(frame) == 0 {

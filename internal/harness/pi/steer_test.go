@@ -427,3 +427,72 @@ func TestRealPiADeliveredSteerIsNotHandedBackByACancel(t *testing.T) {
 		t.Fatalf("dropped = %v, want nothing: pi had already delivered the message", dropped)
 	}
 }
+
+// A turn that ENDS ON ITS OWN with a message pi delivered hands nothing back,
+// and the message does not leak into the conversation's next question: pi used
+// it inside the turn, which is exactly what a steered message is for
+// (nocx-a62cl.6.3).
+func TestRealPiATurnEndingOnItsOwnLeavesADeliveredSteerUsed(t *testing.T) {
+	gate := make(chan struct{})
+	c, fake := configuredPi(t,
+		fakemodel.Response{Deltas: []fakemodel.Delta{{Text: "reading the logs "}, {Text: "first", Block: gate}}},
+		fakemodel.Response{Text: []string{"the answer after the message"}},
+		fakemodel.Response{Text: []string{"the second answer"}},
+	)
+	defer func() { _ = c.Close(context.Background()) }()
+	ctx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
+	spec := harness.TurnSpec{ConversationID: "natural-end", Dir: t.TempDir(), SystemPrompt: "Fixed nocx instructions", Text: "pane=local cwd=/work: look at the logs"}
+	turn := piTurn(t, c, spec)
+	events := make(chan harness.Event, 256)
+	go func() {
+		defer close(events)
+		for ev := range turn.Events() {
+			events <- ev
+		}
+	}()
+	for streamed := false; !streamed; {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("the turn ended before the first answer arrived")
+			}
+			streamed = ev.Kind == harness.EventAnswerDelta && ev.Text == "reading the logs "
+		case <-ctx.Done():
+			t.Fatal("the first model call never streamed")
+		}
+	}
+	const message = "this one is delivered"
+	steerer, ok := turn.(harness.Steerer)
+	if !ok {
+		t.Fatal("pi's turn has no Steer")
+	}
+	if err := steerer.Steer(ctx, message); err != nil {
+		t.Fatalf("steer while pi answers: %v", err)
+	}
+	close(gate)
+	// Let the turn END on its own: no cancel, no second question.
+	for range events {
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatalf("the turn: %v", err)
+	}
+	handback, ok := turn.(harness.SteerHandback)
+	if !ok {
+		t.Fatal("a turn cannot report what it handed back")
+	}
+	if dropped := handback.DroppedSteers(); len(dropped) != 0 {
+		t.Fatalf("dropped = %v, want nothing: pi had already delivered the message", dropped)
+	}
+
+	// NOTHING LEAKS INTO THE NEXT TURN: the message is history there, once.
+	spec.Text = "pane=local cwd=/work: and the second answer?"
+	piSuccess(t, c, spec)
+	requests := fake.Requests()
+	if len(requests) != 3 {
+		t.Fatalf("model calls = %d, want two for the steered turn and one for the next question", len(requests))
+	}
+	if count := strings.Count(string(requests[2].Body), message); count != 1 {
+		t.Fatalf("the next question carries the message %d times, want once as history", count)
+	}
+}

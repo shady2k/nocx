@@ -125,6 +125,9 @@ func (c *codec) SteerCommand(text string) (harness.Command, bool) {
 	return harness.Command{Name: "steer", Payload: protocol.Steer{Text: text}}, true
 }
 
+// QueueClear asks the fake agent what it still holds for steering.
+func (c *codec) QueueClear() harness.Command { return harness.Command{Name: "clear_queue"} }
+
 // DroppedSteers reads what the fake agent's cancel answer removed: the same
 // shape pi's clear_queue uses, so the actor's recovery path is exercised by the
 // fixture and not only by a real agent.

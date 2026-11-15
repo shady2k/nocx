@@ -1686,17 +1686,28 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	// (nocx-a62cl.6.4). agent.steer runs on another goroutine, so it hands the
 	// text over and waits for the ledger rather than writing out of order.
 	steers := make(chan steerBoundaryWrite)
+	// The stream can END while a steer is being delivered — a failed run takes
+	// its fatal and leaves — and a boundary write to a stream nobody is reading
+	// would hold the handler until the connection died. The write says so
+	// instead: the agent already has the message, and the record is what is lost,
+	// which the caller logs.
+	streamDone := make(chan struct{})
+	defer close(streamDone)
 	if rc.control != nil {
 		rc.control.attachSteerBoundary(func(ctx context.Context, text string) error {
 			write := steerBoundaryWrite{text: text, ack: make(chan error, 1)}
 			select {
 			case steers <- write:
+			case <-streamDone:
+				return errSteerStreamGone
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 			select {
 			case ackErr := <-write.ack:
 				return ackErr
+			case <-streamDone:
+				return errSteerStreamGone
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -1976,6 +1987,11 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 	h.log.Info("agent steer: the turn did not take the message, so it is asked next", "run", p.RunID)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
 }
+
+// errSteerStreamGone is the boundary write's answer when the run's stream has
+// already ended: the agent has the message, and the turn's record cannot take it
+// — a lost record, never a lost message.
+var errSteerStreamGone = errors.New("the turn's stream has ended")
 
 // steerBoundaryWrite is one person's message handed to the stream, and the
 // answer: the ledger holds it, or it does not.

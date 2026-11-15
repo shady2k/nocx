@@ -137,7 +137,11 @@ package coordinator
 // 36 (nocx-a62cl.13.1): agent.runState carries the agent's stated token usage.
 // 37 (nocx-a62cl.6.1): agent.steer is added, so a window built against 36 has
 // no way to send a message into the turn it is watching.
-const ProtocolVersion = 37
+// 38 (nocx-a62cl.6.3): agent.steer says what became of the message — steered
+// into the turn or kept for the next question — because the block draws each
+// one differently and a window built against 37 would read a flag that no
+// longer exists.
+const ProtocolVersion = 38
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

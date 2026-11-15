@@ -108,13 +108,24 @@ type agentCancelResponse struct {
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
 }
 
-// agentSteerResponse is the real result of agent.steer: the run that took the
-// message, and that the agent answering it accepted the message. Accepted, not
-// merely queued: the harness answers when the agent's own protocol says so, so
-// a message a turn ended under is refused rather than reported delivered.
+// What happened to a person's message. Two values and no third: it went into
+// the turn the person was watching, or it will be asked as that conversation's
+// next question (ADR-anntnxdj decision 4).
+const (
+	// steerSteered is the message the agent took inside the running turn.
+	steerSteered = "steered"
+	// steerNextQuestion is the message the turn could not take: the agent does
+	// not steer, the turn ended first, or the agent did not accept it in time.
+	steerNextQuestion = "next_question"
+)
+
+// agentSteerResponse is the real result of agent.steer: the run the message was
+// about, and what became of it. The outcome is stated rather than derived from
+// a flag, because the block shows the message differently for each — inline in
+// the answer, or inline and waiting to be asked next.
 type agentSteerResponse struct {
-	RunID   int64 `json:"runId"`
-	Steered bool  `json:"steered"`
+	RunID   int64  `json:"runId"`
+	Outcome string `json:"outcome"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -1797,33 +1808,43 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 			h.log.Warn("agent steer: the open question was settled by somebody else", "run", p.RunID, "tool", wait.tool)
 		}
 	}
+	// WHAT THE CONNECTOR DOES WITH A MESSAGE IS ITS OWN STATEMENT, not something
+	// this handler finds out by trying (ADR-anntnxdj decision 4). An agent that
+	// cannot steer still gets the person's answer to the question above; the
+	// message itself is kept and asked as the conversation's next question.
+	if h.harness != nil && h.harness.Facts().Steering == agentharness.QueuesNextQuestion {
+		h.log.Info("agent steer: the agent queues the message as the next question", "run", p.RunID)
+		_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+		return
+	}
 	steerer := rc.control.attachedSteerer()
-	if steerer == nil {
-		// The run is recorded but its turn is not reaching the agent yet, or
-		// this agent's protocol has no steering (ADR-anntnxdj decision 4).
-		// Either way there is nothing to hand the message to.
-		_ = h.r.TryError(req.ID, RPCError{
-			Code:    -32603,
-			Message: "the answering turn cannot take a message yet",
-		})
-		return
-	}
-	if err := steerer.Steer(ctx, p.Text); err != nil {
-		h.log.Warn("agent steer: the message was not delivered", "run", p.RunID, "reason", err)
-		// The harness states WHICH refusal it is; the person reads a sentence
-		// about what happened rather than the contract's own word for it.
-		sentence := fmt.Sprint(err)
-		switch {
-		case errors.Is(err, agentharness.ErrTurnNotRunning):
-			sentence = "the answer finished before your message reached the agent"
-		case errors.Is(err, agentharness.ErrNotSteerable):
-			sentence = "this agent does not take a message while it answers"
+	if steerer != nil {
+		if err := steerer.Steer(ctx, p.Text); err == nil {
+			h.log.Info("agent steer: the agent took the person's message", "run", p.RunID)
+			_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerSteered}))
+			return
+		} else if !isSteerNotTaken(err) {
+			h.log.Warn("agent steer: the message was not delivered", "run", p.RunID, "reason", err)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprint(err)})
+			return
 		}
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: sentence})
-		return
 	}
-	h.log.Info("agent steer: the agent took the person's message", "run", p.RunID)
-	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Steered: true}))
+	// The turn did not take it — it is not reaching the agent yet, it ended
+	// first, it was cancelled, or the agent did not accept it within the turn's
+	// bound. The message is not lost: it becomes the next question
+	// (ADR-4khgzeyp decision 3).
+	h.log.Info("agent steer: the turn did not take the message, so it is asked next", "run", p.RunID)
+	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+}
+
+// isSteerNotTaken reports whether a turn's refusal of a person's message means
+// "ask it next" rather than a failure the person must read as an error: no turn
+// left to land in, an agent whose protocol has no steering, or a turn that
+// ended before the agent accepted it.
+func isSteerNotTaken(err error) bool {
+	return errors.Is(err, agentharness.ErrSteerNotTaken) ||
+		errors.Is(err, agentharness.ErrTurnNotRunning) ||
+		errors.Is(err, agentharness.ErrNotSteerable)
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact

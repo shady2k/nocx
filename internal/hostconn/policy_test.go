@@ -73,6 +73,40 @@ func acquire(t *testing.T, mgr *hostconn.Manager, holds hostconn.Holds) *hostcon
 	return lease
 }
 
+// advancingBeforeWaitClock stages a clock jump between the guard reading Now
+// and registering its relative wait. The clock then stays frozen.
+type advancingBeforeWaitClock struct {
+	*hostconntest.Clock
+	once sync.Once
+}
+
+func (c *advancingBeforeWaitClock) After(d time.Duration) <-chan monoclock.Nanos {
+	c.once.Do(func() { c.Advance(hostconn.ProbeInterval + hostconn.ProbeDeadline) })
+	return c.Clock.After(d)
+}
+
+func TestAClockAdvanceBeforeWaitRegistrationStillReportsSilence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := &advancingBeforeWaitClock{Clock: hostconntest.New()}
+		link := newQuietLink()
+		defer link.release()
+		mgr, sup := managerOn(t, quietCarrier(link), clock)
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
+
+		// All runnable work has finished. A relative timer registered after
+		// the jump cannot fire without another advance; the deadline is
+		// already due and must be handled without one.
+		synctest.Wait()
+		if got := sup.Current().Kind; got != hostconn.Stalled {
+			t.Fatalf("a silent connection reads %v after its deadline, want stalled", got)
+		}
+		if lease.Lost() {
+			t.Fatal("reporting silence ended a plain shell's connection")
+		}
+	})
+}
+
 // TestASilentConnectionReadsStalledWithinThirtySeconds is Q3: fifteen seconds to
 // the next probe plus its fifteen-second deadline, and the parked probe is what
 // notices the far side the moment it speaks.

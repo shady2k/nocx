@@ -172,6 +172,13 @@ func (g *prober) run() {
 			}
 			continue
 		}
+		timer := g.clock.After(time.Duration(wait - now))
+		// The clock may advance between Now and registering this relative
+		// wait. If the deadline passed in that gap, handle it now rather
+		// than waiting for another clock advance to wake the guard.
+		if g.clock.Now() >= wait {
+			continue
+		}
 		select {
 		case <-g.live.stop:
 			return
@@ -192,7 +199,7 @@ func (g *prober) run() {
 			}
 		case err := <-g.st.lookOut:
 			g.lookResult(err)
-		case <-g.clock.After(time.Duration(wait - now)):
+		case <-timer:
 		}
 	}
 }

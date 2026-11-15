@@ -51,6 +51,30 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "usage": {
+      "description": "Token counts stated by the agent for this run. Absent when the agent stated no usage; explicit zero counts are preserved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cacheRead", "cacheWrite"],
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cacheRead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cacheWrite": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

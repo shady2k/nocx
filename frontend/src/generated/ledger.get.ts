@@ -30,6 +30,13 @@ export interface LedgerGet {
    * Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.
    */
   caused: Caused[]
+  /**
+   * The latest agent run’s recorded facts, read from its execution. Absent for entries without an agent run.
+   */
+  runFacts?: {
+    model?: string
+    usage?: Usage
+  }
 }
 /**
  * One row of recall: the ledger's identity for the entry plus every fact a block or a history row is rendered from.
@@ -350,4 +357,13 @@ export interface Caused {
     kind: string
     id: string
   } | null
+}
+/**
+ * Token counts stated by the agent for this run. Absent when the agent stated no usage; explicit zero counts are preserved.
+ */
+export interface Usage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
 }

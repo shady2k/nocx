@@ -81,7 +81,7 @@ func (p *interleaveProtocol) Decode(line []byte) (Decoded, error) {
 	}
 	switch s {
 	case "end":
-		return Decoded{Events: []Event{{Kind: EventEnd, End: &End{Model: "test"}}}}, nil
+		return Decoded{Events: []Event{{Kind: EventEnd, Outcome: &Outcome{Model: "test"}}}}, nil
 	case "failure":
 		return Decoded{Events: []Event{{Kind: EventFailure, Failure: &Failure{Reason: "decoded failure"}}}}, nil
 	default:
@@ -175,7 +175,7 @@ func assertTerminal(t *testing.T, ctx context.Context, seed int, turn Turn) {
 		}
 		if ev.Kind == EventEnd {
 			count++
-			if err != nil || ev.End.Model != out.Model {
+			if err != nil || ev.Outcome.Model != out.Model {
 				t.Fatalf("seed %d Wait disagrees: %v", seed, err)
 			}
 		}
@@ -293,7 +293,7 @@ func TestRandomizedInterleaving(t *testing.T) {
 
 func TestWaitUsesPublishedTerminal(t *testing.T) {
 	tkn := &actorTurn{session: newSession(Base{}, shellProtocol{}), events: make(chan Event, 65), done: make(chan struct{})}
-	publish(tkn, Event{Kind: EventEnd, End: &End{Model: "published"}})
+	publish(tkn, Event{Kind: EventEnd, Outcome: &Outcome{Model: "published"}})
 	if err := tkn.Cancel(context.Background()); err != nil {
 		t.Fatal(err)
 	}

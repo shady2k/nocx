@@ -2923,6 +2923,28 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.querySelector('.cmd-answer-provenance')).toBeNull()
   })
 
+  it.each([
+    [
+      { input: 104, output: 27, cacheRead: 40, cacheWrite: 8 },
+      '104 input · 27 output · 40 from cache',
+    ],
+    [{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, '0 input · 0 output · 0 from cache'],
+  ])('shows stated usage facts, including zero counts', (usage, expected) => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.close('success', undefined, 'test-model', usage)
+    const row = h.el.querySelector('.cmd-agent-usage')
+    expect(row?.textContent).toBe(expected)
+    expect(row?.querySelector('.ui-meta')).not.toBeNull()
+  })
+
+  it('does not invent usage when the harness did not state any', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.close('success', undefined, 'test-model')
+    expect(h.el.querySelector('.cmd-agent-usage')).toBeNull()
+  })
+
   it('clearAll removes answer blocks too', () => {
     const { inner, manager } = newManager()
     manager.addAnswerBlock('q', '/')

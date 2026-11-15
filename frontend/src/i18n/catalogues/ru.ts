@@ -19,6 +19,9 @@ import type { CatalogueEntry } from '../locale-model'
  * where a translation has not landed yet.
  */
 export const ru: Readonly<Record<string, CatalogueEntry>> = {
+  'scrollback.usage.input': '{count} входных',
+  'scrollback.usage.output': '{count} выходных',
+  'scrollback.usage.cacheRead': '{count} из кеша',
   'session.close.failed': 'Не удалось завершить сессию — она может всё ещё работать',
   // ── Settings → Interface → Language chrome ──────────────────────────────
   'settings.ui.language.label': 'Язык',

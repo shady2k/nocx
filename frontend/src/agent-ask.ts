@@ -153,6 +153,7 @@ export class AgentInputTarget implements InputTarget {
       droppedDeltas?: number
       notices?: string[]
       unarmedBounds?: string[]
+      usage?: AgentRunState['usage']
     },
   ): void {
     const run = this.runs.get(runId)
@@ -195,11 +196,16 @@ export class AgentInputTarget implements InputTarget {
       run.handle.append(`— ${unarmed.join('; ')}; only the wall-clock deadline remains active —`)
     }
     if (presentation.state === 'completed') {
-      run.handle.close('success', undefined, run.handle.el.dataset.answeredBy)
+      run.handle.close('success', undefined, run.handle.el.dataset.answeredBy, presentation.usage)
     } else if (presentation.state === 'cancelled') {
-      run.handle.close('cancelled', presentation.error)
+      run.handle.close('cancelled', presentation.error, undefined, presentation.usage)
     } else {
-      run.handle.close('failure', presentation.error ?? presentation.state)
+      run.handle.close(
+        'failure',
+        presentation.error ?? presentation.state,
+        undefined,
+        presentation.usage,
+      )
     }
     this.seams.onTurnEnd?.(run.askId)
   }

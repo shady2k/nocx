@@ -32,6 +32,26 @@ const facts = (over: Partial<Parameters<typeof restoredBlock>[0]> = {}) => ({
 })
 
 describe('a block built from the store', () => {
+  it('restores the model and stated zero usage after the turn children', () => {
+    const [el] = restoredTurn(
+      {
+        ...facts({ kind: 'ask', body: null }),
+        model: 'pinned-model',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+      S,
+      () => 1,
+      container,
+      () => {},
+      store(),
+      () => null,
+    )
+    expect(el.querySelector('.cmd-answer-provenance')?.textContent).toBe('answered by pinned-model')
+    expect(el.querySelector('.cmd-agent-usage')?.textContent).toBe(
+      '0 input · 0 output · 0 from cache',
+    )
+  })
+
   it('renders a stored SGR body as coloured term-line rows, one per line', () => {
     // The stored body is what sgr-read.ts's `runsFromSGR` reads back
     // (nocx-cjct0, design §6) — the same colour a live cell would have

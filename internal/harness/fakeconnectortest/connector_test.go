@@ -53,7 +53,7 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 	case harnesstest.ParentStream:
 		script.Steps = []protocol.Step{{Kind: protocol.StepAnswer, Text: "Hel"}, {Kind: protocol.StepBridge}, {Kind: protocol.StepHang}}
 	case harnesstest.Failure:
-		script.Steps = []protocol.Step{{Kind: protocol.StepFail, Reason: "the provider is down"}}
+		script.Steps = []protocol.Step{{Kind: protocol.StepFail, Reason: "the provider is down", Model: "fake-model", Usage: end.Usage}}
 	}
 	waitFile := func(name string) {
 		waittest.WaitFor(t, "fixture "+name, func() bool { raw, err := os.ReadFile(path(name)); return err == nil && len(raw) > 0 })

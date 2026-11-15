@@ -72,6 +72,9 @@ type Response struct {
 	Payload any
 }
 type Decoded struct {
+	// Outcome is the latest accumulated turn facts, including completed model calls.
+	// The actor retains them if it must publish a terminal without the agent's terminal.
+	Outcome  *Outcome
 	Events   []Event
 	Response *Response
 }

@@ -64,6 +64,19 @@ const BOTH = [
 ]
 
 describe('restore-client — one helper, two media types', () => {
+  it('restores the latest execution facts without deriving usage', async () => {
+    const runFacts = {
+      model: 'pinned-model',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const client = {
+      call: vi
+        .fn()
+        .mockResolvedValue({ entry: { kind: 'ask' }, artifacts: [], caused: [], runFacts }),
+    } as unknown as WSClient
+    expect((await restoredBody(client, 'turn-1')).runFacts).toEqual(runFacts)
+  })
+
   it('a block body is the SGR artifact — the colour is what a block draws', async () => {
     const { client } = fakeLedger(BOTH)
     expect(await bodyForBlock(client, 'entry-1')).toBe(SGR_BODY)

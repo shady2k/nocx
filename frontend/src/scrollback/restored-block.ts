@@ -25,6 +25,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import { attrsToStyle, type TerminalSnapshot } from './serializer'
 import { runsFromSGR } from './sgr-read'
 import { t } from '../i18n/locale-model'
+import { appendAgentFacts, type AgentUsage } from './agent-facts'
 
 /** What a restored block is made of: the entry's facts, and its body. */
 export interface RestoredBlockFacts {
@@ -233,6 +234,8 @@ export interface RestoredCause {
  *  the ledger holds for it. `proseEvicted` is inherited from the block
  *  facts — the turn's own notice is the block's, gated on that fact. */
 export interface RestoredTurnFacts extends Omit<RestoredBlockFacts, 'id'> {
+  model?: string
+  usage?: AgentUsage
   /** The turn's children, in the seat order the ledger stored (ADR-0040). */
   causes?: RestoredCause[]
 }
@@ -286,5 +289,6 @@ export function restoredTurn(
     const child = drawCaused(cause)
     if (child) children.appendChild(child)
   }
+  appendAgentFacts(children, facts.model, facts.usage)
   return [el]
 }

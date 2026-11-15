@@ -123,13 +123,17 @@ func (t *actorTurn) Cancel(ctx context.Context) error {
 func (t *actorTurn) Wait(ctx context.Context) (Outcome, error) {
 	select {
 	case <-t.done:
+		var out Outcome
+		if t.terminal.Outcome != nil {
+			out = *t.terminal.Outcome
+		}
 		if t.terminal.Kind == EventEnd {
-			return Outcome{Model: t.terminal.End.Model, Usage: t.terminal.End.Usage}, nil
+			return out, nil
 		}
 		if t.terminal.Failure.Reason == "cancelled" {
-			return Outcome{}, ErrCancelled
+			return out, ErrCancelled
 		}
-		return Outcome{}, &TurnError{Reason: t.terminal.Failure.Reason}
+		return out, &TurnError{Reason: t.terminal.Failure.Reason}
 	case <-ctx.Done():
 		return Outcome{}, ctx.Err()
 	}
@@ -360,8 +364,13 @@ func (s *session) loop() {
 	var generation, turnNumber, serial uint64
 	var starting, retiring, closing, cancelling, promptWritten, settling, settlementDone bool
 	var deathPending, retired bool
+	// exitBy is the bound by which an exited agent's stdout must reach EOF. The
+	// agent's exit is not its turn's terminal: what it wrote before leaving is
+	// still in the pipe, and a survivor of its group can hold that pipe open.
+	var exitBy time.Time
 	var retirementErr error
 	var terminal *Event
+	var outcome Outcome
 	var plan []Step
 	var cancelCommands []Command
 	var cancelPrepared bool
@@ -476,8 +485,13 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
+		if ev.Outcome == nil {
+			snapshot := outcome
+			ev.Outcome = &snapshot
+		}
 		if cancelling {
-			ev = failure("cancelled")
+			ev.Kind = EventFailure
+			ev.Failure = &Failure{Reason: "cancelled"}
 		}
 		terminal = &ev
 		plan = nil
@@ -538,6 +552,7 @@ func (s *session) loop() {
 		settling = false
 		settlementDone = false
 		terminal = nil
+		outcome = Outcome{}
 		delivery = nil
 		frame = nil
 		pending = nil
@@ -570,6 +585,7 @@ func (s *session) loop() {
 			publish(current, *terminal)
 			current = nil
 			terminal = nil
+			outcome = Outcome{}
 			plan = nil
 			pending = nil
 			frame = nil
@@ -622,6 +638,10 @@ func (s *session) loop() {
 				return
 			}
 			decoded, err := codec.Decode(line)
+			if decoded.Outcome != nil {
+				outcome = *decoded.Outcome
+			}
+
 			if err != nil {
 				fail(fmt.Sprint("agent protocol: ", err))
 				return
@@ -760,6 +780,7 @@ func (s *session) loop() {
 				stopStart = nil
 			}
 			process, tools = result.child, result.tools
+			exitBy = time.Time{}
 			bridge = result.bridge
 			barrierPassed = false
 			if result.err != nil {
@@ -803,6 +824,8 @@ func (s *session) loop() {
 				}
 				if retirementErr != nil {
 					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", retirementErr))
+					snapshot := outcome
+					ev.Outcome = &snapshot
 					terminal = &ev
 				}
 			}
@@ -828,6 +851,8 @@ func (s *session) loop() {
 				}
 				if result.toolErr != nil && current != nil {
 					ev := failure(fmt.Sprint("tool calls could not be confirmed stopped: ", result.toolErr))
+					snapshot := outcome
+					ev.Outcome = &snapshot
 					terminal = &ev
 				}
 				if deathPending {
@@ -842,12 +867,18 @@ func (s *session) loop() {
 		case line := <-lines:
 			handleLine(line)
 		case <-exited:
+			// The agent is gone, but its last words are not yet read. Converge on
+			// the EOF path below, which retires the incarnation once stdout has
+			// ended; only the bound tears the pipes down first.
 			deathPending = true
 			settle()
-			retire(false)
+			exitBy = time.Now().Add(bound)
 		case now := <-tick.C:
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
+				retire(false)
+			}
+			if process != nil && !retiring && !exitBy.IsZero() && !now.Before(exitBy) {
 				retire(false)
 			}
 			if current == nil && process != nil && !retiring && !now.Before(idleAt) {
@@ -856,7 +887,9 @@ func (s *session) loop() {
 					retire(false)
 				}
 			}
-			if current == nil && !retiring && !starting && len(queue) > 0 && !closing {
+			// A dead incarnation cannot take a new prompt: its cleanup frees the
+			// process, and only then may the queued turn start another.
+			if current == nil && !retiring && !starting && len(queue) > 0 && !closing && (process == nil || exitBy.IsZero()) {
 				t := queue[0]
 				queue = queue[1:]
 				if process != nil {
@@ -875,6 +908,7 @@ func (s *session) loop() {
 					settling = false
 					settlementDone = false
 					terminal = nil
+					outcome = Outcome{}
 					deadline = time.Time{}
 					starting = true
 					observe("begin-turn", nil)
@@ -921,7 +955,9 @@ func (s *session) loop() {
 					}()
 				}
 			}
-			if process == nil || current == nil || terminal != nil {
+			// A dead agent's turn is already ending; its stdin is not a place to
+			// learn that, and a broken pipe would replace the exit as its cause.
+			if process == nil || current == nil || terminal != nil || !exitBy.IsZero() {
 				continue
 			}
 			if len(frame) == 0 {

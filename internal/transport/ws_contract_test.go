@@ -6715,7 +6715,8 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	effect := "observe"
 	getCases := map[string]ledgerGetResponse{
 		"populated": {
-			Entry: entry,
+			RunFacts: &ledgerRunFactsWire{Model: "actual-model", Usage: &content.RunUsage{Input: 123, Output: 45, CacheRead: 67, CacheWrite: 8}},
+			Entry:    entry,
 			Edges: []ledgerEdgeWire{{
 				From: entry.ID, To: running.ID, Rel: "rerun-of",
 				Payload: json.RawMessage(`{"note":"anything"}`),

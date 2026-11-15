@@ -77,6 +77,7 @@ import {
 } from '../ui/prompt-context'
 import { t } from '../i18n/locale-model'
 import { formatElapsed } from './elapsed'
+import { appendAgentFacts, type AgentUsage } from './agent-facts'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -498,6 +499,7 @@ export interface AnswerBlockHandle {
     status: 'success' | 'failure' | 'cancelled',
     error?: string,
     model?: string,
+    usage?: AgentUsage,
   ): void
 }
 
@@ -3940,7 +3942,12 @@ export class BlockManager {
         proseBody(blockId).append(text)
         showTyping()
       },
-      close(status: 'success' | 'failure' | 'cancelled', error?: string, model?: string): void {
+      close(
+        status: 'success' | 'failure' | 'cancelled',
+        error?: string,
+        model?: string,
+        usage?: AgentUsage,
+      ): void {
         el.dataset.turnState = status
         el.dispatchEvent(new Event('nocx:block-settled'))
         stopWaiting()
@@ -3959,12 +3966,7 @@ export class BlockManager {
         // look it up. The value is the ask result's pinned model — this run's
         // fact, never a re-derivation. Last among the children, because it is
         // a caption on the whole turn rather than a piece of it.
-        if (status === 'success' && model) {
-          const note = document.createElement('div')
-          note.className = 'cmd-answer-provenance'
-          note.textContent = t('scrollback.answeredBy', 'answered by {model}', { model })
-          children.appendChild(note)
-        }
+        appendAgentFacts(children, status === 'success' ? model : undefined, usage)
         if (error) {
           const note = document.createElement('div')
           note.className = 'cmd-answer-error'

@@ -25039,7 +25039,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('does not report a new size when only the accepted frame grid changes', async () => {
+  it('does not report a new size when only the alternate frame grid changes', async () => {
     const { session, fits, openCommand, restore } = await paneWithLayout()
     vi.useFakeTimers()
     try {

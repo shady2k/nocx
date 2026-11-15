@@ -5963,14 +5963,17 @@ export class TerminalContent extends BasePaneContent {
             previous.geometry.cellHeightPx !== geometry.cellHeightPx
           if (geometryChanged) {
             this.scrollback?.cellMetricsChanged()
-            // Another client's grid is not a measurement of this pane.
-            // Only a new cell metric changes the local size report here;
-            // viewport delivery owns changes to our columns and rows.
-            if (
+            // A buffer switch is presentation, not a resize request
+            // (ADR-92zzg2y2). Normal-buffer frames still reassert this
+            // window's measured grid when another client changes it.
+            const metricsChanged =
               previous === null ||
               previous.geometry.cellWidthPx !== geometry.cellWidthPx ||
               previous.geometry.cellHeightPx !== geometry.cellHeightPx
-            ) {
+            const normalGridChanged =
+              previous?.state.bufferKind === 'normal' &&
+              result.snapshot.state.bufferKind === 'normal'
+            if (metricsChanged || normalGridChanged) {
               this._scheduleResizeReport()
             }
             // The same screen on a new grid, and the shell's own redraw

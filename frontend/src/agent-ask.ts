@@ -198,6 +198,11 @@ export class AgentInputTarget implements InputTarget {
    *  this map at its terminal, so what is found here is a turn still running. */
   private runningRun(): { runId: number; handle: AnswerBlockHandle } | null {
     for (const [runId, run] of this.runs) {
+      // A TURN IS ADDRESSABLE ONLY BY THE ID THE BACKEND MINTED. A run recorded
+      // without one has no turn to steer — there is nothing to name in
+      // agent.steer — so the person's next submit is a QUESTION again, which is
+      // the only thing that can work (nocx-a62cl.6.1).
+      if (!Number.isInteger(runId) || runId <= 0) continue
       return { runId, handle: run.handle }
     }
     return null

@@ -48,6 +48,19 @@ type Steerer interface {
 	Steer(ctx context.Context, text string) error
 }
 
+// SteerHandback is the capability a turn has after it was cancelled: it says
+// which of the person's messages the agent had queued and dropped with the
+// turn. Those are precisely the ones nobody used, so they are the ones the
+// caller asks as the conversation's next questions — a message pi had already
+// delivered is not handed back, because asking it again would run it twice
+// (ADR-4khgzeyp decision 3).
+//
+// It is read AFTER Wait returns; before that the turn has not finished dropping
+// anything.
+type SteerHandback interface {
+	DroppedSteers() []string
+}
+
 // ModelReadiness checks a specific chosen model instead of the native default.
 type ModelReadiness interface {
 	ReadinessForModel(ctx context.Context, model string) Readiness

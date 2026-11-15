@@ -111,13 +111,43 @@ func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
 	}
 }
 
-func (c *codec) CancelSequence() []harness.Command { return []harness.Command{{Name: "abort"}} }
+// CancelSequence clears the agent's steering queue and then aborts, in pi's
+// order and with pi's answer: what the queue held is exactly what the cancelled
+// turn never used.
+func (c *codec) CancelSequence() []harness.Command {
+	return []harness.Command{{Name: "clear_queue"}, {Name: "abort"}}
+}
 
 func (c *codec) SteerCommand(text string) (harness.Command, bool) {
 	if !c.steers {
 		return harness.Command{}, false
 	}
 	return harness.Command{Name: "steer", Payload: protocol.Steer{Text: text}}, true
+}
+
+// DroppedSteers reads what the fake agent's cancel answer removed: the same
+// shape pi's clear_queue uses, so the actor's recovery path is exercised by the
+// fixture and not only by a real agent.
+func (c *codec) DroppedSteers(payload any) ([]string, bool) {
+	value, ok := payload.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	raw, present := value["steering"]
+	if !present {
+		return nil, false
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	texts := make([]string, 0, len(list))
+	for _, entry := range list {
+		if text, ok := entry.(string); ok {
+			texts = append(texts, text)
+		}
+	}
+	return texts, true
 }
 
 func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {

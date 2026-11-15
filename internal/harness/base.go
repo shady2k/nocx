@@ -67,6 +67,15 @@ type Codec interface {
 	Decode(line []byte) (Decoded, error)
 }
 
+// SteerRecovery is the optional codec capability of reading back the person's
+// messages a cancel dropped. The agent's own queue is the authority — pi's
+// clear_queue answers with the steering texts it removed — so the connector
+// decodes them rather than the actor guessing from timing (ADR-4khgzeyp
+// decision 3). ok is false for a response that is not such an answer.
+type SteerRecovery interface {
+	DroppedSteers(payload any) (texts []string, ok bool)
+}
+
 // Step is a response-dependent command. Check may inspect the matched response
 // payload and update codec state needed by later commands. BeginTurn's first
 // step must set Barrier: its matched response fences output from the previous

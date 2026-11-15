@@ -211,8 +211,23 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 	if err != nil || decoded.Response == nil || decoded.Response.Error != "rejected" || len(decoded.Events) != 0 {
 		t.Fatalf("response: %+v, %v", decoded, err)
 	}
-	if got := codec.CancelSequence(); len(got) != 1 || got[0].Name != "abort" {
+	// pi's order, and its answer: the queue is cleared first (the answer names
+	// what it dropped) and then the turn is aborted.
+	if got := codec.CancelSequence(); len(got) != 2 || got[0].Name != "clear_queue" || got[1].Name != "abort" {
 		t.Fatalf("cancel: %+v", got)
+	}
+	// The fixture decodes that answer the way pi's own does, so the actor's
+	// hand-back path is exercised without a real agent.
+	recovery, ok := codec.(harness.SteerRecovery)
+	if !ok {
+		t.Fatal("the fixture codec cannot read back what a cancel dropped")
+	}
+	dropped, ok := recovery.DroppedSteers(map[string]any{"steering": []any{"first", "second"}})
+	if !ok || len(dropped) != 2 || dropped[0] != "first" || dropped[1] != "second" {
+		t.Fatalf("dropped: %v, %v", dropped, ok)
+	}
+	if _, ok := recovery.DroppedSteers(map[string]any{"other": 1}); ok {
+		t.Fatal("an answer that names no queue reported dropped messages")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -101,6 +102,22 @@ type actorTurn struct {
 	done     chan struct{}
 	terminal Event
 	number   uint64
+	// dropped is what the agent had queued for steering and the cancel threw
+	// away. The actor writes it before publishing the terminal, so it is safe
+	// to read once Done is closed.
+	dropped []string
+}
+
+// DroppedSteers reports the person's messages the cancelled turn dropped out of
+// the agent's own queue. They were never used, so they become the
+// conversation's next questions (ADR-4khgzeyp decision 3).
+func (t *actorTurn) DroppedSteers() []string {
+	select {
+	case <-t.done:
+		return append([]string(nil), t.dropped...)
+	default:
+		return nil
+	}
 }
 
 func (t *actorTurn) Events() <-chan Event { return t.events }
@@ -737,6 +754,19 @@ func (s *session) loop() {
 			if decoded.Response != nil && len(decoded.Events) > 0 {
 				fail("agent response envelope also carried turn events")
 				return
+			}
+			// A cancelling agent answers the command that clears its queue with
+			// the messages it removed: those are exactly the ones this turn
+			// never used, and they are handed back to the caller to be asked
+			// next (ADR-4khgzeyp decision 3). The connector decodes them,
+			// because its own queue is the authority on what was left.
+			if response := decoded.Response; response != nil && cancelling {
+				if recovery, ok := codec.(SteerRecovery); ok {
+					if texts, ok := recovery.DroppedSteers(response.Payload); ok && len(texts) > 0 {
+						current.dropped = append(current.dropped, texts...)
+						observe("steer-dropped", []byte(strings.Join(texts, "\n")))
+					}
+				}
 			}
 			if response := decoded.Response; response != nil {
 				if pending == nil || pending.id != response.ID || pending.generation != generation || current == nil || pending.turn != current.number {

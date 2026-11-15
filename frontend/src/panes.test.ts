@@ -3502,9 +3502,7 @@ describe('a restored pane and the session the backend still holds', () => {
 
     expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
     expect(returning.openSession).not.toHaveBeenCalled()
-    // The retry card belonged to the renderer's attachment state, which is
-    // gone (task 5.5). Nothing opened and nothing claimed is the truth.
-    expect(mounted.panes.querySelector('.nocx-attach-offer')).toBeNull()
+    expect(mounted.panes.querySelector('.nocx-attach-offer')).not.toBeNull()
   })
 
   it('does not ask the backend twice for one pane', async () => {
@@ -3559,6 +3557,7 @@ describe('a restored pane and the session the backend still holds', () => {
   it('keeps a restored pane recoverable, and opens nothing, while the inventory stays unavailable', async () => {
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
 
     const returning = makeClient()
     returning.listLiveSessions.mockRejectedValue(new Error('the connection dropped'))
@@ -3571,12 +3570,17 @@ describe('a restored pane and the session the backend still holds', () => {
     )
 
     // Nothing is opened on a question that was never answered, and the pane
-    // is not declared lost either — its shell may still be running. There is
-    // no second recovery surface: the attach card was the renderer's own
-    // attachment state and went with it (task 5.5).
+    // is not declared lost either — its shell may still be running.
     expect(returning.openSession).not.toHaveBeenCalled()
-    expect(mounted.panes.querySelector('.nocx-attach-offer')).toBeNull()
-    expect(returning.reclaimSession).not.toHaveBeenCalled()
+    const card = mounted.panes.querySelector('.nocx-attach-offer')
+    expect(card).not.toBeNull()
+
+    // Once the plane answers, the person's retry takes the SAME session back.
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
+    card!.querySelector<HTMLButtonElement>('button')!.click()
+    await vi.waitFor(() => expect(returning.reclaimSession).toHaveBeenCalledTimes(1))
+    expect(returning.reclaimSession.mock.calls[0][0]).toMatchObject({ paneId })
+    expect(returning.openSession).not.toHaveBeenCalled()
   })
 })
 

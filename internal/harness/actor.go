@@ -364,6 +364,10 @@ func (s *session) loop() {
 	var generation, turnNumber, serial uint64
 	var starting, retiring, closing, cancelling, promptWritten, settling, settlementDone bool
 	var deathPending, retired bool
+	// exitBy is the bound by which an exited agent's stdout must reach EOF. The
+	// agent's exit is not its turn's terminal: what it wrote before leaving is
+	// still in the pipe, and a survivor of its group can hold that pipe open.
+	var exitBy time.Time
 	var retirementErr error
 	var terminal *Event
 	var outcome Outcome
@@ -776,6 +780,7 @@ func (s *session) loop() {
 				stopStart = nil
 			}
 			process, tools = result.child, result.tools
+			exitBy = time.Time{}
 			bridge = result.bridge
 			barrierPassed = false
 			if result.err != nil {
@@ -862,12 +867,18 @@ func (s *session) loop() {
 		case line := <-lines:
 			handleLine(line)
 		case <-exited:
+			// The agent is gone, but its last words are not yet read. Converge on
+			// the EOF path below, which retires the incarnation once stdout has
+			// ended; only the bound tears the pipes down first.
 			deathPending = true
 			settle()
-			retire(false)
+			exitBy = time.Now().Add(bound)
 		case now := <-tick.C:
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
+				retire(false)
+			}
+			if process != nil && !retiring && !exitBy.IsZero() && !now.Before(exitBy) {
 				retire(false)
 			}
 			if current == nil && process != nil && !retiring && !now.Before(idleAt) {
@@ -876,7 +887,9 @@ func (s *session) loop() {
 					retire(false)
 				}
 			}
-			if current == nil && !retiring && !starting && len(queue) > 0 && !closing {
+			// A dead incarnation cannot take a new prompt: its cleanup frees the
+			// process, and only then may the queued turn start another.
+			if current == nil && !retiring && !starting && len(queue) > 0 && !closing && (process == nil || exitBy.IsZero()) {
 				t := queue[0]
 				queue = queue[1:]
 				if process != nil {
@@ -942,7 +955,9 @@ func (s *session) loop() {
 					}()
 				}
 			}
-			if process == nil || current == nil || terminal != nil {
+			// A dead agent's turn is already ending; its stdin is not a place to
+			// learn that, and a broken pipe would replace the exit as its cause.
+			if process == nil || current == nil || terminal != nil || !exitBy.IsZero() {
 				continue
 			}
 			if len(frame) == 0 {

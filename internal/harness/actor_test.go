@@ -874,6 +874,166 @@ func TestWaitKeepsFailureUsage(t *testing.T) {
 	}
 }
 
+// settlementProbe reports the turn's settlement, which the actor begins as
+// soon as it observes the agent's exit, before any remaining stdout is read.
+type settlementProbe struct {
+	ending chan struct{}
+}
+
+func (*settlementProbe) BeginTurn(TurnAuthority) error { return nil }
+func (p *settlementProbe) EndTurn(context.Context) error {
+	select {
+	case p.ending <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (*settlementProbe) Pending() bool                { return false }
+func (*settlementProbe) Retire(context.Context) error { return nil }
+
+// exitLatentUsageProtocol models the agent that states a completed model
+// call's usage and leaves at once. A survivor of its group holds its stdout
+// and writes the usage line only when the gate opens, so the line is written
+// after the exit was observed and before stdout reaches EOF.
+type exitLatentUsageProtocol struct {
+	shellProtocol
+	gate string
+}
+
+func (p exitLatentUsageProtocol) Start(context.Context, TurnSpec) (Launch, error) {
+	return Launch{Argv: []string{"/bin/sh", "-c", `while read -r id name; do
+case "$name" in
+barrier) echo "response $id";;
+prompt) { read x < "$1"; echo usage; } & exit 7;;
+esac
+done`, "agent", p.gate}}, nil
+}
+
+func (p exitLatentUsageProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
+
+func (p exitLatentUsageProtocol) Decode(line []byte) (Decoded, error) {
+	if string(line) == "usage" {
+		return Decoded{Outcome: &Outcome{Model: "test", Usage: &Usage{InputTokens: 13, OutputTokens: 5, CacheReadTokens: 3}}}, nil
+	}
+	return p.shellProtocol.Decode(line)
+}
+
+func TestAgentExitKeepsUsageWrittenBeforeIt(t *testing.T) {
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	gate := filepath.Join(t.TempDir(), "latent")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gateFile, err := os.OpenFile(gate, os.O_RDWR|syscall.O_NONBLOCK, 0o600) //nolint:gosec // private test FIFO
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gateFile.Close() }()
+	probe := &settlementProbe{ending: make(chan struct{}, 1)}
+	factory := func(context.Context, SessionInfo) (ToolSession, ToolBridge, error) {
+		return probe, ToolBridge{}, nil
+	}
+	m := NewSessionManager(Base{Tools: factory}, exitLatentUsageProtocol{gate: gate})
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "exit-usage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-probe.ending:
+	case <-ctx.Done():
+		t.Fatal("the turn never observed the agent's exit")
+	}
+	// The usage line exists only after the exit, so a turn that treats the death
+	// as its terminal cannot record it.
+	if _, err := gateFile.Write([]byte("go\n")); err != nil {
+		t.Fatal(err)
+	}
+	events := collectTurn(t, ctx, turn)
+	terminal := events[len(events)-1]
+	want := Usage{InputTokens: 13, OutputTokens: 5, CacheReadTokens: 3}
+	if terminal.Kind != EventFailure || terminal.Failure == nil || !strings.Contains(terminal.Failure.Reason, "status 7") {
+		t.Fatalf("terminal = %+v, want the exit", terminal)
+	}
+	if terminal.Outcome == nil || terminal.Outcome.Usage == nil || *terminal.Outcome.Usage != want {
+		t.Fatalf("terminal outcome = %+v, want the usage written before the exit", terminal.Outcome)
+	}
+	outcome, waitErr := turn.Wait(ctx)
+	if waitErr == nil || !strings.Contains(waitErr.Error(), "status 7") {
+		t.Fatalf("Wait = %v, want the exit", waitErr)
+	}
+	if outcome.Model != "test" || outcome.Usage == nil || *outcome.Usage != want {
+		t.Fatalf("Wait outcome = %+v, want the usage written before the exit", outcome)
+	}
+}
+
+// exitHeldStdoutProtocol leaves a survivor of the agent's group holding its
+// stdout open, so that pipe never reaches EOF.
+type exitHeldStdoutProtocol struct{ shellProtocol }
+
+func (exitHeldStdoutProtocol) Start(context.Context, TurnSpec) (Launch, error) {
+	return Launch{Argv: []string{"/bin/sh", "-c", `while read -r id name; do
+case "$name" in
+barrier) echo "response $id";;
+prompt) sleep 30 & exit 7;;
+esac
+done`}}, nil
+}
+
+func TestAgentExitWithHeldStdoutIsBounded(t *testing.T) {
+	const bound = 100 * time.Millisecond
+	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	probe := &settlementProbe{ending: make(chan struct{}, 1)}
+	factory := func(context.Context, SessionInfo) (ToolSession, ToolBridge, error) {
+		return probe, ToolBridge{}, nil
+	}
+	m := NewSessionManager(Base{Tools: factory, ShutdownTimeout: bound}, exitHeldStdoutProtocol{})
+	defer func() { _ = m.Close(ctx) }()
+	turn, err := m.Run(ctx, TurnSpec{ConversationID: "held-stdout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-probe.ending:
+	case <-ctx.Done():
+		t.Fatal("the turn never observed the agent's exit")
+	}
+	observed := time.Now()
+	events := collectTurn(t, ctx, turn)
+	// A second is a hang detector, not the deadline: the exit bound above is
+	// what may end the turn, and waiting on EOF would never end it.
+	if elapsed := time.Since(observed); elapsed > time.Second {
+		t.Fatalf("held stdout kept the turn open for %s; the exit bound is %s", elapsed, bound)
+	}
+	terminal := events[len(events)-1]
+	if terminal.Kind != EventFailure || terminal.Failure == nil || !strings.Contains(terminal.Failure.Reason, "status 7") {
+		t.Fatalf("terminal = %+v, want the exit", terminal)
+	}
+}
+
+// collectTurn drains a turn's stream, failing rather than hanging when the
+// terminal never arrives.
+func collectTurn(t *testing.T, ctx context.Context, turn Turn) []Event {
+	t.Helper()
+	var events []Event
+	for {
+		select {
+		case ev, ok := <-turn.Events():
+			if !ok {
+				if len(events) == 0 {
+					t.Fatal("the turn ended without a terminal")
+				}
+				return events
+			}
+			events = append(events, ev)
+		case <-ctx.Done():
+			t.Fatal("the turn's event stream did not close: the exit did not end the turn")
+		}
+	}
+}
+
 type usageFailureProtocol struct{ shellProtocol }
 
 func (p usageFailureProtocol) NewCodec(SessionInfo, Launch) Codec { return p }

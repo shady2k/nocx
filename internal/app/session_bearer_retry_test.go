@@ -14,8 +14,8 @@ import (
 	"github.com/shady2k/nocx/internal/turnbearer"
 )
 
-// Cut a real endpoint frame before its newline, then hold the write result
-// until the session has been retired and its replacement is running.
+// Cut a real endpoint frame before its newline and lose the transport, then
+// hold the write result until the session has been retired and replaced.
 type retirementRetryDialer struct {
 	entered chan struct{}
 	release chan struct{}
@@ -49,6 +49,9 @@ func (c *retirementRetryConn) Write(p []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
+	// Lose the transport before retirement: otherwise settlement can answer
+	// the partial frame with a parse refusal, which correctly prevents retry.
+	_ = c.Conn.Close()
 	close(c.owner.entered)
 	<-c.owner.release
 	return n, nil

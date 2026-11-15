@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/harness"
 	fakemodel "github.com/shady2k/nocx/internal/harness/fakemodeltest"
 	"github.com/shady2k/nocx/internal/harness/harnesstest"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -164,6 +166,20 @@ func realPiDriver(t *testing.T, s harnesstest.DriverSetup) harnesstest.Fixture {
 	server := httptest.NewServer(fake)
 	t.Cleanup(server.Close)
 	c := configuredPiAtURL(t, server.URL)
+	if s.Scenario == harnesstest.CancelTool {
+		gatePath := filepath.Join(s.Dir, "cancel-tool")
+		if err := syscall.Mkfifo(gatePath, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		base := harness.Base{Tools: func(context.Context, harness.SessionInfo) (harness.ToolSession, harness.ToolBridge, error) {
+			bridge := harness.ToolBridge{Command: []string{s.ToolServerPath}, Env: []string{
+				"MCP_BLOCK=1", "MCP_BLOCKEDFILE=" + filepath.Join(s.Dir, "blocked"), "MCP_CANCEL_GATE=" + gatePath,
+				"MCP_PIDFILE=" + filepath.Join(s.Dir, "server.pid"), "NOCX_TEST_SECRET=bridge-only-secret",
+			}}
+			return &piCancelToolSession{gate: gatePath}, bridge, nil
+		}}
+		c = NewWithBase(c.dataDir, c.env, base)
+	}
 	installPiObserver(t, c, s.Dir)
 	cfg := piHostConfig{c.dataDir, c.env}
 	raw, _ := json.Marshal(cfg)
@@ -235,6 +251,22 @@ func realPiDriver(t *testing.T, s harnesstest.DriverSetup) harnesstest.Fixture {
 		},
 	}
 }
+
+// piCancelToolSession models the endpoint returning a cancellation result before
+// the actor asks pi to abort, as the production ToolSession does.
+type piCancelToolSession struct {
+	gate string
+	once sync.Once
+	err  error
+}
+
+func (*piCancelToolSession) BeginTurn(harness.TurnAuthority) error { return nil }
+func (s *piCancelToolSession) EndTurn(context.Context) error {
+	s.once.Do(func() { s.err = os.WriteFile(s.gate, []byte("cancel"), 0o600) })
+	return s.err
+}
+func (*piCancelToolSession) Pending() bool                { return false }
+func (*piCancelToolSession) Retire(context.Context) error { return nil }
 
 func piMessageText(raw json.RawMessage) string {
 	var text string

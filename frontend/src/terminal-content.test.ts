@@ -16001,6 +16001,67 @@ describe('an uncertain adoption keeps the pane and opens no replacement', () => 
     }
   })
 
+  it.each([false, true])(
+    'honours end-session=%s for a late reclaimed session',
+    async (endsSession) => {
+      const client = makeClient()
+      const adopted = makeSession()
+      let resolveRetry: ((session: SessionHandle) => void) | undefined
+      const adopt = vi
+        .fn<() => Promise<SessionHandle | null>>()
+        .mockRejectedValueOnce(new LiveSessionUncertainError(UNCERTAIN))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveRetry = resolve
+            }),
+        )
+      const { content, tab, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true, hooks: { adoptSession: adopt } },
+        client,
+      )
+      try {
+        tab.pane.querySelector<HTMLButtonElement>('.nocx-attach-offer button')?.click()
+        await vi.waitFor(() => expect(adopt).toHaveBeenCalledTimes(2))
+        content.dispose(endsSession ? 'end-session' : undefined)
+        resolveRetry?.(asSessionHandleForTest(adopted))
+        await vi.waitFor(() =>
+          expect(endsSession ? adopted.close : adopted.detach).toHaveBeenCalled(),
+        )
+        expect(endsSession ? adopted.detach : adopted.close).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it('restores an actionable offer when a recovery open is cancelled', async () => {
+    const client = makeClient()
+    client.openSession.mockRejectedValueOnce(
+      Object.assign(new Error('Cancelled'), { name: 'AbortError' }),
+    )
+    const adopt = vi
+      .fn<() => Promise<SessionHandle | null>>()
+      .mockRejectedValueOnce(new LiveSessionUncertainError(UNCERTAIN))
+      .mockResolvedValueOnce(null)
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { adoptSession: adopt } },
+      client,
+    )
+    try {
+      tab.pane.querySelector<HTMLButtonElement>('.nocx-attach-offer button')?.click()
+      await vi.waitFor(() => {
+        expect(client.openSession).toHaveBeenCalledTimes(1)
+        expect(tab.pane.querySelector('.nocx-attach-offer button')).not.toBeNull()
+      })
+      expect(client._sessions).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
   it('opens a fresh shell when the adoption answers that nothing is held', async () => {
     // The pair of the rule above: an ANSWERED absence is proof, and a pane
     // whose shell really is gone must not be left dead.

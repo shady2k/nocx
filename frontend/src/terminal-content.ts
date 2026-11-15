@@ -2306,6 +2306,7 @@ export class TerminalContent extends BasePaneContent {
    *  a replacement shell. */
   private _pendingAdoption = false
   private _inventoryRetrying = false
+  private _disposeEndsSession = false
   private _inventoryOffer: SessionInventoryOfferHandle | null = null
 
   /** This pane's files binding, opened on the FIRST upload and reused. A
@@ -5608,6 +5609,8 @@ export class TerminalContent extends BasePaneContent {
         // has nothing left to show), and a rebind or a recovery leaves the
         // pane exactly as it was.
         if (err instanceof Error && err.name === 'AbortError') {
+          // Recovery keeps the pane, so its caller restores an actionable offer.
+          if (mode === 'recover') throw err
           if (mode === 'first') {
             editor.dispose()
             scrollback.dispose()
@@ -5634,7 +5637,10 @@ export class TerminalContent extends BasePaneContent {
     }
 
     if (signal.aborted) {
-      session.close()
+      // A recovered handle still names the saved shell. Leaving the view
+      // detaches it; only an explicit end-session disposal may end its work.
+      if (mode === 'recover' && !this._disposeEndsSession) session.detach()
+      else session.close()
       // A FIRST bind that is aborted takes the pane down with it: nothing
       // has been shown and there is nothing to leave behind. A REBIND that
       // is aborted must leave the pane exactly as it was — its scrollback
@@ -10573,6 +10579,7 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(reason?: 'end-session'): void {
     this._disposed = true
+    this._disposeEndsSession = reason === 'end-session'
     this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
     // A departure timer outliving the pane would fire against a disposed

@@ -15,9 +15,26 @@
 
 import { createSignal } from 'solid-js'
 
+/** What an overlay is allowed to take from the surface under it. */
+export interface OverlayOptions {
+  /**
+   * Whether the stack's Escape closes this overlay. Default true.
+   *
+   * `false` is for a question asked over a surface the person may go on using
+   * — Prompt's `modal={false}`, which the agent approval needs because the
+   * composer is the other half of its answer (ADR-anntnxdj decision 4). Escape
+   * out there belongs to whatever they are in; the overlay answers its own
+   * Escape from inside its panel.
+   */
+  readonly escape?: boolean
+}
+
 export interface OverlayEntry {
   /** Unique id for this overlay instance. */
   readonly id: string
+  /** Whether Escape pressed anywhere closes this overlay (see
+   *  OverlayOptions.escape). */
+  readonly escape: boolean
   /** Called to close this overlay. Returns false if the close was prevented. */
   close: () => boolean
   /**
@@ -93,7 +110,7 @@ function installEscapeHandler(): void {
   escapeHandler = (e: KeyboardEvent) => {
     if (e.key !== 'Escape') return
     const top = stack[stack.length - 1]
-    if (!top) return
+    if (!top || !top.escape) return
     e.preventDefault()
     top.close()
   }
@@ -115,9 +132,11 @@ export function pushOverlay(
   close: () => boolean,
   prevFocus?: Element | null,
   element?: HTMLElement | null,
+  options?: OverlayOptions,
 ): OverlayEntry {
   const entry: OverlayEntry = {
     id: nextId(),
+    escape: options?.escape !== false,
     close,
     prevFocus: prevFocus ?? document.activeElement,
     element: element ?? null,

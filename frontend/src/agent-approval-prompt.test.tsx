@@ -874,9 +874,19 @@ describe('AgentApprovalPrompt', () => {
   it('dismissing the prompt is the NARROWEST refusal, never a standing one', () => {
     const { decisions, onDecide } = recordDecisions()
     const { container } = renderPrompt({ onDecide })
-    const overlay = container.querySelector('.ui-prompt-overlay')!
-    fireEvent.mouseDown(overlay)
+    // ESCAPE, from inside the question, is the dismiss that is a refusal: the
+    // prompt does not own the surface round it (a press out there belongs to
+    // the composer, which is the other half of the answer — nocx-a62cl.6.2),
+    // so its own panel is where the key is taken.
+    fireEvent.keyDown(container.querySelector('.ui-prompt')!, { key: 'Escape' })
     expect(decisions).toEqual([[false, 'once']])
+  })
+
+  it('a press outside the panel decides nothing — it is reaching for the composer', () => {
+    const { decisions, onDecide } = recordDecisions()
+    const { container } = renderPrompt({ onDecide })
+    fireEvent.mouseDown(container.querySelector('.ui-prompt-overlay')!)
+    expect(decisions).toEqual([])
   })
 
   it('disables every answer while the decision is in flight', () => {

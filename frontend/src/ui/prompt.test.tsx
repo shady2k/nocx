@@ -666,3 +666,52 @@ describe('a prompt that does not fit (nocx-ck02x)', () => {
     ])
   })
 })
+
+// ── A question that does not own the surface under it ────────────────
+//
+// The agent approval is answered EITHER by a button or by a message typed
+// into the composer the question is about (ADR-anntnxdj decision 4). A scrim
+// that swallows the click and a focus guard that takes the keyboard back
+// would leave the person with only the buttons, so this variant keeps the
+// shell around the question usable.
+
+it('does not own the surface under it when it is not modal', () => {
+  const close = vi.fn()
+  const { container } = render(() => (
+    <Prompt
+      open
+      modal={false}
+      ariaLabel="This action needs your approval"
+      placement="top-sheet"
+      onClose={close}
+      actions={<button type="button">Deny</button>}
+    >
+      <span>question</span>
+    </Prompt>
+  ))
+
+  const overlay = container.querySelector('.ui-prompt-overlay')!
+  expect(overlay.getAttribute('data-modal')).toBe('false')
+  expect(container.querySelector('.ui-prompt')?.getAttribute('aria-modal')).toBe('false')
+  // A press on the surface AROUND the question is not a refusal: the person
+  // is reaching for the composer, not dismissing what they were asked.
+  fireEvent.mouseDown(overlay)
+  expect(close).not.toHaveBeenCalled()
+  // And Escape pressed out there belongs to whatever they are in.
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect(close).not.toHaveBeenCalled()
+  // Inside the question it is still the narrowest refusal.
+  fireEvent.keyDown(container.querySelector('.ui-prompt')!, { key: 'Escape' })
+  expect(close).toHaveBeenCalledOnce()
+})
+
+it('owns the surface under it by default', () => {
+  const { container } = render(() => (
+    <Prompt open ariaLabel="Password" onClose={() => undefined} actions={null}>
+      <input />
+    </Prompt>
+  ))
+
+  expect(container.querySelector('.ui-prompt-overlay')!.hasAttribute('data-modal')).toBe(false)
+  expect(container.querySelector('.ui-prompt')?.getAttribute('aria-modal')).toBe('true')
+})

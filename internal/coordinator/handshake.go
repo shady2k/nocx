@@ -135,7 +135,9 @@ package coordinator
 // 34: agent.status reports harness readiness instead of endpoint health.
 // 35 (nocx-a62cl.5.6): endpoints and agent.dump leave the control plane.
 // 36 (nocx-a62cl.13.1): agent.runState carries the agent's stated token usage.
-const ProtocolVersion = 36
+// 37 (nocx-a62cl.6.1): agent.steer is added, so a window built against 36 has
+// no way to send a message into the turn it is watching.
+const ProtocolVersion = 37
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

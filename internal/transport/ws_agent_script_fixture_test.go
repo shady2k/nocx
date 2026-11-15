@@ -76,7 +76,7 @@ func newScriptedAgent(t *testing.T, script protocol.Script) *scriptedAgentFixtur
 	for _, field := range []struct {
 		p    *string
 		name string
-	}{{&script.PromptFile, "prompt"}, {&script.PIDFile, "pid"}, {&script.ResultFile, "result"}, {&script.HangFile, "hang"}, {&script.EnvironmentFile, "environment"}} {
+	}{{&script.PromptFile, "prompt"}, {&script.PIDFile, "pid"}, {&script.ResultFile, "result"}, {&script.HangFile, "hang"}, {&script.EnvironmentFile, "environment"}, {&script.SteerFile, "steer"}} {
 		if *field.p == "" {
 			*field.p = filepath.Join(dir, field.name)
 		}

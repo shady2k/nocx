@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.steer.schema.json",
+  "title": "AgentSteer",
+  "description": "Result of the agent.steer JSON-RPC method: the person's message was handed to the agent answering the run. The answer waits for the agent's own acceptance of the message, so a message the turn ended under is refused with an error rather than reported delivered. steer is a capability, not a promise: an agent whose protocol has no steering refuses the message and says so.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "steered"],
+  "properties": {
+    "runId": {
+      "description": "The run that took the message.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "steered": {
+      "description": "True because the agent accepted the message into the running turn.",
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

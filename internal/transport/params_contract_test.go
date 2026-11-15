@@ -825,6 +825,12 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"agent.rules": {
 			[]byte(`{}`),
 		},
+		// A message into the turn that is already running: the run it belongs
+		// to and the words, and nothing else — the message reaches an agent
+		// that already holds the conversation.
+		"agent.steer": {
+			[]byte(`{"runId":7,"text":"also check the second log"}`),
+		},
 		"agent.rules.set": {
 			[]byte(`{"agent":"claude","document":"{\"agent\":\"claude\",\"anchors\":[],\"branches\":[],\"default\":\"unknown\"}"}`),
 		},

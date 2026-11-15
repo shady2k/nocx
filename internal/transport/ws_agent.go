@@ -88,6 +88,14 @@ type agentCancelParams struct {
 	RunID int64 `json:"runId"`
 }
 
+// agentSteerParams is a person's message to the turn that is already running:
+// the run it belongs to, and the words. Nothing else travels — the message is
+// not a question, so it carries no grants and no cwd.
+type agentSteerParams struct {
+	RunID int64  `json:"runId"`
+	Text  string `json:"text"`
+}
+
 // agentCancelResponse is the real result of agent.cancel. cancelled is true
 // only when this request closed a live run; an already-terminal or unknown
 // run is answered as an error rather than being reported as stopped.
@@ -98,6 +106,15 @@ type agentCancelResponse struct {
 	Error         string   `json:"error,omitempty"`
 	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
+}
+
+// agentSteerResponse is the real result of agent.steer: the run that took the
+// message, and that the agent answering it accepted the message. Accepted, not
+// merely queued: the harness answers when the agent's own protocol says so, so
+// a message a turn ended under is refused rather than reported delivered.
+type agentSteerResponse struct {
+	RunID   int64 `json:"runId"`
+	Steered bool  `json:"steered"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -141,6 +158,11 @@ type agentRunControl struct {
 	usage              *content.RunUsage
 	answeringModel     string
 	actorTerminalState content.RunState
+	// steerer is the running turn's way in for a person's message — the
+	// harness Turn askHarness started. It is attached once and never
+	// replaced: a steer addresses the turn that is answering, and a turn that
+	// has ended refuses the message itself.
+	steerer agentharness.Steerer
 }
 
 type agentRunDrive struct {
@@ -178,6 +200,22 @@ func (c *agentRunControl) beginDrive(parent context.Context) (context.Context, f
 func agentRunControlFromContext(ctx context.Context) *agentRunControl {
 	control, _ := ctx.Value(agentRunControlContextKey{}).(*agentRunControl)
 	return control
+}
+
+// attachSteerer names the running turn a person's message goes into. The
+// harness Turn is the only thing that can deliver it: the actor owns the
+// agent process, and asking the connector instead would be a second route to
+// the same session.
+func (c *agentRunControl) attachSteerer(steerer agentharness.Steerer) {
+	c.mu.Lock()
+	c.steerer = steerer
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) attachedSteerer() agentharness.Steerer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.steerer
 }
 
 func (c *agentRunControl) attachRunLease(lease *runLease) bool {
@@ -1548,6 +1586,9 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	if err != nil {
 		return err
 	}
+	if steerer, ok := turn.(agentharness.Steerer); ok && rc.control != nil {
+		rc.control.attachSteerer(steerer)
+	}
 	var fatalErr error
 	var emissionErr error
 	started := make(map[string]struct{})
@@ -1714,6 +1755,62 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		result.Error = sentence
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(result))
+}
+
+// handleSteer delivers a person's message into the run that is answering it
+// (ADR-anntnxdj decision 4). It answers only once the agent took the message:
+// a message the turn ended under is refused, and says so, rather than being
+// reported delivered into a block that has already closed.
+func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
+		return
+	}
+	var p agentSteerParams
+	if msg := decodeParamsStrict(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+		return
+	}
+	ctx, _ = log.StartTrace(ctx, runTrace(p.RunID))
+	// The run registry is the one owner of "which turn is live": a run whose
+	// terminal was written is gone from it, and its message has nowhere to go.
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[p.RunID]
+	h.pendingRunsMu.Unlock()
+	if !ok || rc.control == nil {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: run is not active (it may already be terminal or never existed)",
+		})
+		return
+	}
+	steerer := rc.control.attachedSteerer()
+	if steerer == nil {
+		// The run is recorded but its turn is not reaching the agent yet, or
+		// this agent's protocol has no steering (ADR-anntnxdj decision 4).
+		// Either way there is nothing to hand the message to.
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32603,
+			Message: "the answering turn cannot take a message yet",
+		})
+		return
+	}
+	if err := steerer.Steer(ctx, p.Text); err != nil {
+		h.log.Warn("agent steer: the message was not delivered", "run", p.RunID, "reason", err)
+		// The harness states WHICH refusal it is; the person reads a sentence
+		// about what happened rather than the contract's own word for it.
+		sentence := fmt.Sprint(err)
+		switch {
+		case errors.Is(err, agentharness.ErrTurnNotRunning):
+			sentence = "the answer finished before your message reached the agent"
+		case errors.Is(err, agentharness.ErrNotSteerable):
+			sentence = "this agent does not take a message while it answers"
+		}
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: sentence})
+		return
+	}
+	h.log.Info("agent steer: the agent took the person's message", "run", p.RunID)
+	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Steered: true}))
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact
@@ -2214,6 +2311,22 @@ func validateAgentCancelRaw(raw json.RawMessage) string {
 	return ""
 }
 
+func validateAgentSteerRaw(raw json.RawMessage) string {
+	var p agentSteerParams
+	// Strict: the message and the run it belongs to, and nothing else. A
+	// typo'd field would otherwise be an empty message delivered to a turn.
+	if msg := decodeParamsStrict(raw, &p); msg != "" {
+		return msg
+	}
+	if p.RunID <= 0 {
+		return "runId must be the backend-minted run id"
+	}
+	if strings.TrimSpace(p.Text) == "" || utf8.RuneCountInString(p.Text) > maxQuestionRunes {
+		return "text is required and bounded"
+	}
+	return ""
+}
+
 // declineKindForScope maps the wire's answer scope to the declined record's
 // standing half — the sentence the model is refused with. "once" covers the
 // call only; "session" and "always" are the standing noes the middleware
@@ -2602,6 +2715,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 		reg(contentSub, catalog.OpAgentCancel, params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
+		}),
+		reg(contentSub, catalog.OpAgentSteer, params(validateAgentSteerRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSteer(ctx, req) }
 		}),
 		reg(contentSub, catalog.OpAgentApprove, params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)

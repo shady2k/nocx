@@ -5,7 +5,6 @@ package assistant
 // terminal items, and the precedence of personal instructions.
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -74,14 +73,6 @@ func TestSystemPrompt_ExplainsBareInputAndNeverGuesses(t *testing.T) {
 	}
 }
 
-func quoted(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
-// TestSystemPrompt_IsAFunctionOfItsFacts is the table: what each shape of
-// pane produces, and what it must never produce. No I/O, nothing read from
-// the host — the caller owns every fact, including the OS.
 func TestSystemPrompt_IsAFunctionOfItsFacts(t *testing.T) {
 	host := "build.example.com"
 	remote := content.Environment{Kind: content.EnvSSH, Endpoint: &host}

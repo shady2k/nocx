@@ -36,6 +36,8 @@ const artifactChunkSize = 64 << 10
 // 32 hex chars from crypto/rand, the same shape as session.NewID. The
 // frame id and its artifact id are minted here, never supplied by the
 // renderer.
+const agentLane = "agent"
+
 func mintID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

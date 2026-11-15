@@ -1,128 +1,23 @@
-// Package assistant is the AI assistant's model access, behind one
-// interface (ADR-0028, design §4). eino runs the loop; this package is the
-// one owner of the eino wiring, the guarded HTTP client and the probe — the
-// rest of the app depends on Client, never on eino types, and nothing in
-// the product reads eino's state to answer a question the ledger answers
-// (ADR-0019).
-//
-// The engine is adk.ChatModelAgent with the OpenAI-compatible adapter
-// (ADR-0028 decision 1; design §4.1). Explain mode is the ONLY mode this
-// slice knows: zero tools declared, terminate after the first completed
-// response, context is question + referenced frames (design §4.2). The
-// tools, the policy middleware, the grant and the narrowed capability are
-// nocx-lndv and deliberately do not live here.
-//
-// The HTTP client every model call goes through enforces design §4.5
-// decision 3 at dial time — see httpguard.go for the rule and the four
-// reasons it cannot live in the form.
+// Package assistant owns the tool authority kernel used by agent harnesses.
 package assistant
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
-	"time"
 
 	tools "github.com/shady2k/nocx/contracts/tools"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// Client is the app-facing surface of the assistant engine. Consumers: the
-// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
-// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
-type Client interface {
-	// Probe streams one real response from the given endpoint configuration
-	// — the Test button's whole meaning: it probes what will actually be
-	// used, not one cheap completion (design §4.5, bead notes). The
-	// parameters are the form's DRAFT values: the endpoint may not be saved
-	// yet, and the key is an input that never crosses back (ADR-0030).
-	//
-	// A failed dial, a refused stream, a timeout or zero content is a
-	// ProbeResult with OK=false — a probe outcome, not a Go error. A Go
-	// error means the probe could not run at all (a parameter the engine
-	// refuses), and no result is produced.
-	Probe(ctx context.Context, p ProbeParams) (ProbeResult, error)
-	// Ask streams the run to onEvent — ONE ordered stream carrying the
-	// three things a run produces: the answer's text, the model's
-	// reasoning, and the tool calls it makes (nocx-shxv0, nocx-bshm2,
-	// nocx-s92so). One callback rather than three because the ORDER between
-	// them is the product fact: a tool call belongs where it happened, in
-	// the answer that was streaming when it happened, and three callbacks
-	// could not state that.
-	//
-	// Returning an error from onEvent ABORTS the stream — the caller's write
-	// was refused, and the run must terminalize rather than wedge (the
-	// probe's write-only callback cannot say that, which is why this one
-	// can). Ask returns nil when the answer was received in full, a
-	// *StreamError when the model or the transport failed mid-stream (or the
-	// stream produced no ANSWER text — reasoning alone is not an answer),
-	// and any other Go error when the ask could not run at all.
-	Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error
-	// Discard drops the process-lifetime state the engine holds for one run.
-	// Ask already does this for every outcome it returns from; this is the
-	// seam for the ones it does not — the run was closed by another path, or
-	// its call was refused while its question was still open. Discarding a
-	// run that holds nothing does nothing, so the transport can call it from
-	// its one terminal funnel without asking what the run ever held.
-	Discard(runID string)
-}
+// Client owns process-lifetime tool state.
+type Client interface{ Discard(runID string) }
 
-// AskEventKind names which of the three things one Ask event is. A closed
-// set: the renderer draws each differently, and a fourth kind arriving
-// unnamed would be drawn as whichever of these it was mistaken for — which
-// is exactly the defect nocx-bshm2 was (a tool result drawn as the answer,
-// because the loop asked only "does this message have content").
-type AskEventKind string
-
-const (
-	// AskAnswer is a chunk of the answer — the model's own prose, and the
-	// ONLY thing that is the answer. Not a tool's return value, not the
-	// model's thinking.
-	AskAnswer AskEventKind = "answer"
-	// AskReasoning is a chunk of the model's thinking (eino's
-	// schema.Message.ReasoningContent, which the OpenAI-compatible adapter
-	// fills from the wire's `reasoning_content`). Its own kind because an
-	// answer block that concatenates thinking with the answer is nocx-bshm2
-	// in another shape; a model that sends none produces none of these.
-	AskReasoning AskEventKind = "reasoning"
-	// AskToolCall is one tool call the run is about to make. It is a thing
-	// on the wire and an element of the answer's own flow, so the ordering
-	// fixes itself: the call is rendered where it happened.
-	AskToolCall AskEventKind = "toolCall"
-)
-
-// AskEvent is one event of a run's ordered stream.
-type AskEvent struct {
-	Kind AskEventKind
-	// Text is the chunk, for AskAnswer and AskReasoning. Empty for a tool
-	// call — a call is not text.
-	Text string
-	// Call is the call, for AskToolCall only.
-	Call *ToolCall
-}
-
-// ToolCall is the fact a person is shown when the assistant does something:
-// WHICH tool, WHAT IT ASKED FOR, and what it touched. Deliberately NOT the
-// result.
-//
-// The result is left off because it already has an owner. The attempt's
-// outcome is in the ledger (design §6.4), the run tool's output is in the
-// block the command really opened, and the egress gate (design §7.1) screens
-// a result for the PROVIDER — sending the same bytes to the renderer would
-// be a second egress path this bead did not decide. EntryID is the handle a
-// later "show me what it returned" reaches through; it is not a second copy
-// of the bytes.
-//
-// The ARGUMENTS are part of the announcement: session.list names the pane,
-// while session.read may name an item and a window. What separates calls of
-// one tool is what the model asked for, so that is what is announced.
+// ToolCall announces a validated tool invocation without its result.
 type ToolCall struct {
 	// Tool is the declared tool name, e.g. "files.read".
 	Tool string
@@ -164,51 +59,14 @@ type ToolCall struct {
 	OpensBlock bool
 }
 
-// Message is one turn of the conversation, in this package's own
-// vocabulary — never eino's schema.Message (ADR-0028: the rest of the app
-// depends on Client, never on eino types; the engine maps at the seam).
-type Message struct {
-	Role    string // "user" | "assistant" | "system"
-	Content string
-}
-
-// Header is one resolved custom HTTP header the endpoint sends on every
-// request it makes (bead nocx-lyyk): the name, and the value ALREADY
-// RESOLVED — a literal, or the material of a vault secret the transport
-// resolved before the call. The resolver is the transport (it owns the
-// vault); this package only ever sends.
-type Header struct {
-	Name  string
-	Value string
-}
-
-// AskParams is one ask's model call: the resolved endpoint's facts plus the
-// conversation context (question + referenced frames, design §4.2).
+// AskParams binds one turn's authority and tool seams.
 type AskParams struct {
-	// Key is the endpoint's resolved credential. Never persisted, never
-	// echoed; it lives only in the model config for the call's duration.
-	Key credential.Secret
-	// BaseURL is the endpoint's base URL, validated at dial time.
-	BaseURL string
-	// Model is the model id the run resolved to.
-	Model string
-	// Headers are the endpoint's custom headers, resolved to their values.
-	// Sent on the completion AND the connection check, so a Test that
-	// passes means the real calls will too.
-	Headers []Header
-	// Messages is the assembled context: the system rule (frame content is
-	// data, not instructions — design §6.2) when frames are attached, the
-	// question, and the referenced frames' text as labelled data. A
-	// zero-reference ask (nocx-4wtlh) carries only the question — the
-	// transport derives the rule from what is attached, never a constant.
-	Messages []Message
 	// Grant is the run's authority (ADR-0020 decision 5) — the ledger's
 	// type (content.Grant), the one grant model: effect classes the run may
 	// produce, resource scopes it may touch, and the policy preset that
-	// decides act/ask/refuse. The engine declares to the model exactly the
-	// tools this grant permits (design §5) and nothing else — the strongest
-	// refusal is the one never proposed. Nil means no authority: the model
-	// is declared no tools, which is every caller's state today.
+	// decides act/ask/refuse. The kernel checks this authority at tool
+	// admission and execution; the harness owns the model's tool declarations.
+	// Nil means no authority and BindRunTools refuses to bind the turn.
 	Grant *content.Grant
 	// AttemptLedger is the ledger seam the tool-call pipeline records its
 	// attempts with (design §6.4 — the attempt is durable, before the call,
@@ -322,10 +180,6 @@ type AskParams struct {
 	// whose tools may execute FAILS without it: the gate must see short
 	// vault values, or a result would leave for the provider unscreened.
 	KnownMaterial KnownMaterial
-	// Presentation controls the model-facing lazy tool catalog. It changes
-	// visibility only; the grant and kernel remain the authority boundary.
-	Presentation *agenttools.PresentationConfig
-
 	// RunID and SessionID are the run's backend-owned identities. The
 	// transport passes both from the ask context; SessionID is the pane the
 	// run is executing in, not a value recovered from grant scopes.
@@ -372,102 +226,13 @@ type Attachments struct {
 	MarkedWindows  []MarkedSessionWindow
 }
 
-// StreamError is a model-stream failure the transport terminalizes the run
-// with: Message is a sentence a person reads (design §7's agent.runState
-// error), never a Go error string.
-type StreamError struct {
-	Message string
-}
-
-func (e *StreamError) Error() string { return e.Message }
-
-// ProbeParams is the draft endpoint configuration the Test button probes:
-// what the form shows, not what the store holds.
-type ProbeParams struct {
-	// Name is the display name (draft). Reported in the result for the
-	// "last probe" fact; not sent to the model.
-	Name string
-	// BaseURL is the absolute http(s) base URL of the OpenAI-compatible
-	// API. The http:// address rule is enforced at dial time, never here.
-	BaseURL string
-	// Key is the API key input, empty when the form has none (local models
-	// like Ollama need none). Never persisted, never echoed.
-	Key credential.Secret
-	// Model is the model id the probe asks to speak, and EMPTY means the
-	// caller is asking the other question. Two checks live behind one
-	// button (nocx-q27y): with a model, "does this model answer" — a real
-	// streamed completion. Without one, "can I reach this API with this
-	// key" — which needs no model at all, and is the only question that
-	// can be asked of an endpoint nobody has typed a model into yet. The
-	// result names which one ran, so it can never be mistaken for the
-	// other.
-	Model string
-	// Headers are the form's draft custom headers, resolved to their
-	// values. Sent on whichever check runs.
-	Headers []Header
-}
-
-// ProbeKind names which of the two checks a ProbeResult reports.
-type ProbeKind string
-
-const (
-	// ProbeModel streamed a real completion from a named model.
-	ProbeModel ProbeKind = "model"
-	// ProbeConnection reached the endpoint and had its credential accepted,
-	// without asking any model to speak.
-	ProbeConnection ProbeKind = "connection"
-)
-
-// ProbeResult is the outcome of one probe. It is the wire shape declared in
-// contracts/endpoints.probe.schema.json ($defs/probeResult) and reused by
-// agent.status's lastProbe — the Go DTO lives here so the transport maps
-// to it directly.
-type ProbeResult struct {
-	// EndpointName is the probed draft's display name. Historical fact:
-	// agent.status reports the last probe whatever the endpoint list says
-	// now.
-	EndpointName string `json:"name"`
-	// Model is the model id that was probed. Empty for a connection check,
-	// which has none by definition.
-	Model string `json:"model"`
-	// Kind names WHICH check produced this result: "model" streamed a real
-	// completion, "connection" only established that the endpoint is
-	// reachable and the credential accepted. They are different facts and a
-	// person acts on them differently, so the result states which it is
-	// rather than leaving it to be inferred from an empty Model.
-	Kind ProbeKind `json:"kind"`
-	// OK is true when the check succeeded: for "model", the endpoint
-	// streamed at least one content chunk; for "connection", the endpoint
-	// was reached and did not reject the credential.
-	OK bool `json:"ok"`
-	// Models are the model ids a connection check found the endpoint
-	// offering. ALWAYS an addition, never a gate: GET /models is not
-	// universally implemented, so an endpoint that does not list them is
-	// reachable, usable, and must stay configurable by hand. Empty for a
-	// model check, and empty for an endpoint that lists nothing.
-	Models []string `json:"models,omitempty"`
-	// Error describes what went wrong when OK is false: the dial failure,
-	// the HTTP status, the refused stream, zero content. Empty when OK.
-	Error string `json:"error,omitempty"`
-	// ElapsedMS is the total wall time of the probe, from dial to the end
-	// of the stream.
-	ElapsedMS int64 `json:"elapsedMs"`
-	// At is when the probe finished, wall-clock (the renderer shows it as
-	// "2m ago"; a monotonic clock would render as 1970 — wall-clock-vs-
-	// monotonic-persistence).
-	At time.Time `json:"at"`
-}
-
-// NewClientAndRegistry builds the assistant and returns the exact registry
-// used by its engine. The composition root passes that same registry to
-// transport so prompt offers and execution use one declaration table.
-func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, agenttools.Registry, error) {
+// NewClientAndRegistry constructs the tool owner and its canonical registry.
+func NewClientAndRegistry(logger log.Logger, floor content.Floor) (Client, agenttools.Registry, error) {
 	reg, err := assembleToolRegistry(tools.Schemas)
 	if err != nil {
 		return nil, agenttools.Registry{}, err
 	}
-	searchSchema, _ := fs.ReadFile(tools.Schemas, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
+	return newClientWithRegistry(logger, reg, floor), reg, nil
 }
 
 func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
@@ -481,29 +246,20 @@ func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
 	return reg, nil
 }
 
-func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, floor content.Floor, searchSchema ...[]byte) Client {
-	var schema []byte
-	if len(searchSchema) > 0 {
-		schema = append([]byte(nil), searchSchema[0]...)
-	}
-	return &client{
-		log:          logger,
-		http:         newGuardedHTTPClient(logger, nil, recorder),
-		tools:        reg,
-		searchSchema: schema,
-		floor:        floor,
-		approvals:    NewApprovalStore(),
-		snapshots:    newRunSnapshots(),
-	}
+func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, floor content.Floor) Client {
+	return &client{log: logger, tools: reg, floor: floor, approvals: NewApprovalStore(), snapshots: newRunSnapshots()}
 }
 
 type client struct {
-	log          log.Logger
-	http         *http.Client
-	tools        agenttools.Registry
-	searchSchema []byte
-	floor        content.Floor
-
+	log       log.Logger
+	tools     agenttools.Registry
+	floor     content.Floor
 	approvals *ApprovalStore
 	snapshots *runSnapshots
+}
+
+func (c *client) Discard(runID string) {
+	if c.snapshots != nil {
+		c.snapshots.Discard(runID)
+	}
 }

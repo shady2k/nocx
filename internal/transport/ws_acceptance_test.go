@@ -984,3 +984,21 @@ func TestMutationAwaitedThenReadObservesIt(t *testing.T) {
 		t.Fatalf("profiles.list did not observe the awaited create: %s", listResp)
 	}
 }
+
+func errorCodeOf(t *testing.T, raw json.RawMessage) int {
+	t.Helper()
+	var env struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if env.Error == nil {
+		return 0
+	}
+	return env.Error.Code
+}
+
+var _ = websocket.TextMessage

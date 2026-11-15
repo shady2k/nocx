@@ -14,7 +14,6 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import { BlockNotice, type BlockNoticeState } from '../ui/block-notice'
-import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
 import { findReferences } from '../secret-reference'
@@ -43,8 +42,7 @@ import type { CommandAuthor } from '../command-ledger'
 import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
-import { mountDumpPanel } from '../ui/dump-panel'
-import { codeBlockCopyWords, dumpLabels, secretChipTitles } from '../i18n/kit-labels'
+import { secretChipTitles } from '../i18n/kit-labels'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
@@ -66,7 +64,6 @@ import {
   ArrowDownUpIcon,
   ChevronRightIcon,
   CopyIcon,
-  FileIcon,
   iconElement,
   MoreIcon,
   PinIcon,
@@ -1236,9 +1233,6 @@ function placeHeaderChip(right: Element, chip: Element): void {
  *  socket, and the one that does is wired at the composition root. */
 export type AnswerTextSource = (entryId: string) => Promise<string | null>
 
-/** Fetches the recorded provider drives for one finished answer turn. */
-export type DumpSource = (entryId: string) => Promise<{ request: Drive[]; response: Drive[] }>
-
 /** What a RUNNING block's ⋮ menu can do about the command in it, beyond
  *  copying its text (nocx-92gfl, nocx-23rph).
  *
@@ -1287,7 +1281,6 @@ function buildOverflowMenu(
   blockEl: HTMLElement,
   command: string,
   answerText?: AnswerTextSource,
-  dump?: DumpSource,
   running?: RunningBlockActions,
 ): HTMLElement {
   /** Disposes the open menu's Solid root, or null while closed. The menu is a
@@ -1370,36 +1363,6 @@ function buildOverflowMenu(
 
   function items(): ContextMenuItem[] {
     const list: ContextMenuItem[] = []
-    const answerSettled =
-      dump !== undefined &&
-      isAnswer() &&
-      blockEl.dataset.turnState !== undefined &&
-      blockEl.dataset.turnState !== '' &&
-      blockEl.dataset.turnState !== 'waiting'
-    if (answerSettled) {
-      list.push({
-        id: 'dump',
-        label: 'Show dump',
-        icon: FileIcon,
-        busyLabel: 'Loading…',
-        onSelect: async () => {
-          const entryId = blockEl.dataset.entryId
-          if (!dump || !entryId) return
-          try {
-            const result = await dump(entryId)
-            const host = document.createElement('div')
-            document.body.appendChild(host)
-            mountDumpPanel(host, {
-              dump: result,
-              copy: { ...codeBlockCopyWords(), write: copyToClipboard },
-              labels: dumpLabels(),
-            })
-          } catch {
-            showToast({ level: 'danger', message: 'Could not load the model dump' })
-          }
-        },
-      })
-    }
     if (running?.toggleGrant && (running.grantsAvailable?.() ?? true)) {
       list.push({
         id: 'grant',
@@ -1698,7 +1661,6 @@ export function createCommandBlock(
   /** Durable ledger identity, when this block already has one. Renderer
    *  selection ids remain internal and never cross this DOM seam. */
   entryId?: string,
-  dump?: DumpSource,
   /** Command output is painted later from backend-owned stored rows. */
 ): HTMLElement {
   const wrapper = document.createElement('div')
@@ -1754,7 +1716,7 @@ export function createCommandBlock(
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
-    const overflow = buildOverflowMenu(wrapper, command, answerText, dump, menuActions)
+    const overflow = buildOverflowMenu(wrapper, command, answerText, menuActions)
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
@@ -1950,7 +1912,7 @@ export function createRunningBlock(
   // Overflow menu — copying the command, plus what can be done ABOUT the
   // command while it is still running (nocx-92gfl, nocx-23rph).
   // Always the LAST element of header-right (owner directive).
-  const overflow = buildOverflowMenu(wrapper, command, undefined, undefined, running)
+  const overflow = buildOverflowMenu(wrapper, command, undefined, running)
   if (right) right.appendChild(overflow)
 
   wrapper.appendChild(header)
@@ -2011,7 +1973,6 @@ export function freezeBlock(
     undefined,
     menuActions,
     entryId,
-    undefined,
   )
   beforeSwap?.(newEl)
   if (el.parentNode) {
@@ -2122,8 +2083,6 @@ export interface BlockManagerOpts {
    *  embedding, and then copying an answer refuses rather than falling back
    *  to the painted text. */
   answerText?: AnswerTextSource
-  /** Fetches the recorded provider drives for a finished answer turn. */
-  dump?: DumpSource
   /** Reads back what a tool call returned (nocx-hp8p2.13). The manager holds
    *  no socket, so the caller that does supplies the reader. Absent in a
    *  bare-bones embedding, and then a call draws NO expansion at all — an
@@ -2204,7 +2163,6 @@ export class BlockManager {
   /** Reader for an answer's durable text — handed to the copy menu of every
    *  answer block this manager frames (nocx-v13pd). */
   private _answerText?: AnswerTextSource
-  private _dump?: DumpSource
   /** Reads back what a tool call returned — see BlockManagerOpts. */
   private _toolResult?: ToolResultSource
   private _runningActions?: RunningBlockActions
@@ -2275,7 +2233,6 @@ export class BlockManager {
     this._reclaimSeatedHeader = opts.reclaimSeatedHeader
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
-    this._dump = opts.dump
     this._toolResult = opts.toolResult
     this._runningActions = opts.runningActions
     this._ownsAppVisibility = opts.appVisibility === undefined
@@ -3724,7 +3681,6 @@ export class BlockManager {
       this._answerText,
       running,
       undefined,
-      this._dump,
     )
     // WHERE THE TURN'S CHILDREN GO. Its own element, under the header, so the
     // children are addressable as a list and the header stays exactly one

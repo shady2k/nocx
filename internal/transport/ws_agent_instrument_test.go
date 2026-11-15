@@ -78,7 +78,7 @@ func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	// the seal must fail before the kernel can execute the read.
 	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepAnswer, Text: "before"}, {Kind: protocol.StepTool, Name: "session.read", Arguments: map[string]any{}}, {Kind: protocol.StepEnd}}}
 	h := newGapHandlers(svc, newScriptedAgent(t, script).harness, assistant.NewApprovalStore())
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}

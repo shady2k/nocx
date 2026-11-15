@@ -393,7 +393,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	t.Helper()
 
 	router := &runLeaseActor{}
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +439,6 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 		WithContentDB(db),
 		WithAssistantClient(client),
 		WithAgentHarness("scripted", router),
-		WithAssistantProbeStore(assistant.NewProbeStore()),
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithLifecyclePublisher(pub),
 		WithRunLease(leaseCfg),
@@ -474,22 +473,6 @@ func (h *runLeaseHarness) openSession(t *testing.T) string {
 	ackEstablishmentFrom(t, h.pub, lane, domain, h.conn)
 	h.domain = domain
 	return sid
-}
-
-// createEndpointAt installs an independent endpoint credential. The subprocess
-// harness owns its native model; endpoints no longer assign answering roles.
-func (h *runLeaseHarness) createEndpointAt() {
-	h.t.Helper()
-	_, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Local",
-		"baseUrl": "http://127.0.0.1:11434/v1",
-		"schema":  "openai-compatible",
-		"key":     "sk-test-123",
-		"models":  []map[string]any{{"name": "qwen3"}},
-	}))
-	if code != 0 {
-		h.t.Fatalf("endpoints.create: code %d", code)
-	}
 }
 
 // askRunsTool drives one ask whose first model response calls the run tool
@@ -694,7 +677,6 @@ func TestRunLease_BoundBeforeBrokerDeliveryNamesExpiredSubmissionInRunState(t *t
 		WallClock:   time.Minute,
 		SignalGrace: 20 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 
 	deliverStarted := make(chan struct{})
@@ -759,7 +741,6 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 		Inactivity:  30 * time.Second, // cannot explain the outcome
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	res := h.askRunsTool(sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'")
@@ -810,7 +791,6 @@ func TestRunLease_ConnectionLossKillsCommandAndRecordsTransportGone(t *testing.T
 		Inactivity:  30 * time.Second,
 		SignalGrace: 50 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -881,7 +861,6 @@ func TestRunLease_AQuietCommandIsNotKilledAndTheModelIsAsked(t *testing.T) {
 		Inactivity:  700 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"
@@ -931,7 +910,6 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 		OutputBudget: 1 << 20,
 		SignalGrace:  200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	// An ordinary command that COMPLETES on its own — every lease bound is
 	// far beyond it, so none can explain anything that happens to it.
@@ -988,7 +966,6 @@ func TestRunLease_EscalationReachesTermForAnIntIgnoringProcess(t *testing.T) {
 		WallClock:   1500 * time.Millisecond,
 		SignalGrace: 300 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT; sleep 100 & wait'"
@@ -1023,7 +1000,6 @@ func TestRunLease_EscalationReachesKillForAnIntAndTermIgnoringProcess(t *testing
 		WallClock:   1500 * time.Millisecond,
 		SignalGrace: 300 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT TERM; sleep 100 & wait'"
@@ -1062,7 +1038,6 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 		OutputBudget: 512,
 		SignalGrace:  200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	// Output that KEEPS COMING until something stops it, rather than one
@@ -1125,7 +1100,6 @@ func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) 
 		OutputBudget: 512,
 		SignalGrace:  200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	// The session's axis explicitly reports a conventional terminal: shell
 	// integration was attempted but no authenticated lifecycle lane exists.

@@ -611,8 +611,6 @@ describe('SettingsContent', () => {
     // groups in catalogue order with their members in registry order.
     expect(labels).toEqual([
       'Connections',
-      'Endpoints',
-      'Roles',
       'Assistant permissions',
       // Beside the permissions page and not the same subject: that one
       // governs nocx's own assistant, this lists the foreign programs a

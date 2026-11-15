@@ -1,33 +1,13 @@
 package app
 
-// THE EPIC'S OWN CRITERION: the coordinator's calls come from a MODEL
-// (nocx-dkawo.14).
-//
-// Every worker call was already asserted where it lives, and the sequence they
-// drive was asserted on real sessions in real panes — by a test making the
-// calls. That is what AGENTS.md rule 1 is about: a test written by reading
-// the implementation cannot report a missing feature, it can only confirm
-// that what was written does what it was written to do. Nothing had ever let
-// an agent CHOOSE to spawn, wait and close.
-//
-// So this runs the real assistant engine — the shipped loop, the shipped tool
-// registry, the shipped executors — against a provider that proposes tool
-// calls, over the real worker record, opening real sessions in real panes.
-//
-// WHAT IT DOES NOT COVER, said here so nobody reads it as covering more. The
-// provider is scripted rather than a model, so it shows that a model's calls
-// move the record and not that any model would make them; that half is
-// persuasion (§5) and has no test anywhere. And the launcher is stood in for:
-// a real worker enrols over the authenticated channel from the shell bundle,
-// which internal/shellintegration proves on a real pty in bash and zsh, and
-// here a goroutine supplies the enrolment the launcher would have sent.
+// Worker tool calls enter the assistant authority chain and the shipped executors.
+// Model selection and tool proposals are covered by the real pi/harness tests;
+// this test keeps the worker registration, holdings and close assertions.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +15,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -43,156 +22,12 @@ import (
 	"github.com/shady2k/nocx/internal/workers"
 )
 
-// scriptedTurn is one thing the provider proposes.
-type scriptedTurn struct {
-	tool string
-	args string
-	// answer ends the run instead of proposing a tool.
-	answer string
-}
-
-// scriptedProvider walks a script, one step per completion request, and keeps
-// what it was handed back. Reading the results is the point: a provider that
-// only proposed would prove the calls were made and nothing about what they
-// answered.
-type scriptedProvider struct {
-	mu      sync.Mutex
-	script  []scriptedTurn
-	at      int
-	results []string
-	// then is consulted once the script runs out. It is handed the last
-	// tool result so a step can ADDRESS what it was told about — which is
-	// the whole point of an id in an answer, and the only way a scripted
-	// provider can close workers whose ids are minted at runtime.
-	then func(lastResult string) (scriptedTurn, bool)
-}
-
-func (p *scriptedProvider) serve(w http.ResponseWriter, r *http.Request) {
-	body := readAll(r)
-	p.mu.Lock()
-	if strings.Contains(body, `"role":"tool"`) {
-		p.results = append(p.results, body)
-	}
-	var turn scriptedTurn
-	switch {
-	case p.at < len(p.script):
-		turn = p.script[p.at]
-		p.at++
-	case p.then != nil:
-		last := ""
-		if len(p.results) > 0 {
-			last = p.results[len(p.results)-1]
-		}
-		if next, more := p.then(last); more {
-			turn = next
-		} else {
-			turn = scriptedTurn{answer: "done"}
-		}
-	default:
-		turn = scriptedTurn{answer: "done"}
-	}
-	p.mu.Unlock()
-
-	if turn.answer != "" {
-		streamModelAnswer(w, turn.answer)
-		return
-	}
-	streamModelToolCall(w, turn.tool, turn.args)
-}
-
-// toolResults decodes every tool result the provider was handed, in order.
-//
-// It decodes rather than substring-matches the raw body: the results arrive
-// inside a JSON string, so a search for a field name would be searching for
-// its escaped form and would pass or fail for reasons that have nothing to do
-// with the answer.
-func (p *scriptedProvider) toolResults(t *testing.T) []string {
-	t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.results) == 0 {
-		return nil
-	}
-	// The last request carries the whole conversation, so one decode has
-	// every result in it.
-	var body struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(p.results[len(p.results)-1]), &body); err != nil {
-		t.Fatalf("decode the provider's last request: %v", err)
-	}
-	var out []string
-	for _, m := range body.Messages {
-		if m.Role == "tool" {
-			out = append(out, m.Content)
-		}
-	}
-	return out
-}
-
-func readAll(r *http.Request) string {
-	var sb strings.Builder
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Body.Read(buf)
-		sb.Write(buf[:n])
-		if err != nil {
-			break
-		}
-	}
-	return sb.String()
-}
-
-// streamModelToolCall writes the streamed shape an openai-compatible provider
-// uses to propose one tool call.
-func streamModelToolCall(w http.ResponseWriter, name, args string) {
-	frame := map[string]any{
-		"id": "chatcmpl-worker", "object": "chat.completion.chunk", "model": "probe-model",
-		"choices": []map[string]any{{
-			"index": 0,
-			"delta": map[string]any{"role": "assistant", "tool_calls": []map[string]any{{
-				"index": 0, "id": "call-1", "type": "function",
-				"function": map[string]any{"name": name, "arguments": args},
-			}}},
-			"finish_reason": "tool_calls",
-		}},
-	}
-	streamFrames(w, frame)
-}
-
-func streamModelAnswer(w http.ResponseWriter, text string) {
-	frame := map[string]any{
-		"id": "chatcmpl-worker", "object": "chat.completion.chunk", "model": "probe-model",
-		"choices": []map[string]any{{
-			"index": 0, "delta": map[string]any{"role": "assistant", "content": text},
-			"finish_reason": "stop",
-		}},
-	}
-	streamFrames(w, frame)
-}
-
-func streamFrames(w http.ResponseWriter, frames ...map[string]any) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	for _, f := range frames {
-		b, _ := json.Marshal(f)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-	}
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-	if fl, ok := w.(http.Flusher); ok {
-		fl.Flush()
-	}
-}
-
 // launcherStandIn supplies the enrolment a real launcher would send, for
-// every worker session that appears while the model is working.
+// every worker session that appears while tool calls run.
 //
 // It stands in for exactly one thing and says so: the enrolment act itself is
 // internal/shellintegration's, proved there on a real pty in both shells. A
-// spawn blocks until an enrolment arrives, so without this the model's first
+// spawn blocks until an enrolment arrives, so without this the first
 // tool call would sit out its whole deadline.
 func launcherStandIn(t *testing.T, w *wakeStand, stop <-chan struct{}) *sync.WaitGroup {
 	t.Helper()
@@ -221,58 +56,24 @@ func launcherStandIn(t *testing.T, w *wakeStand, stop <-chan struct{}) *sync.Wai
 	return &wg
 }
 
-// A MODEL SPAWNS THREE WORKERS, WAITS ON THE WORKER, AND CLOSES THEM.
-//
-// Nothing in this test calls the registrar. Every participant that exists
-// exists because the engine executed a tool call the provider proposed, and
-// every one that ends ends the same way.
-func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
+// The authority pipeline spawns three workers, reads holdings, and closes them.
+// The test never calls the registrar directly.
+func TestAssistantToolsSpawnThreeWorkersReadTheirHoldingsAndCloseThem(t *testing.T) {
 	ctx := context.Background()
 	w := newWakeStand(t)
-
-	provider := &scriptedProvider{script: []scriptedTurn{
-		{tool: "workers.spawn", args: `{"command":"claude","task":"read AGENTS.md"}`},
-		{tool: "workers.spawn", args: `{"command":"claude","task":"read the architecture"}`},
-		{tool: "workers.spawn", args: `{"command":"claude","task":"read the vision"}`},
-		// One read, and it is the whole of how a coordinator is told what it
-		// holds: there is no call that waits on a worker any more (ADR-0070).
-		{tool: "workers.holdings", args: `{}`},
-	}}
-	// Then it closes what it was told is still running, BY THE IDS IT WAS
-	// GIVEN. A script with the ids written into it would be addressing
-	// workers nobody told it about, which is not what an id in an answer is
-	// for.
-	var toClose []string
-	provider.then = func(last string) (scriptedTurn, bool) {
-		// Read the ids ONCE, from the holdings answer. After the first
-		// close the newest tool result is that close's own, which names no
-		// participants — a step that re-read it every time would close one
-		// worker and call it done.
-		if toClose == nil {
-			toClose = liveWorkerIDs(last)
-		}
-		if len(toClose) == 0 {
-			return scriptedTurn{}, false
-		}
-		id := toClose[0]
-		toClose = toClose[1:]
-		return scriptedTurn{tool: "workers.close", args: `{"worker":"` + id + `"}`}, true
-	}
-	srv := httptest.NewServer(http.HandlerFunc(provider.serve))
-	defer srv.Close()
 
 	stop := make(chan struct{})
 	wg := launcherStandIn(t, w, stop)
 	defer func() { close(stop); wg.Wait() }()
 
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant client: %v", err)
 	}
 	env := content.EnvironmentIDFor(content.EnvLocal, "")
 	grant := autonomousWorkerGrant(string(w.coordinator), env)
 
-	// One worker's process ends while the model is between calls. It is not
+	// One worker's process ends between tool calls. It is not
 	// the test making a call the model should have made: the coordinator does
 	// not end its own workers here, the WORK does — which is the case a read
 	// of the record is for.
@@ -285,24 +86,41 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 		_ = w.reg.Close(session.ID(held[0].Liveness.SessionID))
 	}()
 
-	askErr := client.Ask(ctx, assistant.AskParams{
-		Key:           credential.NewSecret("sk-test"),
-		BaseURL:       srv.URL,
-		Model:         "probe-model",
-		SessionID:     string(w.coordinator),
-		Messages:      []assistant.Message{{Role: "user", Content: "start three workers and wait"}},
-		Grant:         &grant,
+	bound, err := assistant.BindRunTools(t.Context(), client, assistant.AskParams{
+		SessionID: string(w.coordinator),
+		Grant:     &grant, FreshGrant: func() *content.Grant { return &grant },
 		AttemptLedger: w.db.Ledger(),
-		// The egress comparison the engine refuses to run without: a run
-		// that may execute tools must screen its results against known
-		// vault material. This stand has no vault, so nothing is known —
-		// which is a real answer and not a bypass.
-		KnownMaterial:     noKnownMaterial{},
-		Workers:           workerRecordForTools{w.record},
-		WorkerEnvironment: env,
-	}, func(assistant.AskEvent) error { return nil })
-	if askErr != nil {
-		t.Fatalf("Ask: %v", askErr)
+		KnownMaterial: noKnownMaterial{},
+		Workers:       workerRecordForTools{w.record}, WorkerEnvironment: env,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, args string) string {
+		t.Helper()
+		invocation, admitErr := bound.Admit(ctx)
+		if admitErr != nil {
+			t.Fatal(admitErr)
+		}
+		invocation.Context, invocation.Method, invocation.RawParams = ctx, method, []byte(args)
+		result, dispatchErr := bound.Dispatch(invocation)
+		if dispatchErr != nil {
+			t.Fatalf("%s: %v", method, dispatchErr)
+		}
+		return result
+	}
+	var results []string
+	for _, task := range []string{"read AGENTS.md", "read the architecture", "read the vision"} {
+		results = append(results, call("workers.spawn", fmt.Sprintf(`{"command":"claude","task":%q}`, task)))
+	}
+	waittest.WaitFor(t, "the first worker's process to exit", func() bool {
+		held, heldErr := w.workerStore.HeldBy(ctx, string(w.coordinator))
+		return heldErr == nil && len(held) == 3 && held[0].State == workers.StateExited
+	})
+	holdings := call("workers.holdings", `{}`)
+	results = append(results, holdings)
+	for _, id := range liveWorkerIDs(holdings) {
+		results = append(results, call("workers.close", fmt.Sprintf(`{"worker":%q}`, id)))
 	}
 
 	// THREE WORKERS EXIST, and the test never registered one.
@@ -311,7 +129,7 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 		t.Fatalf("held by: %v", err)
 	}
 	if len(held) != 3 {
-		t.Fatalf("the model's calls produced %d workers, want 3", len(held))
+		t.Fatalf("tool calls produced %d workers, want 3", len(held))
 	}
 	tasks := map[string]bool{}
 	for _, p := range held {
@@ -323,19 +141,16 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 		}
 	}
 
-	// WHAT THE MODEL WAS TOLD, off the real results rather than off a struct
-	// this test built. Four scripted calls, then one close for each worker
-	// that was still running when the model looked.
-	results := provider.toolResults(t)
+	// Results come from the real executor, not from structs built by this test.
 	if len(results) != 6 {
-		t.Fatalf("the model was handed %d tool results, want 6 (three spawns, holdings, two closes)", len(results))
+		t.Fatalf("the caller received %d tool results, want 6 (three spawns, holdings, two closes)", len(results))
 	}
 	// Each spawn told it a worker id it can address later, and told it the
 	// worker is LIVE — which is the enrolment having arrived, never that the
 	// call returned.
 	for i, r := range results[:3] {
 		if !strings.Contains(r, `"state":"live"`) {
-			t.Fatalf("spawn %d did not tell the model the worker is live: %s", i+1, r)
+			t.Fatalf("spawn %d did not tell the caller the worker is live: %s", i+1, r)
 		}
 	}
 	// Holdings answered with what the session holds, and it names both the
@@ -376,24 +191,8 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 	}
 }
 
-// liveWorkerIDs pulls the ids of the still-running workers out of a holdings
-// answer, the way a model reading that answer would.
-func liveWorkerIDs(requestBody string) []string {
-	var body struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(requestBody), &body); err != nil {
-		return nil
-	}
-	last := ""
-	for _, m := range body.Messages {
-		if m.Role == "tool" {
-			last = m.Content
-		}
-	}
+// liveWorkerIDs pulls the still-running worker ids from the holdings result.
+func liveWorkerIDs(last string) []string {
 	open := last[strings.Index(last, "{"):]
 	var answer struct {
 		Participants []struct {

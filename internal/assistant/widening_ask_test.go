@@ -49,7 +49,7 @@ func readArgs(path string) string { return `{"path":"` + path + `"}` }
 
 // askFor drives one proposal through the real pipeline and returns the
 // approval request it raised, or nil with the refusal the model was handed.
-func askFor(t *testing.T, mw *policyMiddleware, callID, args string) (*ApprovalRequest, string) {
+func askFor(t *testing.T, mw *kernelFixture, callID, args string) (*ApprovalRequest, string) {
 	t.Helper()
 	store := mw.kernel.approvals
 	if store == nil {
@@ -239,7 +239,7 @@ func TestAsk_OutsideTheFenceStaysARefusalAndIsNeverAWideningAsk(t *testing.T) {
 // middlewareForRun is middlewareFor with an explicit run id — the second run
 // over the same process-lifetime approval store, which is the only way to
 // assert that a run-scoped decline ends with its run.
-func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, runID string) *policyMiddleware {
+func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, runID string) *kernelFixture {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
@@ -252,9 +252,9 @@ func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, a
 			break
 		}
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil)
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil)
 	if err != nil {
-		t.Fatalf("newPolicyMiddleware: %v", err)
+		t.Fatalf("newKernelFixture: %v", err)
 	}
 	return mw
 }

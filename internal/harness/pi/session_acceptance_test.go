@@ -290,7 +290,7 @@ process.stdout.write=function(chunk,...args) {
 }
 
 func TestPiSpawnFailureSweepsSessionConfig(t *testing.T) {
-	c := New(t.TempDir(), []string{"PATH=" + t.TempDir(), "PI_OFFLINE=1"})
+	c := newTestConnector(t.TempDir(), []string{"PATH=" + t.TempDir(), "PI_OFFLINE=1"})
 	defer func() { _ = c.Close(context.Background()) }()
 	turn := piTurn(t, c, harness.TurnSpec{ConversationID: "spawn-failure", Dir: t.TempDir(), Text: "question"})
 	events := piCollect(t, turn)

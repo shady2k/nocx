@@ -1085,9 +1085,7 @@ func New(opts ...Option) (*App, error) {
 	// One stanced material resolver serves both endpoint connections and the
 	// egress gate. Its unsealer is the vault itself; the requester is attached
 	// to the vault below once the transport exists.
-	credResolver := credential.NewResolver(v, func(err error) bool {
-		return errors.Is(err, vault.ErrVaultSealed)
-	}, v)
+	credResolver := credential.NewResolver(v, v)
 
 	// THE ANSWERS THIS COORDINATOR GIVES ITS HELPER (nocx-50w7p.2). A helper
 	// that dials has to ask for the material it may present, a signature it
@@ -2056,18 +2054,16 @@ func New(opts ...Option) (*App, error) {
 	// and nowhere else (AGENTS.md check 5). The probe store is
 	// process-lifetime: agent.status's "last probe result" fact, whose
 	// meaning expires with the endpoint that produced it.
-	assistantProbes := assistant.NewProbeStore()
 	// The floor is fixed here from the same roots that own nocx's policy,
 	// vault, ledger, and shell-integration documents; no policy layer can
 	// widen it.
 	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
-	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor)
+	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, floor)
 	if err != nil {
 		return nil, err
 	}
 	tpOpts = append(tpOpts,
 		transport.WithAssistantClient(assistantClient),
-		transport.WithAssistantProbeStore(assistantProbes),
 		transport.WithAgentToolRegistry(agentToolRegistry),
 		transport.WithAgentFetcher(apiFetcher),
 	)

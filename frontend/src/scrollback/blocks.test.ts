@@ -1625,63 +1625,6 @@ describe('overflow menu (P1-6)', () => {
 
     document.body.removeChild(container)
   })
-  it('loads a finished answer dump through the menu with its entry id', async () => {
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    const seen: string[] = []
-    const dump = (entryId: string) => {
-      seen.push(entryId)
-      return Promise.resolve({
-        request: [{ text: 'request bytes', truncated: false }],
-        response: [],
-      })
-    }
-    const el = createCommandBlock(
-      'ask',
-      1,
-      'what happened?',
-      '~',
-      '',
-      '',
-      null,
-      null,
-      'settled',
-      () => container,
-      noopSelect,
-      freshStore(),
-      'shell',
-      undefined,
-      undefined,
-      'turn-entry-1',
-      dump,
-    )
-    el.dataset.turnState = 'success'
-    container.appendChild(el)
-
-    ;(el.querySelector('[data-block-actions]') as HTMLElement).click()
-    const item = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(
-        '[data-testid="block-actions-menu"] .ui-context-menu__item',
-      ),
-    ).find((button) => button.textContent === 'Show dump')
-    expect(item).toBeDefined()
-    item!.click()
-    await new Promise<void>((resolve) => queueMicrotask(resolve))
-
-    expect(seen).toEqual(['turn-entry-1'])
-    document.querySelector('[data-testid="block-actions-menu"]')?.remove()
-    document.querySelector('.nocx-dialog')?.remove()
-    document.body.removeChild(container)
-  })
-})
-
-describe('frozen block header highlighting', () => {
-  // The frozen header is highlighted by the same Shiki tokenizer as the live
-  // editor; the grammar loads asynchronously at module init, so wait for it.
-  beforeAll(async () => {
-    await shellHighlightReady
-  })
-
   it('highlights the frozen header with the same token classes as the live editor', () => {
     const container = document.createElement('div')
     const el = createCommandBlock(

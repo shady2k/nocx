@@ -38,7 +38,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HistoryStatusStore } from './history-status'
 import { CheckoutsStatusStore } from './checkouts-status'
 import { FootprintClient } from './footprint-client'
-import { EndpointClient } from './endpoints'
+import { RolesClient } from './roles-client'
 import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { createApprovalQueue } from './agent-approval-queue'
@@ -303,7 +303,7 @@ function main(): void {
   })
   const dialogClient = new DialogClient(dispatcher)
   const footprintClient = new FootprintClient(dispatcher)
-  const endpointsClient = new EndpointClient(dispatcher)
+  const rolesClient = new RolesClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
   // The UI-state document (ADR-0048): what the app remembers without being
   // asked — the sidebar's collapse, its active view, its width. Not the
@@ -678,10 +678,9 @@ function main(): void {
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
-  tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
   // The composer's model chip names the model that will answer and IS the
   // way to change it (nocx-rikz5): the Roles page is where that choice is
-  // made. Beside onCreateEndpoint because it is the same idea — a state
+  // made. The same idea applies here — a state
   // names the one page that repairs it — and it reuses that seam for the
   // endpoints destination rather than growing a second one.
   tm.onOpenAgentSettings = () => openSettingsPane().openPage('agent-installed')
@@ -725,7 +724,7 @@ function main(): void {
         vaultClient,
         dialogClient,
         footprintClient,
-        endpointsClient,
+        rolesClient,
         agentClient,
         snippetsStore,
         historyStatusStore,

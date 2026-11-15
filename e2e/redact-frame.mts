@@ -7,8 +7,8 @@
  * it a lost keystroke and a dropped one print the same nothing.
  *
  * A JSON-RPC request's params can carry a vault passphrase (vault.unseal),
- * an endpoint API key (endpoints.create), or the text of a command a person
- * typed for the assistant to read (policy.classify) — exactly the class of
+ * secret material (secrets.create), or the text of a question a person
+ * typed for the assistant to read (agent.ask) — exactly the class of
  * thing AGENTS.md says a dev build's log already carries and a failure
  * report must not repeat. A result can echo the same material back. Method,
  * id and the error object are the only fields this suite has ever needed to

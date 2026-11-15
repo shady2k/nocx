@@ -19,8 +19,8 @@ import (
 //
 // The rule is therefore structural rather than remembered: this package does
 // not hold a Resolver. Material is resolved by the caller, before or after
-// the operation, never inside it — the shape endpoints.probe already had and
-// the shape the open's PHASE TWO dial was split into for the same reason.
+// the operation, never inside it — the same boundary the open's PHASE TWO
+// dial was split into for the same reason.
 //
 // credential.SecretStore is fine and deliberate: it mutates and answers
 // existence, and its Get was removed precisely so a stanceless read cannot

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,12 +26,12 @@ func answeringScript() protocol.Script {
 func TestAgentHarnessStreamsWithoutLegacyClient(t *testing.T) {
 	backend := newScriptedAgent(t, answeringScript())
 	h := agentHandlers{harness: backend.harness}
-	var got []assistant.AskEvent
-	err := h.askHarness(t.Context(), askRunContext{question: "why?", sessionID: "pane-session"}, assistant.AskParams{}, func(e assistant.AskEvent) error { got = append(got, e); return nil })
+	var got []agentAskEvent
+	err := h.askHarness(t.Context(), askRunContext{question: "why?", sessionID: "pane-session"}, assistant.AskParams{}, func(e agentAskEvent) error { got = append(got, e); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Kind != assistant.AskReasoning || got[1].Text != "answer" {
+	if len(got) != 2 || got[0].Kind != agentAskReasoning || got[1].Text != "answer" {
 		t.Fatalf("events: %+v", got)
 	}
 	prompt := backend.prompt()
@@ -115,7 +118,7 @@ func TestAgentHarnessKeepsPaneFactsOutOfStandingPrompt(t *testing.T) {
 	backend := newScriptedAgent(t, answeringScript())
 	h := agentHandlers{harness: backend.harness}
 	rc := askRunContext{question: "why?", sessionID: "s", promptFacts: assistant.SystemPromptFacts{Cwd: "/first"}}
-	emit := func(assistant.AskEvent) error { return nil }
+	emit := func(agentAskEvent) error { return nil }
 	if err := h.askHarness(t.Context(), rc, assistant.AskParams{}, emit); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +191,7 @@ func TestAgentHarnessSocketCloseEndsLiveConversation(t *testing.T) {
 func TestAgentHarnessActorEndWinsQueuedStop(t *testing.T) {
 	control := &agentRunControl{cancelled: true}
 	h := agentHandlers{harness: newScriptedAgent(t, answeringScript()).harness}
-	err := h.askHarness(t.Context(), askRunContext{control: control}, assistant.AskParams{}, func(assistant.AskEvent) error { return nil })
+	err := h.askHarness(t.Context(), askRunContext{control: control}, assistant.AskParams{}, func(agentAskEvent) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,4 +269,108 @@ func assertActorTerminalWinsStop(t *testing.T, terminal protocol.Step, want cont
 	if err != nil || state == nil || *state != want {
 		t.Fatalf("ledger state: %v, %v", state, err)
 	}
+}
+
+func TestAgentHarnessSerializesToolAndAnswerDelivery(t *testing.T) {
+	backend := &concurrentDeliveryHarness{}
+	h := newAskHarnessWithOpts(t, answeringScript(), WithAgentHarness("test", backend), WithAgentPolicy(autonomousPolicyStore(t)))
+	handler := h.ws.agentTerminalizer(nil)
+	grant := h.ws.runGrantFor("test")
+	var active, maximum, toolCalls atomic.Int32
+	err := handler.askHarness(t.Context(), askRunContext{}, assistant.AskParams{
+		Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: &deliveryLedger{}, KnownMaterial: adapterKnownMaterial(h.v),
+	}, func(ev agentAskEvent) error {
+		if ev.Kind == agentAskToolCall {
+			toolCalls.Add(1)
+		}
+		count := active.Add(1)
+		defer active.Add(-1)
+		for old := maximum.Load(); count > old && !maximum.CompareAndSwap(old, count); old = maximum.Load() {
+		}
+		for range 100 {
+			runtime.Gosched()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toolCalls.Load() != 100 {
+		t.Fatalf("tool callbacks=%d,want100", toolCalls.Load())
+	}
+	if maximum.Load() != 1 {
+		t.Fatalf("concurrent stream deliveries = %d, want 1", maximum.Load())
+	}
+}
+
+type concurrentDeliveryHarness struct{ agentharness.Harness }
+
+func (*concurrentDeliveryHarness) Readiness(context.Context) agentharness.Readiness {
+	return agentharness.Readiness{State: agentharness.Ready}
+}
+func (*concurrentDeliveryHarness) Facts() agentharness.Facts { return agentharness.Facts{} }
+
+func (h *concurrentDeliveryHarness) Run(ctx context.Context, spec agentharness.TurnSpec) (agentharness.Turn, error) {
+	events := make(chan agentharness.Event)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(events)
+		var calls sync.WaitGroup
+		calls.Go(func() {
+			tools, ok := spec.Authority.(*assistant.RunTools)
+			if !ok {
+				return
+			}
+			for range 100 {
+				invocation, err := tools.Admit(ctx)
+				if err == nil {
+					invocation.Context = ctx
+					invocation.Method = "snippets.list"
+					invocation.RawParams = json.RawMessage(`{}`)
+					_, _ = tools.Dispatch(invocation)
+				}
+			}
+		})
+		for range 100 {
+			events <- agentharness.Event{Kind: agentharness.EventAnswerDelta, Text: "answer"}
+		}
+		calls.Wait()
+	}()
+	return &deliveryTurn{events: events, done: done}, nil
+}
+
+type deliveryTurn struct {
+	events chan agentharness.Event
+	done   chan struct{}
+}
+
+func (t *deliveryTurn) Events() <-chan agentharness.Event { return t.events }
+func (*deliveryTurn) Cancel(context.Context) error        { return nil }
+func (t *deliveryTurn) Wait(context.Context) (agentharness.Outcome, error) {
+	<-t.done
+	return agentharness.Outcome{}, nil
+}
+
+type deliveryLedger struct{}
+
+func (*deliveryLedger) EnsureEnvironment(context.Context, content.Environment) error { return nil }
+func (*deliveryLedger) RecordObservation(context.Context, content.Observation) (int64, error) {
+	return 1, nil
+}
+
+func (*deliveryLedger) Submit(context.Context, content.SubmitEntry) (content.SubmitResult, error) {
+	return content.SubmitResult{}, nil
+}
+
+func (*deliveryLedger) StartExecution(context.Context, content.StartExecution) (int64, error) {
+	return 1, nil
+}
+
+func (*deliveryLedger) FinishExecution(context.Context, int64, content.FinishExecution) error {
+	return nil
+}
+func (*deliveryLedger) AddCause(context.Context, string, string) (int, error) { return 1, nil }
+func (*deliveryLedger) CaptureOutput(context.Context, content.CaptureOutput) (bool, error) {
+	return true, nil
 }

@@ -3,14 +3,8 @@ package credential
 // WHO MAY RAISE THE UNLOCK — the declaration this file exists to force
 // (nocx-k41yv, ADR-0032 as amended).
 //
-// Transport shape is not intent. An operation may resolve material while it
-// is still a request or after it has created a durable run; a report may travel
-// through the same pipes and must remain quiet. Every resolution therefore
-// declares one of two stances:
-//
-//   - Operation(reason) asks the vault to become unsealed, waits, and reads.
-//   - Report() reads only to describe state and translates sealed to
-//     ErrSealedQuiet, which cannot raise a prompt.
+// Every material resolution declares Operation(reason), asks the vault to
+// become unsealed, waits, and reads. Status reads do not resolve material.
 //
 // There is no default. The zero stance returns ErrStanceUndeclared, and a call
 // that omits the stance does not compile. Raw Get belongs only to the
@@ -28,7 +22,7 @@ import (
 )
 
 // Stance declares why secret material is being resolved. Its zero value is
-// invalid; callers construct one with Operation or Report.
+// invalid; callers construct one with Operation.
 type Stance struct {
 	kind   stanceKind
 	reason string
@@ -39,7 +33,6 @@ type stanceKind uint8
 const (
 	stanceUndeclared stanceKind = iota
 	stanceOperation
-	stanceReport
 )
 
 // Operation declares a user-initiated operation that cannot continue without
@@ -48,24 +41,10 @@ func Operation(reason string) Stance {
 	return Stance{kind: stanceOperation, reason: reason}
 }
 
-// Report declares a read whose purpose is to describe state. It never raises
-// an unlock prompt.
-func Report() Stance {
-	return Stance{kind: stanceReport}
-}
-
 // ErrStanceUndeclared is what a resolution that names no stance gets
 // instead of a secret. It is a programming error, surfaced rather than
 // guessed at: guessing is how the stance stopped being declared last time.
 var ErrStanceUndeclared = errors.New("credential: resolution names no stance")
-
-// ErrSealedQuiet is a sealed vault reported as a fact by a ToReport
-// resolution. It deliberately neither wraps the vault's own sealed error
-// nor repeats its words: the transport's normalizer recognizes a sealed
-// failure by exactly those two fingerprints, so this error cannot become
-// the canonical shape and therefore cannot raise a prompt. Callers that
-// need to say "sealed" in a status field test for this.
-var ErrSealedQuiet = errors.New("the vault cannot answer right now")
 
 // Resolver is the stanced read seam over a SecretStore. Every consumer that
 // resolves material on behalf of a person holds THIS, never the store: the
@@ -90,26 +69,17 @@ type Unsealer interface {
 	EnsureUnsealed(ctx context.Context, reason string) error
 }
 
-// NewResolver wraps a store. sealed recognizes the store's sealed condition
-// and is what makes a Report read quiet; unsealer raises and waits for the
-// unlock on an Operation read. A nil unsealer is the headless answer — no
-// prompt carrier, so the store's sealed error is returned verbatim and the
-// renderer's replay seam handles it, exactly as it did before the vault
-// raised its own unlock.
-//
-// Both are supplied at the composition root because both are composition
-// decisions: which implementation's sealed error is in play, and whether
-// there is anybody to ask.
-func NewResolver(store MaterialStore, sealed func(error) bool, unsealer Unsealer) Resolver {
+// NewResolver wraps a material store and its optional vault-owned unlock.
+// A nil unsealer is the headless path: the store returns its sealed error.
+func NewResolver(store MaterialStore, unsealer Unsealer) Resolver {
 	if store == nil {
 		return nil
 	}
-	return resolver{store: store, sealed: sealed, unsealer: unsealer}
+	return resolver{store: store, unsealer: unsealer}
 }
 
 type resolver struct {
 	store    MaterialStore
-	sealed   func(error) bool
 	unsealer Unsealer
 }
 
@@ -129,12 +99,6 @@ func (r resolver) Resolve(ctx context.Context, id SecretID, why Stance) (Secret,
 			}
 		}
 		return r.store.Get(ctx, id)
-	case stanceReport:
-		s, err := r.store.Get(ctx, id)
-		if err != nil && r.sealed != nil && r.sealed(err) {
-			return Secret{}, ErrSealedQuiet
-		}
-		return s, err
 	default:
 		return Secret{}, ErrStanceUndeclared
 	}

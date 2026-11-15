@@ -18,7 +18,7 @@ import (
 
 func TestRunTools_AdmissionBindsCompleteContextAndFreshAuthority(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestRunTools_AdmissionBindsCompleteContextAndFreshAuthority(t *testing.T) {
 
 func TestRunTools_FrozenAttachmentReadsKeepTheirMarkedWindow(t *testing.T) {
 	grant := sessionGrant("pane-a", autonomousMatrix())
-	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRunTools_FrozenAttachmentReadsKeepTheirMarkedWindow(t *testing.T) {
 
 func TestRunTools_PolicyRefusalIsATypedEndpointRefusal(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestRunTools_DispatchUsesApprovalAndEgress(t *testing.T) {
 	path := filepath.Join(dir, "read.txt")
 	secret := "known-secret-value-123"
 	writeFile(t, path, secret)
-	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestRunTools_DispatchUsesApprovalAndEgress(t *testing.T) {
 
 func TestRunTools_CancelledAdmissionDoesNotMintAuthority(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestRunTools_RunOutcomesPreserveEndpointSemantics(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			grant := sessionGrant("pane-a", autonomousMatrix())
-			cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+			cl, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), content.Floor{})
 			if err != nil {
 				t.Fatal(err)
 			}

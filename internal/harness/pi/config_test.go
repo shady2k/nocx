@@ -29,7 +29,7 @@ func TestConnectorSweepsOnlyDeadOwnerConfigsAtStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := New(data, []string{"PI_OFFLINE=1"})
+	c := newTestConnector(data, []string{"PI_OFFLINE=1"})
 	defer func() { _ = c.Close(context.Background()) }()
 	if _, err := os.Stat(filepath.Join(configs, deadName)); !os.IsNotExist(err) {
 		t.Fatalf("dead owner's credential config remains: %v", err)

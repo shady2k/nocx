@@ -33,7 +33,7 @@ func isolatedPiEnvironment(t *testing.T) []string {
 }
 
 func TestReadinessWithoutPi(t *testing.T) {
-	c := New(t.TempDir(), []string{"PATH=" + t.TempDir(), "PI_OFFLINE=1"})
+	c := newTestConnector(t.TempDir(), []string{"PATH=" + t.TempDir(), "PI_OFFLINE=1"})
 	got := c.Readiness(context.Background())
 	if got.State != harness.NotInstalled || got.Message == "" {
 		t.Fatalf("Readiness = %+v, want not installed with an explanation", got)
@@ -41,7 +41,7 @@ func TestReadinessWithoutPi(t *testing.T) {
 }
 
 func TestRealPiWithoutProviderIsNotConfigured(t *testing.T) {
-	c := New(t.TempDir(), isolatedPiEnvironment(t))
+	c := newTestConnector(t.TempDir(), isolatedPiEnvironment(t))
 	got := c.Readiness(context.Background())
 	if got.State != harness.NotConfigured || got.Message == "" {
 		t.Fatalf("Readiness = %+v, want not configured with an explanation", got)
@@ -56,7 +56,7 @@ func TestRealPiWithoutProviderIsNotConfigured(t *testing.T) {
 }
 
 func TestPiDeclaresSupportedFacts(t *testing.T) {
-	got := New(t.TempDir(), isolatedPiEnvironment(t)).Facts()
+	got := newTestConnector(t.TempDir(), isolatedPiEnvironment(t)).Facts()
 	if got.ToolBoundary != harness.NocxToolsOnly || !got.ContinuesConversationByID || !got.ReportsAnsweringModel {
 		t.Fatalf("Facts = %+v", got)
 	}
@@ -97,7 +97,7 @@ func configuredPiAtURL(t *testing.T, url string) *Connector {
 	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return New(t.TempDir(), env)
+	return newTestConnector(t.TempDir(), env)
 }
 
 func TestRealPiModelsAndReadiness(t *testing.T) {

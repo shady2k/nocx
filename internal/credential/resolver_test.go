@@ -48,7 +48,7 @@ func (s *stancedStore) ensure(context.Context, string) error {
 
 func TestResolverOperationEnsuresThenReads(t *testing.T) {
 	store := &stancedStore{sealed: true, secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	got, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Operation("answer the ask"))
 	if err != nil {
@@ -62,24 +62,9 @@ func TestResolverOperationEnsuresThenReads(t *testing.T) {
 	}
 }
 
-func TestResolverReportNeverEnsures(t *testing.T) {
-	store := &stancedStore{sealed: true}
-	resolver := credential.NewResolver(store, func(err error) bool {
-		return errors.Is(err, errSealed)
-	}, store)
-
-	_, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Report())
-	if !errors.Is(err, credential.ErrSealedQuiet) {
-		t.Fatalf("Resolve error = %v, want ErrSealedQuiet", err)
-	}
-	if store.ensureCalls != 0 {
-		t.Fatalf("report raised unlock %d times", store.ensureCalls)
-	}
-}
-
 func TestResolverRejectsUndeclaredStance(t *testing.T) {
 	store := &stancedStore{secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, nil, store)
+	resolver := credential.NewResolver(store, store)
 
 	_, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Stance{})
 	if !errors.Is(err, credential.ErrStanceUndeclared) {

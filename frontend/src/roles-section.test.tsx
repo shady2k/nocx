@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { RolesSection } from './roles-section'
-import { EndpointClient } from './endpoints'
+import { RolesClient } from './roles-client'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 afterEach(cleanup)
@@ -18,9 +18,7 @@ function mount(
     if (method === 'roles.assign') model = (params as { model: string | null }).model
     return Promise.resolve({ agentId: 'pi', roles: [{ role: 'answering', model }] })
   })
-  render(() => (
-    <RolesSection client={new EndpointClient(dispatcher)} agentId="pi" models={models} />
-  ))
+  render(() => <RolesSection client={new RolesClient(dispatcher)} agentId="pi" models={models} />)
   return call
 }
 it('offers the agent catalogue and writes the selected model with its agent', async () => {
@@ -69,7 +67,7 @@ it('keeps declared roles visible but does not offer unused roles as working feat
   })
   render(() => (
     <RolesSection
-      client={new EndpointClient(dispatcher)}
+      client={new RolesClient(dispatcher)}
       agentId="pi"
       models={[{ id: 'pi/a', name: 'Alpha' }]}
     />
@@ -88,7 +86,7 @@ it('keeps the saved model visible when a write fails and reports the failure', a
   )
   render(() => (
     <RolesSection
-      client={new EndpointClient(dispatcher)}
+      client={new RolesClient(dispatcher)}
       agentId="pi"
       models={[
         { id: 'pi/a', name: 'Alpha' },

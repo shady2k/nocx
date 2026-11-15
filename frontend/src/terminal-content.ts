@@ -141,12 +141,7 @@ import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
 import { openBlockMenuAt } from './scrollback/blocks'
-import type {
-  AnswerToolCall,
-  BlockRecord,
-  DumpSource,
-  RunningBlockActions,
-} from './scrollback/blocks'
+import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -917,11 +912,6 @@ export interface TerminalContentHooks {
    *  and the toolbar menu use (AD-8: one owner for what a snippet becomes). */
   onSnippetAccepted?: (snippetId: string) => void
 
-  /** A question was refused because no endpoint is configured: open the
-   *  endpoint editor so the refusal comes with its repair — wired by
-   *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
-   *  by the model chip's `endpoints` destination (nocx-rikz5). */
-  onCreateEndpoint?: () => void
   /** What a session is called TO A PERSON — the pane's own display title,
    *  the words already on the tab (nocx-vnzek). A tool-call line in an
    *  answer names the session it touched with this instead of the session
@@ -931,14 +921,12 @@ export interface TerminalContentHooks {
    *  tool alone. */
   sessionName?: (sessionId: string) => string | null
   /** The model chip's other destination: the Roles page, where the model
-   *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenAgentSettings?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
    *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
-   *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
   /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
@@ -1317,7 +1305,6 @@ export class TerminalContent extends BasePaneContent {
   /** The running-state footer (decision §1, "Running-state gap"), mounted
    *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
    *  — never both surfaces visible at once. */
-  private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
    *  dispatcher — the sealed-access seam it carries is already installed at
@@ -3322,7 +3309,6 @@ export class TerminalContent extends BasePaneContent {
       }
 
       const agentClient = new AgentClient(this.client.dispatcher)
-      this.dumpSource = (entryId) => agentClient.dump(entryId)
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -3378,7 +3364,6 @@ export class TerminalContent extends BasePaneContent {
         // `text` children joined — never an artifact of its own, which since
         // ADR-0040 it does not have (nocx-3dteo).
         answerText: (entryId) => answerTextForTurn(this.client, entryId),
-        dump: (entryId) => agentClient.dump(entryId),
         // What a tool call returned, read back from the action entry it was
         // recorded under — the handle agent.runToolCall sends instead of the
         // bytes (nocx-hp8p2.13).
@@ -7301,7 +7286,6 @@ export class TerminalContent extends BasePaneContent {
               () => {},
               snapshotStore,
               this.runningActions,
-              this.dumpSource ?? undefined,
             ),
             b.entryId,
           ),
@@ -7362,7 +7346,6 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
                 // A text child owns its single text/plain artifact; it must
                 // never borrow the enclosing turn's assembled answer.
                 (entryId) => answerTextForEntry(this.client, entryId),
@@ -7402,7 +7385,6 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
               )
               // A RESTORED CALL EXPANDS THE SAME WAY A LIVE ONE DOES
               // (nocx-hp8p2.13). The result is on the action entry, which is
@@ -7430,13 +7412,11 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
-                this.dumpSource ?? undefined,
               ),
               caused.entryId,
             )
           },
           this.runningActions,
-          this.dumpSource ?? undefined,
           (entryId) => answerTextForTurn(this.client, entryId),
         ),
       )

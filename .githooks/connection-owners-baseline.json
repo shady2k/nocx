@@ -37,14 +37,6 @@
     },
     {
       "rule": "net-dial",
-      "file": "internal/assistant/httpguard.go",
-      "func": "github.com/shady2k/nocx/internal/assistant.newGuardedHTTPClient",
-      "object": "net.Dialer",
-      "count": 1,
-      "reason": "the assistant's model HTTP route, in the family that also carries SSH leases; it leaves with the agent replacement (nocx-a62cl)"
-    },
-    {
-      "rule": "net-dial",
       "file": "internal/httppolicy/dial.go",
       "func": "github.com/shady2k/nocx/internal/httppolicy.Local",
       "object": "net.Dialer",

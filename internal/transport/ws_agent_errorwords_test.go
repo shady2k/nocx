@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -213,8 +211,7 @@ func TestAskFailure_CausesKeepTheirOwnSentences(t *testing.T) {
 	}
 }
 
-// These are classification units, not agent.ask journeys. The embedded
-// provider's typed failures still have a production sentence mapping.
+// Malformed tool arguments still have a production sentence mapping.
 func TestAskFailure_MalformedModelOutputKeepsItsOwnSentence(t *testing.T) {
 	reason, sentence := classifyAskFailure(fmt.Errorf("jsonschema https://nocx.local additional properties: %w", assistant.ErrMalformedModelOutput), "model")
 	if reason != content.TermFailed {
@@ -227,23 +224,6 @@ func TestAskFailure_MalformedModelOutputKeepsItsOwnSentence(t *testing.T) {
 	for _, word := range []string{"jsonschema", "https://nocx.local", "additional properties"} {
 		if strings.Contains(sentence, word) {
 			t.Errorf("validator text leaked: %q", sentence)
-		}
-	}
-}
-
-func TestAskFailure_AnUnreachableEndpointKeepsItsOwnSentence(t *testing.T) {
-	err := &url.Error{Op: "Post", URL: "http://127.0.0.1:1/v1/chat/completions", Err: syscall.ECONNREFUSED}
-	reason, sentence := classifyAskFailure(err, "model")
-	if reason != content.TermFailed {
-		t.Fatalf("reason: %s", reason)
-	}
-	assertNoFrameworkWords(t, sentence)
-	if !strings.Contains(strings.ToLower(sentence), "reach") || strings.Contains(strings.ToLower(sentence), "polic") {
-		t.Fatalf("endpoint sentence: %q", sentence)
-	}
-	for _, word := range []string{"127.0.0.1", "dial tcp", "connection refused", "chat/completions"} {
-		if strings.Contains(sentence, word) {
-			t.Errorf("transport text leaked: %q", sentence)
 		}
 	}
 }

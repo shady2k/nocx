@@ -42,7 +42,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"BackupOperation", NewBackupOperation(gate(GateConfig), nil), DispositionDirect},
 		{"CaptureSaveOperation", NewCaptureSaveOperation(gate(GateVault), gate(GateContent), nil, nil), DispositionDirect},
 		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), nil, nil, nil, nil, nil), DispositionDirect},
-		{"ConfigOperation", NewConfigOperation(gate(GateConfig), nil, nil, nil, nil, nil, nil, nil, nil), DispositionDirect},
+		{"ConfigOperation", NewConfigOperation(gate(GateConfig), nil, nil, nil, nil, nil, nil), DispositionDirect},
 		{"ContentOperation", NewContentOperation(gate(GateContent), db), DispositionDirect},
 		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), nil, nil, nil), DispositionAdapted},
 		{"FilesystemBindingOperation", NewFilesystemBindingOperation(nil), DispositionAdapted},

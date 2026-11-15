@@ -28,7 +28,6 @@ import (
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -78,10 +77,6 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	defer f.mu.Unlock()
 	f.finish = &in
 	return nil
-}
-
-func (f *fakeAgentService) PriorTurns(_ context.Context, _, _ string) ([]content.PriorTurn, error) {
-	return nil, nil
 }
 
 func (f *fakeAgentService) OpenProse(_ context.Context, turnID string, _ int64) (content.ProseBlock, error) {
@@ -216,9 +211,6 @@ func gapRunContext() askRunContext {
 		entryID:  "turn-1",
 		question: "q",
 		control:  &agentRunControl{cancelDone: make(chan struct{})},
-		// The stream resolves endpoint material up front; a keyless endpoint
-		// resolves to nothing, keeping these unit tests on the delta path.
-		endpoint: profile.Endpoint{NoKey: true},
 	}
 }
 

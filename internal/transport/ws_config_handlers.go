@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
@@ -103,18 +104,13 @@ const (
 	maxSettingsKeyRunes = 256
 	// maxSecretSettingRunes bounds a secret-class setting value and the
 	// Tabby vault passphrase. A wire-cost bound sized like the assistant
-	// key's ceiling (maxProbeKeyRunes — some providers issue long JWTs):
+	// key's ceiling (maxSecretSettingRunes — some providers issue long JWTs):
 	// the product defines no tighter ceiling for either value, so the
 	// validator's job is the generous bound plus the control-character
 	// refusal, not a naming rule.
 	maxSecretSettingRunes = 8_000
-	// maxEndpointURLRunes bounds an endpoint base URL, matching the probe
-	// path's maxProbeURLRunes — the same URL is dialled by the Test button
-	// and the ask path.
+	// maxEndpointURLRunes bounds API request URLs.
 	maxEndpointURLRunes = 2_000
-	// maxModelNameRunes bounds an endpoint model name and alias. Model ids
-	// ride request bodies verbatim (the probe validator bounds them at 200).
-	maxModelNameRunes = 200
 	// maxHeaderNameRunes bounds a custom header name (bead nocx-lyyk). A
 	// header name is short by HTTP nature; the bound is a wire-cost ceiling.
 	maxHeaderNameRunes = 256
@@ -760,146 +756,8 @@ func validateSettingsSecretSetRaw(raw json.RawMessage) string {
 	return ""
 }
 
-// validateEndpointParamsWith is the ONE validator for the endpoint write
-// params: the base fields plus the credential row (the "use an existing
-// secret" choice, nocx-rzjw) and the custom headers (nocx-lyyk). The record
-// level rules are profile.ValidateEndpoint — the same check the store runs
-// on save — and the key rides the params once to become an Authorization
-// header, so it gets the probe key's bound and the control-character
-// refusal.
-func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, noKey bool, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
-	if msg := boundedRunes("name", name, maxConfigNameRunes); msg != "" {
-		return msg
-	}
-	if msg := boundedRunes("baseUrl", baseURL, maxEndpointURLRunes); msg != "" {
-		return msg
-	}
-	if noKey && (key != "" || credentialRow != "") {
-		return "endpoint declaring noKey must not carry a credential"
-	}
-	if key != "" {
-		if msg := boundedRunes("key", key, maxProbeKeyRunes); msg != "" {
-			return msg
-		}
-		if hasControlChars(key) {
-			return "key must not contain control characters"
-		}
-	}
-	// The credential has ONE source: a typed key (minted or rotated) or a
-	// row handle (referenced). Both is a contradiction, and the renderer's
-	// source control makes both unreachable — this is the wire's own check,
-	// and the service holds the same rule as its backstop.
-	if key != "" && credentialRow != "" {
-		return "the endpoint credential has two sources: a typed key and an existing secret are mutually exclusive"
-	}
-	if credentialRow != "" {
-		if msg := boundedRunes("credential", credentialRow, maxSecretRowRunes); msg != "" {
-			return msg
-		}
-		if !isRowHandle(credentialRow) {
-			return "credential must be a secrow handle"
-		}
-	}
-	for i, m := range models {
-		if msg := boundedRunes(fmt.Sprintf("models[%d].name", i), m.Name, maxModelNameRunes); msg != "" {
-			return msg
-		}
-		if hasControlChars(m.Name) {
-			return fmt.Sprintf("models[%d].name must not contain control characters", i)
-		}
-		if m.Alias != nil {
-			if msg := boundedRunes(fmt.Sprintf("models[%d].alias", i), *m.Alias, maxModelNameRunes); msg != "" {
-				return msg
-			}
-		}
-	}
-	if msg := validateEndpointHeaderRows(headers); msg != "" {
-		return msg
-	}
-	e := profile.Endpoint{
-		Name:          name,
-		BaseURL:       baseURL,
-		Schema:        resolveEndpointSchema(schema),
-		NoKey:         noKey,
-		CredentialRef: credentialRow,
-		Models:        wireModelsToStored(models),
-		Headers:       wireHeadersToStored(headers),
-	}
-	if err := profile.ValidateEndpoint(e); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-// validateEndpointHeaderRows checks the wire-form header rows: per-row
-// bounds and the row-handle grammar, exactly-one-source, and then the
-// record-level rules (profile.ValidateEndpointHeaders — the ONE owner of the
-// refused-name set, the control characters and the duplicate rule), so a
-// header refused at save time is refused identically at probe time.
-func validateEndpointHeaderRows(headers []endpointHeaderInput) string {
-	for i, h := range headers {
-		if msg := boundedRunes(fmt.Sprintf("headers[%d].name", i), h.Name, maxHeaderNameRunes); msg != "" {
-			return msg
-		}
-		if (h.Value == nil) == (h.Secret == nil) {
-			return fmt.Sprintf("headers[%d]: a header value needs exactly one source — a literal or an existing secret", i)
-		}
-		if h.Value != nil {
-			if msg := boundedRunes(fmt.Sprintf("headers[%d].value", i), *h.Value, maxHeaderValueRunes); msg != "" {
-				return msg
-			}
-		}
-		if h.Secret != nil {
-			if msg := boundedRunes(fmt.Sprintf("headers[%d].secret", i), *h.Secret, maxSecretRowRunes); msg != "" {
-				return msg
-			}
-			if !isRowHandle(*h.Secret) {
-				return fmt.Sprintf("headers[%d].secret must be a secrow handle", i)
-			}
-		}
-	}
-	if err := profile.ValidateEndpointHeaders(wireHeadersToStored(headers)); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-// validateEndpointCreateRaw is the registered validator for endpoints.create.
-func validateEndpointCreateRaw(raw json.RawMessage) string {
-	var p endpointCreateParams
-	if msg := decodeObject(raw, &p); msg != "" {
-		return msg
-	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
-}
-
-// validateEndpointUpdateRaw is the registered validator for endpoints.update.
-func validateEndpointUpdateRaw(raw json.RawMessage) string {
-	var p endpointUpdateParams
-	if msg := decodeObject(raw, &p); msg != "" {
-		return msg
-	}
-	if p.ID == "" {
-		return "id is required"
-	}
-	if msg := configIDRunes("id", p.ID); msg != "" {
-		return msg
-	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
-}
-
-// validateEndpointDeleteRaw is the registered validator for endpoints.delete.
-func validateEndpointDeleteRaw(raw json.RawMessage) string {
-	var p struct {
-		ID string `json:"id"`
-	}
-	if msg := decodeObject(raw, &p); msg != "" {
-		return msg
-	}
-	if p.ID == "" {
-		return "id is required"
-	}
-	return configIDRunes("id", p.ID)
+func hasControlChars(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // validateTabbyImportRaw is the registered validator for profiles.importTabby
@@ -2297,18 +2155,6 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 // returns whether the endpoint repository is wired, the "endpoints not
 // available" gate the handlers check first.
 func (s *WSServer) buildConfigOp(stores control.Admission) (capability.ConfigOperation, bool) {
-	// Endpoints ride the profile store (ADR-0030): the same JSON document,
-	// so the profile store satisfies the endpoint repository. The nil guard
-	// is real: the type assertion panics on a nil interface, and profiles
-	// may simply not be wired.
-	var endpointsRepo profile.EndpointRepository
-	if s.profiles != nil {
-		if er, ok := s.profiles.(profile.EndpointRepository); ok {
-			endpointsRepo = er
-		}
-	}
-	// Role assignments ride the same document (bead nocx-e6kn2): a role
-	// names an endpoint, and the pair shares the endpoints' atomic writes.
 	var rolesRepo profile.RoleRepository
 	if s.profiles != nil {
 		if rr, ok := s.profiles.(profile.RoleRepository); ok {
@@ -2317,15 +2163,15 @@ func (s *WSServer) buildConfigOp(stores control.Admission) (capability.ConfigOpe
 	}
 	return capability.NewConfigOperation(
 		stores,
-		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
-		s.vaultRowResolver(), s.vaultEndpointSecrets(),
-	), endpointsRepo != nil
+		s.profiles, s.groups, rolesRepo, s.profileSvc, s.settings,
+		s.vaultRowResolver(),
+	), rolesRepo != nil
 }
 
 // configSpecs declares the config-domain control methods. The ConfigOperation
 // is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
 // agent specs; the handler families receive it.
-func (s *WSServer) configSpecs(configGate, configVault control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
+func (s *WSServer) configSpecs(configGate, configVault control.Admission, configOp capability.ConfigOperation, rolesWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
@@ -2381,51 +2227,18 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
-		regResponder(configSub, catalog.OpEndpointsList, noParams(), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
-		regResponder(configSub, catalog.OpEndpointsCreate, params(validateEndpointCreateRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
-		regResponder(configSub, catalog.OpEndpointsUpdate, params(validateEndpointUpdateRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
-		regResponder(configSub, catalog.OpEndpointsDelete, params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
 		// Role choices are kept per agent through the config operation.
 		// roles.list and roles.assign ride the same config operation
 		// as the endpoints they reference — one queue, so a default and an
 		// assignment can never be written against two different endpoint
 		// tables.
 		regResponder(configSub, catalog.OpRolesList, params(validateRoleListRaw), func(r Responder) handlerFunc {
-			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			h := roleHandlers{op: configOp, wired: rolesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, catalog.OpRolesAssign, params(validateRoleAssignRaw), func(r Responder) handlerFunc {
-			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			h := roleHandlers{op: configOp, wired: rolesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
-		}),
-
-		// The assistant's methods (nocx-edio): endpoints.probe is the Test
-		// button — a streaming probe that can take tens of seconds, so it
-		// owns a capacity-one admission off the read loop exactly like
-		// connections.test; agent.status is a fast config read under the
-		// config queue.
-		regResponder(s.agentProbeSub, catalog.OpEndpointsProbe, params(validateProbeParamsRaw), func(r Responder) handlerFunc {
-			// op + secrets are the credential resolution (nocx-reu5): the
-			// probe names a saved endpoint and the backend resolves the
-			// credential it owns — the same seams agent.status holds.
-			h := assistantProbeHandlers{
-				op: configOp, secrets: s.credentialResolver(),
-				client: s.assistantClient, probes: s.assistantProbes,
-				wired: s.assistantClient != nil, admit: s.agentProbeAdmit, r: r,
-			}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
 
 		regResponder(configSub, catalog.OpGroupsList, noParams(), func(r Responder) handlerFunc {
@@ -2590,19 +2403,6 @@ func (s *WSServer) vaultSecretSeam() capability.SecretVault {
 	}
 	if sv, ok := s.vaultLifecycle.(capability.SecretVault); ok {
 		return sv
-	}
-	return nil
-}
-
-// vaultEndpointSecrets returns the EndpointSecrets seam for the endpoint
-// write paths, or nil when no vault is wired — key-bearing endpoint writes
-// and material deletes then fail loudly, the documented nil-seam contract.
-func (s *WSServer) vaultEndpointSecrets() capability.EndpointSecrets {
-	if s.vaultLifecycle == nil {
-		return nil
-	}
-	if es, ok := s.vaultLifecycle.(capability.EndpointSecrets); ok {
-		return es
 	}
 	return nil
 }

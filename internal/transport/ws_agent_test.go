@@ -131,7 +131,6 @@ func TestAgentMethods_UnwiredAnswerMethodNotFound(t *testing.T) {
 
 func TestAgentAsk_RejectsBadParams(t *testing.T) {
 	h := newAskHarness(t, answerScript("x"))
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 	base := map[string]any{
 		"askId":           "ask-1",

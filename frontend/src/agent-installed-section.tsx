@@ -35,14 +35,14 @@ import { RecordRow } from './ui/record-row'
 import { StatusCard } from './ui/status-card'
 import type { StatusDotTone } from './ui/status-dot'
 import { RolesSection } from './roles-section'
-import type { EndpointClient } from './endpoints'
+import type { RolesClient } from './roles-client'
 import { t } from './i18n/locale-model'
 
 type ConnectorAgent = AgentRecordsCatalogueResult['agents'][number]
 
 export interface AgentInstalledSectionProps {
   client: AgentRecordsClient
-  rolesClient?: EndpointClient
+  rolesClient?: RolesClient
 }
 
 /**

@@ -61,7 +61,8 @@ export interface AgentRunToolCall {
     /**
      * The resource kind, from the ledger's closed set.
      */
-    kind: 'path' | 'session' | 'environment' | 'credential' | 'destination'
+    kind:
+      'path' | 'session' | 'environment' | 'credential' | 'destination' | 'content' | 'workspace'
     /**
      * The resource's id.
      */

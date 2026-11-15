@@ -17,7 +17,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { AgentInstalledSection } from './agent-installed-section'
 import { setActiveLocale } from './i18n/locale-model'
 import type { Agent } from './generated/agentRecords.detect'
-import { EndpointClient } from './endpoints'
+import { RolesClient } from './roles-client'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { AgentRecordsClient } from './agent-records-client'
@@ -90,7 +90,7 @@ describe('AgentInstalledSection', () => {
       }),
     )
     const view = render(() => (
-      <AgentInstalledSection client={api} rolesClient={new EndpointClient(dispatcher)} />
+      <AgentInstalledSection client={api} rolesClient={new RolesClient(dispatcher)} />
     ))
     const select = await screen.findByRole('combobox', { name: 'Answering' })
     expect(row(view.container, 'pi').contains(select)).toBe(true)

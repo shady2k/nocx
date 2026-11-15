@@ -48,7 +48,6 @@ func TestRunLease_AQuietCommandIsAskedAboutAndThenCompletes(t *testing.T) {
 		Inactivity:  1200 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	// Silent for far longer than the quiet bound, then it speaks and exits
@@ -144,7 +143,6 @@ func TestRunLease_TheModelAnsweringStopEndsTheCommandAndTheRunSaysSo(t *testing.
 		Inactivity:  700 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"

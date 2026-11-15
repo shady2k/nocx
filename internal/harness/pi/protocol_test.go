@@ -41,7 +41,7 @@ func codecWire(t *testing.T, codec harness.Codec, id string, command harness.Com
 }
 
 func TestCodecTurnPlanBarrierAndPrompt(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	text := "line one\nline two with \"quotes\""
 	plan := codec.BeginTurn(harness.TurnSpec{Text: text})
 	if len(plan) < 2 || plan[0].Command.Name != "get_state" || !plan[0].Barrier {
@@ -72,7 +72,7 @@ func TestCodecTurnPlanBarrierAndPrompt(t *testing.T) {
 }
 
 func TestCodecPinnedModelSelectionIsVerified(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	plan := codec.BeginTurn(harness.TurnSpec{Model: "fake/chosen", Text: "question"})
 	names := make([]string, len(plan))
 	for i, step := range plan {
@@ -115,7 +115,7 @@ func TestCodecPinnedModelSelectionIsVerified(t *testing.T) {
 }
 
 func TestCodecCommandResponsesKeepActorIDsAndErrors(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	for _, id := range []string{"actor-9", "actor-10"} {
 		codecWire(t, codec, id, harness.Command{Name: "abort"})
 		response := codecResponse(t, codec, `{"type":"response","id":"`+id+`","command":"abort","success":true,"data":{}}`)
@@ -133,7 +133,7 @@ func TestCodecCommandResponsesKeepActorIDsAndErrors(t *testing.T) {
 }
 
 func TestCodecHandledPromptFailsImmediately(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	codec.BeginTurn(harness.TurnSpec{Text: "question"})
 	decoded, err := codec.Decode([]byte(`{"type":"response","id":"prompt-2","command":"prompt","success":true,"data":{"disposition":"handled"}}`))
 	if err != nil {
@@ -199,7 +199,7 @@ func TestCodecLastAssistantErrorOverridesEarlierAnswer(t *testing.T) {
 }
 
 func TestCodecCancelSequence(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	commands := codec.CancelSequence()
 	names := make([]string, len(commands))
 	for i, command := range commands {
@@ -212,7 +212,7 @@ func TestCodecCancelSequence(t *testing.T) {
 }
 
 func TestCodecLaterTurnUsesObservedModel(t *testing.T) {
-	codec := New(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
+	codec := newTestConnector(t.TempDir(), nil).NewCodec(harness.SessionInfo{})
 	first := codec.BeginTurn(harness.TurnSpec{Model: "fake/chosen", Text: "first"})
 	if len(first) != 4 || first[2].Check == nil {
 		t.Fatalf("first pinned plan: %+v", first)

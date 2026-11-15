@@ -39,9 +39,6 @@ type AgentService interface {
 	// is the run printing it, recorded on the block so a turn with more than
 	// one attempt can be read back one attempt at a time.
 	OpenProse(ctx context.Context, turnID string, runID int64) (content.ProseBlock, error)
-	// PriorTurns returns every agent turn before beforeEntryID in paneID,
-	// oldest first, with prose and ledger-derived tool lines already arranged.
-	PriorTurns(ctx context.Context, paneID, beforeEntryID string) ([]content.PriorTurn, error)
 	// SealProse seals one prose block's body: the boundary arrived (the next
 	// tool call) and nothing more may be appended to it.
 	SealProse(ctx context.Context, entryID string) error
@@ -122,13 +119,6 @@ func (s *agentService) OpenProse(ctx context.Context, turnID string, runID int64
 		return content.ProseBlock{}, err
 	}
 	return s.ledger.OpenProse(ctx, turnID, runID)
-}
-
-func (s *agentService) PriorTurns(ctx context.Context, paneID, beforeEntryID string) ([]content.PriorTurn, error) {
-	if err := s.guard.check(); err != nil {
-		return nil, err
-	}
-	return s.ledger.PriorTurns(ctx, paneID, beforeEntryID)
 }
 
 func (s *agentService) SealProse(ctx context.Context, entryID string) error {

@@ -41,7 +41,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -238,13 +237,6 @@ const (
 type modelResult struct {
 	text string
 	kind modelResultKind
-}
-
-func (r modelResult) forModel(frame func(string) string) string {
-	if r.kind == modelNocxMessage {
-		return r.text
-	}
-	return frame(r.text)
 }
 
 // ApprovalRequest is the user-facing ask (design §7.2): what was proposed,
@@ -1448,28 +1440,6 @@ func canonicalArgHash(raw string) string {
 // removes every class a declared tool can reach. The rows are named so a person
 // can understand the omission and change the policy, rather than seeing a
 // completed turn that silently skipped the tool.
-func withheldToolResult(tool string, effects []content.Effect) string {
-	rows := make([]string, 0, len(effects))
-	for _, effect := range effects {
-		rows = append(rows, string(effect))
-	}
-	return fmt.Sprintf("REFUSED: nocx did not offer tool %q: every effect it can reach is refused by policy (%s).", tool, strings.Join(rows, ", "))
-}
-
-// refusalResult is the TOOL RESULT a refused call returns to the model
-// (nocx-uvac6.1): the refusal is an answer, not a fault. The system prompt
-// promises exactly this — "A refusal is an answer: say what you could not do
-// and what you would need" — and a non-error tool result is how the promise
-// is kept: the refused call's own slot in the conversation carries the
-// refusal, the run continues, and the model answers in words, or proposes
-// something else. The text is OURS, written per reason (nocx-avogl.3: never
-// the framework's stringification), and it says nothing the policy keeps
-// from the person — no effect lattice, no scope list, no error internals.
-//
-// kind is the declined proposal's standing half (the person's own no); empty
-// for a policy refusal, which is standing only when the matrix row says so.
-// detail is supplied only by the fixed floor, whose sentence names the
-// operation rather than exposing policy internals.
 func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, detail ...string) string {
 	switch reason {
 	case RefusedOutOfScope:

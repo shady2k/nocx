@@ -170,7 +170,7 @@ func TestSessionBearerEndTurnWaitsForDelayedRequestToSettle(t *testing.T) {
 
 func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(logtest.Slog(t)), nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(logtest.Slog(t)), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}

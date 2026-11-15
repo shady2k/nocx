@@ -55,9 +55,8 @@ func TestAgentAsk_TheFollowUpCarriesTheEarlierTurnsProseWhole(t *testing.T) {
 		{{Kind: protocol.StepAnswer, Text: "let me look: "}, readFileStep(t), {Kind: protocol.StepAnswer, Text: "it says hello, "}, readFileStep(t), {Kind: protocol.StepAnswer, Text: "so the config is fine."}, {Kind: protocol.StepEnd}},
 		answerScript("glad to hear it.").Steps,
 	}}, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpoint()
 	sid := openSessionInAskPane(t, h.conn, 1)
-	askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
+	firstTurn := askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
 	first := h.prompt()
 	turn := askAndSettle(t, h, sid, "ask-2", "and is that a problem?", 3)
 	follow := h.prompt()
@@ -67,57 +66,51 @@ func TestAgentAsk_TheFollowUpCarriesTheEarlierTurnsProseWhole(t *testing.T) {
 	if !strings.HasPrefix(follow.Text, "and is that a problem?\n") {
 		t.Fatalf("follow-up question lost: %q", follow.Text)
 	}
-	prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, turn)
-	if err != nil || len(prior) != 1 {
-		t.Fatalf("PriorTurns: %+v, %v", prior, err)
+	assertRecordedTurn(t, h, firstTurn, "what does the config say?", "let me look: it says hello, so the config is fine.", content.RunCompleted)
+	if prose := proseUnder(t, h.db.Ledger(), firstTurn); len(prose) != 3 {
+		t.Fatalf("earlier turn has %d prose blocks, want 3", len(prose))
 	}
-	if prior[0].Question != "what does the config say?" || prior[0].Prose.Text != "let me look: it says hello, so the config is fine." || prior[0].Prose.Blocks != 3 {
-		t.Fatalf("earlier turn not whole: %+v", prior[0])
-	}
+	assertRecordedTurn(t, h, turn, "and is that a problem?", "glad to hear it.", content.RunCompleted)
 }
 
 func TestAgentAsk_ThirdQuestionCarriesAllEarlierTurnsOldestFirst(t *testing.T) {
 	h := newAskHarness(t, protocol.Script{Turns: [][]protocol.Step{answerScript("answer one").Steps, answerScript("answer two").Steps, answerScript("answer three").Steps}})
-	h.createEndpoint()
 	sid := openSessionInAskPane(t, h.conn, 1)
 	first := askAndSettle(t, h, sid, "ask-1", "question one", 2)
-	before, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, first)
-	if err != nil || len(before) != 0 {
-		t.Fatalf("first turn has history: %+v, %v", before, err)
-	}
-	askAndSettle(t, h, sid, "ask-2", "question two", 3)
+	second := askAndSettle(t, h, sid, "ask-2", "question two", 3)
 	third := askAndSettle(t, h, sid, "ask-3", "question three", 4)
-	prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, third)
-	if err != nil || len(prior) != 2 {
-		t.Fatalf("PriorTurns: %+v, %v", prior, err)
+	for _, want := range []struct{ id, q, a string }{{first, "question one", "answer one"}, {second, "question two", "answer two"}, {third, "question three", "answer three"}} {
+		assertRecordedTurn(t, h, want.id, want.q, want.a, content.RunCompleted)
 	}
-	for i, want := range []struct{ q, a string }{{"question one", "answer one"}, {"question two", "answer two"}} {
-		if prior[i].Question != want.q || prior[i].Prose.Text != want.a {
-			t.Errorf("turn %d: %+v", i, prior[i])
-		}
+	page, err := h.db.Ledger().QueryEntries(t.Context(), content.LedgerQuery{Scope: content.ScopeEverywhere, PaneID: askPaneID, Limit: 10})
+	if err != nil || len(page.Entries) != 3 {
+		t.Fatalf("recorded turns: %+v, %v", page, err)
+	}
+	if page.Entries[0].ID != third || page.Entries[1].ID != second || page.Entries[2].ID != first {
+		t.Fatalf("recorded turn order: %+v", page.Entries)
 	}
 }
 
 func TestAgentAsk_AnEvictedEarlierAnswerSaysSoRatherThanLeavingAHole(t *testing.T) {
 	h := newAskHarness(t, protocol.Script{Turns: [][]protocol.Step{answerScript("a long answer nobody will read again.").Steps, answerScript("ok.").Steps, answerScript("ok again.").Steps}})
-	h.createEndpoint()
 	sid := openSessionInAskPane(t, h.conn, 1)
-	askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
+	first := askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
 	second := askAndSettle(t, h, sid, "ask-2", "sure?", 3)
-	prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, second)
-	if err != nil || len(prior) != 1 || prior[0].Prose.Text != "a long answer nobody will read again." {
-		t.Fatalf("before eviction: %+v, %v", prior, err)
-	}
-	if _, evictErr := h.db.Ledger().EvictBodies(t.Context(), content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); evictErr != nil {
-		t.Fatal(evictErr)
+	assertRecordedTurn(t, h, first, "what does the config say?", "a long answer nobody will read again.", content.RunCompleted)
+	if _, err := h.db.Ledger().EvictBodies(t.Context(), content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err != nil {
+		t.Fatal(err)
 	}
 	third := askAndSettle(t, h, sid, "ask-3", "and now?", 4)
-	prior, err = h.db.Ledger().PriorTurns(t.Context(), askPaneID, third)
-	if err != nil || len(prior) != 2 {
-		t.Fatalf("after eviction: %+v, %v", prior, err)
+	assertRecordedTurn(t, h, first, "what does the config say?", "", content.RunCompleted)
+	assertRecordedTurn(t, h, second, "sure?", "", content.RunCompleted)
+	assertRecordedTurn(t, h, third, "and now?", "ok again.", content.RunCompleted)
+	children, err := h.db.Ledger().Caused(t.Context(), first)
+	if err != nil || len(children) != 1 {
+		t.Fatalf("evicted prose children: %+v, %v", children, err)
 	}
-	if !prior[0].Prose.Evicted || prior[0].Prose.Text != "" || prior[0].Question != "what does the config say?" || prior[1].Question != "sure?" {
-		t.Fatalf("eviction lost metadata or retained text: %+v", prior)
+	child, err := h.db.Ledger().Entry(t.Context(), children[0].EntryID)
+	if err != nil || child == nil || len(child.Artifacts) != 1 || !child.Artifacts[0].Evicted {
+		t.Fatalf("evicted prose metadata: %+v, %v", child, err)
 	}
 }
 
@@ -128,21 +121,14 @@ func TestAgentAsk_AnEarlierAnswerThatWasCutShortIsMarkedPartial(t *testing.T) {
 			terminal = protocol.Step{Kind: protocol.StepFail, Reason: "the provider hung up mid-answer"}
 		}
 		h := newAskHarness(t, protocol.Script{Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "I was halfway through saying"}, terminal}, answerScript("ok.").Steps}})
-		h.createEndpoint()
 		sid := openSessionInAskPane(t, h.conn, 1)
-		askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
-		next := askAndSettle(t, h, sid, "ask-2", "and then?", 3)
-		prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, next)
-		if err != nil || len(prior) != 1 {
-			t.Fatalf("PriorTurns: %+v, %v", prior, err)
-		}
+		first := askAndSettle(t, h, sid, "ask-1", "what does the config say?", 2)
+		askAndSettle(t, h, sid, "ask-2", "and then?", 3)
 		want := content.RunCompleted
 		if failed {
 			want = content.RunFailed
 		}
-		if prior[0].Prose.State != want || prior[0].Prose.Text != "I was halfway through saying" {
-			t.Fatalf("partial state/text: %+v", prior[0])
-		}
+		assertRecordedTurn(t, h, first, "what does the config say?", "I was halfway through saying", want)
 	}
 }
 
@@ -152,15 +138,12 @@ func TestAgentAsk_ConversationBudgetKeepsDurableTurnsWhole(t *testing.T) {
 	oldAnswer := strings.Repeat("old answer ", 400)
 	newAnswer := strings.Repeat("new answer ", 1000)
 	h := newAskHarness(t, protocol.Script{Turns: [][]protocol.Step{answerScript(oldAnswer).Steps, answerScript(newAnswer).Steps, answerScript("final answer").Steps}})
-	h.createEndpoint()
 	sid := openSessionInAskPane(t, h.conn, 1)
-	askAndSettle(t, h, sid, "ask-1", "old question", 2)
-	askAndSettle(t, h, sid, "ask-2", "new question", 3)
-	last := askAndSettle(t, h, sid, "ask-3", "final question", 4)
-	prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, last)
-	if err != nil || len(prior) != 2 || prior[0].Prose.Text != oldAnswer || prior[1].Prose.Text != newAnswer {
-		t.Fatalf("durable context truncated: %+v, %v", prior, err)
-	}
+	first := askAndSettle(t, h, sid, "ask-1", "old question", 2)
+	second := askAndSettle(t, h, sid, "ask-2", "new question", 3)
+	askAndSettle(t, h, sid, "ask-3", "final question", 4)
+	assertRecordedTurn(t, h, first, "old question", oldAnswer, content.RunCompleted)
+	assertRecordedTurn(t, h, second, "new question", newAnswer, content.RunCompleted)
 	if h.prompt().ConversationID != askPaneID {
 		t.Fatalf("lost actor identity: %+v", h.prompt())
 	}
@@ -237,17 +220,22 @@ func TestAgentAsk_DestructiveCommandEvidenceSurvivesIntoNextTurn(t *testing.T) {
 		t.Fatalf("FinishExecution action: %v", finishActionErr)
 	}
 
-	nextTurn := askAndSettle(t, h, sid, "ask-2", "what happened?", 3)
-	prior, err := h.db.Ledger().PriorTurns(ctx, askPaneID, nextTurn)
-	if err != nil || len(prior) != 1 {
-		t.Fatalf("PriorTurns: %+v, %v", prior, err)
+	askAndSettle(t, h, sid, "ask-2", "what happened?", 3)
+	children, err := led.Caused(ctx, turnID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	evidence := strings.Join(prior[0].ToolLines, "\n")
-	if strings.Contains(evidence, "removed") {
-		t.Fatalf("tool output leaked: %q", evidence)
+	var recordedAction, recordedCommand bool
+	for _, child := range children {
+		if child.EntryID == actionID {
+			recordedAction = child.Kind == content.EntryAction && child.Args["command"] == "rm -f target.txt" && child.OpensBlock
+		}
+		if child.EntryID == commandID {
+			recordedCommand = child.Kind == content.EntryShell && child.Intent == "rm -f target.txt"
+		}
 	}
-	if !strings.Contains(evidence, "ran rm -f target.txt → 1 lines") {
-		t.Fatalf("missing completed action evidence: %q", evidence)
+	if !recordedAction || !recordedCommand {
+		t.Fatalf("action evidence lost: %+v", children)
 	}
 	action, err := led.Entry(ctx, actionID)
 	if err != nil || action == nil || action.ParentID == nil || *action.ParentID != turnID {
@@ -256,6 +244,13 @@ func TestAgentAsk_DestructiveCommandEvidenceSurvivesIntoNextTurn(t *testing.T) {
 	command, err := led.Entry(ctx, commandID)
 	if err != nil || command == nil || command.ParentID == nil || *command.ParentID != turnID {
 		t.Fatalf("command linkage = %+v (err=%v), want same turn", command, err)
+	}
+	if len(command.Executions) != 1 || command.Executions[0].TerminationReason == nil || *command.Executions[0].TerminationReason != content.TermCompleted || len(command.Executions[0].Artifacts) != 1 {
+		t.Fatalf("completed command evidence: %+v", command.Executions)
+	}
+	body, err := led.Artifact(ctx, command.Executions[0].Artifacts[0].ID)
+	if err != nil || body == nil || len(body.Chunks) != 1 || string(body.Chunks[0]) != "removed\n" {
+		t.Fatalf("command output evidence: %+v, %v", body, err)
 	}
 }
 
@@ -266,17 +261,33 @@ func TestAgentAsk_ASessionWithNoPaneCarriesNoConversation(t *testing.T) {
 		if anchored {
 			sid = openSessionInAskPane(t, h.conn, 2)
 		}
-		askAndSettle(t, h, sid, "ask-1", "what does the config say?", 3)
-		turn := askAndSettle(t, h, sid, "ask-2", "sure?", 4)
-		prior, err := h.db.Ledger().PriorTurns(t.Context(), askPaneID, turn)
-		if err != nil {
-			t.Fatal(err)
+		first := askAndSettle(t, h, sid, "ask-1", "what does the config say?", 3)
+		askAndSettle(t, h, sid, "ask-2", "sure?", 4)
+		entry, err := h.db.Ledger().Entry(t.Context(), first)
+		if err != nil || entry == nil {
+			t.Fatalf("first turn: %+v, %v", entry, err)
 		}
-		if anchored && (len(prior) != 1 || prior[0].Prose.Text != "the config is fine.") {
-			t.Fatalf("anchored history: %+v", prior)
+		if anchored && (entry.PaneID == nil || *entry.PaneID != askPaneID) {
+			t.Fatalf("anchored turn: %+v", entry)
 		}
-		if !anchored && len(prior) != 0 {
-			t.Fatalf("unanchored history: %+v", prior)
+		if !anchored && entry.PaneID != nil {
+			t.Fatalf("unanchored turn: %+v", entry)
 		}
+		assertRecordedTurn(t, h, first, "what does the config say?", "the config is fine.", content.RunCompleted)
+	}
+}
+
+// assertRecordedTurn reads the durable row and its prose, not model history.
+func assertRecordedTurn(t *testing.T, h *askHarness, id, question, text string, state content.RunState) {
+	t.Helper()
+	entry, err := h.db.Ledger().Entry(t.Context(), id)
+	if err != nil || entry == nil || entry.Intent != question {
+		t.Fatalf("recorded question: %+v, %v", entry, err)
+	}
+	if len(entry.Executions) != 1 || entry.Executions[0].State == nil || *entry.Executions[0].State != state {
+		t.Fatalf("recorded run: %+v, want %s", entry.Executions, state)
+	}
+	if got := proseBodyOf(t, h.db.Ledger(), id); got != text {
+		t.Fatalf("recorded prose = %q, want %q", got, text)
 	}
 }

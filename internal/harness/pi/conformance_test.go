@@ -136,7 +136,7 @@ func realPiDriver(t *testing.T, s harnesstest.DriverSetup) harnesstest.Fixture {
 		if err := json.Unmarshal([]byte(s.HostConfig), &cfg); err != nil {
 			t.Fatal(err)
 		}
-		return harnesstest.Fixture{Harness: New(cfg.DataDir, cfg.Env), Model: "nocx-test/test-model"}
+		return harnesstest.Fixture{Harness: newTestConnector(cfg.DataDir, cfg.Env), Model: "nocx-test/test-model"}
 	}
 	gate := make(chan struct{})
 	var release sync.Once

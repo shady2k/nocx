@@ -128,7 +128,7 @@ func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServ
 
 	agent := newScriptedAgent(t, script)
 	// The real client binds the run kernel; model turns still use the subprocess harness.
-	kernel, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
+	kernel, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,29 +159,16 @@ func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServ
 	return &askHarness{t: t, v: v, db: db, profiles: docStore, ws: ws, conn: conn, logs: serverLogs, agent: agent, script: agent.script}
 }
 
-// createEndpoint makes one endpoint with a resolvable key.
-func (h *askHarness) createEndpoint() {
-	h.t.Helper()
-	e, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
-		"name":    "Local",
-		"baseUrl": "http://127.0.0.1:11434/v1",
-		"schema":  "openai-compatible",
-		"key":     "sk-test-123",
-		"models":  []map[string]any{{"name": "qwen3"}},
-	}))
-	if code != 0 {
-		h.t.Fatalf("endpoints.create: code %d", code)
-	}
-	h.seedLegacyRole(e.ID, "qwen3")
-}
-
 // seedLegacyRole writes the endpoint-based format left by older installs.
 // It is deliberately not sent to roles.assign: new writes require an agentId.
 func (h *askHarness) seedLegacyRole(endpointID, model string) {
 	h.t.Helper()
 	var document map[string]any
-	if found, err := h.profiles.Read("p.json", &document); err != nil || !found {
-		h.t.Fatalf("read legacy profile document: found %v, err %v", found, err)
+	if _, err := h.profiles.Read("p.json", &document); err != nil {
+		h.t.Fatalf("read legacy profile document: %v", err)
+	}
+	if document == nil {
+		document = map[string]any{}
 	}
 	document["roles"] = []map[string]any{{"role": "answering", "endpointId": endpointID, "model": model}}
 	if err := h.profiles.Write("p.json", document); err != nil {
@@ -205,7 +192,6 @@ func (h *askHarness) pid() int                { return h.agent.pid() }
 func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	script := answerScript("hello", " ", "world")
 	h := newAskHarness(t, script)
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
@@ -263,7 +249,7 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	// path is gone; marked items are described by metadata and read through
 	// session.read instead.
 	prompt := h.prompt()
-	messages := []assistant.Message{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
+	messages := []struct{ Role, Content string }{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
 	var full string
 	for _, m := range messages {
 		full += m.Content + "\n"
@@ -338,7 +324,7 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	}
 }
 
-// ── no endpoint configured: the ask is a refusal the surface can render ──
+// ── a harness ask does not require legacy endpoint configuration ──
 
 func TestAgentAsk_NoLegacyEndpointStillUsesHarness(t *testing.T) {
 	h := newAskHarness(t, answerScript("x"))
@@ -364,7 +350,6 @@ func TestAgentAsk_ModelFailureTerminalizesFailed(t *testing.T) {
 		{Kind: protocol.StepAnswer, Text: "partial"},
 		{Kind: protocol.StepFail, Reason: "the model returned no text"},
 	}})
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":           "ask-1",
@@ -407,7 +392,6 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 		{Kind: protocol.StepAnswer, Text: "first"},
 		{Kind: protocol.StepHang},
 	}})
-	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
 	res, errObj := askOverWire(t, conn, map[string]any{
@@ -483,7 +467,6 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 	script := answerScript("sure")
 	h := newAskHarness(t, script)
-	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 
 	// No captureFrame at all: the gesture for a general question is type +
@@ -510,7 +493,7 @@ func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 	// The engine received the question and NO frame text — nothing was
 	// pointed at, so nothing may ride the prompt.
 	prompt := h.prompt()
-	messages := []assistant.Message{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
+	messages := []struct{ Role, Content string }{{Role: "system", Content: prompt.SystemPrompt}, {Role: "user", Content: prompt.Text}}
 	var full string
 	for _, m := range messages {
 		full += m.Content + "\n"
@@ -552,21 +535,7 @@ func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
 func TestAgentAsk_HarnessDefaultIgnoresLegacyRoleAssignment(t *testing.T) {
 	script := answerScript("x")
 	h := newAskHarness(t, script)
-	// TWO endpoints; the FIRST is the one the old eps[0] path would have
-	// picked. The role names the SECOND.
-	firstRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "First", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-1", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	first, _ := decodeEndpointResult(t, firstRaw)
-	secondRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Second", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
-		"key": "sk-2", "models": []map[string]any{{"name": "gpt-4o"}, {"name": "gpt-4o-mini"}},
-	})
-	second, _ := decodeEndpointResult(t, secondRaw)
-	h.seedLegacyRole(second.ID, "gpt-4o")
-	_ = first
-
+	h.seedLegacyRole("legacy-second", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	askRes, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-role", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -595,13 +564,7 @@ func TestAgentAsk_HarnessDefaultIgnoresLegacyRoleAssignment(t *testing.T) {
 func TestAgentAsk_LegacyReassignmentDoesNotOverrideHarness(t *testing.T) {
 	script := answerScript("x")
 	h := newAskHarness(t, script)
-	h.createEndpoint() // "Local" with model qwen3, answering → qwen3
-	otherRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Other", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
-		"key": "sk", "models": []map[string]any{{"name": "gpt-4o"}},
-	})
-	other, _ := decodeEndpointResult(t, otherRaw)
-	h.seedLegacyRole(other.ID, "gpt-4o")
+	h.seedLegacyRole("legacy-other", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-re", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -618,18 +581,7 @@ func TestAgentAsk_LegacyReassignmentDoesNotOverrideHarness(t *testing.T) {
 func TestAgentAsk_DeletedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
 	script := answerScript("x")
 	h := newAskHarness(t, script)
-	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	created, code := decodeEndpointResult(t, raw)
-	if code != 0 {
-		t.Fatalf("endpoints.create: code %d", code)
-	}
-	h.seedLegacyRole(created.ID, "qwen3")
-	if isErrorResponse(t, jsonrpcCall(t, h.conn, "endpoints.delete", map[string]any{"id": created.ID})) {
-		t.Fatal("delete refused")
-	}
+	h.seedLegacyRole("deleted-endpoint", "qwen3")
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-d", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -647,21 +599,7 @@ func TestAgentAsk_DeletedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
 func TestAgentAsk_RemovedLegacyModelDoesNotBlockHarness(t *testing.T) {
 	script := answerScript("x")
 	h := newAskHarness(t, script)
-	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
-		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}, {"name": "gpt-4o"}},
-	})
-	created, _ := decodeEndpointResult(t, raw)
-	h.seedLegacyRole(created.ID, "gpt-4o")
-	// The update drops gpt-4o from the model list — "qwen3" remains, and
-	// must NOT be silently substituted.
-	up := jsonrpcCall(t, h.conn, "endpoints.update", map[string]any{
-		"id": created.ID, "name": "Local", "baseUrl": "http://127.0.0.1:11434/v1",
-		"schema": "openai-compatible", "key": "", "models": []map[string]any{{"name": "qwen3"}},
-	})
-	if isErrorResponse(t, up) {
-		t.Fatalf("endpoints.update: %s", up)
-	}
+	h.seedLegacyRole("legacy-endpoint-without-model", "gpt-4o")
 	sid := openLocalSession(t, h.conn)
 	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-m", "sessionId": sid, "question": "q", "cwd": "/repo",
@@ -678,7 +616,6 @@ func TestAgentAsk_RemovedLegacyModelDoesNotBlockHarness(t *testing.T) {
 
 func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
 	h := newAskHarness(t, answerScript("hi"))
-	h.createEndpoint()
 
 	// A session that IS the pipe of a pane, which is what the product opens.
 	resp := jsonrpcCallWithID(t, h.conn, "open", map[string]any{
@@ -716,7 +653,6 @@ func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
 
 func TestAgentAsk_SealedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
 	h := newAskHarness(t, answerScript("without endpoint unlock"))
-	h.createEndpoint()
 	h.v.Seal()
 	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
 	sid := openLocalSession(t, h.conn)

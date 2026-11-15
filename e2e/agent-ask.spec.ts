@@ -2,8 +2,6 @@
  * e2e: ask about a frozen block through real pi in a disposable home.
  * A marked block grants its whole output; the scripted model reads the
  * announced item through session.read and answers from that result.
- * Endpoint-only journeys remain in a separate describe for removal with
- * endpoints/eino; they do not supply prerequisites for the pi journeys.
  */
 import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
@@ -16,50 +14,19 @@ import {
   bindEndpoint,
   ensureAssistantVault,
   settingsReady,
-  setUpVaultThroughTheSheet,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { configurePiHome } from './pi-home'
-import { FakeOpenAI, type FakeRequest } from './fake-openai'
-import { fieldChip } from './secret-field'
+import { FakeOpenAI } from './fake-openai'
 import { attachedItemID, terminalContext, toolResults } from './ask-gesture'
 
-/** The Test button's probe request, identified by its BODY: a
- *  chat-completions request naming the configured model. The form's silent
- *  model-discovery probe (discoverModels) carries the same credential over
- *  the same client, so index arithmetic on fake.requests() cannot tell the
- *  two apart; the body can. `from` is the request count captured BEFORE
- *  the action that should produce the probe, so an older request for the
- *  same model (an earlier ask) cannot satisfy the wait. */
-async function waitForProbeRequest(
-  fake: FakeOpenAI,
-  model: string,
-  from: number,
-  timeoutMs = 15_000,
-): Promise<FakeRequest> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const hit = fake
-      .requests()
-      .slice(from)
-      .find((r) => r.body.includes(`"model":"${model}"`))
-    if (hit) return hit
-    if (Date.now() > deadline) {
-      throw new Error(`fake-openai: timed out waiting for a probe of model ${model}`)
-    }
-    const { promise, resolve } = Promise.withResolvers<void>()
-    setTimeout(resolve, 50)
-    await promise
-  }
-}
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
 const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
 /** WHAT A SELECTION LEAVES BEHIND (nocx-wcswn). The ask entry is a gesture
  *  at the prompt (nocx-4wtlh) — the per-block Ask control and the receipt
@@ -141,18 +108,6 @@ async function openApp(page: Page): Promise<void> {
  *  the rail (renamed from AI Endpoints; the Assistant group carries the AI)
  *  — the surface a user configures the assistant with
  *  (the connections-settings.spec.ts walk). */
-async function openAIEndpoints(page: Page): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await settingsReady(page)
-  await page.locator(SETTINGS_AI_NAV).click()
-  // Wait on the page root, not on the readiness badge: the badge appears
-  // only once an endpoint is configured, so waiting on it would make this
-  // helper unusable in the first state a user is ever in.
-  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
-}
-
-/** Back to the terminal tab: Settings is a tab like any other, and the first
- *  tab is the terminal. */
 async function backToTerminal(page: Page): Promise<void> {
   await page.locator(TITLE).first().click()
   const input = page.locator(INPUT)
@@ -174,46 +129,6 @@ async function backToTerminal(page: Page): Promise<void> {
  *  The assertions are part of the walk rather than left to the caller: a helper
  *  that only clicked would let a silent refusal through, and every asking case
  *  depends on this having worked. */
-async function createEndpointThroughTheSurface(page: Page): Promise<void> {
-  await page.getByRole('button', { name: '+ New endpoint' }).first().click()
-  const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
-  await expect(dialog).toBeVisible()
-  await dialog.locator('#endpoint-name').fill(`E2E Fake ${nonce}`)
-  // The fake's base URL: http://127.0.0.1:<port>/v1 — loopback, which is
-  // exactly the address rule internal/assistant/httpguard.go permits.
-  await dialog.locator('#endpoint-base-url').fill(fake.baseUrl())
-  await dialog.locator('#endpoint-key').fill(`e2e-key-${nonce}`)
-  await dialog.getByRole('button', { name: 'Add model' }).click()
-  await dialog.locator('#endpoint-model-0-name').fill('e2e-model')
-  await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
-
-  // The setup sheet, raised BY THE SAVE — not by a detour through the Vault
-  // page: the backend refused the mint (vault-uninitialized) and the wrapper
-  // answered with the sheet instead of a toast.
-  const setupSheet = page
-    .locator('.ui-prompt-overlay')
-    .filter({ has: page.locator('#vault-setup-passphrase') })
-  await expect(setupSheet).toBeVisible({ timeout: 10_000 })
-  // The sheet's journey is the one owner's (harness.ts): press-and-look, code,
-  // Done, sheet gone. This file's private copy was the shape that waited blind
-  // on the code block while the press it sent never landed (nocx-17ihs).
-  await setUpVaultThroughTheSheet(page, `vault-pass-${nonce}`)
-
-  // The deferred save ran with the vault now existing: the dialog closes and
-  // the record is in the list. That the KEY landed is not asserted from any
-  // caption — it is proved where this same endpoint answers a real question
-  // through the fake.
-  await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-  // The record landed and the row says so. The page deliberately shows no
-  // assistant-readiness badge: readiness belongs on the ask chip, where a
-  // person is actually asking, not floating above this page's frame
-  // (nocx-q27y removed `.ep-status-row`, so nothing here may assert on it).
-  const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-  await expect(savedRow).toBeVisible({ timeout: 10_000 })
-}
-
-/** Allow the marked-item read through the person's permission surface.
- * Real pi is configured in this backend's disposable home before startup. */
 async function ensureAskingPrerequisites(page: Page): Promise<void> {
   await ensureAssistantVault(page, endpoint, `vault-pass-${nonce}`)
   await page.locator(TITLE).first().click()
@@ -266,42 +181,6 @@ async function switchToAsk(page: Page): Promise<void> {
  * indicator, so at the call sites where Ask was already active every Run
  * assertion silently did nothing — and had the pane ever started in Ask, the
  * whole half would have gone on passing while testing nothing. */
-async function pointAtFromRun(block: Locator): Promise<void> {
-  const page = block.page()
-  await expect(block.locator('.cmd-output .term-grid-row').first()).toBeVisible({ timeout: 15_000 })
-  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
-  await expect(indicator).toHaveAttribute('data-target', 'shell')
-
-  await block.locator('[data-block-actions]').click()
-  await expect(page.locator('.ui-context-menu__item[data-item-id="grant"]')).toHaveCount(0)
-  const copyCommand = page
-    .locator('[data-testid="block-actions-menu"] .ui-context-menu__item')
-    .filter({ hasText: 'Copy command' })
-  await expect(copyCommand).toBeVisible()
-  await copyCommand.click()
-  await expect(page.locator('[data-testid="block-actions-menu"]')).toHaveCount(0)
-
-  await page.locator(INPUT).click()
-  await selectWholeOutput(block)
-
-  const offer = page.locator('.mark-affordance .ui-button')
-  await expect(offer).toBeHidden()
-  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).not.toBe('')
-
-  // No reselection and no second selectionchange: the registry callback
-  // reuses the Range already on the document when the real chord flips, and
-  // the draft swap underneath it must not eat that Range either.
-  await page.keyboard.press('ControlOrMeta+Enter')
-  await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
-  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).not.toBe('')
-
-  await confirmOffer(page)
-}
-
-/** The selection a mouse drag leaves behind, made as a real DOM Range over
- *  the block's output rows and announced with the event the product listens
- *  for. A synthetic drag across rows would be a geometry test in disguise;
- *  what these specs are about is what a selection MEANS. */
 async function selectWholeOutput(block: Locator): Promise<void> {
   await block.evaluate((el) => {
     const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-grid-row'))
@@ -649,343 +528,3 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
 
 // Subject leaves with endpoints/eino. Keep their serial dependencies separate
 // so a removed endpoint surface cannot skip the surviving assistant journeys.
-test.describe('endpoint subjects retained for removal with endpoints/eino', () => {
-  test.describe.configure({ mode: 'serial' })
-  test.use({ viewport: { width: 1280, height: 900 } })
-
-  test('with no endpoint configured, the surfaces say so (agent.status)', async ({ page }) => {
-    // The first state a dev stand is in — no endpoint — and it needs no fake
-    // server at all. What the product owes a person here is not a status
-    // line: it is the way out. Asking without an endpoint says what is
-    // wrong AND opens where it is fixed (nocx-jh2rv), and that is what this
-    // asserts, on the surface, never on a log line.
-    await openApp(page)
-    const marker = `ask-status-${nonce}`
-    const { block } = await runCommand(page, `echo ${marker}`, marker)
-
-    // The gesture still works with nothing configured: the selection marks
-    // the block it was made in, and the input line says one block is marked.
-    await pointAtFromRun(block)
-    await expectGranted(page, [`echo ${marker}`])
-
-    // The ask is refused, and the refusal carries its repair: the toast
-    // names the problem and the Endpoints page opens with the editor up on
-    // a blank endpoint. A sentence with nowhere to go is how a person
-    // concludes the feature is broken rather than unconfigured.
-    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
-    // resolves the role to its assigned (endpoint, model) pair, so the
-    // first dev-stand state refuses with "no model assigned" and points at
-    // Settings → Roles, not with the pre-roles "no endpoint configured".
-    await askFromPrompt(page, 'What did this print?')
-    await expect(page.locator('.ui-toast')).toContainText(
-      'the answering role has no model assigned — assign one in Settings → Roles',
-      {
-        timeout: 15_000,
-      },
-    )
-    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
-      timeout: 15_000,
-    })
-  })
-
-  test('creating an endpoint through a fresh vault keeps its key (nocx-4egm)', async ({ page }) => {
-    await openApp(page)
-    await openAIEndpoints(page)
-    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
-    await createEndpointThroughTheSurface(page)
-  })
-
-  test('custom headers ride the completion AND the connection check (nocx-lyyk)', async ({
-    page,
-  }) => {
-    // The endpoint from test 2 exists with a key. Give it a custom header
-    // through the same form a user uses: the header list is the kit's
-    // EditableRowList, and the value's source is the same control the key
-    // uses (acceptance 7's shape).
-    await openApp(page)
-    await openAIEndpoints(page)
-    const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
-    const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: 'Add header' }).click()
-    await dialog.locator('#endpoint-header-0-name').fill('HTTP-Referer')
-    await dialog.locator('#endpoint-header-0-value').fill('https://nocx.dev')
-    await dialog.getByRole('button', { name: 'Save Endpoint', exact: true }).click()
-    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-
-    // ── The connection check carries the header (acceptance 1, half 2) ──
-    // The model field's silent discovery probes GET /models with the draft's
-    // headers — the same request the no-model Test button makes.
-    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
-    const dialog2 = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(dialog2).toBeVisible()
-    const before = fake.requests().length
-    await dialog2.locator('#endpoint-model-0-name').focus()
-    await expect
-      .poll(
-        () => {
-          const reqs = fake.requests()
-          const check = reqs.slice(before).find((r) => r.path.endsWith('/models'))
-          return check ? (check.headers['http-referer'] as string | undefined) : undefined
-        },
-        { timeout: 15_000 },
-      )
-      .toBe('https://nocx.dev')
-    await dialog2.getByRole('button', { name: 'Cancel', exact: true }).click()
-
-    // ── The completion carries the header (acceptance 1, half 1) ────────
-    await backToTerminal(page)
-    const marker = `hdr-${nonce}`
-    const { block } = await runCommand(page, `echo ${marker}`, marker)
-    const base = fake.requests().length
-    fake.setScript({ chunks: ['ok ', marker] })
-    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
-    // half of that rule has its own coverage in pointAtFromRun; here the
-    // flip is setup, made through the same real chord.
-    await switchToAsk(page)
-    await pointAt(block)
-    // The block is marked before the question is sent; then the question
-    // goes out and the completion lands — the ask must actually be SENT for
-    // there to be a completion to inspect.
-    await expectGranted(page, [`echo ${marker}`])
-    await askFromPrompt(page, 'What did it print?')
-    const req = await fake.waitForRequests(base + 1)
-    expect(req[base].path.endsWith('/chat/completions')).toBe(true)
-    expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
-    // The credential still rides as the stored Bearer, and the custom header
-    // does not replace it.
-    expect(req[base].authorization).toBe(`Bearer e2e-key-${nonce}`)
-  })
-
-  test('the Test button on a saved endpoint probes with the STORED credential, and a typed key wins (nocx-reu5)', async ({
-    page,
-  }) => {
-    // The serial describe shares one backend; the first endpoint-creating
-    // test above set up the vault and minted a key into it, so a save with
-    // a key works from here without the setup sheet.
-    await openApp(page)
-    await openAIEndpoints(page)
-
-    const name = `E2E Probe ${nonce}`
-    const storedKey = `stored-key-${nonce}`
-    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
-    const newDialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
-    await expect(newDialog).toBeVisible()
-    await newDialog.locator('#endpoint-name').fill(name)
-    await newDialog.locator('#endpoint-base-url').fill(fake.baseUrl())
-    await newDialog.locator('#endpoint-key').fill(storedKey)
-    await newDialog.getByRole('button', { name: 'Add model' }).click()
-    await newDialog.locator('#endpoint-model-0-name').fill('e2e-model')
-    await newDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
-    await expect(newDialog).not.toBeVisible({ timeout: 10_000 })
-
-    // ── Stored credential: the key field HOLDS the bound row ────────────
-    // Open the saved endpoint for editing. The key material never crosses
-    // back (ADR-0030 §3): the field opens holding the reference to the row
-    // the mint created, drawn as a chip carrying the secret's NAME — and the
-    // probe must still authenticate with the credential the endpoint OWNS,
-    // resolved by the backend from the vault.
-    //
-    // The name used to be the bound combobox's DOM value (nocx-rzjw); that
-    // control is gone (nocx-3o0ed.4) and the field's value is the opaque
-    // reference itself, so the name-not-handle assertion moves onto the chip
-    // painted over it. Both halves are still here: what a person reads is the
-    // name, and `secrow:` appears nowhere they can read.
-    await page.getByRole('button', { name: `Edit ${name}` }).click()
-    const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(editDialog).toBeVisible()
-    const keyField = editDialog.locator('#endpoint-key')
-    const keyChip = fieldChip(keyField)
-    await expect(keyChip).toHaveText(`${name} API key`)
-    await expect(keyField).toHaveValue(/^\{\{secret:.+\}\}$/)
-    await expect(editDialog).not.toContainText('secrow:')
-    // The button must be ENABLED before the click: it is disabled while a
-    // probe is in flight (testDisabled = probing()), and a click on a
-    // disabled button is silently swallowed — leaving the dialog without a
-    // verdict. The silent model-discovery probe (discoverModels) can be
-    // mid-flight here, so wait on the observable state, never a duration.
-    const testButton = editDialog.getByRole('button', { name: 'Test endpoint' })
-    await expect(testButton).toBeEnabled()
-    const probeBase = fake.requests().length
-    await testButton.click()
-    // The probe request, identified by its body: a chat-completions call
-    // naming the stored model. The discovery probe carries the same
-    // credential, so index arithmetic could read the wrong request.
-    const probeReq = await waitForProbeRequest(fake, 'e2e-model', probeBase)
-    expect(probeReq.authorization).toBe(`Bearer ${storedKey}`)
-    // The probe succeeded end to end — a streamed answer through the real
-    // backend, not merely a request that arrived.
-    await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-    await expect(keyChip).toHaveText(`${name} API key`)
-    await expect(editDialog).not.toContainText('secrow:')
-
-    // ── A key typed into the form WINS over the stored one ──────────────
-    const typedKey = `typed-key-${nonce}`
-    // Typing over the reference is what "switch to Type a new one" was: the
-    // reference goes, the chip goes with it, and what is left is an input —
-    // never a stored value, which the record could not hand back in any case.
-    // Clearing first is the assertion the old empty-field check made: nothing
-    // the vault held is carried into the material this probe sends.
-    await keyField.fill('')
-    await expect(keyField).toHaveValue('')
-    await expect(fieldChip(keyField)).toHaveCount(0)
-    await keyField.fill(typedKey)
-    await expect(testButton).toBeEnabled()
-    const typedBase = fake.requests().length
-    await testButton.click()
-    const typedProbe = await waitForProbeRequest(fake, 'e2e-model', typedBase)
-    expect(typedProbe.authorization).toBe(`Bearer ${typedKey}`)
-    await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-
-    // ── A DECLARED keyless endpoint (a local model) probes without one ──
-    // Keyless is a DECLARATION now, not an empty field (nocx-8e6v5): an
-    // endpoint with no key and no declaration is a credential that has not
-    // been supplied yet, and the two used to be one silent state. So the
-    // person ticks the box, which is the gesture this half is about.
-    await editDialog.getByRole('button', { name: 'Cancel' }).click()
-    const localName = `E2E Local ${nonce}`
-    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
-    const localDialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
-    await expect(localDialog).toBeVisible()
-    await localDialog.locator('#endpoint-name').fill(localName)
-    await localDialog.locator('#endpoint-base-url').fill(fake.baseUrl())
-    await localDialog
-      .getByRole('checkbox', { name: 'This endpoint does not require an API key' })
-      .check()
-    // The key field goes away with the declaration — there is nothing left
-    // to type, which is the point of saying so once.
-    await expect(localDialog.locator('#endpoint-key')).toHaveCount(0)
-    await localDialog.getByRole('button', { name: 'Add model' }).click()
-    await localDialog.locator('#endpoint-model-0-name').fill('e2e-model')
-    await localDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
-    await expect(localDialog).not.toBeVisible({ timeout: 10_000 })
-    await page.getByRole('button', { name: `Edit ${localName}` }).click()
-    const localEdit = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(localEdit).toBeVisible()
-    await expect(localEdit.getByRole('button', { name: 'Test endpoint' })).toBeEnabled()
-    const localBase = fake.requests().length
-    await localEdit.getByRole('button', { name: 'Test endpoint' }).click()
-    const localProbe = await waitForProbeRequest(fake, 'e2e-model', localBase)
-    expect(localProbe.authorization).toBe('')
-    await expect(localEdit).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-  })
-
-  test('an endpoint CREATED through a SEALED vault raises the unlock sheet and lands WITH its key (nocx-4egm)', async ({
-    page,
-  }) => {
-    // The serial file shares one backend whose passphrase vault was set up
-    // by the first endpoint test above. Restarting the backend leaves that
-    // vault SEALED (the file provider's data key derives from the
-    // passphrase), and the app comes up normally — the derived content key
-    // needs no startup unlock, so the sealed state is the state the save
-    // meets. This is the create path: a NEW endpoint whose key must be
-    // minted through the vault, not a rotation of an existing one.
-    endpoint = await backend.restart()
-    await openApp(page)
-    await openAIEndpoints(page)
-
-    const name = `E2E Sealed ${nonce}`
-    const sealedKey = `sealed-key-${nonce}`
-    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
-    const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
-    await expect(dialog).toBeVisible()
-    await dialog.locator('#endpoint-name').fill(name)
-    await dialog.locator('#endpoint-base-url').fill(fake.baseUrl())
-    await dialog.locator('#endpoint-key').fill(sealedKey)
-    await dialog.getByRole('button', { name: 'Add model' }).click()
-    await dialog.locator('#endpoint-model-0-name').fill('e2e-model')
-    await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
-
-    // The unlock sheet, raised by the save: the mint failed with
-    // vault-sealed (the reason now rides the wire, ws_endpoints.go) and the
-    // dispatcher's sealed seam keeps the request pending behind the prompt.
-    const unlockSheet = page
-      .locator('.ui-prompt-overlay')
-      .filter({ has: page.locator('#vault-unlock-passphrase') })
-    await expect(unlockSheet).toBeVisible({ timeout: 10_000 })
-    await page.locator('#vault-unlock-passphrase').fill(`vault-pass-${nonce}`)
-    await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
-    await expect(unlockSheet).not.toBeVisible({ timeout: 10_000 })
-
-    // The re-sent request carried the key: the save waits for it, so the
-    // dialog closes only after the record exists. Before the closeDialog fix
-    // this closed and toasted "Saved" while the create was still in flight,
-    // leaving no row and no error — so the row's EXISTENCE is the assertion,
-    // and the key itself is proved two steps down, where the Test resolves
-    // the STORED credential and the fake reports the material it received.
-    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-    const savedRow = page.locator('.ui-collection-row').filter({ hasText: name })
-    await expect(savedRow).toBeVisible({ timeout: 10_000 })
-    // The stored material is the key the form was filled with — the Test
-    // button resolves the STORED credential and the fake records it.
-    await page.getByRole('button', { name: `Edit ${name}` }).click()
-    const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-    await expect(editDialog).toBeVisible()
-    await expect(editDialog.getByRole('button', { name: 'Test endpoint' })).toBeEnabled()
-    const sealedBase = fake.requests().length
-    await editDialog.getByRole('button', { name: 'Test endpoint' }).click()
-    const sealedProbe = await waitForProbeRequest(fake, 'e2e-model', sealedBase)
-    expect(sealedProbe.authorization).toBe(`Bearer ${sealedKey}`)
-    await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-  })
-
-  test('a sealed vault raises unlock from an ask and the same run completes', async ({ page }) => {
-    endpoint = await backend.restart()
-    await openApp(page)
-    await backToTerminal(page)
-
-    const question = `sealed ask ${nonce}`
-    const base = fake.requests().length
-    fake.setScript({ chunks: ['answered after unlock'] })
-    await askFromPrompt(page, question)
-
-    const unlock = page
-      .locator('.ui-prompt-overlay')
-      .filter({ has: page.locator('#vault-unlock-passphrase') })
-    await expect(unlock).toBeVisible({ timeout: 10_000 })
-    expect(fake.requests()).toHaveLength(base)
-    await page.locator('#vault-unlock-passphrase').fill(`vault-pass-${nonce}`)
-    await unlock.getByRole('button', { name: 'Unlock', exact: true }).click()
-    await expect(unlock).not.toBeVisible({ timeout: 10_000 })
-
-    await fake.waitForRequests(base + 1)
-    const answer = answerBlockOf(page, question)
-    await expect(answer.locator('.cmd-output[data-answer-body]')).toContainText(
-      'answered after unlock',
-      { timeout: 15_000 },
-    )
-    await expect(answer).toHaveAttribute('data-outcome', 'success', {
-      timeout: 15_000,
-    })
-  })
-
-  test('cancelling an ask unlock stops its durable run without calling the model', async ({
-    page,
-  }) => {
-    endpoint = await backend.restart()
-    await openApp(page)
-    await backToTerminal(page)
-
-    const question = `cancel sealed ask ${nonce}`
-    const base = fake.requests().length
-    await askFromPrompt(page, question)
-    const unlock = page
-      .locator('.ui-prompt-overlay')
-      .filter({ has: page.locator('#vault-unlock-passphrase') })
-    await expect(unlock).toBeVisible({ timeout: 10_000 })
-    await unlock.getByRole('button', { name: 'Cancel', exact: true }).click()
-    await expect(unlock).not.toBeVisible({ timeout: 10_000 })
-
-    const answer = answerBlockOf(page, question)
-    await expect(
-      answer.locator(':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'),
-    ).toHaveText('stopped', {
-      timeout: 15_000,
-    })
-    await expect(answer).toHaveAttribute('data-outcome', 'cancelled', { timeout: 15_000 })
-    expect(fake.requests()).toHaveLength(base)
-    await expect(answer).not.toContainText('failed')
-  })
-})

@@ -11,14 +11,14 @@ import { render } from '@solidjs/testing-library'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import { SettingsComponent } from './settings'
+import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import { setActiveLocale } from './i18n/locale-model'
 
 /** The describe-mock shape settings.test.ts uses, trimmed to what the mount
  *  needs: declarations, groups, the section→group map, and a snapshot with
  *  nothing modified. The describe call resolves on a microtask, so callers
  *  that read the rail wait for it. */
-async function mountSettings(): Promise<HTMLElement> {
+async function mountSettings(page?: string): Promise<HTMLElement> {
   const client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(client, 'describeSettings').mockResolvedValue({
     declarations: [
@@ -32,7 +32,10 @@ async function mountSettings(): Promise<HTMLElement> {
         default: true,
       },
     ],
-    groups: [{ id: 'application', title: 'Application', order: 0 }],
+    groups: [
+      { id: 'application', title: 'Application', order: 0 },
+      { id: 'assistant', title: 'Assistant', order: 1 },
+    ],
     sectionGroups: { Application: 'application' },
   })
   vi.spyOn(client, 'getSnapshot').mockResolvedValue({
@@ -41,7 +44,10 @@ async function mountSettings(): Promise<HTMLElement> {
     revision: 0,
   })
   const container = document.body.appendChild(document.createElement('div'))
-  render(() => <SettingsComponent profileClient={client} />, { container })
+  const ref: { current: SettingsComponentHandle | null } = { current: null }
+  render(() => <SettingsComponent profileClient={client} ref={ref} />, { container })
+  await ref.current!.ready()
+  if (page) ref.current!.openPage(page)
   // The search box is in the rail's leading slot from the first paint, in
   // either locale — the marker that the surface is up.
   await vi.waitFor(() => {
@@ -63,6 +69,11 @@ afterEach(() => {
 })
 
 describe('settings surface renders through the catalogue', () => {
+  it('does not open the removed endpoints page', async () => {
+    const container = await mountSettings('endpoints')
+    expect(container.textContent).not.toContain('AI endpoints are not available in this window.')
+  })
+
   it('shows the Russian search placeholder under ru', async () => {
     setActiveLocale('ru')
     const container = await mountSettings()

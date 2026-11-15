@@ -287,8 +287,7 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 // and the mint each take the operation for as long as they need it; the wait
 // happens between them, holding nothing.
 //
-// It is the same split endpoints.probe has, and the same reason PHASE TWO of
-// the open dials outside its domain gate.
+// PHASE TWO of the open dials outside its domain gate for the same reason.
 func (h secretsHandlers) handleSaveKeyPassphrase(ctx context.Context, req jsonrpcRequest, params secretsSaveKeyPassphraseParams) {
 	var keyID credential.SecretID
 	answered := false

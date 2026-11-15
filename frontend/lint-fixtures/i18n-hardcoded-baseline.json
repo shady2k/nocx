@@ -1571,36 +1571,6 @@
       "snippet": "Close"
     },
     {
-      "file": "src/ui/dump-panel.tsx",
-      "line": 218,
-      "context": "jsx-text",
-      "snippet": "Drive"
-    },
-    {
-      "file": "src/ui/dump-panel.tsx",
-      "line": 221,
-      "context": "attr:ariaLabel",
-      "snippet": "drive"
-    },
-    {
-      "file": "src/ui/dump-panel.tsx",
-      "line": 231,
-      "context": "jsx-text",
-      "snippet": "Highlighting is disabled for large dumps (over 256 KiB)."
-    },
-    {
-      "file": "src/ui/dump-panel.tsx",
-      "line": 237,
-      "context": "attr:ariaLabel",
-      "snippet": "drive raw chunks"
-    },
-    {
-      "file": "src/ui/dump-panel.tsx",
-      "line": 268,
-      "context": "jsx-text",
-      "snippet": "Recorded provider bytes. Requests are formatted JSON; respon"
-    },
-    {
       "file": "src/ui/file-readout.tsx",
       "line": 163,
       "context": "prop:description",

@@ -180,7 +180,7 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
           // reference. A typed password is material and belongs behind dots
           // — the dialog this replaced masked it too — while a reference is
           // not material, and masking it would hide the chip that names the
-          // secret (endpoints-section.tsx says the same thing at its key).
+          // secret.
           type={props.passwordSecret === undefined ? 'password' : 'text'}
           value={passwordText()}
           onInput={onPasswordInput}

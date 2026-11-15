@@ -112,7 +112,7 @@ func TestFilesCreateApprovalAllowsMissingPath(t *testing.T) {
 // approveWiringProposal puts one call to a person who says yes, optionally
 // doing something while the question is open (between), and returns the
 // proposal that was approved together with the call's result.
-func approveWiringProposal(t *testing.T, mw *policyMiddleware, approvals *ApprovalStore, tool, args string, between ...func()) (Approval, string, error) {
+func approveWiringProposal(t *testing.T, mw *kernelFixture, approvals *ApprovalStore, tool, args string, between ...func()) (Approval, string, error) {
 	t.Helper()
 	q := &recordingQuestioner{store: approvals, answer: Approved{}}
 	if len(between) > 0 {

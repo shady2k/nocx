@@ -183,21 +183,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"dialog.openFileForUpload": {
 			[]byte(`{}`),
 		},
-		"endpoints.create": {
-			[]byte(`{"name":"Local","baseUrl":"https://example.com/v1","schema":"openai-compatible","models":[{"name":"model"}]}`),
-		},
-		"endpoints.delete": {
-			[]byte(`{"id":"endpoint:test:1"}`),
-		},
-		"endpoints.list": {
-			[]byte(`{}`),
-		},
-		"endpoints.probe": {
-			[]byte(`{"baseUrl":"https://example.com/v1","model":"model"}`),
-		},
-		"endpoints.update": {
-			[]byte(`{"id":"endpoint:test:1","name":"Local","baseUrl":"https://example.com/v1","schema":"openai-compatible","models":[{"name":"model"}]}`),
-		},
 		"fs.complete": {
 			[]byte(`{"text":"/tmp","cwd":"/"}`),
 		},
@@ -440,9 +425,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"agent.cancel": {
 			[]byte(`{"runId":1}`),
-		},
-		"agent.dump": {
-			[]byte(`{"entryId":"entry-1"}`),
 		},
 		"agent.laneInteractivity": {
 			[]byte(`{"sessionId":"session-1","bufferKind":"normal"}`),
@@ -1006,12 +988,6 @@ func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
 	groupParams := func(id, name, parent string) map[string]any {
 		return map[string]any{"id": id, "name": name, "parentGroupId": parent}
 	}
-	endpointParams := func(name string) map[string]any {
-		return map[string]any{
-			"name": name, "baseUrl": "https://example.com/v1",
-			"models": []map[string]any{{"name": "model"}},
-		}
-	}
 	cases := []struct {
 		method string
 		valid  any
@@ -1036,10 +1012,6 @@ func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
 		{"groups.impact/name", map[string]any{"group": groupParams(idAtLimit, nameAtLimit, idAtLimit)}, map[string]any{"group": groupParams(idAtLimit, overName, idAtLimit)}},
 		{"groups.impact/parent", map[string]any{"group": groupParams(idAtLimit, nameAtLimit, idAtLimit)}, map[string]any{"group": groupParams(idAtLimit, nameAtLimit, overID)}},
 		{"groups.impact/delete", map[string]any{"deleteGroupId": idAtLimit}, map[string]any{"deleteGroupId": overID}},
-		{"endpoints.create/name", endpointParams(nameAtLimit), endpointParams(overName)},
-		{"endpoints.update/id", map[string]any{"id": idAtLimit, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}, map[string]any{"id": overID, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}},
-		{"endpoints.update/name", map[string]any{"id": idAtLimit, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}, map[string]any{"id": idAtLimit, "name": overName, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}},
-		{"endpoints.probe/name", map[string]any{"name": nameAtLimit, "baseUrl": "https://example.com/v1", "model": "model"}, map[string]any{"name": overName, "baseUrl": "https://example.com/v1", "model": "model"}},
 		{"profiles.moveImpact/profileId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{overID}, "targetGroupId": idAtLimit}},
 		{"profiles.moveImpact/targetGroupId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": overID}},
 		// The seam methods that take a profile id. They validate through

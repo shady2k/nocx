@@ -439,11 +439,6 @@ func (s *ledgerStub) OpenProse(_ context.Context, turnID string, runID int64) (P
 	return ProseBlock{}, ErrNotImplemented
 }
 
-func (s *ledgerStub) PriorTurns(_ context.Context, paneID, beforeEntryID string) ([]PriorTurn, error) {
-	s.log.Info("content stub: LedgerRepository.PriorTurns", "pane", paneID, "before", beforeEntryID)
-	return nil, ErrNotImplemented
-}
-
 func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {
 	s.log.Info("content stub: LedgerRepository.SealProse", "entry", entryID)
 	return ErrNotImplemented

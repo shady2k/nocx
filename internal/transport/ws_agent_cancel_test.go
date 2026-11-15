@@ -189,7 +189,6 @@ func TestAgentRun_StopReachesTheForegroundCommand(t *testing.T) {
 		Inactivity:  time.Minute,
 		SignalGrace: 100 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	pidTmp := pidFile + ".tmp"
@@ -292,7 +291,6 @@ func TestAgentCancel_StopsAssistantRunChildBeforeResponse(t *testing.T) {
 		Inactivity:  time.Minute,
 		SignalGrace: 100 * time.Millisecond,
 	})
-	h.createEndpointAt()
 	sid := openLocalSession(t, h.conn)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	pidTmp := pidFile + ".tmp"

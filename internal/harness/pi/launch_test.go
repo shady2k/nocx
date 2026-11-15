@@ -12,7 +12,7 @@ import (
 )
 
 func TestSessionLaunchIsPrivateAndStable(t *testing.T) {
-	c := New(t.TempDir(), []string{"PI_OFFLINE=1"})
+	c := newTestConnector(t.TempDir(), []string{"PI_OFFLINE=1"})
 	spec := harness.TurnSpec{ConversationID: "conversation", SystemPrompt: "exact instructions", Dir: t.TempDir(), Tools: harness.ToolBridge{Command: []string{"bridge", "mcp"}, Env: []string{"BEARER=private"}}}
 	first, err := c.Start(context.Background(), spec)
 	if err != nil {

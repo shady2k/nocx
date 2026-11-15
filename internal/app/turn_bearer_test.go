@@ -483,7 +483,7 @@ func (q *turnPerson) AskEgress(_ context.Context, req *assistant.EgressRequest) 
 
 func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(logtest.Slog(t)), nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(logtest.Slog(t)), content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,6 +499,7 @@ func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	tools, err := assistant.BindRunTools(context.Background(), client, assistant.AskParams{
 		Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
 		RunID: "real-chain", SessionID: string(stand.sess.ID()), Attempt: 1,
+		Environment:   content.Environment{Kind: content.EnvLocal},
 		AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: secret}, Approvals: store, Questioner: person,
 	}, nil)
 	if err != nil {

@@ -17383,7 +17383,6 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       makeClipboard(),
       {
         hooks: {
-          onCreateEndpoint: () => opened.push('endpoints'),
           onOpenAgentSettings: () => opened.push('agent-installed'),
         },
       },
@@ -17408,7 +17407,6 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       makeClipboard(),
       {
         hooks: {
-          onCreateEndpoint: () => opened.push('endpoints'),
           onOpenAgentSettings: () => opened.push('agent-installed'),
         },
       },
@@ -24862,11 +24860,19 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       typeIntoPane(content, 'x')
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
       resize(776)
-      await vi.waitFor(() => expect(fits()).toHaveLength(before + 1))
-      const resized = fits()[fits().length - 1]
       // The pane grew by a hundred pixels: 744px above the header is 46 rows,
       // and the program is told all 46 — no margin row is taken from it.
-      expect(resized).toEqual({ cols: 115, rows: 46, xpixel: 920, ypixel: 736 })
+      // A pending report for the previous grid is not the resize completing.
+      await vi.waitFor(() =>
+        expect(fits()[fits().length - 1]).toEqual({
+          cols: 115,
+          rows: 46,
+          xpixel: 920,
+          ypixel: 736,
+        }),
+      )
+      expect(fits()).toHaveLength(before + 1)
+      const resized = fits()[fits().length - 1]
       session.fireScreenFrame(screenFrame(12, ['PRIMARY'], { cols: 40, rows: 20 }))
       expect(sb.mode).toBe('running')
       expect(fits()).toHaveLength(before + 1)

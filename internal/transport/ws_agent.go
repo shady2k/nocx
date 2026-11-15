@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"runtime"
 	"sort"
 	"strconv"
@@ -38,10 +37,8 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -599,6 +596,20 @@ type agentApproveResponse struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+type agentAskEventKind string
+
+const (
+	agentAskAnswer    agentAskEventKind = "answer"
+	agentAskReasoning agentAskEventKind = "reasoning"
+	agentAskToolCall  agentAskEventKind = "tool_call"
+)
+
+type agentAskEvent struct {
+	Kind agentAskEventKind
+	Text string
+	Call *assistant.ToolCall
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────
 
 // agentHandlers answers agent.ask and the related run-control methods. It
@@ -608,24 +619,16 @@ type agentApproveResponse struct {
 // ask ids — per connection, so a reconnect mints a new one) and the
 // Responder; never the *WSServer.
 type agentHandlers struct {
-	op     capability.AgentOperation // nil → content store not wired
-	dumpOp capability.LedgerOperation
-	// configOp resolves the endpoint the run uses (the ONE config operation,
-	// shared with the config handlers — AD-8). nil → no endpoint store.
-	configOp   capability.ConfigOperation
+	op         capability.AgentOperation  // nil → content store not wired
+	configOp   capability.ConfigOperation // role choices
 	noteOp     capability.NoteOperation
 	snippetOp  capability.SnippetOperation
 	agentTools agenttools.Registry
 	log        log.Logger
-	// endpointWired is the config handlers' "endpoints not available" gate:
-	// with no endpoint repository, ListEndpoints would nil-panic inside the
-	// service, so the ask refuses before the call.
-	endpointWired bool
-	credentials   credential.Resolver
-	client        assistant.Client
-	harness       agentharness.Harness
-	harnessID     string
-	askSub        control.Submission
+	client     assistant.Client
+	harness    agentharness.Harness
+	harnessID  string
+	askSub     control.Submission
 	// fetcher is the guarded direct-network seam for fetch.url.
 	fetcher apifetch.TextFetcher
 	// attemptLedger is the ledger seam the tool-call pipeline records its
@@ -933,24 +936,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: ready.Message})
 		return
 	}
-	var endpoint profile.Endpoint
 	facts := content.RunFacts{Mode: "explain", Harness: h.harnessID, ConversationID: conversation, Model: model}
 	in.Facts = facts
 
-	// Endpoint material (the credential and secret-valued headers) is NOT
-	// resolved here: it resolves inside the stream task (runAskStream), so
-	// plaintext never sits in the durable pending-run record and a resume
-	// re-resolves it from the endpoint the run was pinned to. A sealed vault
-	// therefore waits inside the stream task — the Operation stance raises
-	// one coalesced unlock and continues this same durable run — instead of
-	// failing the request after its response was already sent, which is the
-	// dead end that sent the person hunting for a door the surface could not
-	// open.
-	//
-	// The transaction records the turn + run + body + edges in ONE commit,
-	// and the response is sent with the turn's identity BEFORE the stream
-	// starts — the renderer places the block from the response, then
-	// appends deltas to it.
+	// Record the turn before the harness starts so streamed events have a durable entry.
 	var askRes content.AgentAskResult
 	err = h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		res, submitErr := svc.SubmitAsk(ctx, in)
@@ -984,15 +973,13 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{}), driveDone: make(chan struct{})}
 	rc := askRunContext{
-		runID:      askRes.RunID,
-		control:    runControl,
-		entryID:    askRes.EntryID,
-		paneID:     in.PaneID,
-		question:   in.Question,
-		endpoint:   endpoint,
-		model:      facts.Model,
-		grant:      runGrant,
-		offerState: assistant.NewWireToolOfferState(),
+		runID:    askRes.RunID,
+		control:  runControl,
+		entryID:  askRes.EntryID,
+		paneID:   in.PaneID,
+		question: in.Question,
+		model:    facts.Model,
+		grant:    runGrant,
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The approved call's own execution is the proposal
@@ -1047,24 +1034,14 @@ type askRunContext struct {
 	runID   int64
 	control *agentRunControl
 	entryID string
-	// paneID is the pane this turn is anchored to — the THREAD the earlier
-	// turns of this conversation are read from (PriorTurn). It is the same
-	// value the turn was recorded with, carried from the ask rather than
-	// re-resolved on the stream: the session may be gone by then, and the
-	// anchor is what outlives it (nocx-4em1z). Nil when the session is the
-	// pipe of no recorded pane, which costs the conversation context and
-	// nothing else.
+	// paneID is the stable conversation anchor, independent of the live session.
 	paneID   *string
 	question string
-	endpoint profile.Endpoint
 	model    string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
-	// offerState survives retries so the structural offer remains
-	// once-per-run without process-lifetime run-id storage.
-	offerState *assistant.WireToolOfferState
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The approved call's own execution is the proposal entry's
@@ -1190,8 +1167,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// after every tool call, so the first delta opens the next block
 	// (ADR-0040).
 	var prose content.ProseBlock
-	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
-	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	requester := h.requester
 	if requester != nil {
 		bound := runBoundRequester{RendererRequester: requester, control: rc.control, degradation: rc.leaseDegradation}
@@ -1260,7 +1235,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		TurnEntryID:           rc.entryID,
 		AutomaticSessionItems: rc.automaticSessionItems,
 		MarkedSessionWindows:  rc.markedSessionWindows,
-	}, func(ev assistant.AskEvent) error {
+	}, func(ev agentAskEvent) error {
 		if rc.control != nil {
 			// Declared inside the branch, like the other two: outside it
 			// there is no event to release, and a no-op standing in for a
@@ -1278,7 +1253,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// answer that was streaming when it happened, and the socket
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
-		case assistant.AskToolCall:
+		case agentAskToolCall:
 			// NOT PERSISTED AS PROSE, and that is not an omission: the
 			// durable account of a tool call is the LEDGER's action entry,
 			// which the middleware wrote before the call ran and whose id
@@ -1351,7 +1326,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			// accepted tool-call events from requests that merely arrived.
 			toolCallsExecuted.Add(1)
 			return nil
-		case assistant.AskReasoning:
+		case agentAskReasoning:
 			reasoningChars.Add(int64(len(ev.Text)))
 			// Also not persisted, and for the stronger reason: the durable
 			// answer is the ANSWER, and appending the thinking to the open
@@ -1506,14 +1481,22 @@ func (r runBoundWaitRequester) RequestRunWait(ctx context.Context, runID string,
 
 // askHarness translates only agent prose and reasoning. Tool announcements come
 // from the endpoint kernel, after its durable attempt has been recorded.
-func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assistant.AskParams, emit func(assistant.AskEvent) error) error {
+func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assistant.AskParams, emit func(agentAskEvent) error) error {
+	// Tool admission and the agent stream run on independent goroutines, but
+	// both update the same prose block and publish to the same run.
+	var emitMu sync.Mutex
+	writeEvent := func(event agentAskEvent) error {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		return emit(event)
+	}
 	if h.harness == nil {
 		return errors.New("the answering agent is not available")
 	}
 	var authority agentharness.TurnAuthority
 	if p.Grant != nil {
 		tools, err := assistant.BindRunTools(ctx, h.client, p, func(call assistant.ToolCall) error {
-			return emit(assistant.AskEvent{Kind: assistant.AskToolCall, Call: &call})
+			return writeEvent(agentAskEvent{Kind: agentAskToolCall, Call: &call})
 		})
 		if err != nil {
 			return err
@@ -1535,16 +1518,16 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 		return err
 	}
 	for event := range turn.Events() {
-		var ev assistant.AskEvent
+		var ev agentAskEvent
 		switch event.Kind {
 		case agentharness.EventAnswerDelta:
-			ev = assistant.AskEvent{Kind: assistant.AskAnswer, Text: event.Text}
+			ev = agentAskEvent{Kind: agentAskAnswer, Text: event.Text}
 		case agentharness.EventReasoningDelta:
-			ev = assistant.AskEvent{Kind: assistant.AskReasoning, Text: event.Text}
+			ev = agentAskEvent{Kind: agentAskReasoning, Text: event.Text}
 		default:
 			continue
 		}
-		if emitErr := emit(ev); emitErr != nil {
+		if emitErr := writeEvent(ev); emitErr != nil {
 			_ = turn.Cancel(context.WithoutCancel(ctx))
 			return emitErr
 		}
@@ -2264,50 +2247,15 @@ func unarmedRunLeaseSentences(rc askRunContext) []string {
 	return sentences
 }
 
-// classifyAskFailure turns any Ask error into the run's termination reason
-// and the sentence agent.runState carries — one owner of the engine-error →
-// wire-sentence mapping (design §7: "a sentence a person reads, not a Go
-// error string").
-//
-// Nothing here appends err.Error() (nocx-avogl.3). It used to, in the default
-// arm, and what a person saw was eino's own stringification:
-//
-//	the model failed to answer: [NodeRunError] failed to stream tool call
-//	call_7947...: agent policy: tool call refused
-//	node path: [node_1, ToolNode]
-//
-// `NodeRunError`, `node path`, `ToolNode` and the call id are the framework's
-// internals; they say nothing a person can act on and they are not ours. The
-// framework's text is not thrown away — runAskStream logs it once, with the
-// run id, at the boundary that catches it — but it never travels on the wire.
-//
-// A cause per sentence, deliberately: one message for three causes is how a
-// cause stops being findable. Every arm is reached by a TYPE, never by a
-// string match against the framework's text — the typed chain survives eino.
-// A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
-// result, not an error, so it never reaches this function at all.
-func classifyAskFailure(err error, model string) (content.TerminationReason, string) {
+// classifyAskFailure maps harness and tool-authority failures to a durable
+// termination reason and a sentence safe to display on the wire.
+func classifyAskFailure(err error, _ string) (content.TerminationReason, string) {
 	var agentFailure *agentharness.TurnError
 	if errors.As(err, &agentFailure) {
 		return content.TermFailed, agentFailure.Reason
 	}
 	if errors.Is(err, agentharness.ErrCancelled) {
 		return content.TermUserKilled, "the person stopped this answer"
-	}
-	// The engine's own failure sentence: the endpoint answered, and did not
-	// answer (a StreamError is nocx's type, never the framework's). It is
-	// the FIRST arm because it is the most specific thing Ask can return
-	// about itself.
-	var se *assistant.StreamError
-	if errors.As(err, &se) {
-		return content.TermFailed, se.Message
-	}
-	// The endpoint returned a complete textual tool-call envelope instead of
-	// a native call. The stream itself succeeded, so this belongs here as a
-	// typed semantic failure rather than in the transport-error arms below.
-	var envelopeErr *assistant.UnexecutedToolCallError
-	if errors.As(err, &envelopeErr) {
-		return content.TermFailed, assistant.UnexecutedToolCallSentence
 	}
 	// The run lease (ADR-0020 decision 2) fired: the sentence names WHICH
 	// bound ended the run, so the block says why — the ledger already
@@ -2365,7 +2313,7 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 		if errors.Is(err, vault.ErrVaultSealed) {
 			return content.TermFailed, "the vault is sealed. Unlock it in Settings → Vault, then ask again."
 		}
-		return content.TermFailed, assistant.EgressScreeningFailureSentence
+		return content.TermFailed, "nocx could not check the tool result for secrets, so it was not sent to the agent. Unlock the vault and ask again."
 	}
 
 	// Cause 2: the model produced a tool call the engine cannot act on — a
@@ -2397,23 +2345,7 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	case errors.Is(err, context.DeadlineExceeded):
 		return content.TermTimeout, "the model did not answer in time"
 	}
-	if sentence, ok := assistant.EndpointErrorSentence(err, model); ok {
-		return content.TermFailed, sentence
-	}
-	// Cause 3: the request to the model endpoint never completed — a dial
-	// that failed, a TLS handshake that did not, a connection that dropped
-	// mid-request. Checked AFTER context.Canceled and context.DeadlineExceeded
-	// for the same reason the lease is checked before them: a cancelled or
-	// timed-out request in flight comes back as a *url.Error WRAPPING the
-	// context error, so matching *url.Error first would report every lost
-	// connection and every deadline as an unreachable endpoint.
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return content.TermFailed, "nocx could not reach the model endpoint. Check that the endpoint's address is right and that it is running, then ask again."
-	}
-	// Anything else. It still says nothing eino wrote: the trace is in the
-	// log, named there so a person can find it.
-	return content.TermFailed, assistant.UnexplainedFailureSentence
+	return content.TermFailed, "the agent could not finish this answer. Check the agent in Settings, then ask again."
 }
 
 // answerError maps ask transaction failures to JSON-RPC errors. A conflict
@@ -2503,29 +2435,15 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 	return in, attached, ""
 }
 
-// priorTurns reads the pane's thread before this run, oldest first. The
-// ledger owns the complete read and its ordering; transport only crosses the
-// capability seam once and returns that projection to context assembly.
-func derefOrEmpty(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
 // ── registration ──────────────────────────────────────────────────────────
 
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, agentTools agenttools.Registry, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, s.contentDB)
-	}
-	var dumpOp capability.LedgerOperation
-	if s.contentDB != nil {
-		dumpOp = capability.NewLedgerOperation(contentGate, s.contentDB)
 	}
 	var attemptLedger assistant.AttemptLedger
 	if s.contentDB != nil {
@@ -2541,9 +2459,9 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 	// to read another field.
 	buildFor := func(r Responder) agentHandlers {
 		return agentHandlers{
-			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
+			op: agentOp, configOp: configOp,
 			noteOp: noteOp, snippetOp: snippetOp, agentTools: agentTools,
-			credentials: credentials, client: client, askSub: askSub,
+			client: client, askSub: askSub,
 			harness: s.agentHarness, harnessID: s.agentHarnessID,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
@@ -2587,10 +2505,6 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 		reg(contentSub, catalog.OpAgentApprove, params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
-		}),
-		regResponder(contentSub, catalog.OpAgentDump, params(validateAgentDumpRaw), func(r Responder) handlerFunc {
-			h := agentDumpHandlers{op: dumpOp, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 	}
 }

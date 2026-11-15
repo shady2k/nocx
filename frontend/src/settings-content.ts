@@ -17,7 +17,7 @@ import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import { t } from './i18n/locale-model'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
-import type { EndpointClient } from './endpoints'
+import type { RolesClient } from './roles-client'
 import type { HistoryStatusStore } from './history-status'
 import type { CheckoutsStatusStore } from './checkouts-status'
 
@@ -41,7 +41,7 @@ export class SettingsContent extends SolidPaneContent {
     private readonly vaultClient?: import('./vault-client').VaultClient,
     private readonly dialogClient?: import('./dialog-client').DialogClient,
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
-    private readonly endpointsClient?: EndpointClient,
+    private readonly rolesClient?: RolesClient,
     private readonly agentClient?: AgentClient,
     private readonly snippetsStore?: SnippetsStore,
     /** Whether durable command history is running (nocx-rtg0.15). Passed
@@ -59,7 +59,7 @@ export class SettingsContent extends SolidPaneContent {
     private readonly updateCheckError?: import('./update-check').UpdateCheckController['error'],
     private readonly policyClient?: import('./policy-client').PolicyClient,
     /** The ONE secret picker source (nocx-3o0ed.4). Built by the composition
-     *  root, not here: the Connections and Endpoints pages place the same
+     *  root, not here: the Connections page place the same
      *  field the API workbench does, and a second source assembled beside
      *  main.tsx's would be the same wiring written twice — agreeing until the
      *  day one of them changed. */
@@ -118,7 +118,7 @@ export class SettingsContent extends SolidPaneContent {
           rulesClient: this.rulesClient,
           typingClient: this.typingClient,
           paneName: this.paneName,
-          endpointsClient: this.endpointsClient,
+          rolesClient: this.rolesClient,
           snippetsStore: this.snippetsStore,
           historyStatus: this.historyStatus,
           checkoutsStatus: this.checkoutsStatus,
@@ -160,10 +160,6 @@ export class SettingsContent extends SolidPaneContent {
       const queued = this.pendingNewSecret
       this.pendingNewSecret = null
       this.handle.newSecret(queued.name, queued.value)
-    }
-    if (this.pendingNewEndpoint) {
-      this.pendingNewEndpoint = false
-      this.handle.newEndpoint()
     }
     if (this.pendingPage !== null) {
       const id = this.pendingPage
@@ -223,19 +219,6 @@ export class SettingsContent extends SolidPaneContent {
     this.pendingNewSecret = { name, value }
   }
 
-  /** Open the Endpoints page with the editor up on a blank endpoint — the
-   *  ask surface's repair for a question refused with "no endpoint
-   *  configured". Queued before mount for the same reason as
-   *  startNewConnection: opening Settings and asking for the editor is one
-   *  user action, and the mount is a promise the caller does not hold. */
-  startNewEndpoint(): void {
-    if (this.handle) {
-      this.handle.newEndpoint()
-      return
-    }
-    this.pendingNewEndpoint = true
-  }
-
   /** Open a component page by its registry id — the general form of the
    *  three starters above, for a caller that wants the page and nothing
    *  more ("Manage snippets…", nocx-d346). Queued before mount for the same
@@ -254,7 +237,6 @@ export class SettingsContent extends SolidPaneContent {
    *  queued. An object (with either field '') means "asked"; null means
    *  "nobody asked". */
   private pendingNewSecret: { name: string; value: string } | null = null
-  private pendingNewEndpoint = false
   /** The queued page id, or null when nobody asked. */
   private pendingPage: string | null = null
 }

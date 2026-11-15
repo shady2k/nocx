@@ -15,6 +15,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,23 +49,28 @@ func localRunContext() agenttools.RunContext {
 	return agenttools.RunContext{Environment: localPaneEnvironment()}
 }
 
-// kernelOn builds the effect kernel over the real registry and dispatcher for
-// a run whose pane is `pane`, with a ledger and the announcement seam the
-// tests watch.
-func kernelOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *effectKernel {
+// toolsOn binds the harness's tool entry for one pane.
+func toolsOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *RunTools {
 	t.Helper()
-	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	owner, _, err := NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
-		t.Fatalf("Assemble: %v", err)
+		t.Fatal(err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "session-1", 1, "turn-entry", nil, Attachments{}, func(call ToolCall) error {
-		watch.seen = append(watch.seen, call)
-		return nil
-	}, toolSeams{paneEnvironment: pane})
+	bound, err := BindRunTools(context.Background(), owner, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, Environment: pane, AttemptLedger: ledger, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-1", SessionID: "session-1", Attempt: 1, TurnEntryID: "turn-entry"}, func(call ToolCall) error { watch.seen = append(watch.seen, call); return nil })
 	if err != nil {
-		t.Fatalf("newEffectKernel: %v", err)
+		t.Fatal(err)
 	}
-	return k
+	return bound
+}
+
+func invokePaneTool(bound *RunTools, method, callID, args string) (string, error) {
+	invocation, err := bound.Admit(context.Background())
+	if err != nil {
+		return "", err
+	}
+	invocation.Context = context.Background()
+	invocation.Method, invocation.RawParams = method, []byte(args)
+	return bound.Dispatch(invocation)
 }
 
 // TestFileToolsRefuseAPaneThatIsNotThisMachine is the criterion: on an SSH
@@ -82,7 +88,7 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	ledger := &fakeLedger{}
 	watch := &watchedCalls{}
-	k := kernelOn(t, grant, remotePaneEnvironment(), ledger, watch)
+	k := toolsOn(t, grant, remotePaneEnvironment(), ledger, watch)
 
 	calls := []struct{ method, params string }{
 		{"files.read", fmt.Sprintf(`{"path":%q}`, readPath)},
@@ -90,10 +96,12 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 		{"files.create", fmt.Sprintf(`{"path":%q,"content":"created"}`, created)},
 	}
 	for _, call := range calls {
-		out, err := k.Invoke(context.Background(), call.method, "call-1", call.params)
-		if err != nil {
-			t.Fatalf("%s on an SSH pane: err = %v, want a refusal the model reads as an answer", call.method, err)
+		_, err := invokePaneTool(k, call.method, "call-1", call.params)
+		var refusal *DispatchRefusalError
+		if !errors.As(err, &refusal) {
+			t.Fatalf("%s: %v, want a dispatch refusal", call.method, err)
 		}
+		out := refusal.Reason
 		if !strings.Contains(out, "REFUSED") || !strings.Contains(out, call.method) {
 			t.Fatalf("%s on an SSH pane: result = %q, want the refusal naming the tool", call.method, out)
 		}
@@ -135,9 +143,9 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	watch := &watchedCalls{}
-	k := kernelOn(t, grant, localPaneEnvironment(), &fakeLedger{}, watch)
+	k := toolsOn(t, grant, localPaneEnvironment(), &fakeLedger{}, watch)
 
-	out, err := k.Invoke(context.Background(), "files.read", "call-1", fmt.Sprintf(`{"path":%q}`, readPath))
+	out, err := invokePaneTool(k, "files.read", "call-1", fmt.Sprintf(`{"path":%q}`, readPath))
 	if err != nil {
 		t.Fatalf("files.read on a local pane: %v", err)
 	}
@@ -157,7 +165,7 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, invokeErr := k.Invoke(context.Background(), "files.edit", "call-2", string(editParams)); invokeErr != nil {
+	if _, invokeErr := invokePaneTool(k, "files.edit", "call-2", string(editParams)); invokeErr != nil {
 		t.Fatalf("files.edit on a local pane: %v", invokeErr)
 	}
 	if got := readFileString(t, readPath); got != "hello there\n" {
@@ -168,7 +176,7 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, createErr := k.Invoke(context.Background(), "files.create", "call-3", string(createParams)); createErr != nil {
+	if _, createErr := invokePaneTool(k, "files.create", "call-3", string(createParams)); createErr != nil {
 		t.Fatalf("files.create on a local pane: %v", createErr)
 	}
 	if got := readFileString(t, created); got != "made\n" {
@@ -188,4 +196,20 @@ func readFileString(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+func kernelOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *effectKernel {
+	t.Helper()
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "session-1", 1, "turn-entry", nil, Attachments{}, func(call ToolCall) error {
+		watch.seen = append(watch.seen, call)
+		return nil
+	}, toolSeams{paneEnvironment: pane})
+	if err != nil {
+		t.Fatalf("newEffectKernel: %v", err)
+	}
+	return k
 }

@@ -1,16 +1,10 @@
 package assistant
 
-// The egress gate's acceptance tests (nocx-0p7y2, design §7.1): a tool
-// result containing secret-shaped material does not leave for the provider —
-// the call BLOCKS on the person's answer and the findings name what was found
-// and where. These are the criteria 1-5 assertions, driven through the REAL
-// eino agent against the fake OpenAI server (asserted on what the engine sent)
-// and through the middleware where the engine seam cannot reach.
+// Tool-result egress screening through the kernel and pipeline.
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,165 +34,6 @@ func (k *knownMatcher) FindKnown(_ context.Context, text string) ([]KnownMatch, 
 
 // askParamsWith builds AskParams with the full run seams: the ledger, the
 // approvals, the egress vault comparison and the renderer-request seam.
-func askParamsWith(baseURL string, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, requester RendererRequester) AskParams {
-	p := askParams(baseURL, grant, ledger, approvals)
-	p.KnownMaterial = known
-	p.Requester = requester
-	return p
-}
-
-// ── criterion 1: a value known to the vault does not leave ───────────────
-
-// TestAsk_EgressKnownVaultValueIsAskedBeforeItLeaves is acceptance criterion
-// 1: a tool result containing a value the vault holds is withheld until the
-// person answers, and the finding names it as known material. The value is
-// deliberately NOT a recognizer shape (a short password-like token) — the
-// vault comparison is what catches it, and the assertion proves that path
-// fires. Nothing reached the model before the answer: exactly one request hit
-// the server, the one that proposed the call.
-func TestAsk_EgressKnownVaultValueIsAskedBeforeItLeaves(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	const secret = "known-secret-value-123"
-	writeFile(t, filepath.Join(dir, "a.txt"), "deploy key: "+secret)
-
-	ledger := &fakeLedger{}
-	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
-	defer srv.Close()
-
-	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	approvals := NewApprovalStore()
-	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
-	q.before = func() {
-		if n := f.requests.Load(); n != 1 {
-			t.Errorf("the engine made %d model requests while the result was withheld, want 1", n)
-		}
-	}
-	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{value: secret, name: "github-token"}, nil)
-	p.Questioner = q
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
-		t.Fatal("the run went on after the person refused to send the result")
-	}
-	if len(q.egressAsked) != 1 {
-		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
-	}
-	req := q.egressAsked[0]
-	if len(req.Findings) != 1 {
-		t.Fatalf("findings = %+v, want exactly one", req.Findings)
-	}
-	f0 := req.Findings[0]
-	if f0.Source != EgressFindingKnown {
-		t.Fatalf("finding source = %q, want known (the vault comparison fired)", f0.Source)
-	}
-	if f0.SecretName != "github-token" {
-		t.Fatalf("finding names %q, want the vault's catalogue name", f0.SecretName)
-	}
-	if f0.Start < 0 || f0.End <= f0.Start {
-		t.Fatalf("finding has no valid span: %+v", f0)
-	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests, want 1 — the tool result never left for the provider", n)
-	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want 1 (the call ran; its result was withheld)", s)
-	}
-}
-
-// ── criterion 2: a heuristic match suspends the same way, distinguishably ─
-
-// TestAsk_EgressHeuristicIsAskedDistinguishably is acceptance criterion 2: a
-// recognizer match asks through the same gate, and the finding is
-// distinguishable from the known-material case — the source field names which
-// detector fired, and the heuristic finding carries the recognizer's own kind
-// where the known finding carried the vault's name.
-func TestAsk_EgressHeuristicIsAskedDistinguishably(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	const key = "sk-proj-abcdefghijklmnopqrstuvwx"
-	writeFile(t, filepath.Join(dir, "a.txt"), "the key is "+key)
-
-	ledger := &fakeLedger{}
-	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
-	defer srv.Close()
-
-	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	approvals := NewApprovalStore()
-	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
-	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, nil) // the vault knows nothing
-	p.Questioner = q
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
-		t.Fatal("the run went on after the person refused to send the result")
-	}
-	if len(q.egressAsked) != 1 {
-		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
-	}
-	if len(q.egressAsked[0].Findings) == 0 {
-		t.Fatal("no findings for a recognizer-shaped value")
-	}
-	f0 := q.egressAsked[0].Findings[0]
-	if f0.Source != EgressFindingHeuristic {
-		t.Fatalf("finding source = %q, want heuristic — a shape, not a known value", f0.Source)
-	}
-	if f0.Kind == "" {
-		t.Fatalf("heuristic finding carries no kind: %+v", f0)
-	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests, want 1 — nothing left for the provider", n)
-	}
-}
-
-// ── criterion 3: an error returned by a tool is screened on the same path ─
-
-// TestAsk_EgressErrorStringScreened is acceptance criterion 3: a tool that
-// FAILS is screened on the same path as a success — an error string carries
-// paths, hostnames and names, and the gate that screens successes and not
-// failures has closed the wide door and left the narrow one open. The
-// session.read tool's renderer-request seam fails with a secret-shaped
-// message; the question reports the finding and that it was an error.
-func TestAsk_EgressErrorStringScreened(t *testing.T) {
-	grant := sessionGrant("session-a", autonomousMatrix())
-	requester := &recordingRequester{err: errors.New("capture failed: token sk-proj-abcdefghijklmnopqrstuvwx")}
-
-	ledger := &fakeLedger{}
-	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
-	defer srv.Close()
-
-	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	approvals := NewApprovalStore()
-	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
-	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, requester)
-	p.Questioner = q
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
-		t.Fatal("the run went on after the person refused to send the error")
-	}
-	if len(q.egressAsked) != 1 {
-		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
-	}
-	if !q.egressAsked[0].WasError {
-		t.Fatal("the question does not say the findings were in an error string")
-	}
-	if len(q.egressAsked[0].Findings) == 0 {
-		t.Fatal("no findings in the error string")
-	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests, want 1 — the error never left for the provider", n)
-	}
-}
-
-// ── criterion 4: no finding means the result is returned unchanged ────────
-
-// TestMiddleware_EgressNoFindingReturnsByteForByte is acceptance criterion
-// 4's paired end: a tool result with no finding passes the egress gate
-// unchanged, byte for byte. The shared model-facing frame is applied only
-// after that gate, so this test compares the executor bytes with the result
-// after the one deliberate framing step.
 func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	path := filepath.Join(dir, "a.txt")
@@ -279,52 +114,14 @@ func TestEgressRequest_NeverCarriesMaterial(t *testing.T) {
 // what the ledger records: exactly one execution (the first call's), never a
 // second. The bytes ARE the call's result, so a no leaves nothing to continue
 // with and the run ends (ADR-anntnxdj §3).
-func TestAsk_ADeclinedEgressStopsTheRunBeforeTheNextCall(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	writeFile(t, filepath.Join(dir, "a.txt"), "token: sk-proj-abcdefghijklmnopqrstuvwx")
-	writeFile(t, filepath.Join(dir, "b.txt"), "clean")
-
-	ledger := &fakeLedger{}
-	f, srv := newFakeOpenAI(callThenAnswer(
-		toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))},
-		toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "b.txt"))},
-	))
-	defer srv.Close()
-
-	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	approvals := NewApprovalStore()
-	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
-	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{}, nil)
-	p.Questioner = q
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err == nil {
-		t.Fatal("the run went on after the person refused to send the result")
-	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1 — the second call must not run after the refusal", s)
-	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests, want 1 — nothing left for the provider", n)
-	}
-}
-
-// ── the seam fails closed ─────────────────────────────────────────────────
-
-// TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial pins the wiring
-// requirement: a run that may execute tools MUST carry the egress vault
-// comparison, or the gate cannot see short vault values and a result would
-// leave for the provider unscreened. The failure is at construction, before
-// any tool runs — never a silent weaker gate.
 func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil); err == nil {
-		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
+	if _, err := newKernelFixture(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil); err == nil {
+		t.Fatal("newKernelFixture accepted a run with no egress vault comparison")
 	}
 }
 
@@ -370,4 +167,8 @@ func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
 	if !strings.Contains(body, "the key is ") {
 		t.Fatalf("recorded body = %q, want the rest of the result kept", body)
 	}
+}
+
+func askParamsWith(_ string, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, requester RendererRequester) AskParams {
+	return AskParams{Grant: grant, AttemptLedger: ledger, Approvals: approvals, KnownMaterial: known, Requester: requester, SessionID: "session-a", RunID: "run-1", Attempt: 1, Environment: localPaneEnvironment()}
 }

@@ -63,7 +63,7 @@ import (
 // access, which is the other half of the trade (§5). Availability is what is
 // spent; consistency is what is bought.
 const (
-	// StoreConfig is the config store: the profile/group/endpoint document and
+	// StoreConfig is the config store: profiles, groups, agent role choices and
 	// the settings document, which one config operation can write in sequence.
 	StoreConfig = "config"
 	// StoreVault is the vault: one document plus provider material behind a

@@ -16,7 +16,6 @@ import {
   createCommandBlock,
   type AnswerTextSource,
   type BlockKind,
-  type DumpSource,
   type FrozenStatus,
   type RunningBlockActions,
 } from './blocks'
@@ -122,7 +121,6 @@ export function restoredBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   menuActions?: RunningBlockActions,
-  dump?: DumpSource,
   answerText?: AnswerTextSource,
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
@@ -166,7 +164,6 @@ export function restoredBlock(
     answerText,
     menuActions,
     facts.entryId,
-    dump,
   )
   el.dataset.restored = 'true'
   if (facts.kind === 'ask') {
@@ -266,7 +263,6 @@ export function restoredTurn(
   store: CommandSnapshotStore,
   drawCaused: (cause: RestoredCause) => HTMLElement | null,
   menuActions?: RunningBlockActions,
-  dump?: DumpSource,
   answerText?: AnswerTextSource,
 ): HTMLElement[] {
   const el = restoredBlock(
@@ -276,7 +272,6 @@ export function restoredTurn(
     onSelect,
     store,
     menuActions,
-    dump,
     answerText,
   )
   // The turn's prose, when the run still had it, is drawn by the block

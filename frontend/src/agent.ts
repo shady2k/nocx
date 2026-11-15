@@ -1,7 +1,7 @@
 /**
  * Agent client — the assistant's control-plane surface (nocx-edio, design
  * §7). agent.status tells the ask surface whether an ask can succeed:
- * endpoint configured, credential resolvable, last probe result. The wire
+ * the chosen agent installed and configured. The wire
  * shapes are declared once, in contracts/agent.*.schema.json; this module's
  * types are generated from them.
  *
@@ -9,7 +9,6 @@
  */
 import { Dispatcher } from './dispatcher'
 import type { AgentCancel } from './generated/agent.cancel'
-import type { AgentDump } from './generated/agent.dump'
 import type { AgentStatusResult } from './generated/agent.status'
 
 export class AgentClient {
@@ -21,9 +20,5 @@ export class AgentClient {
 
   cancel(runId: number): Promise<AgentCancel> {
     return this.dispatcher.call<AgentCancel>('agent.cancel', { runId })
-  }
-
-  dump(entryId: string): Promise<AgentDump> {
-    return this.dispatcher.call<AgentDump>('agent.dump', { entryId })
   }
 }

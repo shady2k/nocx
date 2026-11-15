@@ -1,28 +1,10 @@
 package transport
 
 import (
-	"strings"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 )
-
-// The old eino engine recognizes unexecuted envelopes. Harness agents own
-// their own tool dialect; the transport still maps this typed failure to a
-// safe sentence if an answering backend returns it.
-func TestAskFailure_UnexecutedToolCallEnvelopeDialectsFailAtTransportPayload(t *testing.T) {
-	reason, sentence := classifyAskFailure(&assistant.UnexecutedToolCallError{}, "fixture-model")
-	if reason != content.TermFailed {
-		t.Fatalf("reason=%q, want failed", reason)
-	}
-	if sentence != assistant.UnexecutedToolCallSentence {
-		t.Fatalf("sentence=%q", sentence)
-	}
-	if strings.Contains(sentence, "<tool_call>") {
-		t.Fatalf("provider envelope leaked: %q", sentence)
-	}
-}
 
 func TestAskFailure_OrdinaryProseThatMentionsToolCallCompletes(t *testing.T) {
 	const answer = "The answer quotes <tool_call> but gives a real explanation."

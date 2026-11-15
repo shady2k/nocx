@@ -78,18 +78,6 @@ func (q *recordingQuestioner) AskEgress(_ context.Context, req *EgressRequest) A
 // given answer, and returns the questions they were asked. The store decision
 // the transport writes is recorded first, exactly as agent.approve does before
 // it wakes the call.
-func withPerson(t *testing.T, cl Client, p AskParams, answer Answer, kind DeclineKind) (*recordingQuestioner, error) {
-	t.Helper()
-	if p.Approvals == nil {
-		p.Approvals = NewApprovalStore()
-	}
-	q := &recordingQuestioner{store: p.Approvals, answer: answer, kind: kind}
-	p.Questioner = q
-	return q, cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-}
-
-// kernelForQuestioner builds the kernel with the service wired through the
-// seam the transport hands its approval store on.
 func kernelForQuestioner(t *testing.T, grant content.Grant, ledger AttemptLedger, q Questioner) *effectKernel {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))

@@ -7,7 +7,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 )
 
-func roleCall(t *testing.T, h *endpointHarness, method string, params map[string]any) json.RawMessage {
+func roleCall(t *testing.T, h *configVaultHarness, method string, params map[string]any) json.RawMessage {
 	t.Helper()
 	raw := jsonrpcCall(t, h.conn, method, params)
 	var env struct {
@@ -21,7 +21,7 @@ func roleCall(t *testing.T, h *endpointHarness, method string, params map[string
 }
 
 func TestRoles_PerAgentChoicesAndClearOverTheWire(t *testing.T) {
-	h := newEndpointHarness(t)
+	h := newConfigVaultHarness(t)
 	for agent, model := range map[string]string{"pi": "one", "omp": "two"} {
 		roleCall(t, h, "roles.assign", map[string]any{"agentId": agent, "role": "answering", "model": model})
 	}
@@ -53,7 +53,7 @@ func TestRolesList_DTOConformsToContract(t *testing.T) {
 }
 
 func TestRoles_OverTheWireConformsToContract(t *testing.T) {
-	h := newEndpointHarness(t)
+	h := newConfigVaultHarness(t)
 	for _, tc := range []struct {
 		method string
 		params map[string]any

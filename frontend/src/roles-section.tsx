@@ -2,10 +2,10 @@
 import { For, Show, createSignal, onMount } from 'solid-js'
 import { Select, Stack, Button, Field } from './ui'
 import { t } from './i18n/locale-model'
-import type { EndpointClient, WireRole } from './endpoints'
+import type { RolesClient, WireRole } from './roles-client'
 
 export interface RolesSectionProps {
-  client: EndpointClient
+  client: RolesClient
   agentId: string
   models: readonly { id: string; name: string }[]
 }

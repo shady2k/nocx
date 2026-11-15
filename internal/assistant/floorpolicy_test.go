@@ -73,37 +73,6 @@ func floorPermissivePolicy() content.EffectPolicy {
 	}
 }
 
-func TestNewClient_InjectsFloorBeforeToolExecution(t *testing.T) {
-	configDir := filepath.Join(t.TempDir(), "config", "nocx")
-	_, server := newFakeOpenAI(callThenAnswer(toolCallSpec{
-		name: "files.read",
-		args: `{"path":"` + filepath.Join(configDir, "agent-policy.json") + `"}`,
-		id:   "floor-call",
-	}))
-	defer server.Close()
-
-	grant := floorPermissivePolicy().AsGrant([]content.GrantScope{
-		{Kind: content.ResourceSession, ID: "session-a"},
-		{Kind: content.ResourcePath, ID: "/"},
-	})
-	client, _, err := NewClientAndRegistry(nil, nil, content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx")))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	events := make([]AskEvent, 0)
-	if err := client.Ask(context.Background(), askParams(server.URL, &grant, &fakeLedger{}, nil), func(event AskEvent) error {
-		events = append(events, event)
-		return nil
-	}); err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	for _, event := range events {
-		if event.Kind == AskToolCall {
-			t.Fatalf("floor-protected call was announced for execution: %+v", event.Call)
-		}
-	}
-}
-
 func TestFloor_ReasonIsTruthfulForReadAndWrite(t *testing.T) {
 	configDir := filepath.Join(t.TempDir(), "config", "nocx")
 	floor := content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx"))

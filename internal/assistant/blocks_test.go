@@ -1,24 +1,13 @@
 package assistant
 
-// The block tools' tests (nocx-5u3oz.6): the pair that lists the blocks a
-// run was granted and reads a WINDOW of one. The narrowing (a session, and
-// therefore a block, the grant does not name is refused BEFORE anything is
-// read), the window contract of the return (design §4.4 — the model learns
-// the total before it reads, and a window past the end is answered honestly
-// rather than as an error), and the end-to-end: several hundred lines of
-// output, a question about the END of it, answered.
+// Session-item tool execution and backend source fixtures.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,14 +67,6 @@ func (f *fakeBlocks) listCalls() []listedBlocks {
 	return append([]listedBlocks(nil), f.listed...)
 }
 
-func (f *fakeBlocks) readCalls() []readBlock {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]readBlock(nil), f.read...)
-}
-
-// unscriptedBlocks is embedded by renderer/run fakes; any session-source call
-// is a test defect rather than an empty successful answer.
 type unscriptedBlocks struct{}
 
 func (unscriptedBlocks) ListSessionItems(context.Context, string, int) (SessionItems, error) {
@@ -102,44 +83,6 @@ func (unscriptedBlocks) ReadSessionItem(context.Context, string, string, int, in
 // puts the body back after recording it, so the handler reads the same bytes
 // the transport wrote — which is what makes an assertion about what the model
 // was HANDED an assertion about the engine, not about the test.
-func requestBody(r *http.Request) string {
-	b, _ := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(b))
-	return string(b)
-}
-
-// streamAnswer writes one streamed answer, the way a real completion arrives.
-func streamAnswer(w http.ResponseWriter, text string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON(text, ""))
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON("", "stop"))
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-}
-
-// totalFromListBody reads the line count out of the session.list result the
-// engine put into the conversation — the model's own path to the total.
-func totalFromListBody(t *testing.T, body string) int {
-	t.Helper()
-	const key = `\"lines\":`
-	i := strings.Index(body, key)
-	if i < 0 {
-		t.Fatalf("no session.list result in the request the model was handed: %s", body)
-	}
-	rest := body[i+len(key):]
-	end := 0
-	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-		end++
-	}
-	n, err := strconv.Atoi(rest[:end])
-	if err != nil {
-		t.Fatalf("line count %q: %v", rest[:end], err)
-	}
-	return n
-}
-
-func ptrGrant(g content.Grant) *content.Grant { return &g }
-
 func toolsDirFS(t *testing.T) fs.FS {
 	t.Helper()
 	return os.DirFS(realToolsFS)
@@ -147,19 +90,6 @@ func toolsDirFS(t *testing.T) fs.FS {
 
 // newClientWithTestToolsFS keeps filesystem-backed schema fixtures on the
 // production client assembly path.
-func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := assembleToolRegistry(toolsFS)
-	if err != nil {
-		return nil, err
-	}
-	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
-}
-
-// ── the middleware ───────────────────────────────────────────────────────
-
-// The wiring gap is honest: a run whose block seam is not wired refuses the
-// tool with a sentence, never a silent empty list.
 func TestMiddleware_BlocksWithoutSourceIsHonest(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, nil)
@@ -218,192 +148,10 @@ func (r *blocksOnlyRequester) ReadSessionItem(ctx context.Context, sessionID, it
 	return r.blocks.ReadSessionItem(ctx, sessionID, itemID, start, count)
 }
 
-// there. The answer is the marker that lives on line 397 and nowhere else,
-// so a run that read the head of the block cannot pass this.
-func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
-	const marker = "Error: disk quota exceeded on /dev/sda9"
-	lines := make([]string, 400)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("filesystem-%03d      1.0T   400G   600G  40%%", i)
-	}
-	lines[397] = marker
-
-	src := &fakeBlocks{
-		items: SessionItems{Items: []SessionItem{{
-			ID: "blk-df", Command: "df -h", State: "exited", Lines: len(lines),
-		}}},
-		item: SessionItemRead{
-			Command: "df -h", State: "exited", Total: len(lines), Start: 0, End: len(lines), Text: strings.Join(lines, "\n"),
-		},
-	}
-	var turn int
-	f, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
-		turn++
-		switch turn {
-		case 1:
-			streamToolCalls(w, toolCallSpec{name: "session.list", args: `{}`, id: "call_list"})
-		case 2:
-			// The model read the total off the list result and aims at the end.
-			total := totalFromListBody(t, requestBody(r))
-			args := fmt.Sprintf(`{"id":"blk-df","start":%d,"count":20}`, total-20)
-			streamToolCalls(w, toolCallSpec{name: "session.read", args: args, id: "call_read"})
-		default:
-			answer := "the output ends with something else"
-			if strings.Contains(requestBody(r), marker) {
-				answer = marker
-			}
-			streamAnswer(w, answer)
-		}
-	})
-	defer srv.Close()
-
-	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), &fakeLedger{}, nil)
-	p.SessionSource = src
-	p.Messages = []Message{{Role: "user", Content: "did df fail, and why?"}}
-
-	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
+func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, floor content.Floor) (Client, error) {
+	reg, err := assembleToolRegistry(toolsFS)
 	if err != nil {
-		t.Fatalf("newClient: %v", err)
+		return nil, err
 	}
-	var answer strings.Builder
-	// Only the ANSWER, deliberately: since nocx-bshm2 a tool's return value
-	// no longer travels the delta path, so this asserts the model NAMED the
-	// marker in its prose — not that the tool's window happened to contain
-	// it. That is the criterion the epic actually wants.
-	if err := cl.Ask(context.Background(), p, func(ev AskEvent) error {
-		if ev.Kind == AskAnswer {
-			answer.WriteString(ev.Text)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	if !strings.Contains(answer.String(), marker) {
-		t.Fatalf("answer = %q, want it to name the line at the END of the output", answer.String())
-	}
-	// And the read the model made was the END of the block, not the head:
-	// the window it asked for starts past line 300.
-	calls := src.readCalls()
-	if len(calls) != 1 {
-		t.Fatalf("read %d windows, want exactly 1", len(calls))
-	}
-	if calls[0].start < 300 {
-		t.Errorf("the model read from line %d; the marker is at 397 — the total did not reach it", calls[0].start)
-	}
-	_ = f
-}
-
-// TestAsk_AMarkedWindowIsReadEvenWhenTheModelOmitsTheCount is the marked
-// line the person actually asked about (nocx-hp8p2.15).
-//
-// The person selected ONE line of `df -h` and asked what it means. The model
-// called session.read with the mark's start and no count, so the read ran
-// from that line to the end of the block and it answered about `df -h`. Two
-// rounds of prompt wording did not stop it, and the prompt is the wrong place
-// for this: the run already KNOWS what was marked — the window travelled with
-// the ask — so a read of a marked item cannot be allowed to run past the mark
-// just because the model left a field out.
-func TestAsk_AMarkedWindowIsReadEvenWhenTheModelOmitsTheCount(t *testing.T) {
-	lines := make([]string, 12)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("tmpfs      1.0M   0  1.0M  0%% /run/credentials/unit-%02d.service", i)
-	}
-	src := &fakeBlocks{
-		items: SessionItems{Items: []SessionItem{{
-			ID: "blk-df", Command: "df -h", State: "exited", Lines: len(lines),
-		}}},
-		item: SessionItemRead{
-			Command: "df -h", State: "exited", Total: len(lines),
-			Start: 0, End: len(lines), Text: strings.Join(lines, "\n"),
-		},
-	}
-	var turn int
-	_, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
-		turn++
-		if turn == 1 {
-			// The model names the item and the start it was given, and omits
-			// the count — the exact call the owner's model made.
-			streamToolCalls(w, toolCallSpec{
-				name: "session.read", args: `{"id":"blk-df","start":5}`, id: "call_read",
-			})
-			return
-		}
-		streamAnswer(w, "that line is a credentials mount")
-	})
-	defer srv.Close()
-
-	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), &fakeLedger{}, nil)
-	p.SessionSource = src
-	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-df", Start: 5, Count: 1}}
-	p.Messages = []Message{{Role: "user", Content: "what does this mean?"}}
-
-	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("newClient: %v", err)
-	}
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	calls := src.readCalls()
-	if len(calls) != 1 {
-		t.Fatalf("read %d windows, want exactly 1", len(calls))
-	}
-	if calls[0].start != 5 || calls[0].count != 1 {
-		t.Errorf("read window was start=%d count=%d; the mark is start=5 count=1 — a read of a marked item must not run past it",
-			calls[0].start, calls[0].count)
-	}
-}
-
-// TestAsk_AWiderWindowAroundAMarkIsHonoured is the other half of
-// nocx-hp8p2.15: the mark is the DEFAULT, never a cage. A line of a long log
-// often means nothing without its neighbours, so a window the model asks for
-// is read as asked — the substitution only fills a window it left out.
-func TestAsk_AWiderWindowAroundAMarkIsHonoured(t *testing.T) {
-	lines := make([]string, 40)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("log line %02d", i)
-	}
-	src := &fakeBlocks{
-		items: SessionItems{Items: []SessionItem{{
-			ID: "blk-log", Command: "journalctl", State: "exited", Lines: len(lines),
-		}}},
-		item: SessionItemRead{
-			Command: "journalctl", State: "exited", Total: len(lines),
-			Start: 0, End: len(lines), Text: strings.Join(lines, "\n"),
-		},
-	}
-	var turn int
-	_, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
-		turn++
-		if turn == 1 {
-			// Ten rows either side of the marked line 20.
-			streamToolCalls(w, toolCallSpec{
-				name: "session.read", args: `{"id":"blk-log","start":10,"count":21}`, id: "call_read",
-			})
-			return
-		}
-		streamAnswer(w, "the marked line follows a restart")
-	})
-	defer srv.Close()
-
-	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), &fakeLedger{}, nil)
-	p.SessionSource = src
-	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-log", Start: 20, Count: 1}}
-	p.Messages = []Message{{Role: "user", Content: "what does this line mean?"}}
-
-	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
-	if err != nil {
-		t.Fatalf("newClient: %v", err)
-	}
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	calls := src.readCalls()
-	if len(calls) != 1 {
-		t.Fatalf("read %d windows, want exactly 1", len(calls))
-	}
-	if calls[0].start != 10 || calls[0].count != 21 {
-		t.Errorf("read window was start=%d count=%d; the model asked for start=10 count=21 — a mark bounds a read it did not ask for, never one it did",
-			calls[0].start, calls[0].count)
-	}
+	return newClientWithRegistry(logger, reg, floor), nil
 }

@@ -1784,6 +1784,19 @@ func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
+	// A message typed while a call awaits approval ANSWERS that question
+	// (ADR-anntnxdj decision 4): the call is declined in the person's own
+	// words, the calls already queued behind it are refused with the same
+	// sentence by the turn's own order, and only then does the message reach
+	// the agent. The question's wait sends agent.approvalRetired on its way
+	// out, so the prompt leaves the block at once.
+	if wait := h.takePendingAnswerWait(p.RunID); wait != nil {
+		answered := wait.settleLocked(assistant.Declined{Reason: assistant.PersonMessageResult(wait.tool, p.Text)})
+		wait.mu.Unlock()
+		if !answered {
+			h.log.Warn("agent steer: the open question was settled by somebody else", "run", p.RunID, "tool", wait.tool)
+		}
+	}
 	steerer := rc.control.attachedSteerer()
 	if steerer == nil {
 		// The run is recorded but its turn is not reaching the agent yet, or

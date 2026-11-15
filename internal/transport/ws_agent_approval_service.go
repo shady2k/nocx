@@ -364,6 +364,33 @@ func (h agentHandlers) endAnswerWait(runID int64, w *answerWait) {
 	h.pendingRuns[runID] = rc
 }
 
+// takePendingAnswerWait claims whatever question this run has open. It is the
+// claim a person's MESSAGE makes (ADR-anntnxdj decision 4): they answered the
+// question they were looking at, so the message names no binding of its own. A
+// nil result means no question is open — the ordinary case for a message typed
+// while the agent simply answers — and the message declines nothing.
+func (h agentHandlers) takePendingAnswerWait(runID int64) *answerWait {
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[runID]
+	if !ok || rc.approvalWait == nil {
+		h.pendingRunsMu.Unlock()
+		return nil
+	}
+	w := rc.approvalWait
+	rc.approvalWait = nil
+	rc.pendingReason = ""
+	h.pendingRuns[runID] = rc
+	h.pendingRunsMu.Unlock()
+	// The same claim rule as agent.approve's: whoever holds settlement
+	// authority under the wait's own lock is the one that answers it.
+	w.mu.Lock()
+	if w.settled {
+		w.mu.Unlock()
+		return nil
+	}
+	return w
+}
+
 // takeAnswerWait claims the pending question agent.approve is answering. A nil
 // result means no call is blocked on this binding: the answer names a question
 // this run is not waiting on, and it is refused rather than settled.

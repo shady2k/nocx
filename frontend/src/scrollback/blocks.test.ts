@@ -2706,6 +2706,24 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.querySelector('.ui-person-message__label')?.textContent).toBe('You')
   })
 
+  it('restates a message as waiting when the turn drops what its agent had queued', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('what is in the log?', '/')
+    h.append('let me look')
+    const line = h.steer('check the second log')
+    // Taken by the agent: the words are in this turn, unmarked.
+    expect(line.root.dataset.state).toBe('steered')
+    expect(line.root.querySelector('.ui-person-message__note')).toBeNull()
+    // The cancel dropped it: the SAME line says so — one line, one truth — and
+    // the run of prose above it is not disturbed.
+    line.markQueued()
+    expect(line.root.dataset.state).toBe('next_question')
+    expect(line.root.querySelector('.ui-person-message__note')?.textContent).toBe(
+      'asked when this answer ends',
+    )
+    expect(flowOf(h)).toEqual(['text:let me look', 'ui-person-message'])
+  })
+
   it('renders one child per call id, however many times the backend announces it', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

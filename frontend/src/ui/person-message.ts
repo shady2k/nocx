@@ -37,6 +37,7 @@ export type PersonMessageState = 'steered' | 'next_question'
 
 export class PersonMessage {
   readonly root: HTMLElement
+  private readonly labels: PersonMessageLabels
 
   constructor(text: string, labels: PersonMessageLabels, state: PersonMessageState = 'steered') {
     this.root = document.createElement('div')
@@ -58,15 +59,26 @@ export class PersonMessage {
     said.textContent = text
 
     this.root.append(who, said)
+    this.labels = labels
     this.root.dataset.state = state
-    if (state === 'next_question') {
-      // A message this turn could not take is drawn where the person sent it
-      // and marked: it is waiting, and the answer below it is not the answer to
-      // it. The note is the line's own, so the words stay the person's.
-      const note = document.createElement('span')
-      note.className = 'ui-person-message__note'
-      note.textContent = labels.queued
-      this.root.append(note)
-    }
+    if (state === 'next_question') this.markQueued()
+  }
+
+  /**
+   * Restate THIS line as one the turn did not use after all.
+   *
+   * The case: the agent took the message and a cancel then dropped it from its
+   * own queue. The line was drawn as used; it says so no more — the same words,
+   * marked as waiting, rather than a second line saying the same thing
+   * (ADR-4khgzeyp decision 3).
+   */
+  markQueued(note?: string): void {
+    this.root.dataset.state = 'next_question'
+    if (this.root.querySelector('.ui-person-message__note') !== null) return
+    // The note is the line's own, so the words stay the person's.
+    const said = document.createElement('span')
+    said.className = 'ui-person-message__note'
+    said.textContent = note ?? this.labels.queued
+    this.root.append(said)
   }
 }

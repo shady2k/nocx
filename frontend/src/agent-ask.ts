@@ -8,6 +8,7 @@ import { Dispatcher } from './dispatcher'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCancel } from './generated/agent.cancel'
 import type { AgentSteer } from './generated/agent.steer'
+import type { PersonMessage } from './ui/person-message'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunReasoning } from './generated/agent.runReasoning'
 import type { AgentRunToolCall } from './generated/agent.runToolCall'
@@ -73,7 +74,15 @@ export class AgentInputTarget implements InputTarget {
   readonly routesToShell = false
   private readonly runs = new Map<
     number,
-    { handle: AnswerBlockHandle; settle: () => void; askId: string }
+    {
+      handle: AnswerBlockHandle
+      settle: () => void
+      askId: string
+      /** The messages this turn has been given, with the line each was drawn
+       *  on: a cancel names the ones the agent dropped, and the block restates
+       *  exactly those. */
+      steered: { text: string; line: PersonMessage }[]
+    }
   >()
   /** Messages a turn kept for later, in the order the person sent them: each is
    *  asked as the conversation's next question once that turn ends. */
@@ -171,7 +180,12 @@ export class AgentInputTarget implements InputTarget {
     runId = ask.runId
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
-    this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
+    this.runs.set(ask.runId, {
+      handle,
+      askId,
+      steered: [],
+      settle: () => (settled = true),
+    })
   }
 
   /** The conversation's live turn, if one is being answered. The pane's runs
@@ -203,7 +217,9 @@ export class AgentInputTarget implements InputTarget {
     // block says which, and a kept message is asked as the conversation's next
     // question as soon as this turn terminalizes.
     const queued = outcome === 'next_question'
-    handle.steer(text, queued ? 'next_question' : 'steered')
+    const line = handle.steer(text, queued ? 'next_question' : 'steered')
+    const run = this.runs.get(runId)
+    if (run !== undefined) run.steered.push({ text, line })
     if (queued) this.nextQuestions.push(text)
   }
 
@@ -213,6 +229,7 @@ export class AgentInputTarget implements InputTarget {
       state: AgentRunState['state']
       error?: string
       droppedDeltas?: number
+      droppedSteers?: string[]
       notices?: string[]
       unarmedBounds?: string[]
       usage?: AgentRunState['usage']
@@ -268,6 +285,23 @@ export class AgentInputTarget implements InputTarget {
         undefined,
         presentation.usage,
       )
+    }
+    // A CANCELLED TURN HANDS BACK WHAT ITS AGENT DROPPED (ADR-4khgzeyp decision
+    // 3): the messages it had queued for steering and never used. The lines
+    // already drawn for them are restated as waiting — the same words, marked —
+    // and each is asked as the conversation's next question like any other kept
+    // message.
+    for (const dropped of presentation.droppedSteers ?? []) {
+      const index = run.steered.findIndex((entry) => entry.text === dropped)
+      if (index === -1) {
+        // A message this surface did not send (an extension's, or one from a
+        // previous window): it is still the person's, and it is still not lost.
+        this.nextQuestions.push(dropped)
+        continue
+      }
+      run.steered[index].line.markQueued()
+      run.steered.splice(index, 1)
+      this.nextQuestions.push(dropped)
     }
     this.seams.onTurnEnd?.(run.askId)
     // The messages this turn could not take are asked now, as its successors:

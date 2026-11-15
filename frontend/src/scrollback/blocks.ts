@@ -504,7 +504,7 @@ export interface AnswerBlockHandle {
    *  kept to be asked once it ends (ADR-anntnxdj decision 4). A kept message is
    *  drawn here too, marked, because this is where the person sent it; its
    *  question opens a block of its own later. */
-  steer(this: void, text: string, state?: PersonMessageState): void
+  steer(this: void, text: string, state?: PersonMessageState): PersonMessage
   /** Close the block: success, failure with a renderable reason, or the
    *  distinct cancelled outcome shown as "stopped". */
   close(
@@ -3926,13 +3926,15 @@ export class BlockManager {
         showTyping()
         return drawn
       },
-      steer(text: string, state: PersonMessageState = 'steered'): void {
-        if (text === '') return
+      steer(text: string, state: PersonMessageState = 'steered'): PersonMessage {
         endProse()
         const drawn = new PersonMessage(text, personMessageLabels(), state)
-        children.appendChild(drawn.root)
-        own(drawn.root)
-        showTyping()
+        if (text !== '') {
+          children.appendChild(drawn.root)
+          own(drawn.root)
+          showTyping()
+        }
+        return drawn
       },
       reasoning(text: string): void {
         if (text === '') return

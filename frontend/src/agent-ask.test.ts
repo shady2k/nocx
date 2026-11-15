@@ -5,6 +5,7 @@ import { AgentInputTarget } from './agent-ask'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
 import { BlockNotice } from './ui/block-notice'
+import { PersonMessage, type PersonMessageState } from './ui/person-message'
 
 class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
@@ -70,6 +71,9 @@ function grant(
 
 function makeTarget(grants: GrantBlock[] = []) {
   const dispatcher = new FakeDispatcher()
+  // The lines the turn drew for the person's messages, in the order they were
+  // sent: the surface restates exactly these when a cancel drops one.
+  const steeredLines: PersonMessage[] = []
   const handle: AnswerBlockHandle = {
     id: 1,
     el: document.createElement('div'),
@@ -77,7 +81,15 @@ function makeTarget(grants: GrantBlock[] = []) {
     toolCall: vi.fn(),
     reasoning: vi.fn(),
     notice: vi.fn(() => new BlockNotice({ text: '' })),
-    steer: vi.fn(),
+    steer: vi.fn((text: string, state: PersonMessageState = 'steered') => {
+      const line = new PersonMessage(
+        text,
+        { label: 'You', aria: 'your message', queued: 'asked when this answer ends' },
+        state,
+      )
+      steeredLines.push(line)
+      return line
+    }),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
@@ -95,7 +107,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     openAnswer: vi.fn(() => handle),
     onRefusal,
   })
-  return { dispatcher, handle, onRefusal, consumeGrants, target }
+  return { dispatcher, handle, onRefusal, consumeGrants, steeredLines, target }
 }
 
 describe('AgentInputTarget', () => {
@@ -989,5 +1001,49 @@ describe('AgentInputTarget and a message the turn could not take (nocx-a62cl.6.3
       .filter((call) => call.method === 'agent.ask')
       .map((call) => (call.params as { question: string }).question)
     expect(questions[1]).toBe('one')
+  })
+})
+
+describe('a message the agent took and the cancel dropped (nocx-a62cl.6.3)', () => {
+  it('restates its line as waiting and asks it as the next question', async () => {
+    const { dispatcher, handle, steeredLines, target } = makeTarget()
+    await target.submit('what is in the log?')
+    await target.submit('ask me the other thing instead')
+    expect(handle.steer).toHaveBeenCalledWith('ask me the other thing instead', 'steered')
+    const line = steeredLines[0]
+    const markQueued = vi.spyOn(line, 'markQueued')
+
+    // The agent had it queued; the cancel dropped it and named it.
+    dispatcher.emit('agent.runState', {
+      runId: 7,
+      state: 'cancelled',
+      droppedSteers: ['ask me the other thing instead'],
+    })
+
+    // The line already on screen says so now — the same words, marked — and
+    // the message is asked as the conversation's next question.
+    expect(markQueued).toHaveBeenCalledTimes(1)
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('ask me the other thing instead')
+  })
+
+  it('asks a dropped message it did not draw — it is still the person\u2019s', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+
+    dispatcher.emit('agent.runState', {
+      runId: 7,
+      state: 'cancelled',
+      droppedSteers: ['an extension queued this'],
+    })
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('an extension queued this')
   })
 })

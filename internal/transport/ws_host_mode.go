@@ -57,13 +57,24 @@ type hostModeParams struct {
 	Mode      string `json:"mode,omitempty"`
 }
 
-// hostModeResult is what both methods answer: the connection named, the method
-// in force for its host after the call, and — on a write that stands for this
-// run but could not be persisted — the sentence that says so.
-type hostModeResult struct {
+// hostModeReadResult is what connections.hostMode answers: the connection
+// named, the method its host keeps, and whether this machine has any key for
+// that host at all. The last field exists because auto alone cannot tell
+// "nobody answered" from "never connected" — the editor shows two different
+// states for them (contracts/connections.hostMode.schema.json).
+type hostModeReadResult struct {
 	ProfileID string `json:"profileId"`
 	Mode      string `json:"mode"`
-	Note      string `json:"note,omitempty"`
+	HostKnown bool   `json:"hostKnown"`
+}
+
+// hostModeWriteResult is what connections.setHostMode answers once the record
+// was written. There is deliberately no "note": a write that could not be
+// persisted is an error with the reason, not a success with a caveat, because
+// nothing about the host changes and the editor's Save can be retried.
+type hostModeWriteResult struct {
+	ProfileID string `json:"profileId"`
+	Mode      string `json:"mode"`
 }
 
 type hostModeHandlers struct {
@@ -79,10 +90,20 @@ type hostModeHandlers struct {
 // ordinary for a connection nobody has opened, and the remedy is one connect.
 const hostModeUnanswered = "This host's key is not known yet, so nocx cannot remember a method for it. Connect to it once, then choose."
 
-// hostModeNotSaved is the sentence a write answers when the record could not be
-// persisted. The method stands for this run — hostmode.Store keeps it — and the
-// sentence says what that means after a restart, in the same words the ask uses.
-const hostModeNotSaved = "The method applies to this host, but the host's record was not saved, so this host will be asked again after a restart."
+// hostModeNotSaved is the reason a write answers when the record could not be
+// persisted. It is a FRAGMENT, not a sentence: the editor puts it after "Not
+// saved: " under the field, and inside the split-outcome toast that names the
+// host — the same words in both places, composed by the surface that has the
+// host name. A failed write changes nothing (hostmode.Store.Persist), so the
+// host keeps the method it had and the editor's Save can be retried.
+const hostModeNotSaved = "the host's settings could not be written"
+
+// hostModeUnreadable is the reason both methods answer when this machine's
+// known_hosts cannot be read. It is a fragment for the same reason: the read
+// failure is the field's error after "Could not read this machine's method: ".
+// The fail-closed answer (auto) is not available here — a default shown in
+// place of an unread value is the soft degrade the interface rules forbid.
+const hostModeUnreadable = "the known_hosts file could not be read"
 
 // handleHostMode answers what method the connection's host uses.
 //
@@ -110,7 +131,11 @@ func (h hostModeHandlers) handleHostMode(ctx context.Context, req jsonrpcRequest
 			break
 		}
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(hostModeResult{ProfileID: params.ProfileID, Mode: string(mode)}))
+	_ = h.r.TryResult(req.ID, mustMarshal(hostModeReadResult{
+		ProfileID: params.ProfileID,
+		Mode:      string(mode),
+		HostKnown: len(fingerprints) > 0,
+	}))
 }
 
 // handleSetHostMode records the method a person chose for the connection's
@@ -145,7 +170,7 @@ func (h hostModeHandlers) handleSetHostMode(ctx context.Context, req jsonrpcRequ
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: hostModeUnanswered})
 			return
 		}
-		_ = h.r.TryResult(req.ID, mustMarshal(hostModeResult{ProfileID: params.ProfileID, Mode: string(mode)}))
+		_ = h.r.TryResult(req.ID, mustMarshal(hostModeWriteResult{ProfileID: params.ProfileID, Mode: string(mode)}))
 		return
 	}
 
@@ -153,26 +178,31 @@ func (h hostModeHandlers) handleSetHostMode(ctx context.Context, req jsonrpcRequ
 	// algorithms has two fingerprints in known_hosts, and the dial decides which
 	// one it meets. An answer written for one of them would be found on the day
 	// the other was negotiated and lost on the next.
-	var note string
+	//
+	// THE WRITE IS THE EDITOR'S, NOT THE ASK'S. Persist and Remove change the
+	// host only when the document was written, so a failure here is a refusal
+	// the form reports and retries — never an answer kept quietly in memory
+	// while the field says it was not saved.
 	for _, fingerprint := range fingerprints {
 		var err error
 		if mode == hostmode.Auto {
 			err = h.modes.Remove(fingerprint)
 		} else {
-			err = h.modes.Set(fingerprint, mode)
+			err = h.modes.Persist(fingerprint, mode)
 		}
 		switch {
 		case err == nil:
 		case errors.Is(err, hostmode.ErrNotSaved):
-			note = hostModeNotSaved
-			h.warn("the host's method could not be saved; it stands for this run",
+			h.warn("the host's method could not be saved; nothing about the host changed",
 				"profile", params.ProfileID, "fingerprint", fingerprint, "mode", params.Mode, "error", err)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: hostModeNotSaved})
+			return
 		default:
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record the host's method failed: " + err.Error()})
 			return
 		}
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(hostModeResult{ProfileID: params.ProfileID, Mode: string(mode), Note: note}))
+	_ = h.r.TryResult(req.ID, mustMarshal(hostModeWriteResult{ProfileID: params.ProfileID, Mode: string(mode)}))
 }
 
 // fingerprints resolves the connection and asks known_hosts which keys its
@@ -192,17 +222,22 @@ func (h hostModeHandlers) fingerprints(ctx context.Context, profileID string) ([
 	host, cfg, err := resolver.Resolve(profileID)
 	if err != nil {
 		log.From(ctx).Warn("host mode: cannot resolve the connection", "profile", profileID, "error", err)
-		return nil, -32602, "Invalid params: connection " + profileID + " cannot be resolved"
+		// A reason, not a sentence: the editor's read-failed state puts it
+		// after "Could not read this machine's method: " and its write path
+		// puts it after "Not saved: ". The connection id stays in the log;
+		// it is not something a person reads here.
+		return nil, -32602, "the connection's address could not be resolved"
 	}
 	fingerprints, err := h.index.FingerprintsFor(ctx, host, cfg)
 	if err != nil {
-		// A store this machine cannot read is a real fault, but it is not an
-		// answer: nothing is known about the host, and the record's own
-		// fail-closed rule is "no record" (hostmode.Store). The dial refuses the
-		// same store when a connection is actually opened, which is where the
-		// person can act on it.
+		// A store this machine cannot read is not an answer. Answering auto
+		// would show a default as if it had been read (interface-rules.md): the
+		// editor's read-failed state exists for exactly this, and it shows the
+		// reason under the field with Retry beside it. A MISSING known_hosts is
+		// not this case — internal/ssh answers it as no keys, which is the
+		// honest "never connected".
 		h.warn("host mode: known_hosts cannot be read", "profile", profileID, "error", err)
-		return nil, 0, ""
+		return nil, -32603, hostModeUnreadable
 	}
 	return fingerprints, 0, ""
 }

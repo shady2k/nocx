@@ -61,14 +61,23 @@ func startHostModeServer(t *testing.T, modes *hostmode.Store, resolver ProfileRe
 	return srv
 }
 
-func hostModeCall(t *testing.T, srv *WSServer, method string, params map[string]any) hostModeResult {
+// hostModeCallResult is the union of the two result shapes, so one helper
+// reads either method. HostKnown is present only on the read; a write's zero
+// value is simply not asserted there.
+type hostModeCallResult struct {
+	ProfileID string `json:"profileId"`
+	Mode      string `json:"mode"`
+	HostKnown bool   `json:"hostKnown"`
+}
+
+func hostModeCall(t *testing.T, srv *WSServer, method string, params map[string]any) hostModeCallResult {
 	t.Helper()
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 	raw := jsonrpcCall(t, conn, method, params)
 	var envelope struct {
-		Result hostModeResult   `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
+		Result hostModeCallResult `json:"result"`
+		Error  *jsonrpcErrorObj   `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatalf("unmarshal %s: %v", method, err)
@@ -113,8 +122,8 @@ func TestHostModeReadsTheHostRecordThroughTheProfilesDestination(t *testing.T) {
 	srv := startHostModeServer(t, modes, resolver, index)
 
 	got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
-	if got.ProfileID != "ssh-1" || got.Mode != "script" {
-		t.Fatalf("result = %+v, want ssh-1/script", got)
+	if got.ProfileID != "ssh-1" || got.Mode != "script" || !got.HostKnown {
+		t.Fatalf("result = %+v, want ssh-1/script for a known host", got)
 	}
 	if len(resolver.asked) != 1 || resolver.asked[0] != "ssh-1" {
 		t.Fatalf("resolver asked %v, want the named connection", resolver.asked)
@@ -133,8 +142,25 @@ func TestHostModeIsAutoForAHostNobodyAnswered(t *testing.T) {
 		&fakeHostKeyIndex{fingerprints: []string{"SHA256:unanswered"}})
 
 	got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
-	if got.Mode != "auto" {
-		t.Fatalf("mode = %q, want auto for a host with no record", got.Mode)
+	if got.Mode != "auto" || !got.HostKnown {
+		t.Fatalf("result = %+v, want auto for a host known_hosts holds a key for", got)
+	}
+}
+
+// TestHostModeReadSaysWhetherTheHostIsKnownAtAll: auto alone conflates "nobody
+// answered" with "nocx has never seen this machine's key". The editor's states
+// are the difference (mockup frames 1 and 2): a known host's method is
+// editable, and a host with no key has nowhere to record one — so the read
+// says which of the two it answered.
+func TestHostModeReadSaysWhetherTheHostIsKnownAtAll(t *testing.T) {
+	modes := newHostModeStore(t)
+	srv := startHostModeServer(t, modes,
+		&fakeHostModeResolver{host: "new.example", cfg: &ssh.ConnectConfig{}},
+		&fakeHostKeyIndex{})
+
+	got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
+	if got.Mode != "auto" || got.HostKnown {
+		t.Fatalf("result = %+v, want auto for a host with no key and hostKnown false", got)
 	}
 }
 
@@ -149,8 +175,8 @@ func TestSetHostModeRecordsEveryKnownKeyOfTheDestination(t *testing.T) {
 		&fakeHostKeyIndex{fingerprints: []string{"SHA256:one", "SHA256:two"}})
 
 	got := hostModeCall(t, srv, "connections.setHostMode", map[string]any{"profileId": "ssh-1", "mode": "raw"})
-	if got.Mode != "raw" || got.Note != "" {
-		t.Fatalf("result = %+v, want raw with no note", got)
+	if got.Mode != "raw" {
+		t.Fatalf("result = %+v, want raw", got)
 	}
 	for _, fingerprint := range []string{"SHA256:one", "SHA256:two"} {
 		if mode, ok := modes.Lookup(fingerprint); !ok || mode != hostmode.Raw {
@@ -205,26 +231,25 @@ func TestSetHostModeRefusesAMethodForAHostWithNoKnownKey(t *testing.T) {
 	}
 }
 
-// TestSetHostModeSaysWhenTheRecordCouldNotBeSaved: the method stands for this
-// run (hostmode.Store keeps a failed write in memory), so the call succeeds —
-// and the sentence saying it will not survive a restart rides the result,
-// because a silent failure is a person told nothing about a host that will be
-// asked again.
-func TestSetHostModeSaysWhenTheRecordCouldNotBeSaved(t *testing.T) {
+// TestSetHostModeReportsARecordItCouldNotWrite: the editor's Save stays open
+// with the reason under the field and the same Save retries, so a record that
+// could not be persisted is a refusal — not a success carrying a sentence. The
+// host is left exactly as it was, which is what makes "Not saved" true.
+func TestSetHostModeReportsARecordItCouldNotWrite(t *testing.T) {
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
 	srv := startHostModeServer(t, modes,
 		&fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}},
 		&fakeHostKeyIndex{fingerprints: []string{"SHA256:one"}})
 
-	got := hostModeCall(t, srv, "connections.setHostMode", map[string]any{"profileId": "ssh-1", "mode": "script"})
-	if got.Mode != "script" {
-		t.Fatalf("mode = %q, want script", got.Mode)
+	refusal := hostModeCallError(t, srv, "connections.setHostMode", map[string]any{"profileId": "ssh-1", "mode": "script"})
+	if refusal.Code != -32603 {
+		t.Errorf("code = %d, want -32603", refusal.Code)
 	}
-	if got.Note != hostModeNotSaved {
-		t.Fatalf("note = %q, want the sentence that says it was not saved", got.Note)
+	if refusal.Message != hostModeNotSaved {
+		t.Errorf("message = %q, want the reason the field shows", refusal.Message)
 	}
-	if mode, ok := modes.Lookup("SHA256:one"); !ok || mode != hostmode.Script {
-		t.Fatalf("Lookup = %q/%v, want the answer kept for this run", mode, ok)
+	if mode, ok := modes.Lookup("SHA256:one"); ok {
+		t.Fatalf("Lookup = %q/%v, want no record: a refused write changes nothing", mode, ok)
 	}
 }
 
@@ -267,19 +292,23 @@ func TestHostModeRefusesAnUnknownModeAndAMissingProfile(t *testing.T) {
 	}
 }
 
-// TestHostModeReadKeepsAutoWhenKnownHostsCannotBeRead: a store this machine
-// cannot parse says nothing about the host, and "nothing" is auto — the same
-// fail-closed answer the record's own document gives. The dial reports the
-// broken store when a connection is actually opened.
-func TestHostModeReadKeepsAutoWhenKnownHostsCannotBeRead(t *testing.T) {
+// TestHostModeReadReportsAKnownHostsItCannotRead: a store this machine cannot
+// parse says nothing about the host, and auto would be a default shown as if
+// read (interface-rules.md). The editor has a state for exactly that — the
+// control disabled, the reason under it and Retry beside it — so the read
+// refuses with the reason rather than answering "nobody answered".
+func TestHostModeReadReportsAKnownHostsItCannotRead(t *testing.T) {
 	modes := newHostModeStore(t)
 	srv := startHostModeServer(t, modes,
 		&fakeHostModeResolver{host: "h", cfg: &ssh.ConnectConfig{}},
 		&fakeHostKeyIndex{err: errors.New("known_hosts does not parse")})
 
-	got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
-	if got.Mode != "auto" {
-		t.Fatalf("mode = %q, want auto", got.Mode)
+	refusal := hostModeCallError(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
+	if refusal.Code != -32603 {
+		t.Errorf("code = %d, want -32603", refusal.Code)
+	}
+	if refusal.Message != hostModeUnreadable {
+		t.Errorf("message = %q, want the reason the field shows", refusal.Message)
 	}
 }
 
@@ -288,12 +317,12 @@ func TestHostModeReadKeepsAutoWhenKnownHostsCannotBeRead(t *testing.T) {
 func TestHostModeResult_DTOConformsToContract(t *testing.T) {
 	cases := map[string]struct {
 		schema string
-		dto    hostModeResult
+		dto    any
 	}{
-		"read, a recorded host":    {schema: "connections.hostMode.schema.json", dto: hostModeResult{ProfileID: "ssh-1", Mode: "script"}},
-		"read, an unanswered host": {schema: "connections.hostMode.schema.json", dto: hostModeResult{ProfileID: "ssh-1", Mode: "auto"}},
-		"write, saved":             {schema: "connections.setHostMode.schema.json", dto: hostModeResult{ProfileID: "ssh-1", Mode: "raw"}},
-		"write, not saved":         {schema: "connections.setHostMode.schema.json", dto: hostModeResult{ProfileID: "ssh-1", Mode: "helper", Note: hostModeNotSaved}},
+		"read, a recorded host":    {schema: "connections.hostMode.schema.json", dto: hostModeReadResult{ProfileID: "ssh-1", Mode: "script", HostKnown: true}},
+		"read, an unanswered host": {schema: "connections.hostMode.schema.json", dto: hostModeReadResult{ProfileID: "ssh-1", Mode: "auto", HostKnown: true}},
+		"read, a host with no key": {schema: "connections.hostMode.schema.json", dto: hostModeReadResult{ProfileID: "ssh-1", Mode: "auto"}},
+		"write, saved":             {schema: "connections.setHostMode.schema.json", dto: hostModeWriteResult{ProfileID: "ssh-1", Mode: "raw"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/connections.setHostMode.schema.json",
   "title": "ConnectionsSetHostModeResult",
-  "description": "Result of the connections.setHostMode JSON-RPC method: the method now in force for the connection's host, and \u2014 when the record could not be persisted \u2014 the sentence that says so. The method stands for this run either way, because the store keeps a failed write in memory; note is present only when it will not survive a restart.",
+  "description": "Result of the connections.setHostMode JSON-RPC method: the method now in force for the connection's host. A record that could not be persisted is not a result \u2014 the call answers an error whose message is the reason the connection editor shows under the field (\u201cNot saved: {reason}\u201d), and nothing about the host changes, so the editor's Save can be retried.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,10 +23,6 @@
         "script",
         "helper"
       ]
-    },
-    "note": {
-      "description": "A sentence for the person when the host's record could not be saved: the method applies to this run, and the host will be answered again after a restart. Absent when the record was written.",
-      "type": "string"
     }
   }
 }

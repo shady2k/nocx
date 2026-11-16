@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the connections.setHostMode JSON-RPC method: the method now in force for the connection's host, and — when the record could not be persisted — the sentence that says so. The method stands for this run either way, because the store keeps a failed write in memory; note is present only when it will not survive a restart.
+ * Result of the connections.setHostMode JSON-RPC method: the method now in force for the connection's host. A record that could not be persisted is not a result — the call answers an error whose message is the reason the connection editor shows under the field (“Not saved: {reason}”), and nothing about the host changes, so the editor's Save can be retried.
  */
 export interface ConnectionsSetHostModeResult {
   /**
@@ -21,8 +21,4 @@ export interface ConnectionsSetHostModeResult {
    * The method in force after the call.
    */
   mode: 'auto' | 'raw' | 'script' | 'helper'
-  /**
-   * A sentence for the person when the host's record could not be saved: the method applies to this run, and the host will be answered again after a restart. Absent when the record was written.
-   */
-  note?: string
 }

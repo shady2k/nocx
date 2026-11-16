@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/connections.hostMode.schema.json",
   "title": "ConnectionsHostModeResult",
-  "description": "Result of the connections.hostMode JSON-RPC method: the method the named connection's host uses. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "description": "Result of the connections.hostMode JSON-RPC method: the method the named connection's host uses, and whether this machine has any key for that host at all. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "profileId",
-    "mode"
+    "mode",
+    "hostKnown"
   ],
   "properties": {
     "profileId": {
@@ -15,7 +16,7 @@
       "type": "string"
     },
     "mode": {
-      "description": "The host's integration method. auto means no answer is recorded for this host's key yet \u2014 the connect-time ask will decide (ADR-0033) \u2014 and it is also every answer for a destination known_hosts has no key for.",
+      "description": "The host's integration method. auto means no answer is recorded for this host's key yet \u2014 the connect-time ask will decide (ADR-0033) \u2014 and it is also the answer for a destination known_hosts has no key for, which hostKnown distinguishes.",
       "type": "string",
       "enum": [
         "auto",
@@ -23,6 +24,10 @@
         "script",
         "helper"
       ]
+    },
+    "hostKnown": {
+      "description": "Whether this machine's known_hosts holds at least one key for the connection's destination, resolved as a dial resolves it. False means the host has never been connected to, so a method cannot be recorded for it: the record is keyed by a host-key fingerprint, and the connection editor shows the control disabled with its effective value (auto) rather than hiding it.",
+      "type": "boolean"
     }
   }
 }

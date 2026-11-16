@@ -6,8 +6,8 @@
 // and not of the pane it opened. The connect-time ask (ADR-0069) writes its
 // answer here for a saved connection and a hand-typed one alike; the open path
 // reads it back by the fingerprint the dial observed; the connection editor
-// will read and write the same record. Two connections to one machine
-// therefore resolve one mode, whatever their stored profile settings say.
+// reads and writes the same record. Two connections to one machine therefore
+// resolve one mode, and a saved connection has no copy of its own.
 //
 // IT IS NOT THE MACHINE'S CONSENT. Consent (internal/helper/consent) answers
 // "may a binary be deployed on this machine" and is written only by choosing

@@ -124,3 +124,67 @@ type refusingStore struct{}
 func (refusingStore) Read(string, any) (bool, error) { return false, nil }
 func (refusingStore) Write(string, any) error        { return errors.New("disk is full") }
 func (refusingStore) Delete(string) error            { return errors.New("disk is full") }
+
+// TestRemovingARecordMakesTheHostUnansweredAgain: auto is not a record
+// (ADR-0033), so "ask me again" is a removal rather than a fourth value. The
+// connection editor's auto does this, and the next open must find no answer —
+// not an emptied one — because the difference between silence and an answer is
+// what decides whether the connect-time ask is raised.
+func TestRemovingARecordMakesTheHostUnansweredAgain(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Set("SHA256:abc", Script); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := s.Remove("SHA256:abc"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if mode, ok := s.Lookup("SHA256:abc"); ok {
+		t.Fatalf("Lookup after Remove = %q/%v, want no record", mode, ok)
+	}
+}
+
+// TestRemovalSurvivesANewStore: the removal is a document write like the
+// answer was, so a host answered again stays answered across a restart.
+func TestRemovalSurvivesANewStore(t *testing.T) {
+	first, dir := newTestStore(t)
+	if err := first.Set("SHA256:abc", Helper); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := first.Remove("SHA256:abc"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	second := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "host-modes.json")
+	if mode, ok := second.Lookup("SHA256:abc"); ok {
+		t.Fatalf("a new store over the same directory found %q, want no record", mode)
+	}
+}
+
+// TestRemovingAHostWithNoRecordIsNotAnError: the editor asks for auto on a
+// host nobody answered for, which is the state it is already in. A refusal
+// there would report a lost write for a write that had nothing to forget.
+func TestRemovingAHostWithNoRecordIsNotAnError(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Remove("SHA256:nobody"); err != nil {
+		t.Fatalf("Remove on an unanswered host = %v, want nil", err)
+	}
+	if err := s.Remove(""); !errors.Is(err, ErrEmptyFingerprint) {
+		t.Fatalf("Remove under the empty fingerprint = %v, want ErrEmptyFingerprint", err)
+	}
+}
+
+// TestAFailedRemovalStillForgetsForThisRun mirrors the answer's own rule: the
+// person asked to be asked again, and keeping the old answer in memory would
+// contradict the screen. The record is forgotten here, the write failure is
+// reported, and the host will be answered again after a restart.
+func TestAFailedRemovalStillForgetsForThisRun(t *testing.T) {
+	s := NewStore(log.NewSlogAdapter(nil), refusingStore{}, "host-modes.json")
+	if err := s.Set("SHA256:abc", Raw); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
+	}
+	if err := s.Remove("SHA256:abc"); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("Remove on a store that cannot write = %v, want ErrNotSaved", err)
+	}
+	if mode, ok := s.Lookup("SHA256:abc"); ok {
+		t.Fatalf("Lookup after a failed Remove = %q/%v, want the removal kept for this run", mode, ok)
+	}
+}

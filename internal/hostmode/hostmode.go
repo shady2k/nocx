@@ -15,6 +15,11 @@
 // written by every answer, raw and script included. Two questions, two owners
 // (AD-8), stored beside each other and never derived from one another.
 //
+// TWO SURFACES WRITE IT and they are two views of one record, not two
+// records: the connect-time ask writes the answer it was given, by the
+// fingerprint it named, and the connection editor reads and writes the same
+// record for the host a saved connection points at.
+//
 // AND IT IS NOT A MODE FOR A CONNECTION THAT NEVER DIALED. The record is keyed
 // by a host-key fingerprint, which exists only after a dial has seen a key, so
 // a host nobody has connected to has no mode — it is auto, "not yet answered"
@@ -31,10 +36,8 @@ import (
 )
 
 // Mode is one integration method. The four values are the product's own
-// vocabulary from ADR-0069, spelled once here; internal/profile's
-// DesiredMode still carries the same four strings beside its connection
-// fields until nocx-oalo1.11.2 removes them, and the two are joined by a cast
-// rather than by a second translation table.
+// vocabulary from ADR-0069, spelled once here — a saved connection no longer
+// keeps a copy of its own (ADR-727g63tr decision 1).
 type Mode string
 
 const (
@@ -66,9 +69,8 @@ var ErrEmptyFingerprint = errors.New("host mode: refusing a record under an empt
 
 // ErrNotAnAnswer refuses to record auto. Auto means "not yet answered"
 // (ADR-0033), and a record is only ever an answer: a caller that means "ask me
-// again" has to remove the record, and neither the connect-time ask nor the
-// open path does that — the surface that will (the connection editor, reading
-// and writing the host record) is nocx-oalo1.11.2's.
+// again" removes the record instead (Remove), which is what the connection
+// editor's auto does.
 var ErrNotAnAnswer = errors.New("host mode: auto is not an answer and is not recorded")
 
 // ErrNotSaved reports that an answer was kept for this run but could not be
@@ -163,6 +165,44 @@ func (s *Store) Set(fingerprint string, mode Mode) error {
 		next[k] = v
 	}
 	next[fingerprint] = mode
+	werr := s.writeDoc(next)
+	s.modes = next
+	if werr != nil {
+		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, werr)
+	}
+	return nil
+}
+
+// Remove forgets the host's recorded method, which is how "auto" is reached:
+// the next open asks again (ADR-0033). A host with no record is already in
+// that state, so removing it is not an error — the caller asked for the state
+// it is in, and only an empty fingerprint is refused.
+//
+// # It follows Set's failure rule for the same reason
+//
+// The in-memory record is committed only after the document write is
+// attempted, and a write that fails still forgets here: the person asked to be
+// asked again, and keeping the old answer in memory would put a method in force
+// that the screen says is gone. ErrNotSaved travels back so the product can say
+// the forgetting will not survive a restart — which is the opposite sentence
+// from a lost Set, and true in the same way.
+func (s *Store) Remove(fingerprint string) error {
+	if fingerprint == "" {
+		return ErrEmptyFingerprint
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	if _, ok := s.modes[fingerprint]; !ok {
+		return nil
+	}
+	next := make(map[string]Mode, len(s.modes))
+	for k, v := range s.modes {
+		if k == fingerprint {
+			continue
+		}
+		next[k] = v
+	}
 	werr := s.writeDoc(next)
 	s.modes = next
 	if werr != nil {

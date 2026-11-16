@@ -356,7 +356,7 @@ func TestIntegrationMethod_InvalidMethod(t *testing.T) {
 // (consent design §6).
 func TestIntegrationMethod_GrantFailure(t *testing.T) {
 	granter := &fakeHelperConsentGranter{grantErr: errors.New("disk full")}
-	srv, _ := startIntegrationMethodServer(t, granter, nil)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -375,6 +375,19 @@ func TestIntegrationMethod_GrantFailure(t *testing.T) {
 	}
 	if result.Error.Code != -32603 {
 		t.Errorf("expected code -32603, got %d", result.Error.Code)
+	}
+	if got := result.Error.Message; got != "Record helper consent failed" {
+		t.Errorf("error message = %q, want stable non-sensitive consent failure", got)
+	}
+	var data struct {
+		AnswerApplied bool `json:"answerApplied"`
+	}
+	encoded, _ := json.Marshal(result.Error.Data)
+	if err := json.Unmarshal(encoded, &data); err != nil || data.AnswerApplied {
+		t.Errorf("answerApplied data = %s, want false", encoded)
+	}
+	if mode, ok := modes.Lookup("SHA256:abc"); ok {
+		t.Errorf("mode after consent failure = %q, want no record", mode)
 	}
 }
 
@@ -472,6 +485,11 @@ func TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo(t *testin
 	}
 	if !strings.Contains(result.Error.Message, "not saved") {
 		t.Errorf("error = %q, want it to say the host's record was not saved", result.Error.Message)
+	}
+	var errorData struct { AnswerApplied bool `json:"answerApplied"` }
+	encoded, _ := json.Marshal(result.Error.Data)
+	if err := json.Unmarshal(encoded, &errorData); err != nil || !errorData.AnswerApplied {
+		t.Errorf("answerApplied data = %s, want true", encoded)
 	}
 	// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
 	// retries does not fall back into the same dialog.

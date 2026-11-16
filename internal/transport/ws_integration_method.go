@@ -130,24 +130,25 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 	// into a failed write would put them back in the same dialog on every
 	// connect.
 	if h.modes == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host mode store not available (no store wired)"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host mode store not available (no store wired)", Data: map[string]any{"answerApplied": false}})
 		return
 	}
-	recordErr := h.modes.Set(params.Fingerprint, mode)
-
 	// The machine grant, by fingerprint (ADR-0034) — only for helper.
 	// Raw and script write nothing here: the two questions ("which method
 	// this host uses" and "may a binary be deployed here") stay unmerged.
 	if mode == hostmode.Helper {
 		if h.granter == nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Helper consent not available (no granter wired)"})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Helper consent not available (no granter wired)", Data: map[string]any{"answerApplied": false}})
 			return
 		}
 		if err := h.granter.Grant(params.Fingerprint); err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed: " + err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed", Data: map[string]any{"answerApplied": false}})
 			return
 		}
 	}
+	// Consent and mode are separate facts (ADR-0105). Grant first: a failed
+	// consent write must never leave a durable helper mode without consent.
+	recordErr := h.modes.Set(params.Fingerprint, mode)
 
 	// The saved connection's own desiredMode, through the SAME path
 	// profiles.patch uses — never a second writer of it (AD-8) — while that
@@ -182,7 +183,8 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 			"fingerprint", params.Fingerprint, "mode", params.Method, "error", recordErr)
 		_ = h.r.TryError(req.ID, RPCError{
 			Code:    -32603,
-			Message: "The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart",
+			Message: "The host's record was not saved, so this host will be asked again after a restart",
+			Data:    map[string]any{"answerApplied": true},
 		})
 		return
 	}

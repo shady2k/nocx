@@ -2225,6 +2225,18 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, modes: s.hostModes, r: r, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
+		// The connection editor's read and write of the HOST's integration
+		// method (ADR-727g63tr decision 1). The write records the method and
+		// nothing else: choosing helper here is not the machine's consent, which
+		// stays the connect-time ask's question (ADR-0105, ADR-0068).
+		regResponder(configSub, catalog.OpConnectionsHostMode, params(validateHostModeReadRaw), func(r Responder) handlerFunc {
+			h := hostModeHandlers{resolver: s.resolver, index: s.hostKeyIndex, modes: s.hostModes, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleHostMode(ctx, req) }
+		}),
+		regResponder(configSub, catalog.OpConnectionsSetHostMode, params(validateHostModeWriteRaw), func(r Responder) handlerFunc {
+			h := hostModeHandlers{resolver: s.resolver, index: s.hostKeyIndex, modes: s.hostModes, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetHostMode(ctx, req) }
+		}),
 		// Role choices are kept per agent through the config operation.
 		// roles.list and roles.assign ride the same config operation
 		// as the endpoints they reference — one queue, so a default and an

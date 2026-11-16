@@ -6013,6 +6013,120 @@
       "x-nocx-noResultSchema": true
     },
     {
+      "name": "connections.hostMode",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/connections.hostMode.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "connections.hostMode",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [
+              {
+                "kind": "store",
+                "name": "config",
+                "mode": "key"
+              }
+            ],
+            "dependencies": [
+              "config",
+              "ssh"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "read: the profile is resolved through ~/.ssh/config twice (the connection's own authorized endpoint and the known_hosts storage identity), each bounded by the config resolver's subprocess timeout, plus one known_hosts read"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "none",
+        "waiting": "Reading the host's integration method",
+        "row": "never",
+        "expired": "not-started",
+        "resources": [
+          {
+            "kind": "store",
+            "name": "config",
+            "mode": "key"
+          }
+        ],
+        "dependencies": [
+          "config",
+          "ssh"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "connections.hostModeResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/connections.hostMode.schema.json"
+        }
+      }
+    },
+    {
       "name": "connections.passwordResolved",
       "params": [
         {
@@ -6122,6 +6236,127 @@
         "preempts": []
       },
       "x-nocx-noResultSchema": true
+    },
+    {
+      "name": "connections.setHostMode",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/connections.setHostMode.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "connections.setHostMode",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [
+              {
+                "kind": "store",
+                "name": "config",
+                "mode": "key"
+              }
+            ],
+            "dependencies": [
+              "config",
+              "ssh"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "read: one profile resolution and one known_hosts read, then one atomic document write per known key"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "none",
+        "waiting": "Saving the host's integration method",
+        "row": "never",
+        "expired": "outcome-unknown",
+        "resources": [
+          {
+            "kind": "store",
+            "name": "config",
+            "mode": "key"
+          }
+        ],
+        "dependencies": [
+          "config",
+          "ssh"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "connections.setHostModeResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/connections.setHostMode.schema.json"
+        }
+      }
     },
     {
       "name": "connections.setIntegrationMethod",
@@ -25680,10 +25915,16 @@
       "$ref": "https://nocx.local/contracts/checkouts.status.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/connections.hostMode.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/connections.passwordRequest.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/connections.probe.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/connections.setHostMode.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/connections.setIntegrationMethod.schema.json"

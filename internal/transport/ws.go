@@ -786,6 +786,11 @@ type WSServer struct {
 	// writes it (ws_integration_method.go) and the open path reads it, which is
 	// what makes the mode the host's rather than a saved connection's.
 	hostModes *hostmode.Store
+	// hostKeyIndex answers which host-key fingerprints known_hosts holds for a
+	// saved connection's destination, which is what lets the editor read and
+	// write the host record a person names by profile (ws_host_mode.go). When
+	// nil, both methods refuse by name.
+	hostKeyIndex HostKeyIndex
 	// helperConsentWriter grants the machine's helper consent when the
 	// connect-time ask is answered "helper" (connections.setIntegrationMethod
 	// — ADR-0069). When nil, choosing helper fails; choosing raw or script

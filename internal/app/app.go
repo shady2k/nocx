@@ -1482,6 +1482,11 @@ func New(opts ...Option) (*App, error) {
 		// answer it writes is the HOST's mode, and this is the record every open
 		// of that host reads it back from.
 		transport.WithHostModeStore(hostModes),
+		// The editor's read of that record (nocx-oalo1.11.2): a record is keyed
+		// by a fingerprint, so showing a saved connection's method means asking
+		// known_hosts which key its destination is stored under — resolved as a
+		// dial resolves it, through the same client that decides a host key.
+		transport.WithHostKeyIndex(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable
@@ -3556,6 +3561,14 @@ func (a *proberAdapter) ProbeWithResult(ctx context.Context, host string, cfg *s
 
 func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byte) (string, error) {
 	return a.client.TrustHostKey(addr, key)
+}
+
+// FingerprintsFor is connections.hostMode's known_hosts read (ADR-727g63tr
+// decision 1): the connection editor names a saved connection, the transport
+// resolves it as an open does, and this answers which keys this machine's
+// known_hosts holds for the resolved destination. It dials nothing.
+func (a *proberAdapter) FingerprintsFor(ctx context.Context, host string, cfg *ssh.ConnectConfig) ([]string, error) {
+	return a.client.KnownHostsFingerprintsFor(ctx, host, cfg)
 }
 
 // remoteLauncherAdapter adapts shellintegration.RemoteLauncher to

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.setHostMode.schema.json",
+  "title": "ConnectionsSetHostModeResult",
+  "description": "Result of the connections.setHostMode JSON-RPC method: the method now in force for the connection's host, and \u2014 when the record could not be persisted \u2014 the sentence that says so. The method stands for this run either way, because the store keeps a failed write in memory; note is present only when it will not survive a restart.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profileId",
+    "mode"
+  ],
+  "properties": {
+    "profileId": {
+      "description": "The connection the write was made for.",
+      "type": "string"
+    },
+    "mode": {
+      "description": "The method in force after the call.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "raw",
+        "script",
+        "helper"
+      ]
+    },
+    "note": {
+      "description": "A sentence for the person when the host's record could not be saved: the method applies to this run, and the host will be answered again after a restart. Absent when the record was written.",
+      "type": "string"
+    }
+  }
+}

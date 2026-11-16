@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.hostMode.params.schema.json",
+  "title": "ConnectionsHostModeParams",
+  "description": "Params for connections.hostMode: the saved connection whose host's integration method the editor shows (ADR-727g63tr decision 1). The method belongs to the HOST, keyed by its host-key fingerprint, so this names a connection and the backend resolves that connection's destination exactly as an open would \u2014 alias and port through ~/.ssh/config, and the route identity a jump-routed destination is kept under \u2014 to the fingerprints known_hosts holds for it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profileId"
+  ],
+  "properties": {
+    "profileId": {
+      "description": "The saved connection whose host is asked about. Required: there is no answer without a destination to look up.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

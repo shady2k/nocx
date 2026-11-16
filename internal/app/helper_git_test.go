@@ -326,8 +326,12 @@ type fakeLaneProvider struct {
 	// laneBlock, when set, parks every LaneConn on it (or on the caller's
 	// context): a host that accepts nothing and refuses nothing, which is what
 	// a machine behind a black-holing firewall looks like.
-	laneBlock   chan struct{}
-	uname       string // the probe's canned answer; default "Linux x86_64"
+	laneBlock chan struct{}
+	uname     string // the probe's canned answer; default "Linux x86_64"
+	// fingerprint is the host key the platform probe reports; default
+	// "SHA256:fake". A test about the identity a real it dial observed sets it
+	// to the fingerprint its own known_hosts entry answers.
+	fingerprint string
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
@@ -406,7 +410,7 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 	if uname == "" {
 		uname = "Linux x86_64"
 	}
-	return &fakeProbeConn{uname: uname}, nil
+	return &fakeProbeConn{uname: uname, fingerprint: p.fingerprint}, nil
 }
 
 func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
@@ -450,16 +454,22 @@ func (p *fakeLaneProvider) lane(i int) *fakeLaneConn {
 // fakeProbeConn is a DiscoveryConn that answers the platform probe with a
 // canned uname line — the only exec the selection runs.
 type fakeProbeConn struct {
-	uname string
+	uname       string
+	fingerprint string // empty means the stand's usual "SHA256:fake"
 }
 
 func (f *fakeProbeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
 	return &ssh.ExecResult{Stdout: []byte(f.uname)}, nil
 }
-func (f *fakeProbeConn) Done() <-chan struct{}      { return make(chan struct{}) }
-func (f *fakeProbeConn) LostErr() error             { return nil }
-func (f *fakeProbeConn) Close() error               { return nil }
-func (f *fakeProbeConn) HostKeyFingerprint() string { return "SHA256:fake" }
+func (f *fakeProbeConn) Done() <-chan struct{} { return make(chan struct{}) }
+func (f *fakeProbeConn) LostErr() error        { return nil }
+func (f *fakeProbeConn) Close() error          { return nil }
+func (f *fakeProbeConn) HostKeyFingerprint() string {
+	if f.fingerprint != "" {
+		return f.fingerprint
+	}
+	return "SHA256:fake"
+}
 
 // fakeInstallConn is a HelperInstallConn whose FS is an in-memory map. The
 // REAL deploy.Ensure runs against it, so the selection's install path is

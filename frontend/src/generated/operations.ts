@@ -525,6 +525,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 120000,
     answerMs: null,
   },
+  'connections.hostMode': {
+    waiting: "Reading the host's integration method",
+    row: 'never',
+    expired: 'not-started',
+    merge: 'none',
+    domain: 'config',
+    turnMs: 30000,
+    maxMs: 30000,
+    answerMs: null,
+  },
   'connections.passwordResolved': {
     waiting: 'Checking the connection',
     row: 'never',
@@ -533,6 +543,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     domain: 'config',
     turnMs: 1,
     maxMs: 60000,
+    answerMs: null,
+  },
+  'connections.setHostMode': {
+    waiting: "Saving the host's integration method",
+    row: 'never',
+    expired: 'outcome-unknown',
+    merge: 'none',
+    domain: 'config',
+    turnMs: 30000,
+    maxMs: 30000,
     answerMs: null,
   },
   'connections.setIntegrationMethod': {

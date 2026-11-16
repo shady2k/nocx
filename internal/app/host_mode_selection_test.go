@@ -212,3 +212,72 @@ func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
 		t.Fatalf("the second open's mode = %q, want the answer kept for this run (script)", got)
 	}
 }
+
+// TestTheEditorsChoiceIsWhatTheNextOpenUses is assertion 1's backend half:
+// changing the method in the connection editor changes what the NEXT open of
+// that host does, and choosing auto again makes the open ask.
+//
+// It joins the two halves the editor is made of — the host record's write (the
+// same store call connections.setHostMode makes, tested over the wire in
+// ws_host_mode_test.go) and the open path's read — through the identity both
+// use: the host-key fingerprint. The probe reports the fingerprint its own
+// known_hosts entry answers, which is what a real dial's verification produces.
+// The alternative, a test that only drove the store, would prove a value can be
+// written and not that an open ever reads it.
+func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
+	const fingerprint = "SHA256:editor"
+	provider := &fakeLaneProvider{peer: realHelperPeer(t), fingerprint: fingerprint}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	r := newTestRegistry(t, provider, store)
+
+	// Nothing is recorded yet: the host is auto, which is the ask.
+	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-auto")
+	hold.release()
+	if !selected {
+		t.Fatal("selected = false, want the connect-time ask for a host nobody answered")
+	}
+	if got := askOf(t, err).Fingerprint; got != fingerprint {
+		t.Fatalf("ask fingerprint = %q, want the key the dial observed (%q)", got, fingerprint)
+	}
+
+	// The editor writes raw for this host.
+	mustRecordHostMode(t, r.modes, fingerprint, hostmode.Raw)
+	rawCfg := remoteConfigFor(profile.DesiredAuto)
+	opened, hold, selected, err := r.openHoldingLease(context.Background(), rawCfg, "claim-raw")
+	hold.release()
+	if err != nil {
+		t.Fatalf("open after the editor wrote raw: %v", err)
+	}
+	if selected || opened.Session != nil {
+		t.Fatalf("selected=%v session=%v, want the ordinary local-helper open with no ask", selected, opened.Session)
+	}
+	if got := rawCfg.Remote.DesiredMode; got != string(hostmode.Raw) {
+		t.Fatalf("the open's mode = %q, want the editor's raw", got)
+	}
+	if got := provider.laneCount(); got != 0 {
+		t.Errorf("%d helper lanes were brought up, want 0 for a host the editor set to raw", got)
+	}
+
+	// The editor answers script instead, and the NEXT open is script.
+	mustRecordHostMode(t, r.modes, fingerprint, hostmode.Script)
+	scriptCfg := remoteConfigFor(profile.DesiredAuto)
+	_, hold, selected, err = r.openHoldingLease(context.Background(), scriptCfg, "claim-script")
+	hold.release()
+	if err != nil || selected {
+		t.Fatalf("open after the editor wrote script: selected=%v err=%v, want an unanswered-ask-free script open", selected, err)
+	}
+	if got := scriptCfg.Remote.DesiredMode; got != string(hostmode.Script) {
+		t.Fatalf("the open's mode = %q, want the editor's script", got)
+	}
+
+	// Auto is the absence of a record, so the next open asks again.
+	if err := r.modes.Remove(fingerprint); err != nil {
+		t.Fatalf("the editor's auto: %v", err)
+	}
+	_, hold, selected, err = r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-auto-again")
+	hold.release()
+	if !selected {
+		t.Fatal("selected = false, want the ask once the editor chose auto")
+	}
+	askOf(t, err)
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.hostMode.schema.json",
+  "title": "ConnectionsHostModeResult",
+  "description": "Result of the connections.hostMode JSON-RPC method: the method the named connection's host uses. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profileId",
+    "mode"
+  ],
+  "properties": {
+    "profileId": {
+      "description": "The connection that was asked about, echoed so the renderer keys the answer on the connection the backend resolved rather than its own copy of the request.",
+      "type": "string"
+    },
+    "mode": {
+      "description": "The host's integration method. auto means no answer is recorded for this host's key yet \u2014 the connect-time ask will decide (ADR-0033) \u2014 and it is also every answer for a destination known_hosts has no key for.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "raw",
+        "script",
+        "helper"
+      ]
+    }
+  }
+}

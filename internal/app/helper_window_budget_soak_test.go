@@ -621,7 +621,7 @@ func (s *soakStand) remoteConfig(pane string) session.Config {
 			Secrets:            rememberedPassword{value: openPasswordFixturePassword},
 			SecretID:           "sec:pane-soak:1",
 			AuthorizedEndpoint: "host.example:22",
-			DesiredMode:        "script",
+			IntegrationMode:    "script",
 			Shell:              "bash",
 		},
 		Cols: 80, Rows: 24, PaneID: pane,

@@ -222,8 +222,9 @@ export function resetSessionCounter(): void {
 export interface SessionFake {
   sessionId: string
   cwd: string
-  /** The resolved destination mode from the open ack (nocx-mlm7). */
-  desiredMode: HostMode
+  /** The integration method the HOST keeps, from the open ack
+   *  (ADR-727g63tr decision 1). */
+  integrationMode: HostMode
   /** The opener the backend ADMITTED on the open ack, or null for a root
    *  session (nocx-9hu9d). Null by default: the product opens no session with
    *  a parent yet, so a fixture that claimed one would describe a tree the
@@ -335,7 +336,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   const handle: SessionFake = {
     sessionId,
     cwd: FIXTURE_CWD,
-    desiredMode: 'script',
+    integrationMode: 'script',
     parent: null,
     awaitsIntegration: false,
     recovered: null,
@@ -493,7 +494,6 @@ export interface ClientFake {
       host: string,
       user?: string,
       anchor?: OpenAnchor,
-      desiredMode?: string,
       watch?: OpenWatch,
     ) => Promise<SessionFake>
   >
@@ -862,7 +862,6 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
                   text(record.host),
                   typeof record.user === 'string' ? record.user : undefined,
                   anchor,
-                  typeof record.desiredMode === 'string' ? record.desiredMode : undefined,
                   watch,
                 )
           ) as never

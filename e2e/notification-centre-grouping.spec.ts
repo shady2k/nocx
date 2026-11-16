@@ -13,6 +13,7 @@ import {
 } from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
+import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
 
 /**
  * e2e: a run of notifications is ONE row that opens, and narrowing the feed
@@ -455,8 +456,8 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // Unique per run: the stand's profile store persists across runs in this
     // home, and a stale profile would dial a fixture that is long dead. This
     // spec's subject is notification grouping, not the connect-time ask
-    // (ADR-0069) — desiredMode is declared explicitly as script so the
-    // connection is never asked.
+    // (ADR-0069) — script is recorded for the HOST so the connection is never
+    // asked (ADR-727g63tr decision 1).
     const profileName = `e2e-grouping-${Date.now()}`
     const created = await rpc<{ id: string }>(page, ws.port, ws.token, 'profiles.create', {
       type: 'ssh',
@@ -466,10 +467,12 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
         port: remotePort,
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    // This spec's subject is notification grouping, not the connect-time ask:
+    // script is the host's recorded answer (ADR-727g63tr decision 1).
+    await recordHostMethod(page, ws, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     // Opened the way a person opens it: quick connect finds the saved profile
     // and Enter opens it directly (the profile's key is file-based, so there

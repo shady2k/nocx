@@ -40,8 +40,8 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostmode"
 	nocxlog "github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -232,13 +232,13 @@ const readoptAttemptTimeout = 15 * time.Second
 // readoptConsentRefusal is why a carried-over session's machine was not asked
 // about it, in the two words the resolver actually answered.
 //
-// UNANSWERED IS NOT THE SAME AS DECLINED, and since ADR-0105 a connection whose
-// delivery mode is `helper` can be either: a machine nobody has answered for
+// UNANSWERED IS NOT THE SAME AS DECLINED, and since ADR-0105 a host recorded
+// `helper` can be either: a machine nobody has answered for
 // resolves to ConsentRequired rather than to the helper, so a restart after an
 // upgrade meets sessions whose machine has simply never been asked. The old
 // sentence — "this machine no longer consents" — would have said the opposite
 // of what happened to every one of them.
-func readoptConsentRefusal(outcome Outcome, mode profile.DesiredMode, host string) string {
+func readoptConsentRefusal(outcome Outcome, mode hostmode.Mode, host string) string {
 	if outcome == ConsentRequired {
 		return "nocx has not been told whether it may use its helper on " + host +
 			" — reconnect that connection to be asked"
@@ -248,9 +248,9 @@ func readoptConsentRefusal(outcome Outcome, mode profile.DesiredMode, host strin
 	// does not run the helper at all. Saying "no longer consents" for the
 	// second would name a withdrawal nobody made.
 	switch mode {
-	case profile.DesiredRaw:
+	case hostmode.Raw:
 		return "this host's integration method is Raw, so its helper sessions were not re-adopted"
-	case profile.DesiredScript:
+	case hostmode.Script:
 		return "this host's integration method is Script, so its helper sessions were not re-adopted"
 	}
 	return "this machine no longer consents to the nocx helper"

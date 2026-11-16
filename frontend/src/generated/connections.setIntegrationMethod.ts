@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the connections.setIntegrationMethod JSON-RPC method: which fingerprint was answered, with which method, and (when the answer was written to a saved connection) which one — so the renderer's retry of the open is keyed on the identity the backend actually wrote rather than its own copy of the request. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
+ * Result of the connections.setIntegrationMethod JSON-RPC method: which fingerprint was answered, with which method — so the renderer's retry of the open is keyed on the identity the backend actually wrote rather than its own copy of the request. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
  */
 export interface ConnectionsSetIntegrationMethodResult {
   /**
@@ -21,8 +21,4 @@ export interface ConnectionsSetIntegrationMethodResult {
    * The method as written (raw, script or helper).
    */
   method: 'raw' | 'script' | 'helper'
-  /**
-   * The saved connection whose desiredMode was patched. Absent when the answer named no saved connection.
-   */
-  profileId?: string
 }

@@ -45,7 +45,6 @@ import (
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -739,13 +738,11 @@ func helperPeerWithoutSession(t testing.TB) func(in io.Reader, out io.Writer) in
 }
 
 // fakeRemoteSession is a session.Session whose only interesting facts are
-// the id, kind, host, fingerprint, mode and SSH options the helper
-// selection reads.
+// the id, kind, host, fingerprint and SSH options the helper selection reads.
 type fakeRemoteSession struct {
 	id          session.ID
 	host        string
 	fingerprint string
-	mode        profile.DesiredMode
 }
 
 func (s *fakeRemoteSession) ID() session.ID     { return s.id }
@@ -826,12 +823,10 @@ func (s *fakeRemoteSession) OpenBootstrapWindow() (session.BootstrapWindow, erro
 	return nil, errors.New("fakeRemoteSession has no terminal")
 }
 
-func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption {
-	if s.mode == "" {
-		return nil
-	}
-	return []ssh.ConnectOption{ssh.WithDesiredMode(string(s.mode))}
-}
+// SSHOptions answers none: a saved connection carries no integration method
+// any more (ADR-727g63tr decision 1), so there is nothing here for the
+// selection to read.
+func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption { return nil }
 
 // discardLogger used to be a bare io.Discard sink shared by every caller, so
 // a failure showed only the assertion that tripped and none of the debug
@@ -1318,11 +1313,11 @@ func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
 }
 
 // TestHelperSelectionAHostRecordedRawWritesNothing: a host whose record says
-// raw is never asked and never written to (consent design §4.2) — the
-// connection's own stored mode is not consulted (ADR-727g63tr decision 1), so
-// the session here is even built at helper and the host's record still wins.
-// The selection answers the resolver's Refused as a reason with no earned
-// state, and git.open's not-available error carries it.
+// raw is never asked and never written to (consent design §4.2) — there is no
+// per-connection mode to consult at all any more (ADR-727g63tr decision 1), so
+// the host's record is the only answer. The selection answers the resolver's
+// Refused as a reason with no earned state, and git.open's not-available error
+// carries it.
 func TestHelperSelectionAHostRecordedRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
@@ -1333,7 +1328,7 @@ func TestHelperSelectionAHostRecordedRawWritesNothing(t *testing.T) {
 	reg.modes = newTestHostModes(t)
 	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Raw)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredHelper})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory != nil {
 		t.Fatalf("selection = %+v, want no factory for a host recorded raw", selection)
 	}
@@ -1388,7 +1383,7 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	reg.modes = newTestHostModes(t)
 	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Script)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredHelper})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory != nil {
 		t.Fatalf("selection = %+v, want no factory for a host recorded script — it was never upgraded", selection)
 	}

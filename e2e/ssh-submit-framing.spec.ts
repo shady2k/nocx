@@ -4,7 +4,13 @@ import path from 'node:path'
 
 import { expect, appReadyForInput, promptReady, resolveBackend, test, type Page } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 /**
  * e2e: an ssh pane's composer submit is NEVER bracketed when shell integration
@@ -95,9 +101,9 @@ async function openPane(page: Page, shell: string, inputrc: string | null): Prom
       port: fixture.port,
       user: 'e2e',
       keyPath: fixture.userKey,
-      desiredMode: 'script',
     },
   })
+  await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
   await page.keyboard.press('Control+Shift+P')
   const search = page.locator('.quick-connect__search input')
   await expect(search).toBeVisible({ timeout: 30_000 })

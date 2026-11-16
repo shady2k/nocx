@@ -282,7 +282,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No desiredMode option: the cascade's hardcoded default is Auto
+        // No method record for this host: its record says nothing, so Auto
         // (ADR-0033), which is what makes this connect raise the
         // connect-time ask (ADR-0069) below — an explicit Script would skip
         // straight past it, and Helper is asked too but answers a different

@@ -18,7 +18,7 @@
 import { appReadyForInput, expect, test, resolveBackend } from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
-import { startSshd, type SshdFixture } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, type SshdFixture } from './sshd-fixture'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -85,7 +85,6 @@ async function saveProfile(
                   port: fixture.port,
                   user: profile.user,
                   keyPath: fixture.userKey,
-                  desiredMode: 'script',
                 },
               },
             }),
@@ -164,6 +163,10 @@ test('a saved connection names its tab and its composer place line', async ({ pa
     saved.push(NAMED.id)
     await saveProfile(page, endpoint, UNNAMED, address)
     saved.push(UNNAMED.id)
+    // Both connections reach the SAME host, so one record answers for both:
+    // the method belongs to the machine (ADR-727g63tr decision 1), not to the
+    // profile a person saved.
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     // ── THE NAMED CONNECTION ───────────────────────────────────────────
     await openFromPalette(page, NAMED.name, NAMED.name)

@@ -343,6 +343,20 @@ func TestParse_RejectsObsoleteNeedsReviewField(t *testing.T) {
 	}
 }
 
+// TestParse_AcceptsABackupWrittenBeforeTheMethodWasTheHosts: a backup from a
+// build that kept `desiredMode` on a connection carries it, and this decoder
+// refuses unknown fields. Dropping the value is the answer — the method is the
+// HOST's now (ADR-727g63tr decision 1), a backup carries no host-key record to
+// put it under, and "your old backup is invalid" would be a worse reply than
+// "that setting is no longer a connection's".
+func TestParse_AcceptsABackupWrittenBeforeTheMethodWasTheHosts(t *testing.T) {
+	svc, _, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","desiredMode":"helper"}}],"groups":[]}}`
+	if _, err := svc.Preview(contents, backup.RestoreMerge); err != nil {
+		t.Fatalf("Preview = %v, want the old document accepted with the value dropped", err)
+	}
+}
+
 func TestParse_RejectsNonSSHType(t *testing.T) {
 	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"telnet","name":"a","options":{"host":"h"}}],"groups":[]}}`

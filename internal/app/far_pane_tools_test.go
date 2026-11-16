@@ -47,8 +47,8 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -253,7 +253,7 @@ func farPaneConfig() session.Config {
 			// this machine's `spawn-ssh`. An `auto` connection here would
 			// resolve to the consent ask instead (helperConnection says the
 			// same, one package over).
-			DesiredMode:        string(profile.DesiredHelper),
+			IntegrationMode:    string(hostmode.Helper),
 			Secrets:            rememberedPassword{value: openPasswordFixturePassword},
 			SecretID:           "sec:far-tools:1",
 			AuthorizedEndpoint: "far.example:22",

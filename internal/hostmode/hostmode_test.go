@@ -188,3 +188,30 @@ func TestAFailedRemovalStillForgetsForThisRun(t *testing.T) {
 		t.Fatalf("Lookup after a failed Remove = %q/%v, want the removal kept for this run", mode, ok)
 	}
 }
+
+// TestDeliversScripts is the open-time gate, stated once because it is read in
+// three places: internal/ssh gates the session open on it, internal/transport
+// decides from it whether a session even REQUESTED integration, and the
+// deferred helper applies it to the mode a spawn carries. Those were separate
+// literals until ADR-0033 and they disagreed the moment the default moved —
+// every unconfigured session integrated and then reported nothing. The rule
+// lives on the mode; this table is what a future edit has to argue with.
+func TestDeliversScripts(t *testing.T) {
+	cases := []struct {
+		mode Mode
+		want bool
+		why  string
+	}{
+		{Auto, true, "the default: the scripts are automatic and unasked (N3)"},
+		{Script, true, "the same delivery, chosen explicitly"},
+		{Mode(""), true, "nobody spoke — a direct host, an ad-hoc open, a local session"},
+		{Raw, false, "the user's opt-out: nothing is written"},
+		{Helper, true, "additive, not alternative: allowing the helper never withholds the scripts (§5.2)"},
+		{Mode("ask"), false, "not a mode; an unknown value fails closed"},
+	}
+	for _, tc := range cases {
+		if got := tc.mode.DeliversScripts(); got != tc.want {
+			t.Errorf("Mode(%q).DeliversScripts() = %v, want %v — %s", tc.mode, got, tc.want, tc.why)
+		}
+	}
+}

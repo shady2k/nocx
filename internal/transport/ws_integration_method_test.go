@@ -101,20 +101,19 @@ func newIntegrationMethodProfileStore(t *testing.T, id string) *profile.JSONStor
 	return ps
 }
 
-// TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath: choosing
-// script on a saved connection is read back through profiles.effective the
-// same way an editor-driven patch would be — the acceptance criterion in
-// nocx-xn63t.6.5 — and grants nothing.
-func TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
+// TestIntegrationMethod_ScriptRecordsTheHostMethodOnly: choosing script writes
+// the HOST's record and grants nothing. The saved connection has no copy of the
+// method any more (ADR-727g63tr decision 1), so profiles.effective is not a
+// place the answer could be read back from — and a test that looked there
+// would be asserting a field the wire no longer carries.
+func TestIntegrationMethod_ScriptRecordsTheHostMethodOnly(t *testing.T) {
 	granter := &fakeHelperConsentGranter{}
-	srv, _ := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "script",
 	})
 	var result struct {
@@ -127,48 +126,28 @@ func TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath(t *testing
 	if result.Error != nil {
 		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
 	}
-	if result.Result.Method != "script" || result.Result.ProfileID != "ssh-1" {
-		t.Errorf("result = %+v, want method script / profileId ssh-1", result.Result)
+	if result.Result.Method != "script" || result.Result.Fingerprint != "SHA256:abc" {
+		t.Errorf("result = %+v, want method script for SHA256:abc", result.Result)
 	}
 	if len(granter.grantedFingerprints()) != 0 {
 		t.Error("choosing script must not grant helper consent")
 	}
-
-	// Read back through the same seam the editor's Delivery mode field uses:
-	// profiles.effective's desiredMode.
-	effResp := jsonrpcCall(t, conn, "profiles.effective", map[string]any{"ids": []string{"ssh-1"}})
-	var eff struct {
-		Result struct {
-			Profiles []struct {
-				Fields struct {
-					DesiredMode struct {
-						Value string `json:"value"`
-					} `json:"desiredMode"`
-				} `json:"fields"`
-			} `json:"profiles"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(effResp, &eff); err != nil {
-		t.Fatalf("unmarshal effective: %v", err)
-	}
-	if len(eff.Result.Profiles) != 1 || eff.Result.Profiles[0].Fields.DesiredMode.Value != "script" {
-		t.Fatalf("effective profiles = %+v, want one profile with desiredMode script", eff.Result.Profiles)
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
+		t.Errorf("host record = %q/%v, want script", mode, ok)
 	}
 }
 
-// TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent: choosing
-// helper on a saved connection does both writes ADR-0069 names — the
-// connection's desiredMode AND the machine's fingerprint-keyed grant.
-func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
+// TestIntegrationMethod_HelperRecordsTheHostMethodAndGrantsConsent: choosing
+// helper does both writes ADR-0069 names — the host's method AND the machine's
+// fingerprint-keyed grant — and they are two questions with two stores.
+func TestIntegrationMethod_HelperRecordsTheHostMethodAndGrantsConsent(t *testing.T) {
 	granter := &fakeHelperConsentGranter{}
-	srv, modes := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "helper",
 	})
 	var result struct {
@@ -184,9 +163,6 @@ func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T)
 	if got := granter.grantedFingerprints(); len(got) != 1 || got[0] != "SHA256:abc" {
 		t.Errorf("Grant called with %v, want [SHA256:abc]", got)
 	}
-	// AND THE HOST KEEPS THE METHOD (ADR-727g63tr decision 1): the grant is
-	// the machine's permission, the record is the host's method — two facts,
-	// two stores, and helper is written to both.
 	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Helper {
 		t.Errorf("host record = %q/%v, want helper", mode, ok)
 	}
@@ -196,51 +172,20 @@ func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T)
 // store either — the same rule as script, checked separately because raw and
 // script are refused by two different arms of the resolver.
 func TestIntegrationMethod_RawWritesNoConsent(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
 	granter := &fakeHelperConsentGranter{}
-	srv, _ := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "raw",
 	})
 	if len(granter.grantedFingerprints()) != 0 {
 		t.Error("choosing raw must not grant helper consent")
 	}
-}
-
-// TestIntegrationMethod_NoProfileID: a hand-typed connection has nowhere to
-// keep the answer. Helper still grants — the machine consent is independent
-// of any saved connection — but nothing is patched, and no profile store
-// needs to be wired at all.
-func TestIntegrationMethod_NoProfileID(t *testing.T) {
-	granter := &fakeHelperConsentGranter{}
-	srv, _ := startIntegrationMethodServer(t, granter, nil)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
-
-	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "helper",
-	})
-	var result struct {
-		Result integrationMethodResult `json:"result"`
-		Error  *jsonrpcErrorObj        `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if result.Error != nil {
-		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
-	}
-	if result.Result.ProfileID != "" {
-		t.Errorf("profileId = %q, want empty when none was named", result.Result.ProfileID)
-	}
-	if got := granter.grantedFingerprints(); len(got) != 1 || got[0] != "SHA256:abc" {
-		t.Errorf("Grant called with %v, want [SHA256:abc]", got)
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Raw {
+		t.Errorf("host record = %q/%v, want raw", mode, ok)
 	}
 }
 

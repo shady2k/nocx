@@ -29,7 +29,6 @@ import (
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -67,17 +66,16 @@ func realHelperPeerWithSpawner(t testing.TB) func(in io.Reader, out io.Writer) i
 	}
 }
 
-// remoteConfigFor builds the session.Config openHoldingLease reads: a
-// remote destination at the given mode, with the launcher/installer options
-// SSHOptionsFromConfig round-trips through opts back to the provider.
-func remoteConfigFor(mode profile.DesiredMode) session.Config {
+// remoteConfigFor builds the session.Config openHoldingLease reads: a remote
+// destination with the launcher/installer options SSHOptionsFromConfig
+// round-trips through opts back to the provider. It carries no integration
+// method: a saved connection has none (ADR-727g63tr decision 1), and the open
+// path stamps the host's answer once the probe reports its key.
+func remoteConfigFor() session.Config {
 	return session.Config{
-		Kind: session.KindRemote,
-		Host: "host.example",
-		Remote: &ssh.ConnectConfig{
-			User:        "test",
-			DesiredMode: string(mode),
-		},
+		Kind:   session.KindRemote,
+		Host:   "host.example",
+		Remote: &ssh.ConnectConfig{User: "test"},
 	}
 }
 
@@ -124,7 +122,7 @@ func TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough(t *testing.T
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
-	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")
+	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	defer hold.release()
 
 	if !selected {
@@ -158,7 +156,7 @@ func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	r := newTestRegistry(t, provider, store)
 
-	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")
+	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	defer hold.release()
 
 	if err != nil {
@@ -191,7 +189,7 @@ func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
 	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 
-	opened, hold, selected, err := reg.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")
+	opened, hold, selected, err := reg.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	defer hold.release()
 	if err != nil {
 		t.Fatalf("openHoldingLease: %v", err)
@@ -215,46 +213,40 @@ func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
 	}
 }
 
-// TestOpenHoldingLease_AHostWithNoRecordAsksWhateverTheProfileSays is
-// nocx-1kejz.3 and ADR-727g63tr decision 1 at the connect-time seam: a saved
-// connection whose stored delivery mode is helper and whose HOST has never been
-// answered used to resolve to the helper from the connection's own mode alone
-// and deploy a binary nobody had been asked about. The host record is the
-// question now, so two profiles with different stored modes meet the same
-// answer — the ask — and nothing is installed before it.
-func TestOpenHoldingLease_AHostWithNoRecordAsksWhateverTheProfileSays(t *testing.T) {
-	for _, stored := range []profile.DesiredMode{profile.DesiredHelper, profile.DesiredScript, profile.DesiredRaw} {
-		t.Run(string(stored), func(t *testing.T) {
-			provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-			store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
-			r := newTestRegistry(t, provider, store)
+// TestOpenHoldingLease_AHostWithNoRecordAsksBeforeAnythingIsInstalled is
+// nocx-1kejz.3 and ADR-727g63tr decision 1 at the connect-time seam: nothing a
+// connection says can deploy a binary on a machine nobody answered for,
+// because a connection says nothing about the method any more. A host with no
+// record meets the ask, and no lane, install or session exists before it.
+func TestOpenHoldingLease_AHostWithNoRecordAsksBeforeAnythingIsInstalled(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	r := newTestRegistry(t, provider, store)
 
-			opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(stored), "claim-1")
-			defer hold.release()
+	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
+	defer hold.release()
 
-			if !selected {
-				t.Fatal("selected = false, want true — a host with no record must not fall through to the local opener silently")
-			}
-			if opened.Session != nil {
-				t.Fatal("a session was opened before the host's answer")
-			}
-			var ask *transport.ErrHelperConsentNeeded
-			if !errors.As(err, &ask) {
-				t.Fatalf("err = %v, want *transport.ErrHelperConsentNeeded", err)
-			}
-			if ask.Fingerprint == "" {
-				t.Error("ask carries no fingerprint — the answer is keyed by it and has nowhere else to go")
-			}
-			if ask.Cause != nil {
-				t.Errorf("ask.Cause = %v, want nil — the probe dial succeeded, so the key is already trusted", ask.Cause)
-			}
-			// The interval this bead is about: nothing is installed, and
-			// nothing is spawned, until a person answers. A lane here would be
-			// a binary deployed on somebody else's machine without permission.
-			if got := provider.laneCount(); got != 0 {
-				t.Errorf("the ask brought up %d helper lanes, want 0", got)
-			}
-		})
+	if !selected {
+		t.Fatal("selected = false, want true — a host with no record must not fall through to the local opener silently")
+	}
+	if opened.Session != nil {
+		t.Fatal("a session was opened before the host's answer")
+	}
+	var ask *transport.ErrHelperConsentNeeded
+	if !errors.As(err, &ask) {
+		t.Fatalf("err = %v, want *transport.ErrHelperConsentNeeded", err)
+	}
+	if ask.Fingerprint == "" {
+		t.Error("ask carries no fingerprint — the answer is keyed by it and has nowhere else to go")
+	}
+	if ask.Cause != nil {
+		t.Errorf("ask.Cause = %v, want nil — the probe dial succeeded, so the key is already trusted", ask.Cause)
+	}
+	// The interval this test is about: nothing is installed, and nothing is
+	// spawned, until a person answers. A lane here would be a binary deployed
+	// on somebody else's machine without permission.
+	if got := provider.laneCount(); got != 0 {
+		t.Errorf("the ask brought up %d helper lanes, want 0", got)
 	}
 }
 
@@ -269,7 +261,7 @@ func TestOpenHoldingLease_AHostRecordedHelperIsServedSilently(t *testing.T) {
 	r := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)
 
-	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredRaw), "claim-1")
+	opened, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	defer hold.release()
 
 	if err != nil {
@@ -290,7 +282,7 @@ func TestOpenHoldingLease_AHostRecordedRawNeverAsks(t *testing.T) {
 	r := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Raw)
 
-	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredHelper), "claim-1")
+	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	defer hold.release()
 
 	if selected {

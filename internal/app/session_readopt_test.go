@@ -41,8 +41,8 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -398,7 +398,7 @@ func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 // would resolve to the consent ASK instead only if that answer were missing,
 // and there would be nothing to take back.
 func helperConnection(user string) *ssh.ConnectConfig {
-	return &ssh.ConnectConfig{User: user, DesiredMode: string(profile.DesiredHelper)}
+	return &ssh.ConnectConfig{User: user, IntegrationMode: string(hostmode.Helper)}
 }
 
 // quit is this coordinator's process ending: every helper channel it holds is

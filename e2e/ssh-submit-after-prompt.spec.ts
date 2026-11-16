@@ -40,7 +40,13 @@ import path from 'node:path'
 
 import { expect, appReadyForInput, promptReady, resolveBackend, test } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 const PANE = '.pane.active'
 const EDITOR = `${PANE} .nocx-editor-input`
@@ -107,10 +113,10 @@ test('a submit queued during an ssh open waits for the shell’s prompt (nocx-ev
         port: fixture.port,
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
@@ -224,10 +230,10 @@ test('a submit during a plain sh startup stays in the composer until the person 
         port: fixture.port,
         user: 'nocx-e2e-long-bound',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')

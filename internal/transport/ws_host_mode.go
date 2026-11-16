@@ -67,9 +67,9 @@ type hostModeResult struct {
 }
 
 type hostModeHandlers struct {
-	resolver *resolverHolder        // nil entry → no profile resolver wired
-	index    HostKeyIndex           // nil → known_hosts cannot be asked
-	modes    *hostmode.Store        // nil → nothing may be recorded
+	resolver *resolverHolder // nil entry → no profile resolver wired
+	index    HostKeyIndex    // nil → known_hosts cannot be asked
+	modes    *hostmode.Store // nil → nothing may be recorded
 	r        Responder
 	log      log.Logger
 }

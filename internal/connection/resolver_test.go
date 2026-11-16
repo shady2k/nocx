@@ -678,50 +678,27 @@ func TestResolver_KeySecretBinding(t *testing.T) {
 	}
 }
 
-// TestResolver_ModeFromEffectiveProfile: the effective desiredMode field
-// (profile > group > global > default) is stamped verbatim onto the
-// ConnectConfig (nocx-mlm7) — the ssh layer gates open-time integration on
-// it directly (auto and script integrate at startup; raw opens a plain
-// shell) and the open ack reports the same AXIS value, which must keep every
-// mode distinguishable from every other. One row per mode, plus the unset
-// default, which is auto and NOT script: silence is not an answer
-// (ADR-0033). The LaunchPolicy translation is retired: the resolver stamps
-// the mode, and nothing else.
-func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
-	cases := []struct {
-		name     string
-		mode     *profile.DesiredMode
-		wantMode string
-	}{
-		{name: "unset defaults to auto — silence, not an answer", wantMode: "auto"},
-		{name: "auto", mode: profile.Ptr(profile.DesiredAuto), wantMode: "auto"},
-		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantMode: "script"},
-		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantMode: "raw"},
-		{name: "helper", mode: profile.Ptr(profile.DesiredHelper), wantMode: "helper"},
+// TestResolver_StampsNoIntegrationMode: the integration method is the HOST's
+// (ADR-727g63tr decision 1), keyed by a host-key fingerprint that exists only
+// after a dial has seen a key. The resolver builds a connection before any dial,
+// so it has no answer to stamp — and a resolver that stamped one would be a
+// second answer for a fact it cannot name. The open path fills the field from
+// the record once the probe reports the fingerprint.
+func TestResolver_StampsNoIntegrationMode(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:si:1", Name: "si-test"},
+		Options: profile.StoredSSHProfileOptions{Host: "si.example.com", User: profile.Ptr("deploy")},
+	})
+
+	r := NewResolver(ps, ps, ss)
+	_, cfg, err := r.Resolve("profile:si:1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ps := newStubProfileStore()
-			ss := newStubSecretStore()
-
-			_ = ps.SaveProfile(profile.SSHProfile{
-				Base: profile.Base{ID: "profile:si:1", Name: "si-test"},
-				Options: profile.StoredSSHProfileOptions{
-					Host:        "si.example.com",
-					User:        profile.Ptr("deploy"),
-					DesiredMode: tc.mode,
-				},
-			})
-
-			r := NewResolver(ps, ps, ss)
-			_, cfg, err := r.Resolve("profile:si:1")
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-			if got := cfg.DesiredMode; got != tc.wantMode {
-				t.Errorf("DesiredMode = %q, want %q", got, tc.wantMode)
-			}
-		})
+	if cfg.IntegrationMode != "" {
+		t.Errorf("IntegrationMode = %q, want empty: the resolver names no host key, so it cannot answer for one", cfg.IntegrationMode)
 	}
 }
 

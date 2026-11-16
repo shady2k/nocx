@@ -15,7 +15,6 @@ function evidence(knownHostsHost: string, key: string): HostKeyErrorEvidence {
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:abc',
     key,
-    profileId: 'ssh:test',
   }
 }
 

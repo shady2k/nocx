@@ -160,10 +160,6 @@ async function seedVaultKeyProfile(
       user: 'e2e',
       auth: 'publicKey',
       keySecret: minted.row,
-      // This spec's subject IS the helper tier: the pane must be opened by
-      // this machine's helper against the profile's vault key. An explicit
-      // helper choice is its own consent for the binary (ADR-0034 §4.3).
-      desiredMode: 'helper',
     },
   })
 }

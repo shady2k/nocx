@@ -11,7 +11,7 @@ package session
 // This file exists because that has now happened three times in this one
 // function, and its own comments say what it costs: "a field that is carried
 // and discarded is worse than one that is missing, because it looks
-// configured" (nocx-mlm7 for DesiredMode, nocx-pu4.1 for Shell). Keepalive is
+// configured" (nocx-mlm7 for the integration mode, nocx-pu4.1 for Shell). Keepalive is
 // the third, and it is the one that costs a person their session: the interval
 // is what the helper's prober uses, so a dropped one leaves a tab on a dead
 // pipe in silence.

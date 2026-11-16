@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { appReadyForInput, promptReady, test, expect, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { startSshd, type SshdFixture } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, type SshdFixture } from './sshd-fixture'
 
 // nocx-ouru5.1.4: the tab's right-click menu offered Rename, Pin and Close, and
 // one thing was missing — a copy.
@@ -166,10 +166,11 @@ test.describe('an ssh tab duplicates onto the same connection, as a new session'
           port: host.port,
           user: host.user,
           keyPath: host.userKey,
-          desiredMode: 'script',
         },
       })
       profileId = created.id
+      const info = await resolveBackend(page)
+      await recordHostMethod(page, info, hostKeyFingerprint(host.knownHosts), 'script')
 
       // Open it through quick connect, the palette's own route.
       await page.keyboard.press('Control+Shift+P')

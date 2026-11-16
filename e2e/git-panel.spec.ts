@@ -732,7 +732,7 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No desiredMode option: the cascade's hardcoded default is Auto
+        // No method record for this host: its record says nothing, so Auto
         // (ADR-0033), which wraps and installs the launcher automatically
         // — landing the OSC 7 that makes the cwd verified and lets the
         // git store reach git.open — and is also what raises the
@@ -760,7 +760,7 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     // probe succeeds and the one unanswered question is the method alone
     // — raised on the same one-dialog surface the host-key ask uses
     // (HostKeyDialog), titled for the method-only case. Choosing Script is
-    // a RECORDED answer (written to the connection's desiredMode, ADR-0069)
+    // a RECORDED answer (written to the HOST's record, ADR-727g63tr decision 1)
     // rather than the old yes/no "Not now": the retried open proceeds
     // without the helper, script-tier, and the connection stays usable —
     // the same outcome the removed decline button gave, reached the way a

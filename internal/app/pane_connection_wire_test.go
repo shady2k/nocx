@@ -32,7 +32,7 @@ func TestPaneConnection_OverTheWireConformsToContract(t *testing.T) {
 		transport.WithHelperSessionOpener(opener),
 		transport.WithProfileResolver(liveHostedCwdResolver{host: srv.addr, config: &ssh.ConnectConfig{
 			User: filesFixtureUser, AuthMode: "password", Secrets: &askRecorder{value: openPasswordFixturePassword}, SecretID: filesFixtureSecret,
-			AuthorizedEndpoint: srv.addr, DesiredMode: "raw", Shell: "bash",
+			AuthorizedEndpoint: srv.addr, IntegrationMode: "raw", Shell: "bash",
 		}}), transport.WithPaneConnectionPolicy(paneConnectionOwner{Driver: driver, opener: opener}))
 	driver.SetPublisher(func(s panedriver.Snapshot) { ws.PublishPaneConnection(paneConnectionWire(s)) })
 	driver.SetAction(func(ctx context.Context, pane string, binding uint64) error {

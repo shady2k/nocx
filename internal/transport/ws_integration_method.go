@@ -14,26 +14,20 @@ package transport
 // one alike, because which method a machine uses is a fact about that machine
 // — two tabs to one host resolve one mode, and a second open raises no ask.
 //
-// Two other writes ride beside it and neither owns the answer any more:
-//
-//   - the saved connection's desiredMode, through capability.ConfigService's
-//     PatchProfile — the exact path profiles.patch uses — while that field
-//     still exists (nocx-oalo1.11.2 removes it). Its failure is a warning, not
-//     a refusal: the record above is what the open reads, and refusing here
-//     would say the answer was lost when it was not.
-//   - the machine's CONSENT to deploy the binary, by fingerprint, and only
-//     when the chosen method is helper (ADR-0034, internal/helper/consent).
-//     Choosing raw or script writes nothing to that store: a fingerprint
-//     record there answers "may a binary be deployed here", never "which
-//     method this host uses" — the two questions stay unmerged (ADR-0105).
-//     That is why hostmode is a separate store beside consent and not a field
-//     of it.
+// One other write rides beside it and does not own the answer: the machine's
+// CONSENT to deploy the binary, by fingerprint, and only when the chosen method
+// is helper (ADR-0034, internal/helper/consent). Choosing raw or script writes
+// nothing to that store: a fingerprint record there answers "may a binary be
+// deployed here", never "which method this host uses" — the two questions stay
+// unmerged (ADR-0105). That is why hostmode is a separate store beside consent
+// and not a field of it. The connection editor's own write is a separate
+// method (ws_host_mode.go) because it names a profile instead of a fingerprint
+// and grants nothing.
 
 import (
 	"context"
 	"encoding/json"
 
-	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -69,31 +63,25 @@ func WithHostModeStore(store *hostmode.Store) WSServerOption {
 
 // integrationMethodParams is the payload of "connections.setIntegrationMethod":
 // the fingerprint the ask named (echoed from the open failure's
-// helperConsentData), the chosen method, and — when the answer belongs to a
-// saved connection — the profile it is written to. Host travels for the log
-// line only.
+// helperConsentData) and the chosen method. Host travels for the log line
+// only.
 type integrationMethodParams struct {
 	Fingerprint string `json:"fingerprint"`
 	Host        string `json:"host,omitempty"`
-	ProfileID   string `json:"profileId,omitempty"`
 	Method      string `json:"method"`
 }
 
-// integrationMethodResult confirms which fingerprint was answered, with
-// which method, and which connection (if any) received the write — so the
-// renderer's retry is keyed on the identity the backend actually acted on
-// rather than trusting its own copy of the request back.
+// integrationMethodResult confirms which fingerprint was answered, with which
+// method — so the renderer's retry is keyed on the identity the backend
+// actually acted on rather than trusting its own copy of the request back.
 type integrationMethodResult struct {
 	Fingerprint string `json:"fingerprint"`
 	Method      string `json:"method"`
-	ProfileID   string `json:"profileId,omitempty"`
 }
 
 type integrationMethodHandlers struct {
-	op      capability.ConfigOperation // nil → config domain not wired
-	wired   bool                       // profile repository wired
-	granter HelperConsentGranter       // nil → choosing helper fails
-	modes   *hostmode.Store            // nil → nothing may be answered
+	granter HelperConsentGranter // nil → choosing helper fails
+	modes   *hostmode.Store      // nil → nothing may be answered
 	r       Responder
 	log     log.Logger
 }
@@ -102,7 +90,7 @@ type integrationMethodHandlers struct {
 // connect-time ask.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.setIntegrationMethod","params":{"fingerprint":"SHA256:MKEj…","host":"1.2.3.4:22","profileId":"ssh-1","method":"script"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","profileId":"ssh-1"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script"}}
 func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	var params integrationMethodParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -149,25 +137,6 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 		}
 	}
 
-	// The saved connection's own desiredMode, through the SAME path
-	// profiles.patch uses — never a second writer of it (AD-8) — while that
-	// field still exists (nocx-oalo1.11.2 removes it and this write with it).
-	// Its failure is a warning: the host record above is what the open reads,
-	// and a refusal here would say the answer was lost when it was not.
-	if params.ProfileID != "" {
-		if !h.wired || h.op == nil {
-			h.warn("the answer was recorded for the host but not on its saved connection: profiles are not available",
-				"profile", params.ProfileID)
-		} else if err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-			return svc.PatchProfile(params.ProfileID, map[string]any{
-				"options.desiredMode": params.Method,
-			}, nil)
-		}); err != nil {
-			h.warn("the answer was recorded for the host but not on its saved connection",
-				"profile", params.ProfileID, "error", err)
-		}
-	}
-
 	// THE ANSWER STANDS; THE FAILURE TO REMEMBER IT IS SAID, NOT SWALLOWED.
 	// The answer is in memory (hostmode.Store keeps it), so the retried open
 	// uses it and does not ask again — and the person is told it will not
@@ -190,7 +159,6 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 	_ = h.r.TryResult(req.ID, mustMarshal(integrationMethodResult{
 		Fingerprint: params.Fingerprint,
 		Method:      params.Method,
-		ProfileID:   params.ProfileID,
 	}))
 }
 
@@ -226,11 +194,6 @@ func validateIntegrationMethodRaw(raw json.RawMessage) string {
 	}
 	if p.Host != "" {
 		if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
-			return msg
-		}
-	}
-	if p.ProfileID != "" {
-		if msg := validateStringBound("profileId", p.ProfileID, maxIDRunes); msg != "" {
 			return msg
 		}
 	}

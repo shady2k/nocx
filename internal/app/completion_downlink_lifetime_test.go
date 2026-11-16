@@ -444,7 +444,7 @@ func TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime(t *testing.T) {
 	opened, selected, err := reg.OpenHosted(openCtx, session.Config{
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: "pane-far-1", ProfileID: "profile-1",
-		Remote: &ssh.ConnectConfig{User: "u", DesiredMode: "helper"},
+		Remote: &ssh.ConnectConfig{User: "u", IntegrationMode: "helper"},
 	}, "")
 	if err != nil {
 		t.Fatalf("opening a far-helper pane through the shipped opener: %v", err)

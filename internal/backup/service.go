@@ -693,7 +693,6 @@ func profileToBackup(p profile.SSHProfile) BackupProfile {
 		ReadyTimeout:      intVal(p.Options.ReadyTimeout),
 		JumpHost:          strVal(p.Options.JumpHost),
 		AgentForward:      boolVal(p.Options.AgentForward),
-		DesiredMode:       desiredVal(p.Options.DesiredMode),
 		HelperConsent:     consentVal(p.Options.HelperConsent),
 		PortDiscovery:     discoveryVal(p.Options.PortDiscovery),
 		CanBeJumpServer:   boolVal(p.Options.CanBeJumpServer),
@@ -761,13 +760,6 @@ func authVal(p *profile.AuthMode) profile.AuthMode {
 	return *p
 }
 
-func desiredVal(p *profile.DesiredMode) profile.DesiredMode {
-	if p == nil {
-		return ""
-	}
-	return *p
-}
-
 func consentVal(p *profile.HelperConsent) profile.HelperConsent {
 	if p == nil {
 		return ""
@@ -804,13 +796,6 @@ func optBool(v bool) *bool {
 }
 
 func optAuth(v profile.AuthMode) *profile.AuthMode {
-	if v == "" {
-		return nil
-	}
-	return &v
-}
-
-func optDesired(v profile.DesiredMode) *profile.DesiredMode {
 	if v == "" {
 		return nil
 	}
@@ -887,7 +872,6 @@ func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
 			ReadyTimeout:      intVal(d.ReadyTimeout),
 			JumpHost:          strVal(d.JumpHost),
 			AgentForward:      boolVal(d.AgentForward),
-			DesiredMode:       desiredVal(d.DesiredMode),
 			PortDiscovery:     discoveryVal(d.PortDiscovery),
 		}
 
@@ -1534,7 +1518,6 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			ReadyTimeout:         optInt(bp.Options.ReadyTimeout),
 			JumpHost:             optStr(bp.Options.JumpHost),
 			AgentForward:         optBool(bp.Options.AgentForward),
-			DesiredMode:          optDesired(bp.Options.DesiredMode),
 			HelperConsent:        optConsent(bp.Options.HelperConsent),
 			PortDiscovery:        optDiscovery(bp.Options.PortDiscovery),
 			Forwards:             optForwards(bp.Options.Forwards),
@@ -1563,7 +1546,6 @@ func backupToGroup(bg BackupGroup) profile.ProfileGroup {
 		g.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
 		g.Defaults.JumpHost = optStr(o.JumpHost)
 		g.Defaults.AgentForward = optBool(o.AgentForward)
-		g.Defaults.DesiredMode = optDesired(o.DesiredMode)
 		g.Defaults.PortDiscovery = optDiscovery(o.PortDiscovery)
 	}
 	return g
@@ -1590,7 +1572,6 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.Options.KeepaliveInterval = optInt(bp.Options.KeepaliveInterval)
 	mp.Options.ReadyTimeout = optInt(bp.Options.ReadyTimeout)
 	mp.Options.JumpHost = optStr(bp.Options.JumpHost)
-	mp.Options.DesiredMode = optDesired(bp.Options.DesiredMode)
 	mp.Options.HelperConsent = optConsent(bp.Options.HelperConsent)
 	mp.Options.PortDiscovery = optDiscovery(bp.Options.PortDiscovery)
 	mp.Options.Forwards = optForwards(bp.Options.Forwards)
@@ -1643,7 +1624,6 @@ func mergeGroup(bg BackupGroup, cg profile.ProfileGroup) profile.ProfileGroup {
 		mg.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
 		mg.Defaults.JumpHost = optStr(o.JumpHost)
 		mg.Defaults.AgentForward = optBool(o.AgentForward)
-		mg.Defaults.DesiredMode = optDesired(o.DesiredMode)
 		mg.Defaults.PortDiscovery = optDiscovery(o.PortDiscovery)
 	} else if mg.Defaults != nil {
 		cp := *mg.Defaults
@@ -1673,7 +1653,6 @@ func profileEqual(bp BackupProfile, cp profile.SSHProfile) bool {
 		bp.Options.ReadyTimeout != intVal(cp.Options.ReadyTimeout) ||
 		bp.Options.JumpHost != strVal(cp.Options.JumpHost) ||
 		bp.Options.AgentForward != boolVal(cp.Options.AgentForward) ||
-		bp.Options.DesiredMode != desiredVal(cp.Options.DesiredMode) ||
 		bp.Options.HelperConsent != consentVal(cp.Options.HelperConsent) ||
 		bp.Options.PortDiscovery != discoveryVal(cp.Options.PortDiscovery) ||
 		bp.Options.CanBeJumpServer != boolVal(cp.Options.CanBeJumpServer) ||
@@ -1742,9 +1721,6 @@ func backupSSHToSafeMap(o BackupSSHOptions) map[string]any {
 	if o.AgentForward {
 		m["agentForward"] = true
 	}
-	if o.DesiredMode != "" {
-		m["desiredMode"] = string(o.DesiredMode)
-	}
 	if o.PortDiscovery != "" {
 		m["portDiscovery"] = string(o.PortDiscovery)
 	}
@@ -1767,9 +1743,6 @@ func sparseDefaultsToSafeMap(d *profile.ProfileDefaults) map[string]any {
 	}
 	if d.ReadyTimeout != nil {
 		m["readyTimeout"] = *d.ReadyTimeout
-	}
-	if d.DesiredMode != nil {
-		m["desiredMode"] = string(*d.DesiredMode)
 	}
 	if d.PortDiscovery != nil {
 		m["portDiscovery"] = string(*d.PortDiscovery)

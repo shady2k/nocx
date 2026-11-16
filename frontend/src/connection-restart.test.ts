@@ -39,7 +39,7 @@ async function reconnectingSession(interruptedBeforeRestart = false) {
       accessEpoch: 3,
       workspaceId: 'workspace-restart',
       cwd: '/home/test',
-      desiredMode: 'raw',
+      integrationMode: 'raw',
       effectiveSize: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
       parent: null,
       awaitsIntegration: false,

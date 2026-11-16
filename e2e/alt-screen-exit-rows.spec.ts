@@ -1,6 +1,6 @@
 import { test, expect, promptReady, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -139,12 +139,14 @@ async function openMarkerlessPane(page: import('@playwright/test').Page): Promis
         port: fixture.port,
         user: fixture.user,
         keyPath: fixture.userKey,
-        // No integration at all: a conventional shell, which is the mode with
-        // no prompt marker to hand a borrowed grid back.
-        desiredMode: 'raw',
       },
     })
     createdId = created.id
+    // No integration at all: a conventional shell, which is the mode with no
+    // prompt marker to hand a borrowed grid back. The method is the HOST's
+    // (ADR-727g63tr decision 1), so it is recorded for the host rather than
+    // carried as a profile option.
+    await recordHostMethod(page, wsInfo, hostKeyFingerprint(fixture.knownHosts), 'raw')
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible()

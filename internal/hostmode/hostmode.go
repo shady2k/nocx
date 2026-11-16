@@ -62,6 +62,35 @@ func Parse(s string) (Mode, bool) {
 	return "", false
 }
 
+// DeliversScripts reports whether m publishes the shell bundle and
+// integrates at session open — the open-time gate, and the ONE owner of that
+// question (AD-8). The empty string is an unanswered destination (a direct
+// host, an ad-hoc open, a local session) and answers as the default does; an
+// unrecognised value fails closed and never integrates.
+//
+// It lives on the mode rather than at either call site because it had two and
+// they disagreed. internal/ssh gated the open on `mode == "" || mode ==
+// "script"` while internal/transport decided whether a session had even
+// REQUESTED integration with `... == "script"`, each a separate literal of the
+// same rule. Changing the default to auto (ADR-0033) made the second one false
+// for every unconfigured connection, so sessions integrated and then reported
+// nothing — the status notification never fired, because the axis had one
+// meaning in the gate and another in the reporter.
+//
+// raw is the ONLY answer that means "nothing", and an unrecognised value joins
+// it by failing closed. Every other mode integrates, helper included: the tiers
+// are additive, not alternative (§5.2 — "declining a deployed binary must not
+// also decline shell scripts — different risks", and the inverse holds for the
+// same reason).
+func (m Mode) DeliversScripts() bool {
+	switch m {
+	case "", Auto, Script, Helper:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrEmptyFingerprint refuses a record under "": a mode keyed by nothing
 // would make every host share one answer — the exact defect the fingerprint
 // key exists to prevent.

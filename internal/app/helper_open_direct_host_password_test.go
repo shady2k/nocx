@@ -88,7 +88,7 @@ func directHostPaneConfig(srv *pwSSHServer, asker *directHostAsker, paneID strin
 			// NO AuthMode: auto, the connect UI's shape. No secrets, no key
 			// file, no agent — the machine has nothing to offer, which is
 			// why the prompt rung is the ladder's whole answer.
-			DesiredMode:       string(profile.DesiredRaw),
+			IntegrationMode:   string(hostmode.Raw),
 			PasswordRequester: asker,
 		},
 	}
@@ -193,7 +193,7 @@ func TestOpenPath_DirectHostWrongPasswordAtThePublishReadsAsASentence(t *testing
 
 	// Auto mode: the publish runs, and its lease dial is the first to ask.
 	cfg := directHostPaneConfig(srv, asker, "pane-direct-publish")
-	cfg.Remote.DesiredMode = string(profile.DesiredAuto)
+	cfg.Remote.IntegrationMode = string(hostmode.Auto)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

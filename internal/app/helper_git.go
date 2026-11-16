@@ -41,7 +41,6 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -274,9 +273,9 @@ func refusedHelperReason(sess session.Session, store *consent.Store, modes *host
 	// person to change "this connection" would send them to a field that no
 	// longer decides anything.
 	switch hostModeFor(modes, sess.HostKeyFingerprint()) {
-	case profile.DesiredRaw:
+	case hostmode.Raw:
 		return "this host's integration method is Raw, which does not run the nocx helper — set it to Helper to open repositories here"
-	case profile.DesiredScript:
+	case hostmode.Script:
 		// An answer, not a gap: script asked for the shell tiers and not
 		// the binary, so this is not a refusal to explain away but a
 		// choice to name back. Neither mode in this sentence is named as a
@@ -288,9 +287,9 @@ func refusedHelperReason(sess session.Session, store *consent.Store, modes *host
 	if store != nil {
 		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok {
 			if ans == consent.Denied {
-				// A denial is the machine's answer, and the connection's
-				// Delivery mode cannot override it (ADR-0105): the answer
-				// itself is what changes, on the surface that owns it.
+				// A denial is the machine's answer, and the host's method
+				// cannot override it (ADR-0105): the answer itself is what
+				// changes, on the surface that owns it.
 				return "this machine has declined to run the nocx helper — change that answer in the footprint screen to allow it"
 			}
 		} else {
@@ -571,11 +570,11 @@ func (i installedHelper) machine() proto.Machine { return proto.Machine{Dir: i.d
 // composition root's), is auto: "not yet answered" (ADR-0033), which is the
 // connect-time ask. The store's own Lookup is nil-safe, so the nil case needs
 // no test of its own here.
-func hostModeFor(modes *hostmode.Store, fingerprint string) profile.DesiredMode {
+func hostModeFor(modes *hostmode.Store, fingerprint string) hostmode.Mode {
 	if mode, ok := modes.Lookup(fingerprint); ok {
-		return profile.DesiredMode(mode)
+		return mode
 	}
-	return profile.DesiredAuto
+	return hostmode.Auto
 }
 
 // destinationIdentityFor renders the display identity (user@host:port) the
@@ -1031,7 +1030,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		// host-key failure names the key it was offered, and the record may
 		// already carry an answer for it. Either way the fall-through open
 		// below uses the host's mode, and NOT the connection's stored one.
-		cfg.Remote.DesiredMode = string(hostModeFor(r.modes, offeredHostKeyFingerprint(err)))
+		cfg.Remote.IntegrationMode = string(hostModeFor(r.modes, offeredHostKeyFingerprint(err)))
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
 	// THE OPEN'S OWN CONFIG CARRIES THE HOST'S ANSWER. Every later reader of
@@ -1042,7 +1041,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 	// open rather than only for the helper selection. cfg.Remote is a pointer
 	// and this is deliberate: the transport built this config and reads it
 	// back after Open returns (ws_session_handlers.go's openResult).
-	cfg.Remote.DesiredMode = string(mode)
+	cfg.Remote.IntegrationMode = string(mode)
 	resolver := newResolver(
 		withStore(r.consent),
 		withHelperArtifactAvailable(available),
@@ -1105,7 +1104,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 // resolves the machine's already-recorded answer without asking again).
 func helperConsentAskForProbeFailure(host, fingerprint string, probeErr error, store *consent.Store, modes *hostmode.Store) error {
 	mode := hostModeFor(modes, fingerprint)
-	if mode != profile.DesiredAuto && mode != profile.DesiredHelper {
+	if mode != hostmode.Auto && mode != hostmode.Helper {
 		return nil
 	}
 	if fingerprint == "" || store == nil {

@@ -46,7 +46,13 @@ import path from 'node:path'
 import { dropFileOnActivePane } from './drop-gesture'
 import { appReadyForInput, test, expect, showSidebarView } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 const FILES_PANEL = '[data-testid="files-panel"]'
 const TREE_ROW = '.ui-tree-row'
@@ -83,8 +89,8 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
     // Seed the connection the way Settings would. The name is unique per run:
     // the stand's document store persists across runs in this home, and a
     // stale profile would dial a dead fixture. This spec's subject is
-    // upload, not the connect-time ask (ADR-0069) — desiredMode is declared
-    // explicitly as script so the connection is never asked.
+    // upload, not the connect-time ask (ADR-0069) — script is recorded for the
+    // HOST so the connection is never asked (ADR-727g63tr decision 1).
     const profileName = `e2e-upload-${Date.now()}`
     const created = await rpc<{ id: string }>(page, stand, 'profiles.create', {
       type: 'ssh',
@@ -94,10 +100,10 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
         port: fixture.port,
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    await recordHostMethod(page, stand, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     // Open it the way a person does: quick connect finds the saved profile and
     // Enter opens it (a file-based key needs no vault preflight).

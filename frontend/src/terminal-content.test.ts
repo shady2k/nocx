@@ -925,7 +925,6 @@ describe('SSH open host-key recovery', () => {
           ...routeEvidence,
           storedFingerprint: undefined,
           changed: false,
-          profileId: 'ssh:test:1',
         },
         expect.any(AbortSignal),
       )
@@ -999,7 +998,6 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
           host: 'db.example.com:22',
           fingerprint: 'SHA256:trusted',
           hostKey: null,
-          profileId: 'ssh:test:1',
         },
         expect.any(AbortSignal),
       )
@@ -1061,9 +1059,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
             storedFingerprint: undefined,
             key: 'a2V5',
             changed: false,
-            profileId: 'ssh:test:1',
           },
-          profileId: 'ssh:test:1',
         },
         expect.any(AbortSignal),
       )
@@ -1154,13 +1150,12 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     }
   })
 
-  // A hand-typed ssh still carries the chosen method on the retried open
-  // while open.params.desiredMode exists (ADR-0069's one-shot override). Since
-  // ADR-727g63tr decision 1 the answer is also the HOST's, recorded by
-  // fingerprint, so this param is no longer the only place a typed
-  // connection's choice lives — nocx-oalo1.11.2 removes the param and this
-  // carrying together.
-  it('a hand-typed connection with no saved profile carries the chosen method on the retried open', async () => {
+  // THE RETRY CARRIES NO METHOD (ADR-727g63tr decision 1). The answer was
+  // recorded for the HOST by the fingerprint the ask named, so the second open
+  // reads the same record the first would have — there is no per-connection or
+  // per-open copy left to carry, and a parameter that carried one would be a
+  // second place the choice lives.
+  it('a hand-typed connection retries the same open, with the host record holding the answer', async () => {
     const openSSHSessionByHost = vi
       .fn()
       .mockRejectedValueOnce(
@@ -1188,10 +1183,9 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     )
     try {
       expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
-      // First attempt: no override, since nothing has been answered yet.
-      expect(openSSHSessionByHost.mock.calls[0][4]).toBeUndefined()
-      // Retry: the method just chosen rides this open alone.
-      expect(openSSHSessionByHost.mock.calls[1][4]).toBe('script')
+      expect(openSSHSessionByHost.mock.calls[1][0]).toEqual(openSSHSessionByHost.mock.calls[0][0])
+      expect(openSSHSessionByHost.mock.calls[1][1]).toBe('db.example.com')
+      expect(JSON.stringify(openSSHSessionByHost.mock.calls[1][0])).not.toContain('desiredMode')
     } finally {
       teardown()
     }
@@ -2806,10 +2800,10 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   /** A client whose SSH open session carries the given destination mode.
    *  The refusal reason no longer rides the ack (nocx-dvql) — it arrives on
    *  session.integrationChanged, which the integration tests drive. */
-  const clientWithPolicy = (desiredMode: HostMode): ClientFake => {
+  const clientWithPolicy = (integrationMode: HostMode): ClientFake => {
     const client = makeClient({
       openSSHSession: vi.fn(() => {
-        const s = makeSession({ desiredMode })
+        const s = makeSession({ integrationMode })
         client._sessions.push(s)
         return Promise.resolve(s)
       }),
@@ -25675,7 +25669,6 @@ describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
           _host: string,
           _user: string | undefined,
           _anchor: unknown,
-          _mode: string | undefined,
           watch?: (call: {
             id: number
             method: string

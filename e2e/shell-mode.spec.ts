@@ -1,4 +1,5 @@
 import { appReadyForInput, test, expect, resolveBackend } from './harness'
+import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
@@ -161,9 +162,8 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
 
     // Seed the connection the way Settings would: a profile pointing at the
     // fixture. This spec's subject is block detection, not the connect-time
-    // ask (ADR-0069) — desiredMode is declared explicitly as script so the
-    // connection is never asked, rather than left at the hardcoded auto
-    // default. The name is unique per run: the nocx-server store persists
+    // ask (ADR-0069) — script is recorded for the HOST so the connection is
+    // never asked, rather than left at auto (ADR-727g63tr decision 1). The name is unique per run: the nocx-server store persists
     // across runs in this home, and a stale profile from an earlier run
     // would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
@@ -175,10 +175,13 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     createdId = created.id
+    // The method is the HOST's (ADR-727g63tr decision 1): script is an answer,
+    // so this open needs no connect-time ask and the spec measures what it says
+    // it measures — an SSH connection that comes up integrated.
+    await recordHostMethod(page, wsInfo, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     // Open the connection through quick connect: the palette's host search
     // reaches a saved profile and Enter opens it DIRECTLY (no vault

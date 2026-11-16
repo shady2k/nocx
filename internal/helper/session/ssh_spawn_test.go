@@ -438,7 +438,7 @@ func TestAPaneReachesAHostBehindAJumpHost(t *testing.T) {
 		HostKeyFingerprint: target.fingerprint(),
 		Cols:               80,
 		Rows:               24,
-		DesiredMode:        proto.SSHModeRaw,
+		IntegrationMode:    proto.SSHModeRaw,
 	}
 
 	entry := stand.mustSpawn(t, params)

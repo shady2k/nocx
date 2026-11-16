@@ -71,17 +71,6 @@ type OpenSpec struct {
 	ProfileID string
 	Host      string
 	User      string
-	// DesiredMode is open.params.desiredMode: the one-shot integration-method
-	// override ADR-0069 introduced for the retry of a hand-typed connection,
-	// which had nowhere to persist the answer. It is carried and validated
-	// exactly as before, and it NO LONGER DECIDES ANYTHING: since
-	// ADR-727g63tr decision 1 the mode is the HOST's, recorded by the
-	// connect-time ask for a saved connection and a typed one alike, and read
-	// by the open path by the fingerprint the dial observes. The choice this
-	// field carried is found there, so the retry behaves as it did — the
-	// host record holds the same answer. The field leaves with the profile's
-	// copy in nocx-oalo1.11.2, which is why it is still accepted here.
-	DesiredMode string
 	// Shell pins the far shell the launcher targets. Anything unrecognised
 	// is ignored with a warn, never honoured.
 	Shell string
@@ -529,12 +518,6 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 			RemoteLauncher:  o.launcher,
 			RemoteInstaller: o.installer,
 			RemoteLifecycle: o.lifecycle,
-			// The connect-time ask's one-shot answer for a hand-typed
-			// connection (ADR-0069): there is no profile to persist it on,
-			// so a chosen method rides the very open it retries. Empty
-			// leaves the destination at auto, exactly as before this field
-			// existed.
-			DesiredMode: spec.DesiredMode,
 			// THE PROMPT RUNG REACHES AN UNSAVED HOST TOO (nocx-1ebrs.44).
 			// Without this line the helper's resolution saw a password-capable
 			// connection with nothing to offer: discovered keys followed by

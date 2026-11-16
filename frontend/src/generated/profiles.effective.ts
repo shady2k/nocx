@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the profiles.effective JSON-RPC method — the batched effective profile resolution with per-field provenance. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it. The fields map is a closed set: propertyNames pins the exact key set ToEffectiveDTO emits, so a field dropped from the wire (or a renderer depending on one the wire does not carry) fails the contract instead of looking like a working field. The fields map carries the desiredMode axis (raw|script|helper); helperConsent is a required per-profile field beside id and fields because it is persisted per destination and never inherited.
+ * Result of the profiles.effective JSON-RPC method — the batched effective profile resolution with per-field provenance. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it. The fields map is a closed set: propertyNames pins the exact key set ToEffectiveDTO emits, so a field dropped from the wire (or a renderer depending on one the wire does not carry) fails the contract instead of looking like a working field. The fields map carries the profile's own inheritable options and nothing about the integration method: that belongs to the HOST, keyed by a host-key fingerprint (ADR-727g63tr decision 1), and the connection editor reads it through connections.hostMode. helperConsent is a required per-profile field beside id and fields because it is persisted per destination and never inherited.
  */
 export interface ProfilesEffectiveResponse {
   /**

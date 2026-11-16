@@ -74,9 +74,10 @@ file stays small and a restore never re-asserts a default that has since moved.
 jump host, agent forwarding, port forwards, and the rest. Everything except the credential.
 A connection that had one carries `"requiresCredential": true` in its place.
 
-**Groups** — name, icon, colour, parent, and nine SSH default fields: `port`, `user`,
-`auth`, `keepaliveInterval`, `readyTimeout`, `jumpHost`, `agentForward`, `desiredMode`,
-`portDiscovery`.
+**Groups** — name, icon, colour, parent, and eight SSH default fields: `port`, `user`,
+`auth`, `keepaliveInterval`, `readyTimeout`, `jumpHost`, `agentForward`, `portDiscovery`.
+The integration method is not among them: it belongs to the HOST, keyed by its host-key
+fingerprint (ADR-727g63tr decision 1), and a backup carries no host-key records.
 
 ### What is left out
 
@@ -87,7 +88,11 @@ A connection that had one carries `"requiresCredential": true` in its place.
   fields. A group that had one is marked `"credentialBindingRemoved": true`, which says a
   binding was dropped without naming which secret it was.
 - **Keychain material.** No password or passphrase is read during create or written during
-  restore. The keychain is not touched by either.
+  restore. The keychain is not touched by either.- **A connection's integration method.** It belongs to the HOST, keyed by its host-key
+  fingerprint (ADR-727g63tr decision 1), and a backup carries no host-key record to put it
+  under. A document written before that decision still parses — its `desiredMode` is read
+  and dropped rather than made the reason an old backup cannot be restored.
+
 - **Command history and AI conversations** (`content.db`). Not in v1.
 - **Two group-default keys by name** — `keyPath` and `behaviorOnSessionEnd` — plus any key
   the format does not recognise. They are listed in `omittedDefaultKeys` on the group, and

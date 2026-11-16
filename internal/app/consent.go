@@ -26,17 +26,17 @@ package app
 // AND A CONNECTION THAT NAMES THE HELPER IS ASKED TOO (ADR-0105, nocx-1kejz.3).
 // Until then this ladder answered an explicit `helper` with DesiredHelper and
 // never consulted the store — "an explicit helper choice is the consent for
-// the binary", §4.3 — which read the connection's METHOD as the machine's
-// PERMISSION. A connection whose profile said `helper` therefore deployed a
-// binary the machine had never been asked about, and the editor's own consent
-// field (a leftover ADR-0034 deleted the owner of) was the only place that
-// question appeared to be answered. The method and the permission are two
+// the binary", §4.3 — which read the host's METHOD as the machine's
+// PERMISSION. A host recorded `helper` therefore deployed a binary it had
+// never been asked about, and the editor's own consent field (a leftover
+// ADR-0034 deleted the owner of) was the only place that question appeared to
+// be answered. The method and the permission are two
 // questions with two owners — the connection for the first, the machine for
 // the second — so `helper` now waits for the same answer `auto` waits for.
 
 import (
 	"github.com/shady2k/nocx/internal/helper/consent"
-	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/hostmode"
 )
 
 // Outcome is the resolver's answer for one machine at one consultation.
@@ -63,13 +63,13 @@ const (
 )
 
 // Machine is one consent decision: the remote host's public-key fingerprint
-// and the destination's effective desired mode. The fingerprint is the
-// whole identity (consent design §3.2) — the same machine reached any way
-// is one answer. The mode is the resolved cascade answer; "" means the
-// hardcoded auto default.
+// and the method the HOST keeps (ADR-727g63tr decision 1). The fingerprint is
+// the whole identity (consent design §3.2) — the same machine reached any way
+// is one answer. The mode is the record's answer; "" means auto, which is the
+// same "not yet answered" (ADR-0033).
 type Machine struct {
 	Fingerprint string
-	Mode        profile.DesiredMode
+	Mode        hostmode.Mode
 }
 
 type option func(*resolver)
@@ -107,15 +107,15 @@ type resolver struct {
 func (r *resolver) Resolve(m Machine) Outcome {
 	mode := m.Mode
 	if mode == "" {
-		mode = profile.DesiredAuto
+		mode = hostmode.Auto
 	}
 	switch mode {
-	case profile.DesiredRaw:
+	case hostmode.Raw:
 		// raw: nothing is written and nothing is asked (§4.2).
 		return Refused
-	case profile.DesiredHelper:
-		// An explicit helper names the METHOD this connection uses; it is
-		// not the machine's permission to have a binary deployed on it
+	case hostmode.Helper:
+		// An explicit helper names the METHOD this host uses; it is not the
+		// machine's permission to have a binary deployed on it
 		// (ADR-0105). Falling through to the machine-keyed half is what
 		// makes the difference real: a granted machine serves the helper
 		// exactly as before, a denied one is never upgraded, and an
@@ -127,7 +127,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// — which merged the two questions and left the store unread on
 		// the one path a person is most likely to take deliberately.
 		return r.forMachine(m)
-	case profile.DesiredScript:
+	case hostmode.Script:
 		// An explicit script is an ANSWER: "the shell tiers, and do not
 		// offer me the binary" — script is an answer, not a gap.
 		//

@@ -45,7 +45,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Page } from '@playwright/test'
 import { test, expect, promptReady, clickIntoEditor, resolveBackend } from './harness'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 
 /**
@@ -340,10 +340,10 @@ test('a command printing at apt pace over ssh never moves its output backwards',
         port: fixture.port,
         user: fixture.user,
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     createdId = created.id
+    await recordHostMethod(page, wsInfo, hostKeyFingerprint(fixture.knownHosts), 'script')
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible()

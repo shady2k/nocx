@@ -527,7 +527,6 @@ function main(): void {
         request.evidence.fingerprint,
         method,
         request.evidence.host,
-        request.evidence.profileId,
       )
     } catch (err) {
       note = `The method could not be saved for ${request.evidence.host}: ${

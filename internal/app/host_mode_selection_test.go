@@ -19,7 +19,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -45,37 +44,33 @@ func askOf(t *testing.T, err error) *transport.ErrHelperConsentNeeded {
 
 // TestTwoProfilesToOneHostResolveTheHostsOneMode is section 5.10's lifecycle
 // scenario 1 at the open path: two connections to ONE host, opened with two
-// profiles that store different modes, resolve the mode the host keeps — the
-// same one for both — because the mode is the host's and the connection's copy
-// is not consulted any more.
+// profiles, resolve the mode the host keeps — the same one for both — because
+// the mode is the host's and a connection has no copy to disagree with.
 //
-// Both halves are here: a host recorded script with profiles stored raw and
-// helper (no helper comes up for either, and the open's own config carries
-// script, which is what decides the shell scripts), and a host recorded helper
-// with profiles stored raw and script (both are served by the far helper).
+// Both halves are here: a host recorded script opens as script for both
+// profiles and brings up no helper lane, and a host recorded helper with a
+// granted machine is served by the far helper for both.
 func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
-	t.Run("the host's script wins over a profile stored raw and one stored helper", func(t *testing.T) {
+	t.Run("the host's script answers both profiles", func(t *testing.T) {
 		provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 		store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 		r := newTestRegistry(t, provider, store)
 		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Script)
 
-		for _, stored := range []profile.DesiredMode{profile.DesiredRaw, profile.DesiredHelper} {
-			t.Run(string(stored), func(t *testing.T) {
-				cfg := remoteConfigFor(stored)
-				opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-"+string(stored))
-				hold.release()
-				if err != nil {
-					t.Fatalf("openHoldingLease: %v", err)
-				}
-				if selected || opened.Session != nil {
-					t.Fatalf("selected=%v session=%v, want neither: the host is recorded script", selected, opened.Session)
-				}
-				if got := cfg.Remote.DesiredMode; got != string(hostmode.Script) {
-					t.Fatalf("the open's mode = %q, want the host's script — every later reader of this config "+
-						"(the shell-script gate, the open ack, the integration axis) takes the mode from it", got)
-				}
-			})
+		for _, claim := range []string{"claim-a", "claim-b"} {
+			cfg := remoteConfigFor()
+			opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, claim)
+			hold.release()
+			if err != nil {
+				t.Fatalf("%s: openHoldingLease: %v", claim, err)
+			}
+			if selected || opened.Session != nil {
+				t.Fatalf("%s: selected=%v session=%v, want neither: the host is recorded script", claim, selected, opened.Session)
+			}
+			if got := cfg.Remote.IntegrationMode; got != string(hostmode.Script) {
+				t.Fatalf("%s: the open's mode = %q, want the host's script — every later reader of this config "+
+					"(the shell-script gate, the open ack, the integration axis) takes the mode from it", claim, got)
+			}
 		}
 		// ONE MODE MEANS ONE ANSWER ABOUT THE HELPER: neither open installed
 		// or dialled one, and the host's consent was never granted.
@@ -84,27 +79,25 @@ func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 		}
 	})
 
-	t.Run("the host's helper wins over a profile stored raw and one stored script", func(t *testing.T) {
+	t.Run("the host's helper answers both profiles", func(t *testing.T) {
 		provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 		store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 		r := newTestRegistry(t, provider, store)
 		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)
 
-		for _, stored := range []profile.DesiredMode{profile.DesiredRaw, profile.DesiredScript} {
-			t.Run(string(stored), func(t *testing.T) {
-				cfg := remoteConfigFor(stored)
-				opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-"+string(stored))
-				hold.release()
-				if err != nil {
-					t.Fatalf("openHoldingLease: %v", err)
-				}
-				if !selected || opened.Session == nil {
-					t.Fatalf("selected=%v session=%v, want the far helper serving this host", selected, opened.Session)
-				}
-				if got := cfg.Remote.DesiredMode; got != string(hostmode.Helper) {
-					t.Fatalf("the open's mode = %q, want the host's helper", got)
-				}
-			})
+		for _, claim := range []string{"claim-a", "claim-b"} {
+			cfg := remoteConfigFor()
+			opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, claim)
+			hold.release()
+			if err != nil {
+				t.Fatalf("%s: openHoldingLease: %v", claim, err)
+			}
+			if !selected || opened.Session == nil {
+				t.Fatalf("%s: selected=%v session=%v, want the far helper serving this host", claim, selected, opened.Session)
+			}
+			if got := cfg.Remote.IntegrationMode; got != string(hostmode.Helper) {
+				t.Fatalf("%s: the open's mode = %q, want the host's helper", claim, got)
+			}
 		}
 	})
 }
@@ -122,7 +115,7 @@ func TestAHostWithNoRecordAsksAndAnsweringRecordsIt(t *testing.T) {
 		t.Fatal("the stand starts with a host record; this test is about no record")
 	}
 
-	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	hold.release()
 	if !selected {
 		t.Fatal("selected = false, want the ask before the open proceeds")
@@ -154,12 +147,12 @@ func TestAnsweringTheAskOnceStopsTheSecondOpenAsking(t *testing.T) {
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
-	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	hold.release()
 	ask := askOf(t, err)
 	mustRecordHostMode(t, r.modes, ask.Fingerprint, hostmode.Raw)
 
-	cfg := remoteConfigFor(profile.DesiredHelper)
+	cfg := remoteConfigFor()
 	opened, hold2, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-2")
 	hold2.release()
 	if selected || opened.Session != nil {
@@ -168,7 +161,7 @@ func TestAnsweringTheAskOnceStopsTheSecondOpenAsking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second open raised %v, want no ask at all — the host has answered", err)
 	}
-	if got := cfg.Remote.DesiredMode; got != string(hostmode.Raw) {
+	if got := cfg.Remote.IntegrationMode; got != string(hostmode.Raw) {
 		t.Fatalf("the second open's mode = %q, want the host's raw", got)
 	}
 }
@@ -194,7 +187,7 @@ func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
 	r := newTestRegistry(t, provider, store)
 	r.modes = hostmode.NewStore(log.NewSlogAdapter(discardLogger(t)), refusingDocumentStore{}, "host-modes.json")
 
-	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-1")
 	hold.release()
 	ask := askOf(t, err)
 
@@ -202,13 +195,13 @@ func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
 		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
 	}
 
-	cfg := remoteConfigFor(profile.DesiredRaw)
+	cfg := remoteConfigFor()
 	_, hold2, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-2")
 	hold2.release()
 	if err != nil || selected {
 		t.Fatalf("the second open selected=%v err=%v, want the remembered answer and no ask", selected, err)
 	}
-	if got := cfg.Remote.DesiredMode; got != string(hostmode.Script) {
+	if got := cfg.Remote.IntegrationMode; got != string(hostmode.Script) {
 		t.Fatalf("the second open's mode = %q, want the answer kept for this run (script)", got)
 	}
 }
@@ -231,7 +224,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	r := newTestRegistry(t, provider, store)
 
 	// Nothing is recorded yet: the host is auto, which is the ask.
-	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-auto")
+	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-auto")
 	hold.release()
 	if !selected {
 		t.Fatal("selected = false, want the connect-time ask for a host nobody answered")
@@ -242,7 +235,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 
 	// The editor writes raw for this host.
 	mustRecordHostMode(t, r.modes, fingerprint, hostmode.Raw)
-	rawCfg := remoteConfigFor(profile.DesiredAuto)
+	rawCfg := remoteConfigFor()
 	opened, hold, selected, err := r.openHoldingLease(context.Background(), rawCfg, "claim-raw")
 	hold.release()
 	if err != nil {
@@ -251,7 +244,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	if selected || opened.Session != nil {
 		t.Fatalf("selected=%v session=%v, want the ordinary local-helper open with no ask", selected, opened.Session)
 	}
-	if got := rawCfg.Remote.DesiredMode; got != string(hostmode.Raw) {
+	if got := rawCfg.Remote.IntegrationMode; got != string(hostmode.Raw) {
 		t.Fatalf("the open's mode = %q, want the editor's raw", got)
 	}
 	if got := provider.laneCount(); got != 0 {
@@ -260,13 +253,13 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 
 	// The editor answers script instead, and the NEXT open is script.
 	mustRecordHostMode(t, r.modes, fingerprint, hostmode.Script)
-	scriptCfg := remoteConfigFor(profile.DesiredAuto)
+	scriptCfg := remoteConfigFor()
 	_, hold, selected, err = r.openHoldingLease(context.Background(), scriptCfg, "claim-script")
 	hold.release()
 	if err != nil || selected {
 		t.Fatalf("open after the editor wrote script: selected=%v err=%v, want an unanswered-ask-free script open", selected, err)
 	}
-	if got := scriptCfg.Remote.DesiredMode; got != string(hostmode.Script) {
+	if got := scriptCfg.Remote.IntegrationMode; got != string(hostmode.Script) {
 		t.Fatalf("the open's mode = %q, want the editor's script", got)
 	}
 
@@ -274,7 +267,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	if err := r.modes.Remove(fingerprint); err != nil {
 		t.Fatalf("the editor's auto: %v", err)
 	}
-	_, hold, selected, err = r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-auto-again")
+	_, hold, selected, err = r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-auto-again")
 	hold.release()
 	if !selected {
 		t.Fatal("selected = false, want the ask once the editor chose auto")

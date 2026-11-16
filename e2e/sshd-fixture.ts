@@ -26,7 +26,7 @@
 // the repo root. A tab's cwd is where a dropped file goes, so leaving that to
 // inheritance means uploading into the checkout. The caller states it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import path from 'node:path'
@@ -178,6 +178,35 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
     reject(new Error(`e2e-sshd exited early (${code}): ${lines.join('|')}`))
   })
   return promise
+}
+
+/**
+ * The SHA256 fingerprint of a host key, from its known_hosts line, in the form
+ * every nocx surface uses (`SHA256:` + base64, no padding) — the identity a
+ * host record is keyed by (ADR-727g63tr decision 1).
+ */
+export function hostKeyFingerprint(knownHostsLine: string): string {
+  const fields = knownHostsLine.trim().split(/\s+/)
+  const blob = Buffer.from(fields[1] ?? '', 'base64')
+  return 'SHA256:' + createHash('sha256').update(blob).digest('base64').replace(/=+$/, '')
+}
+
+/**
+ * Record an integration method for a host, through the same
+ * connections.setIntegrationMethod a person's answer to the connect-time ask
+ * calls. A saved connection has no method of its own any more (ADR-727g63tr
+ * decision 1), so a spec that needs its host at script or raw — or one that
+ * must not be asked at connect — answers HERE instead of carrying a profile
+ * option that no longer exists. Choosing helper also records the machine's
+ * consent, which is what a person answering the dialog does.
+ */
+export async function recordHostMethod(
+  page: Page,
+  endpoint: { port: number; token: string },
+  fingerprint: string,
+  method: 'raw' | 'script' | 'helper',
+): Promise<void> {
+  await rpc(page, endpoint, 'connections.setIntegrationMethod', { fingerprint, method })
 }
 
 /** Prove the fixture still serves SSH immediately before a caller opens it.

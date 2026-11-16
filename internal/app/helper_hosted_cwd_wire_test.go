@@ -143,7 +143,7 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 	resolverConfig := &ssh.ConnectConfig{
 		User: fx.user, AuthMode: "publickey", Secrets: key,
 		KeySecretID: liveFixtureKeyRef, AuthorizedEndpoint: fx.addr,
-		DesiredMode: string(profile.DesiredHelper), Shell: ssh.ShellBash,
+		IntegrationMode: string(hostmode.Helper), Shell: ssh.ShellBash,
 	}
 	ws := transport.NewWSServer(sshLog, registry,
 		transport.WithProfileResolver(liveHostedCwdResolver{host: fx.addr, config: resolverConfig}),

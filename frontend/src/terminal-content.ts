@@ -485,13 +485,9 @@ export interface HostKeyErrorEvidence {
   storedFingerprint?: string
   key: string
   changed: boolean
-  profileId?: string
 }
 
-function hostKeyEvidenceFromOpenError(
-  err: unknown,
-  profileId?: string,
-): HostKeyErrorEvidence | null {
+function hostKeyEvidenceFromOpenError(err: unknown): HostKeyErrorEvidence | null {
   if (!(err instanceof RpcError)) return null
   const data: unknown = err.data
   if (
@@ -523,7 +519,6 @@ function hostKeyEvidenceFromOpenError(
         ? data.storedFingerprint
         : undefined,
     key: data.key,
-    profileId,
   }
 }
 
@@ -537,7 +532,6 @@ export interface HelperConsentAskEvidence {
   host: string
   fingerprint: string
   hostKey: HostKeyErrorEvidence | null
-  profileId?: string
 }
 
 /** What the connect-time ask resolved to. `note` is present when the backend
@@ -552,10 +546,7 @@ export interface HelperConsentAnswer {
   note?: string
 }
 
-function helperConsentAskFromOpenError(
-  err: unknown,
-  profileId?: string,
-): HelperConsentAskEvidence | null {
+function helperConsentAskFromOpenError(err: unknown): HelperConsentAskEvidence | null {
   if (!(err instanceof RpcError)) return null
   const data: unknown = err.data
   if (
@@ -600,7 +591,6 @@ function helperConsentAskFromOpenError(
             ? hk.storedFingerprint
             : undefined,
         key: hk.key,
-        profileId,
       }
     }
   }
@@ -608,7 +598,6 @@ function helperConsentAskFromOpenError(
     host: data.host,
     fingerprint: data.fingerprint,
     hostKey,
-    profileId,
   }
 }
 
@@ -3109,7 +3098,6 @@ export class TerminalContent extends BasePaneContent {
         this.sshOpts.host,
         this.sshOpts.user,
         anchor,
-        this._sessionHostModeOverride,
         this._watchOpeningCall,
       )
     } finally {
@@ -3197,13 +3185,6 @@ export class TerminalContent extends BasePaneContent {
     this._openingCall = null
   }
 
-  /** A one-shot integration-method override for a hand-typed connection with
-   *  no saved profile, set once the connect-time ask (ADR-0069) is answered
-   *  for THIS session — there is nowhere else to keep the choice. Read by
-   *  openRequestedSession's retry; a profile-backed connection never sets
-   *  this, since its answer was written to the connection itself. */
-  private _sessionHostModeOverride: IntegrationMethod | undefined
-
   private _showInventoryOffer(message: string): void {
     if (!this._paneTarget || this._disposed) return
     if (this._inventoryOffer) this._inventoryOffer.set(message)
@@ -3284,7 +3265,7 @@ export class TerminalContent extends BasePaneContent {
         // evidence, nested, when the key also needs a trust decision — so
         // checking host-key-only second is what keeps a combined refusal
         // from ever raising two dialogs in sequence.
-        const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
+        const ask = helperConsentAskFromOpenError(err)
         if (ask && this.hooks.onHelperConsentAsk) {
           const answer = await this.hooks.onHelperConsentAsk(ask, signal)
           if (!answer) {
@@ -3293,24 +3274,16 @@ export class TerminalContent extends BasePaneContent {
           if (signal.aborted) {
             throw new Error('SSH open cancelled')
           }
-          // THE ANSWER IS THE HOST'S EITHER WAY (ADR-727g63tr decision 1). A
-          // record the backend could not write is kept for this run and said
-          // out loud, in the head, rather than lost silently or turned into a
-          // dialog the person answers again on the next connect.
+          // THE ANSWER IS THE HOST'S (ADR-727g63tr decision 1), recorded by
+          // the fingerprint the ask named, so the retry carries no copy of it:
+          // it reads the same record the first attempt would have. A record the
+          // backend could not write is kept for this run and said out loud, in
+          // the head, rather than lost silently or turned into a dialog the
+          // person answers again on the next connect.
           this._connectionHead?.note(answer.note ?? null)
-          const method = answer.method
-          // The retry also carries the chosen method, for a connection with
-          // no saved profile (ADR-0069's one-shot override). Since
-          // ADR-727g63tr decision 1 the answer is the HOST's too — the RPC
-          // wrote it by fingerprint — so this param is no longer the only
-          // place the choice lives; it goes with open.params.desiredMode in
-          // nocx-oalo1.11.2.
-          if (!this.sshOpts?.profileId) {
-            this._sessionHostModeOverride = method
-          }
           continue
         }
-        const evidence = hostKeyEvidenceFromOpenError(err, this.sshOpts?.profileId)
+        const evidence = hostKeyEvidenceFromOpenError(err)
         if (!evidence || !this.hooks.onHostKeyError) {
           throw err
         }
@@ -5763,7 +5736,7 @@ export class TerminalContent extends BasePaneContent {
     // reason (nocx-4t37.2): the capability control starts from the
     // backend's own resolution, never from a second fetch that could
     // disagree with it.
-    this._policy = session.desiredMode ?? 'auto'
+    this._policy = session.integrationMode ?? 'auto'
     // awaitsIntegration rides the session handle regardless of which ack
     // produced it — the open ack (nocx-ui8q6.6) for a session this pane
     // opened, the attach ack (nocx-ty0hc) for one it reclaimed or reattached

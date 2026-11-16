@@ -40,6 +40,7 @@
 //
 import { appReadyForInput, test, expect, promptReady, resolveBackend } from './harness'
 import { readStand } from './stand'
+import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer, connect } from 'node:net'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
@@ -313,8 +314,8 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // is the brief's failing example — the string the bug report shows
     // truncating on exactly this three-button row.
     // This spec's subject is the ports row's layout, not the connect-time
-    // ask (ADR-0069) — desiredMode is declared explicitly as script so the
-    // connection is never asked.
+    // ask (ADR-0069) — script is recorded for the HOST so the connection is
+    // never asked (ADR-727g63tr decision 1).
     const profileName = `e2e-row-width-${Date.now()}`
     const created = await rpc<{ id: string }>(page, info.port, info.token, 'profiles.create', {
       type: 'ssh',
@@ -324,7 +325,6 @@ test('a forwarded row keeps its destination readable at the default rail width, 
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
         forwards: [
           {
             direction: 'remote',
@@ -336,6 +336,14 @@ test('a forwarded row keeps its destination readable at the default rail width, 
       },
     })
     createdId = created.id
+    // desiredMode is the HOST's answer now (ADR-727g63tr decision 1): script,
+    // recorded for the machine, so the connection is never asked.
+    await recordHostMethod(
+      page,
+      { port: info.port, token: info.token },
+      hostKeyFingerprint(fixture.knownHosts),
+      'script',
+    )
 
     // Open the connection through quick connect, the user path.
     await page.keyboard.press('Control+Shift+P')

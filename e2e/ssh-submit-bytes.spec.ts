@@ -38,7 +38,13 @@ import path from 'node:path'
 
 import { expect, appReadyForInput, promptReady, resolveBackend, test, type Page } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 const PANE = '.pane.active'
 const EDITOR = `${PANE} .nocx-editor-input`
@@ -289,14 +295,14 @@ test('an ssh pane submits the bytes it was given, five times in a row', async ({
         port: fixture.port,
         user: 'e2e',
         keyPath: fixture.userKey,
-        // script is what the default (auto) resolves to for integration — it
-        // wraps and installs the scripts — and it names that explicitly so the
-        // open is never the connect-time helper ask (ADR-0069) instead of the
-        // thing this spec is about.
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    // script is an ANSWER — the host wraps and installs the scripts and is
+    // never asked about the helper — so the open is the thing this spec is
+    // about rather than the connect-time ask. It is the HOST's answer
+    // (ADR-727g63tr decision 1).
+    await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')

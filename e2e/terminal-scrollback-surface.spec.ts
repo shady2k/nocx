@@ -2,7 +2,7 @@
 //
 // Five clauses, driven through the real UI against the real backend, in a
 // session with NO shell integration: the fixture sshd opened with
-// desiredMode raw, so no launcher runs, no OSC 133 ever arrives, and the
+// the host recorded at raw, so no launcher runs, no OSC 133 ever arrives, and the
 // unstructured mode owns the pane for the whole test. The rows the reader
 // scrolls into view come from the backend's session.historyPage — the
 // emulator's own scrollback — painted by the same painter as the live
@@ -10,7 +10,7 @@
 // model, with the real history-page op as the backend readiness gate.
 import { test, expect, appReadyForInput, openControlPlane, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -47,7 +47,7 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     await page.goto('/')
     await appReadyForInput(page)
 
-    // The connection is seeded the way Settings would, with desiredMode
+    // The connection is seeded the way Settings would, and the host's method
     // raw: a plain login shell, nothing installed, nothing integrated.
     const ws = await resolveBackend(page)
     const profileName = `e2e-scrollback-${Date.now()}`
@@ -59,10 +59,10 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
         port: fixture.port,
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'raw',
       },
     })
     createdId = created.id
+    await recordHostMethod(page, ws, hostKeyFingerprint(fixture.knownHosts), 'raw')
 
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')

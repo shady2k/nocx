@@ -212,7 +212,11 @@ type openResult struct {
 	// default never renders and so the renderer has no name for it.
 	WorkspaceID string `json:"workspaceId"`
 	Cwd         string `json:"cwd"`
-	DesiredMode string `json:"desiredMode"`
+	// IntegrationMode is the method the HOST keeps for this session's
+	// destination (ADR-727g63tr decision 1), stamped by the open path from the
+	// record. auto is "not yet answered" (ADR-0033) and is also every local
+	// session's answer.
+	IntegrationMode string `json:"integrationMode"`
 	// EffectiveSize is the geometry the BACKEND decided this session runs
 	// at (nocx-eidfb.1). The open params carry what the client measured;
 	// this carries what was done with it, so a renderer learns the answer
@@ -485,12 +489,11 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		XPixel: params.XPixel,
 		YPixel: params.YPixel,
 
-		ProfileID:   params.ProfileID,
-		Host:        params.Host,
-		User:        params.User,
-		DesiredMode: params.DesiredMode,
-		Shell:       params.Shell,
-		Cwd:         params.Cwd,
+		ProfileID: params.ProfileID,
+		Host:      params.Host,
+		User:      params.User,
+		Shell:     params.Shell,
+		Cwd:       params.Cwd,
 	}
 	if params.Parent != nil {
 		spec.Parent = &session.Ref{
@@ -639,11 +642,10 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// a state that keeps being revised, and two places answering it would
 	// be the defect AD-8 names — so the field is removed, not kept beside
 	// the notification.
-	// desiredMode still rides it and carries the RESOLVED destination mode
-	// (nocx-mlm7): the connection-scope default the tab's capability control
-	// starts from — script wraps and installs automatically, raw adds
-	// nothing, helper is consent-gated. It is the mode, never proof
-	// integration succeeded.
+	// integrationMode rides it and carries the mode the HOST keeps
+	// (ADR-727g63tr decision 1) — the value the tab's capability control starts
+	// from, resolved by the open path from the record. It is the mode, never
+	// proof that integration succeeded.
 	// parent rides the ack as the edge the REGISTRY recorded, read back off
 	// the session rather than echoed from the params: the two agree only
 	// because the claim was admitted, and reading the record is what makes the
@@ -667,12 +669,12 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	awaitsIntegration := h.sess.sessionAwaitsIntegration(sess.ID())
 	ident := sess.Identity()
 	result := openResult{
-		SessionID:    string(sess.ID()),
-		InstanceID:   string(ident.InstanceID),
-		SessionEpoch: ident.Epoch,
-		WorkspaceID:  workspaceID,
-		Cwd:          sess.Cwd(),
-		DesiredMode:  desiredModeForAck(cfg.Remote),
+		SessionID:       string(sess.ID()),
+		InstanceID:      string(ident.InstanceID),
+		SessionEpoch:    ident.Epoch,
+		WorkspaceID:     workspaceID,
+		Cwd:             sess.Cwd(),
+		IntegrationMode: integrationModeForAck(cfg.Remote),
 		// Read off the SESSION, never echoed from the params: the two agree
 		// only when the report was adopted, and reading the record is what
 		// makes the ack an answer instead of a repetition.
@@ -1600,14 +1602,6 @@ func validateOpenRaw(raw json.RawMessage) string {
 	}
 	if utf8.RuneCountInString(p.Shell) > maxShellPinRunes {
 		return fmt.Sprintf("shell exceeds %d characters", maxShellPinRunes)
-	}
-	// desiredMode is the connect-time ask's one-shot answer for a hand-typed
-	// connection (ADR-0069, OpenSpec.DesiredMode) — never "auto", which is
-	// not an answer, and never absent-vs-empty here: empty means no override.
-	switch p.DesiredMode {
-	case "", "raw", "script", "helper":
-	default:
-		return `desiredMode must be "raw", "script", "helper", or absent`
 	}
 	// The parent edge (nocx-9hu9d) is optional — a root session carries none —
 	// but a present one must be COMPLETE and well-shaped. Half an identity is

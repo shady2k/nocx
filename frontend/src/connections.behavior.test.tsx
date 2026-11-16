@@ -2892,8 +2892,8 @@ describe('portDiscovery', () => {
 
 describe('the host integration method', () => {
   it("shows the method the connection's host keeps", async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    client.hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script' })
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script' })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
@@ -2926,10 +2926,10 @@ describe('the host integration method', () => {
   })
 
   it('goes back to the recorded method when the host has no known key', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const { container, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const sentence =
       "This host's key is not known yet, so nocx cannot remember a method for it. Connect to it once, then choose."
-    client.setHostMode.mockRejectedValue(new RpcError(sentence, -32603))
+    setHostMode.mockRejectedValue(new RpcError(sentence, -32603))
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
@@ -2947,10 +2947,10 @@ describe('the host integration method', () => {
   })
 
   it('says the method will not survive a restart when the record could not be saved', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const { container, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     const note =
       "The method applies to this host, but the host's record was not saved, so this host will be asked again after a restart."
-    client.setHostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', note })
+    setHostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', note })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')

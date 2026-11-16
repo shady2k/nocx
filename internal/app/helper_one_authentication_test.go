@@ -102,7 +102,7 @@ func paneDestination(srv *pwSSHServer, secrets credential.Resolver) *ssh.Connect
 		Secrets:            secrets,
 		SecretID:           filesFixtureSecret,
 		AuthorizedEndpoint: srv.addr,
-		DesiredMode:        string(profile.DesiredRaw),
+		IntegrationMode:    string(hostmode.Raw),
 	}
 }
 
@@ -288,7 +288,7 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	seam := openSeamOver(t, stand)
 	seam.hosted.remote.source = stubArtifacts(t)
 	cfg := paneConfig(srv, secrets, "pane-consent")
-	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
+	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	opened, selected, err := seam.hosted.OpenHosted(ctx, cfg, "claim-consent")
@@ -298,7 +298,7 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	}
 	waittest.WaitForTimeout(t, "the probe-only connection to close after consent refusal", 5*time.Second,
 		func() bool { return srv.liveConns() == 0 })
-	cfg.Remote.DesiredMode = string(profile.DesiredRaw)
+	cfg.Remote.IntegrationMode = string(hostmode.Raw)
 	openPanes(t, ctx, seam, cfg, "claim-answered")
 	if got := srv.connCount(); got != 2 {
 		t.Fatalf("authenticated %d connections, want probe-only open plus answered open", got)
@@ -327,7 +327,7 @@ func TestACancelledConsentOpenStillReleasesItsConnection(t *testing.T) {
 	defer cancel()
 	seam.hosted.remote.source = cancellingConsentArtifacts{ArtifactSource: stubArtifacts(t), cancel: cancel}
 	cfg := paneConfig(srv, &askRecorder{value: openPasswordFixturePassword}, "pane-cancelled-consent")
-	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
+	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	_, _, err := seam.hosted.OpenHosted(ctx, cfg, "claim-cancelled-consent")
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) || ctx.Err() == nil {

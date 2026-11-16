@@ -40,7 +40,13 @@ import {
 } from './harness'
 import type { Page } from '@playwright/test'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  startSshd,
+  rpc,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 import { callOperationDeclaration } from '../frontend/src/generated/operations'
 
@@ -351,10 +357,10 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
           port,
           user: 'e2e',
           keyPath: fixture!.userKey,
-          desiredMode: 'script',
         },
       })
       profileIDs.push(created.id)
+      await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture!.knownHosts), 'script')
       return created.id
     }
     const stamp = Date.now()

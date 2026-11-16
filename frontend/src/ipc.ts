@@ -100,7 +100,7 @@ export type OpenResult = {
   instanceId?: string
   sessionEpoch?: number
   cwd?: string
-  desiredMode?: Open['desiredMode']
+  integrationMode?: Open['integrationMode']
   /** The workspace the backend RESOLVED for this session (nocx-fraus). It is
    *  derived, never sent: the renderer names a pane and the backend walks
    *  pane -> tab -> workspace itself, so this ack is the only place the
@@ -406,11 +406,11 @@ export class SessionHandle {
     /** Where the shell started, ~-abbreviated. Names the tab until a program
      *  sets a title; does not follow `cd` (that needs OSC 7, nocx-5mn.2). */
     readonly cwd: string,
-    /** The resolved destination mode the backend stamped at open
-     *  (nocx-mlm7): the connection-scope default the tab's capability
+    /** The integration method the HOST keeps (ADR-727g63tr decision 1), as the
+     *  backend resolved it for this open: the value the tab's capability
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
-    readonly desiredMode: Open['desiredMode'] = 'script',
+    readonly integrationMode: Open['integrationMode'] = 'auto',
     /** The session that opened this one, as the backend ADMITTED it, or null
      *  for a root session (nocx-9hu9d). The full identity, never a bare id:
      *  an id alone re-resolves to whatever holds it now.
@@ -1542,7 +1542,7 @@ export class WSClient {
       this,
       sid,
       result?.cwd ?? '',
-      result?.desiredMode ?? 'script',
+      result?.integrationMode ?? 'auto',
       result?.parent ?? null,
       result?.workspaceId ?? '',
       null,

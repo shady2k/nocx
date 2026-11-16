@@ -1119,7 +1119,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 
 	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn-ssh",
 		"host", p.Destination.Host, "port", p.Destination.Port, "user", p.Destination.User,
-		"cols", p.Cols, "rows", p.Rows, "mode", p.DesiredMode, "lifecycle_requested", p.Lifecycle != nil)
+		"cols", p.Cols, "rows", p.Rows, "mode", p.IntegrationMode, "lifecycle_requested", p.Lifecycle != nil)
 	defer func() { end(err) }()
 
 	// THE BUILD, FIRST, because it decides whether the rest of this function
@@ -1214,7 +1214,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		AcceptOnTrust:      p.AcceptOnTrust,
 		HostKeyFingerprint: p.HostKeyFingerprint,
 		Shell:              p.Shell,
-		Mode:               p.DesiredMode,
+		Mode:               p.IntegrationMode,
 		// The pane's bearer, on the same terms as the endpoint above: a fact
 		// about THIS request (nocx-50w7p.16).
 		AgentToolToken: p.AgentToolToken,

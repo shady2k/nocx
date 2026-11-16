@@ -67,7 +67,7 @@ it('binds replacement open facts and the immediately following frame through the
     sessionId,
     ...identity,
     cwd: '/backend/replacement',
-    desiredMode: 'helper',
+    integrationMode: 'helper',
     workspaceId: 'workspace-real',
     awaitsIntegration: true,
     accessEpoch: 17,
@@ -112,7 +112,7 @@ it('binds replacement open facts and the immediately following frame through the
     session: {
       sessionId: string
       cwd: string
-      desiredMode: string
+      integrationMode: string
       workspaceId: string
       awaitsIntegration: boolean
     }
@@ -122,7 +122,7 @@ it('binds replacement open facts and the immediately following frame through the
   expect(pane.session).toMatchObject({
     sessionId: second,
     cwd: '/backend/replacement',
-    desiredMode: 'helper',
+    integrationMode: 'helper',
     workspaceId: 'workspace-real',
     awaitsIntegration: true,
   })

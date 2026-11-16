@@ -172,7 +172,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"connections.setIntegrationMethod": {
 			[]byte(`{"fingerprint":"SHA256:abc","method":"raw"}`),
-			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","profileId":"ssh-1","method":"helper"}`),
+			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","method":"helper"}`),
 		},
 		// The connection editor's read and write of the host's integration
 		// method (ADR-727g63tr decision 1). Auto is a valid WRITE because it

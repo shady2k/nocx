@@ -13,21 +13,22 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
 // machineWithNoStoredAnswer is a machine whose host key has no stored
-// helper-tier answer and whose effective mode is the hardcoded auto default.
+// helper-tier answer and whose host record says nothing — auto, the
+// hardcoded default (ADR-0033).
 var machineWithNoStoredAnswer = Machine{Fingerprint: "SHA256:unanswered"}
 
 var (
 	grantedMachine = Machine{Fingerprint: "SHA256:granted"}
 	deniedMachine  = Machine{Fingerprint: "SHA256:denied"}
-	explicitScript = Machine{Fingerprint: "SHA256:script", Mode: profile.DesiredScript}
-	explicitRaw    = Machine{Fingerprint: "SHA256:raw", Mode: profile.DesiredRaw}
-	explicitHelper = Machine{Fingerprint: "SHA256:helper", Mode: profile.DesiredHelper}
+	explicitScript = Machine{Fingerprint: "SHA256:script", Mode: hostmode.Script}
+	explicitRaw    = Machine{Fingerprint: "SHA256:raw", Mode: hostmode.Raw}
+	explicitHelper = Machine{Fingerprint: "SHA256:helper", Mode: hostmode.Helper}
 )
 
 // seedGrantedDocument writes a version-1 consent document carrying a grant
@@ -119,7 +120,7 @@ func TestResolverLadder(t *testing.T) {
 			// one above are the whole difference between the two values.
 			name: "explicit auto: the same as silence — askable",
 			opts: []option{withHelperArtifactAvailable(true)},
-			m:    Machine{Fingerprint: "SHA256:auto", Mode: profile.DesiredAuto},
+			m:    Machine{Fingerprint: "SHA256:auto", Mode: hostmode.Auto},
 			want: ConsentRequired,
 		},
 		{
@@ -143,13 +144,13 @@ func TestResolverLadder(t *testing.T) {
 		{
 			name: "explicit helper on a machine that granted: helper, silently",
 			opts: []option{withHelperArtifactAvailable(true), withStore(store)},
-			m:    Machine{Fingerprint: grantedMachine.Fingerprint, Mode: profile.DesiredHelper},
+			m:    Machine{Fingerprint: grantedMachine.Fingerprint, Mode: hostmode.Helper},
 			want: DesiredHelper,
 		},
 		{
 			name: "explicit helper on a machine that declined: refused, never upgraded",
 			opts: []option{withHelperArtifactAvailable(true), withStore(denied)},
-			m:    Machine{Fingerprint: deniedMachine.Fingerprint, Mode: profile.DesiredHelper},
+			m:    Machine{Fingerprint: deniedMachine.Fingerprint, Mode: hostmode.Helper},
 			want: Refused,
 		},
 		{

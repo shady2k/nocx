@@ -88,9 +88,6 @@
         "agentForward": {
           "type": "boolean"
         },
-        "desiredMode": {
-          "type": "string"
-        },
         "helperConsent": {
           "type": "string"
         },

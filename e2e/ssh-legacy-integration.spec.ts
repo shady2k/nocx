@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import path from 'node:path'
 
 import { appReadyForInput, test, expect, resolveBackend, promptReady } from './harness'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 
 for (const shell of ['bash', 'zsh']) {
@@ -50,10 +50,10 @@ for (const shell of ['bash', 'zsh']) {
           port: fixture.port,
           user: fixture.user,
           keyPath: fixture.userKey,
-          desiredMode: 'script',
         },
       })
       profile = created.id
+      await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'script')
       await page.keyboard.press('Control+Shift+P')
       const search = page.locator('.quick-connect__search input')
       await expect(search).toBeVisible()

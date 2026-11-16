@@ -356,11 +356,10 @@ async function seedPasswordConnection(ep: BackendEndpoint, fixture: SshdFixture)
   // resolves it to the stored reference, and a reference never crosses the
   // wire.
   //
-  // desiredMode is declared explicitly as helper: this spec's subject IS the
-  // helper tier (one connection sharing a pane and Files), not which method
-  // the connection uses. It is NOT the machine's permission to have a binary
-  // deployed on it (ADR-0105, nocx-1kejz.3): that is asked once, at connect,
-  // and the spec answers it below the way a person does.
+  // The host is left unanswered, because this spec's subject IS the helper
+  // tier (one connection sharing a pane and Files): the connect-time ask below
+  // is answered the way a person answers it, and that answer records both the
+  // method and the machine's permission (ADR-0105, nocx-1kejz.3).
   await ask(ep, 'profiles.create', {
     type: 'ssh',
     name: PROFILE_NAME,
@@ -370,7 +369,6 @@ async function seedPasswordConnection(ep: BackendEndpoint, fixture: SshdFixture)
       user: 'e2e',
       auth: 'password',
       passwordSecret: minted.row,
-      desiredMode: 'helper',
     },
   })
 }

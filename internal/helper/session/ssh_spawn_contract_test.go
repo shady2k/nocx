@@ -29,7 +29,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
@@ -324,18 +324,18 @@ func TestTheSSHShellKindSpellingsMatchTheLauncher(t *testing.T) {
 	}
 }
 
-// TestTheSSHModeSpellingsMatchTheProfileAxis is the same guard for the mode a
+// TestTheSSHModeSpellingsMatchTheHostAxis is the same guard for the mode a
 // remote session is asked to run in. The GATE is not duplicated — the spawner
-// asks profile.DesiredMode.DeliversScripts, which owns it — but the four
-// spellings are, and a mode added to the axis without a wire spelling would
+// asks hostmode.Mode.DeliversScripts, which owns it — but the four spellings
+// are, and a mode added to the host record without a wire spelling would
 // otherwise reach the helper as an unrecognised string and fail closed in
 // silence.
-func TestTheSSHModeSpellingsMatchTheProfileAxis(t *testing.T) {
-	fromProfile := []profile.DesiredMode{
-		profile.DesiredAuto,
-		profile.DesiredRaw,
-		profile.DesiredScript,
-		profile.DesiredHelper,
+func TestTheSSHModeSpellingsMatchTheHostAxis(t *testing.T) {
+	fromProfile := []hostmode.Mode{
+		hostmode.Auto,
+		hostmode.Raw,
+		hostmode.Script,
+		hostmode.Helper,
 	}
 	onWire := map[proto.SSHMode]bool{
 		proto.SSHModeAuto:   true,
@@ -344,15 +344,15 @@ func TestTheSSHModeSpellingsMatchTheProfileAxis(t *testing.T) {
 		proto.SSHModeHelper: true,
 	}
 	if len(onWire) != len(fromProfile) {
-		t.Fatalf("the wire knows %d modes and the profile axis %d", len(onWire), len(fromProfile))
+		t.Fatalf("the wire knows %d modes and the host record %d", len(onWire), len(fromProfile))
 	}
 	for _, mode := range fromProfile {
 		if !onWire[proto.SSHMode(mode)] {
-			t.Errorf("the profile axis's %q has no spelling on this wire", mode)
+			t.Errorf("the host record's %q has no spelling on this wire", mode)
 		}
 		delete(onWire, proto.SSHMode(mode))
 	}
 	for mode := range onWire {
-		t.Errorf("the wire spells %q and the profile axis does not know it", mode)
+		t.Errorf("the wire spells %q and the host record does not know it", mode)
 	}
 }

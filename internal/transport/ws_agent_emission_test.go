@@ -86,7 +86,7 @@ func (t *emissionTurn) Wait(context.Context) (agentharness.Outcome, error) {
 func TestAgentHarnessEmissionErrorWaitsForBlockedToolSettlement(t *testing.T) {
 	fetcher := &emissionFetcher{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
 	backend := &emissionHarness{fetcher: fetcher}
-	h := newAskHarnessWithOpts(t, answeringScript(), WithAgentHarness("test", backend), WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
+	h := newAskHarnessVault(t, answeringScript(), WithAgentHarness("test", backend), WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
 	handler := h.ws.agentTerminalizer(nil)
 	grant := h.ws.runGrantFor("test")
 	emitErr := errors.New("answer persistence failed")

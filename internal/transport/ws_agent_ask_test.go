@@ -47,10 +47,14 @@ func (b *synchronizedBuffer) String() string {
 }
 
 // askHarness is a full transport env for the ask flow: real content store,
-// real vault, real profile store, and a subprocess agent.
+// real profile store, and a subprocess agent. A VAULT IS OPTED INTO
+// (newAskHarnessVault), because standing one up costs the production
+// argon2id cost twice — once for the passphrase envelope and once for the
+// recovery envelope — and the overwhelming majority of these tests never hold
+// a secret. That cost was the family's wall clock (nocx-oalo1.11.3).
 type askHarness struct {
 	t        *testing.T
-	v        *vault.Vault
+	v        *vault.Vault // nil unless the harness was built with newAskHarnessVault
 	db       content.ContentDB
 	profiles storage.DocumentStore
 	ws       *WSServer
@@ -60,8 +64,20 @@ type askHarness struct {
 	script   protocol.Script
 }
 
+// noKnownMaterial is the egress comparison of a harness that keeps no vault:
+// nothing is stored, so nothing is found. It is NOT the gate switched off —
+// nil is, and the gate fails the run then — it is the honest answer of a
+// fixture whose vault holds no secret. A test that needs a stored value
+// withheld builds the real vault (newAskHarnessVault) and with it the real
+// adapter.
+type noKnownMaterial struct{}
+
+func (noKnownMaterial) FindKnown(context.Context, string) ([]assistant.KnownMatch, error) {
+	return nil, nil
+}
+
 func newAskHarness(t *testing.T, script protocol.Script) *askHarness {
-	return newAskHarnessWithOpts(t, script)
+	return newAskHarnessWith(t, script, false, false)
 }
 
 // newAskHarnessWithOpts is newAskHarness with additional WSServerOptions —
@@ -92,32 +108,27 @@ func askHarnessParallel(t *testing.T) {
 var askHarnessParallelised sync.Map
 
 func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
-	return newAskHarnessAgent(t, script, false, extra...)
+	return newAskHarnessWith(t, script, false, false, extra...)
 }
 
 // newAskHarnessQueueing is newAskHarnessWithOpts with an agent that cannot take
 // a message while it answers: the queueing half of the harness contract.
 func newAskHarnessQueueing(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
-	return newAskHarnessAgent(t, script, true, extra...)
+	return newAskHarnessWith(t, script, true, false, extra...)
 }
 
-func newAskHarnessAgent(t *testing.T, script protocol.Script, queueing bool, extra ...WSServerOption) *askHarness {
+// newAskHarnessVault is the harness whose vault is REAL and unsealed: the one
+// for a test that creates, resolves, seals or unlocks a stored secret, or that
+// needs one withheld from a tool result. It is the expensive harness on purpose
+// — see the type comment.
+func newAskHarnessVault(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
+	return newAskHarnessWith(t, script, false, true, extra...)
+}
+
+func newAskHarnessWith(t *testing.T, script protocol.Script, queueing, withVault bool, extra ...WSServerOption) *askHarness {
 	askHarnessParallel(t)
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
-	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
-	}
-	logger := slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger)
-	if err != nil {
-		t.Fatalf("vault.New: %v", err)
-	}
-	t.Cleanup(v.Close)
-	if _, setupErr := v.Setup(t.Context(), vault.SetupRequest{Passphrase: "test"}); setupErr != nil {
-		t.Fatalf("Setup: %v", setupErr)
-	}
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 
 	key := make([]byte, 32)
@@ -145,13 +156,32 @@ func newAskHarnessAgent(t *testing.T, script protocol.Script, queueing bool, ext
 	if err != nil {
 		t.Fatal(err)
 	}
+	var v *vault.Vault
 	opts := []WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
-		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
 		WithAgentHarness("fixture", agent.harness),
 		WithAssistantClient(kernel),
+	}
+	if withVault {
+		reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		logger := slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		v, err = vault.New(docStore, reg, logger)
+		if err != nil {
+			t.Fatalf("vault.New: %v", err)
+		}
+		t.Cleanup(v.Close)
+		if _, setupErr := v.Setup(t.Context(), vault.SetupRequest{Passphrase: "test"}); setupErr != nil {
+			t.Fatalf("Setup: %v", setupErr)
+		}
+		opts = append(opts,
+			WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
+			WithAgentKnownMaterial(adapterKnownMaterial(v)))
+	} else {
+		opts = append(opts, WithCredentialStore(newTestStore()), WithAgentKnownMaterial(noKnownMaterial{}))
 	}
 	opts = append(opts, extra...)
 	serverLogs := &synchronizedBuffer{}
@@ -665,7 +695,7 @@ func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
 }
 
 func TestAgentAsk_SealedLegacyEndpointDoesNotBlockHarness(t *testing.T) {
-	h := newAskHarness(t, answerScript("without endpoint unlock"))
+	h := newAskHarnessVault(t, answerScript("without endpoint unlock"))
 	h.v.Seal()
 	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
 	sid := openLocalSession(t, h.conn)

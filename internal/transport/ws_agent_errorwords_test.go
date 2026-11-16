@@ -151,7 +151,7 @@ func TestAsk_EgressSealedVaultUnlocksAndContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepTool, Name: "files.read", Arguments: map[string]any{"path": path}}, {Kind: protocol.StepAnswer, Text: "ok"}, {Kind: protocol.StepEnd}}}
-	h := newAskHarnessWithOpts(t, script, WithAgentPolicy(autonomousPolicyStore(t)))
+	h := newAskHarnessVault(t, script, WithAgentPolicy(autonomousPolicyStore(t)))
 	// Seed known material, then seal the actual vault before the result's gate.
 	createSecret(t, h.v, "egress-secret", secret)
 	h.v.Seal()

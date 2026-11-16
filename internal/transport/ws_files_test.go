@@ -1878,7 +1878,12 @@ func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
 func TestFilesPoll_PerPathLaddersAreIndependent(t *testing.T) {
 	e, provider := newBlockingCountingFilesEnv(t)
 	const base = 5 * time.Millisecond
-	e.ws.filesPollInterval = base
+	// The LOOP is silenced and only the ladder's own arithmetic sees `base`:
+	// this test drives filesPollPath by hand, so a periodic tick is not part
+	// of what it asserts — and with a 5-ms cadence one could land between two
+	// of its own steps and reset the state it is about to read. Measured
+	// exactly that way under a loaded 4-CPU box (nocx-oalo1.11.3).
+	e.ws.filesPollInterval = time.Hour
 	sid := e.openSession(t, 1)
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first")

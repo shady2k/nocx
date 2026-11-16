@@ -109,7 +109,7 @@ func realPrefixPi(t *testing.T, responses ...fakemodel.Response) (prefixConversa
 		"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "PI_CODING_AGENT_DIR=" + agentDir, "PI_OFFLINE=1",
 		"ANTHROPIC_API_KEY=", "OPENAI_API_KEY=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=", "XAI_API_KEY=", "GROQ_API_KEY=", "OPENROUTER_API_KEY=", "MISTRAL_API_KEY=",
 	}
-	_, helper := buildAskPrograms(t)
+	_, helper := askProgramsFor(t)
 	auth := &prefixAuthorizer{}
 	logger := logtest.Slog(t)
 	uid := os.Getuid()

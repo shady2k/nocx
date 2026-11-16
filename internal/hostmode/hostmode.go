@@ -165,18 +165,39 @@ func (s *Store) Lookup(fingerprint string) (Mode, bool) {
 //
 // A consent record is rolled back when it cannot be persisted (its own store
 // says why: a grant this process could not persist must not be believed here
-// and forgotten on the next start). This store answers the OTHER way, for one
-// stated reason: the value being written is a person's answer to a question
-// they were asked in the middle of opening a connection, and losing it would
-// put them back in front of the same dialog — the open they answered for would
-// ask again, forever, on a store that cannot write. So the answer is kept in
-// memory, the open proceeds with it, and ErrNotSaved travels back so the
-// product can say the host will have to be asked again after a restart.
+// and forgotten on the next start). This store answers the OTHER way for the
+// connect-time ask, for one stated reason: the value being written is a
+// person's answer to a question they were asked in the middle of opening a
+// connection, and losing it would put them back in front of the same dialog —
+// the open they answered for would ask again, forever, on a store that cannot
+// write. So the answer is kept in memory, the open proceeds with it, and
+// ErrNotSaved travels back so the product can say the host will have to be
+// asked again after a restart.
 //
-// The in-memory answer is committed only after the document write is
-// attempted; a write that fails leaves the previous record alone if there was
-// one, and installs this answer either way.
+// The editor's write is Persist, not this, and the difference is who can retry
+// (see Persist).
 func (s *Store) Set(fingerprint string, mode Mode) error {
+	return s.record(fingerprint, mode, false)
+}
+
+// Persist records the host's method only when the document was written, so a
+// failed write leaves the host exactly as it was.
+//
+// IT IS THE CONNECTION EDITOR'S WRITE, and it is a second operation rather
+// than a flag because the two callers can promise different things. The ask
+// cannot retry: its answer is needed by the open that is waiting, which is why
+// Set keeps a failed answer for this run. The editor CAN retry — its Save is
+// still on screen — and it reports the failure as a field error, "Not saved:
+// {reason}", with the chosen value left in the control. An answer that stayed
+// in memory there would make that sentence false: the field would say nothing
+// was saved while the open path went on using it.
+func (s *Store) Persist(fingerprint string, mode Mode) error {
+	return s.record(fingerprint, mode, true)
+}
+
+// record is the one write both Set and Persist perform; durable is the only
+// difference and it is about a FAILED write alone.
+func (s *Store) record(fingerprint string, mode Mode, durable bool) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint
 	}
@@ -195,10 +216,13 @@ func (s *Store) Set(fingerprint string, mode Mode) error {
 	}
 	next[fingerprint] = mode
 	werr := s.writeDoc(next)
-	s.modes = next
 	if werr != nil {
+		if !durable {
+			s.modes = next
+		}
 		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, werr)
 	}
+	s.modes = next
 	return nil
 }
 
@@ -207,14 +231,13 @@ func (s *Store) Set(fingerprint string, mode Mode) error {
 // that state, so removing it is not an error — the caller asked for the state
 // it is in, and only an empty fingerprint is refused.
 //
-// # It follows Set's failure rule for the same reason
+// # A failed removal changes nothing
 //
-// The in-memory record is committed only after the document write is
-// attempted, and a write that fails still forgets here: the person asked to be
-// asked again, and keeping the old answer in memory would put a method in force
-// that the screen says is gone. ErrNotSaved travels back so the product can say
-// the forgetting will not survive a restart — which is the opposite sentence
-// from a lost Set, and true in the same way.
+// The editor's auto is the only caller, and its Save stays open with a field
+// error when the record could not be written ("Not saved: {reason}"). Keeping
+// the old answer in memory is what makes that sentence true: nothing about the
+// host has changed, so the method on disk stays the method in force. It is the
+// editor's rule as Persist states it, applied to the other direction.
 func (s *Store) Remove(fingerprint string) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint
@@ -233,10 +256,10 @@ func (s *Store) Remove(fingerprint string) error {
 		next[k] = v
 	}
 	werr := s.writeDoc(next)
-	s.modes = next
 	if werr != nil {
 		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, werr)
 	}
+	s.modes = next
 	return nil
 }
 

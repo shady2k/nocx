@@ -296,7 +296,7 @@ func TestSetHostModeIsAtomicAcrossKnownKeys(t *testing.T) {
 	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 3}
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
 	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
-		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+		if err := modes.Set(fp, hostmode.Raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -326,7 +326,7 @@ func TestSetHostModeAutoIsAtomicAcrossKnownKeys(t *testing.T) {
 	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 3}
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
 	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
-		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+		if err := modes.Set(fp, hostmode.Raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -356,7 +356,7 @@ func TestSetHostModeWritesOneDocumentForAllKnownKeys(t *testing.T) {
 	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 99}
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
 	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
-		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+		if err := modes.Set(fp, hostmode.Raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -372,7 +372,7 @@ func TestSetHostModeAutoWritesOneDocumentForAllKnownKeys(t *testing.T) {
 	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 99}
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
 	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
-		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+		if err := modes.Set(fp, hostmode.Raw); err != nil {
 			t.Fatal(err)
 		}
 	}

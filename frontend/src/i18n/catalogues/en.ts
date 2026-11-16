@@ -1983,6 +1983,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.helperAsk.changeLater': 'Change your mind later from the connection’s settings.',
   'connections.helperAsk.changeLaterTyped':
     'To change it later, save a connection to this machine and open its settings.',
+  // The answer's own sentence, which the pane head shows when the host record
+  // could not be written — the method is in force for this run either way.
+  'connections.helperAsk.notSaved':
+    'The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.',
+  'connections.helperAsk.applyFailed':
+    'Could not apply the integration method for {host}. The choice was not saved.',
   'connections.import.sshConfigPath': 'SSH config ({path})',
   'connections.probe.accepted': 'Accepted',
   'connections.probe.hostKeyChanged': 'Host key changed',

@@ -307,11 +307,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     'попробуйте формат "user@host:port" или "ssh://user@host:port"',
   'connections.toasts.saved': 'Сохранено:',
   'connections.toasts.saveFailedHead': 'Не удалось сохранить подключение:',
-  'connections.toasts.methodSaveFailedHead':
-    'Подключение сохранено, но метод интеграции для',
+  'connections.toasts.methodSaveFailedHead': 'Подключение сохранено, но метод интеграции для',
   'connections.toasts.methodSaveFailedMid': ' не сохранён: ',
-  'connections.toasts.methodSaveFailedTail':
-    '. Нажмите «Сохранить подключение», чтобы повторить.',
+  'connections.toasts.methodSaveFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
   'connections.helperAsk.lead':
     'Выберите, как nocx интегрируется с этой машиной. Метод сохраняется для машины — так открываются все вкладки к ней, из любого сохранённого подключения и из набранного ssh, — и разрешение на развёртывание хелпера nocx здесь запоминается вместе с ним, поэтому вопрос задаётся один раз.',
   'connections.helperAsk.consent':
@@ -319,6 +317,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.helperAsk.changeLater': 'Передумать можно позже в настройках подключения.',
   'connections.helperAsk.changeLaterTyped':
     'Чтобы изменить это позже, сохраните подключение к этой машине и откройте его настройки.',
+  'connections.helperAsk.notSaved':
+    'Метод действует для этой машины, но запись машины не сохранена, поэтому nocx спросит снова после перезапуска.',
+  'connections.helperAsk.applyFailed':
+    'Не удалось применить метод интеграции для {host}. Выбор не сохранён.',
   'connections.toasts.deleted': 'Удалено:',
   'connections.toasts.deleteFailedHead': 'Не удалось удалить',
   'connections.actions.edit': 'Изменить',

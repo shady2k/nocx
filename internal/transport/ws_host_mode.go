@@ -109,7 +109,7 @@ const hostModeUnreadable = "the known_hosts file could not be read"
 // handleHostMode answers what method the connection's host uses.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.hostMode","params":{"profileId":"ssh-1"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"profileId":"ssh-1","mode":"script"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"profileId":"ssh-1","mode":"script","hostKnown":true}}
 func (h hostModeHandlers) handleHostMode(ctx context.Context, req jsonrpcRequest) {
 	var params hostModeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {

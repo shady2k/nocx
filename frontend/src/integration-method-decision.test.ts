@@ -4,7 +4,7 @@ import { HelperConsentAskQueue, type HelperConsentAskRequest } from './host-key-
 import { RpcError } from './dispatcher'
 
 const evidence = { host: 'host.example:22', fingerprint: 'SHA256:abc', hostKey: null }
-const note = `The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart`
+const note = `The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.`
 
 function setup() {
   let active: HelperConsentAskRequest | null = null

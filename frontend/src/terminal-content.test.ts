@@ -1155,7 +1155,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
       const first = await mountTerminal(makeClipboard(), options, client)
       try {
         expect(openSSHSession).toHaveBeenCalledTimes(2)
-        const note = `The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart`
+        const note = `The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.`
         if (hostRecordSaved) expect(first.tab.pane.textContent).not.toContain(note)
         else await vi.waitFor(() => expect(first.tab.pane.textContent).toContain(note))
         const second = await mountTerminal(makeClipboard(), options, client)

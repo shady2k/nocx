@@ -369,6 +369,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [hostModeState, setHostModeState] = createSignal<HostModeState>({ kind: 'draft' })
   const [hostModeChoice, setHostModeChoice] = createSignal<HostMode>('auto')
   const [hostModeWriteError, setHostModeWriteError] = createSignal<string | undefined>(undefined)
+  /** The host-method request whose answer the editor may still apply. Every
+   *  read and every write takes the next number, so an answer that arrives
+   *  after a newer request — a Retry, a second Save, or another connection's
+   *  editor — is stale by construction and never painted over the current one
+   *  (review ALX-51: a failure for A must not draw A's error, section, focus
+   *  or toast over B). */
+  let hostModeRequest = 0
+  const hostModeAnswerIsCurrent = (request: number, profileId: string): boolean =>
+    request === hostModeRequest && editing()?.id === profileId
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   /** The literal a person has typed into a password field and not yet stored.
    *  Two fields, two drafts: the profile editor's and the group defaults'.
@@ -1963,6 +1972,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  there is nothing to ask. A slow answer for a dialog that has since opened
    *  another connection is dropped rather than painted over the newer one. */
   async function loadHostMode(profile: SSHProfile): Promise<void> {
+    const request = ++hostModeRequest
     setHostModeWriteError(undefined)
     setHostModeChoice('auto')
     if (!profile.id) {
@@ -1972,16 +1982,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setHostModeState({ kind: 'loading' })
     try {
       const answer = await props.client.hostMode(profile.id)
-      if (editing()?.id !== profile.id) return
+      if (!hostModeAnswerIsCurrent(request, profile.id)) {
+        log.warn('dropping a stale host-method read', {
+          profileId: profile.id,
+          request,
+          current: hostModeRequest,
+        })
+        return
+      }
       setHostModeChoice(answer.mode)
       setHostModeState({ kind: 'ready', stored: answer.mode, hostKnown: answer.hostKnown })
     } catch (err) {
-      if (editing()?.id !== profile.id) return
       const reason = (err as Error).message
       log.error('Could not read the host integration method', {
         profileId: profile.id,
         message: reason,
       })
+      // A read for a connection the editor has left — or one a newer Retry
+      // has replaced — says nothing about what is on screen now.
+      if (!hostModeAnswerIsCurrent(request, profile.id)) return
       // The reason is the FIELD's, not a toast's: the control is disabled and
       // Retry sits beside it (frame 3). A toast would fade while the control
       // still had no value.
@@ -2000,7 +2019,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  draft, an edited address and an unchanged choice all answer nothing, and
    *  a Save that wrote one of them would be writing under a guessed key or
    *  writing a value nobody read (frames 2–3). */
-  function pendingHostMode(): HostMode | null {
+  function pendingHostMode(profileId: string): HostMode | null {
+    // The value submitted belongs to the connection that was on screen when
+    // Save was pressed. If the editor has since moved on, there is nothing to
+    // write — and reading the live field anyway would write B's choice to A's
+    // host record.
+    if (editing()?.id !== profileId) return null
     const state = methodFieldState()
     if (state.kind !== 'ready' || !state.hostKnown) return null
     const chosen = hostModeChoice()
@@ -2011,18 +2035,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  The two stores can split: a failure here leaves the dialog open, shows
    *  the section holding the field, keeps the chosen value with the reason as
    *  its error, focuses it and names both halves in a warning toast (frame 4).
-   *  Returns whether the host record was written; the same Save retries. */
-  async function saveHostMode(profile: SSHProfile): Promise<boolean> {
-    const mode = pendingHostMode()
-    if (mode === null) return true
+   *
+   *  The mode is the value the Save submitted, captured by the caller, and
+   *  every answer is applied only if it is still the editor's current request
+   *  (see hostModeAnswerIsCurrent). 'stale' means the person moved on or a
+   *  newer write overtook this one: the outcome belongs to nothing on screen,
+   *  so the caller must not close a dialog or toast on its behalf. */
+  async function saveHostMode(
+    profile: SSHProfile,
+    mode: HostMode | null,
+  ): Promise<'ok' | 'failed' | 'stale'> {
+    if (mode === null) return 'ok'
+    const request = ++hostModeRequest
     try {
       await props.client.setHostMode(profile.id, mode)
+      if (!hostModeAnswerIsCurrent(request, profile.id)) {
+        log.warn('dropping a stale host-method write', {
+          profileId: profile.id,
+          mode,
+          request,
+          current: hostModeRequest,
+        })
+        return 'stale'
+      }
       const state = methodFieldState()
       if (state.kind === 'ready') {
         setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
       }
       setHostModeWriteError(undefined)
-      return true
+      return 'ok'
     } catch (err) {
       const reason = (err as Error).message
       log.error('Could not save the host integration method', {
@@ -2030,6 +2071,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         mode,
         message: reason,
       })
+      // THE ANSWER IS APPLIED ONLY TO THE EDITOR THAT ASKED. A refusal for a
+      // connection the person has left must not paint its error, section,
+      // focus or toast over the one now on screen (review ALX-51), and a
+      // refusal overtaken by a newer write must not clear that write's state.
+      if (!hostModeAnswerIsCurrent(request, profile.id)) return 'stale'
       setHostModeWriteError(reason)
       // The field may live on a section the person has since left, and the
       // form's one reveal move is the same one the submit gate makes.
@@ -2046,7 +2092,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           '. Save Connection to retry.',
         )}`,
       })
-      return false
+      return 'failed'
     }
   }
 
@@ -2377,23 +2423,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       dirty.add('group')
     }
     const route = decideSaveRoute(profile, dirty)
+    // THE SUBMITTED METHOD, FIXED NOW. The profile write below is asynchronous
+    // and the person may open another connection before it returns; reading
+    // the field then would write that connection's choice to this one's host.
+    const hostMethod = pendingHostMode(profile.id)
 
     switch (route.kind) {
       case 'noop':
         // Nothing about the connection changed — unless its HOST's method
         // did. That is a change like any other and lives in the other store,
         // so Save writes it even when the profile needs no write (frame 4).
-        if (!(await saveHostMode(profile))) return
+        // A stale or failed answer leaves the dialog as it is; a failure that
+        // is still current has already said so on the field.
+        if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
         closeDialog()
         return
 
       case 'update':
         try {
           const saved = await persistGuarded()
-          if (!(await saveHostMode(saved))) {
-            // The connection IS saved; the host's record is not. Keep the
-            // dialog so the same Save retries the second store, and refresh
-            // the list behind it for what has already been written.
+          if ((await saveHostMode(saved, hostMethod)) !== 'ok') {
+            // The connection IS saved; the host's record is not (or the person
+            // has moved to another one). Keep the dialog so the same Save
+            // retries the second store, and refresh the list behind it for
+            // what has already been written.
             await loadAll()
             void loadSessionStatuses()
             return
@@ -2435,7 +2488,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               })()
             : props.client.patchProfile({ id: profile.id, set: route.patchSet }))
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
-          if (!(await saveHostMode(profile))) return
+          if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
           closeDialog()
           showToast({
             level: 'success',

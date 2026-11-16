@@ -17,6 +17,7 @@ import type { VaultClient, InventoryEntry } from './vault-client'
 import type { DialogClient } from './dialog-client'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
+import { log } from './log'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
@@ -1315,7 +1316,11 @@ function selectGroupSection(container: HTMLElement, label: string) {
 // ── Helper: open the profile edit dialog for a named profile ─────────────
 
 async function openProfileEditor(container: HTMLElement, profileName: string) {
-  const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
+  // BY NAME, not "the first edit button": a test that opens one connection
+  // after another (the stale-answer tests) must reach the one it names.
+  const editBtn = container.querySelector(
+    `.ui-collection-row__actions [aria-label="Edit ${profileName}"]`,
+  )
   expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
 
@@ -3148,6 +3153,106 @@ describe('the host integration method', () => {
     clickButtonByText(container, 'Save Connection')
     await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
     expect(setHostMode).toHaveBeenCalledTimes(2)
+  })
+
+  // A HOST-METHOD ANSWER BELONGS TO THE EDITOR THAT ASKED (review ALX-51).
+  // A write can settle after the person has left the connection it was for, and
+  // applying it then would paint A's failure — its field error, its section, its
+  // focus and its toast — over B, which is the connection now on screen. The
+  // editor therefore applies an answer only while the same connection is still
+  // being edited AND no newer request has been made for it.
+  it('drops a write failure that arrives after the editor moved to another connection', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
+    hostMode.mockImplementation((profileId) =>
+      Promise.resolve({ profileId, mode: 'raw', hostKnown: true }),
+    )
+    let rejectA: ((reason?: unknown) => void) | undefined
+    setHostMode.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectA = reject
+        }),
+    )
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {})
+
+    await waitForProfiles(container, 2)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'script'))
+
+    // The person gives up on prod-web while its write is still in flight, and
+    // opens prod-db.
+    clickButtonByText(container, 'Cancel')
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+    await openProfileEditor(container, 'prod-db')
+    selectProfileSection(container, 'Advanced')
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+    // …and is looking at General when the old refusal arrives.
+    selectProfileSection(container, 'General')
+
+    rejectA!(new RpcError('settings store is read-only', -32603))
+    // The refusal is still logged — the developer's record of it — and only
+    // that: no field error, no toast, no section switch, no focus on B.
+    await vi.waitFor(() => expect(errors).toHaveBeenCalled())
+    expect(methodField(container).error, 'B’s field must not show A’s failure').toBeUndefined()
+    expect(container.textContent).not.toContain('settings store is read-only')
+    expect(
+      toasts().some((toast) => toast.message.includes('web.example.com')),
+      'A’s split-outcome toast names A, and must not be raised while B is edited',
+    ).toBe(false)
+    expect(
+      methodField(container).select.closest('[hidden]'),
+      'the failed save must not reopen Advanced over the section B is on',
+    ).not.toBeNull()
+    expect(document.activeElement).not.toBe(methodField(container).select)
+  })
+
+  it('lets a newer write for one connection settle before an older one', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    const writes: {
+      resolve: (value: { profileId: string; mode: 'auto' | 'raw' | 'script' | 'helper' }) => void
+      reject: (reason?: unknown) => void
+    }[] = []
+    setHostMode.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          writes.push({ resolve, reject })
+        }),
+    )
+    const warnings = vi.spyOn(log, 'warn').mockImplementation(() => {})
+
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+
+    // Two Saves for one connection, the second made before the first answered.
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(writes.length).toBe(1))
+    fireEvent.change(methodField(container).select, { target: { value: 'helper' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(writes.length).toBe(2))
+
+    // The NEWER write fails and is what the field reports.
+    writes[1].reject(new RpcError('settings store is read-only', -32603))
+    await vi.waitFor(() =>
+      expect(methodField(container).error).toBe('Not saved: settings store is read-only'),
+    )
+
+    // The OLDER write succeeds afterwards. It must not clear the newer error,
+    // nor move the recorded value under the choice the person is looking at.
+    writes[0].resolve({ profileId: 'ssh:p1', mode: 'script' })
+    await vi.waitFor(() =>
+      expect(warnings.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'stale host-method write',
+      ),
+    )
+    expect(methodField(container).error).toBe('Not saved: settings store is read-only')
+    expect(methodField(container).select.value).toBe('helper')
+    expect(container.textContent).toContain(CHANGE_HINT)
   })
 
   it('frame 6: the field is called “Integration method”, not “Delivery mode”', async () => {

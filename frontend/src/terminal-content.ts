@@ -229,7 +229,7 @@ import {
   shellStateFromLifecycle,
   type ShellState,
   type InputPresentation,
-  type DesiredMode,
+  type HostMode,
 } from './capability'
 import { createCellModel, snapshotRowText, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
@@ -1819,7 +1819,7 @@ export class TerminalContent extends BasePaneContent {
    *  disagreed with the cascade's default is the two-defaults defect that
    *  ADR closed on the backend. raw refuses every rewrite and remote
    *  write; helper allows the Tier-B binary. */
-  private _policy: DesiredMode = 'auto'
+  private _policy: HostMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
    *  which could not report the two failures that matter most because both
@@ -3109,7 +3109,7 @@ export class TerminalContent extends BasePaneContent {
         this.sshOpts.host,
         this.sshOpts.user,
         anchor,
-        this._sessionDesiredModeOverride,
+        this._sessionHostModeOverride,
         this._watchOpeningCall,
       )
     } finally {
@@ -3202,7 +3202,7 @@ export class TerminalContent extends BasePaneContent {
    *  for THIS session — there is nowhere else to keep the choice. Read by
    *  openRequestedSession's retry; a profile-backed connection never sets
    *  this, since its answer was written to the connection itself. */
-  private _sessionDesiredModeOverride: IntegrationMethod | undefined
+  private _sessionHostModeOverride: IntegrationMethod | undefined
 
   private _showInventoryOffer(message: string): void {
     if (!this._paneTarget || this._disposed) return
@@ -3306,7 +3306,7 @@ export class TerminalContent extends BasePaneContent {
           // place the choice lives; it goes with open.params.desiredMode in
           // nocx-oalo1.11.2.
           if (!this.sshOpts?.profileId) {
-            this._sessionDesiredModeOverride = method
+            this._sessionHostModeOverride = method
           }
           continue
         }
@@ -8509,7 +8509,7 @@ export class TerminalContent extends BasePaneContent {
     this._restoreEditor()
   }
 
-  get policy(): DesiredMode {
+  get policy(): HostMode {
     return this._policy
   }
 

@@ -3,7 +3,7 @@ import {
   deriveActions,
   shellStateFromLifecycle,
   type ActionFacts,
-  type DesiredMode,
+  type HostMode,
   type ObservedDelivery,
   type HelperConsent,
 } from './capability'
@@ -193,9 +193,9 @@ describe('three delivery axes, never collapsed (nocx-mlm7 §3.5)', () => {
     // pins them at runtime too — a collapsed single string would fail.
     // 'helper' legitimately names a desired mode AND an observed delivery —
     // the axes are distinct TYPES, not distinct vocabularies; the compile
-    // check (assigning an ObservedDelivery where a DesiredMode is expected
+    // check (assigning an ObservedDelivery where a HostMode is expected
     // fails) is the real guard, no runtime value collapses them.
-    const modes: DesiredMode[] = ['raw', 'script', 'helper']
+    const modes: HostMode[] = ['raw', 'script', 'helper']
     const observed: ObservedDelivery[] = ['none', 'bootstrap-script', 'installed-script', 'helper']
     const consents: HelperConsent[] = ['unknown', 'granted', 'denied']
     expect(new Set(modes).size).toBe(3)

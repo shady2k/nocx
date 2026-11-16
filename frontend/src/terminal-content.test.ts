@@ -112,7 +112,7 @@ import {
 } from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
-import type { ActionFacts, DesiredMode } from './capability'
+import type { ActionFacts, HostMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
@@ -2806,7 +2806,7 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   /** A client whose SSH open session carries the given destination mode.
    *  The refusal reason no longer rides the ack (nocx-dvql) — it arrives on
    *  session.integrationChanged, which the integration tests drive. */
-  const clientWithPolicy = (desiredMode: DesiredMode): ClientFake => {
+  const clientWithPolicy = (desiredMode: HostMode): ClientFake => {
     const client = makeClient({
       openSSHSession: vi.fn(() => {
         const s = makeSession({ desiredMode })

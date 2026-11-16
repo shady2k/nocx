@@ -13,8 +13,8 @@ import type { LifecycleState } from './lifecycle/state'
 //
 // On 2026-08-05 (nocx-mlm7) the launch-policy enum (auto|ask|off) was
 // itself replaced by three never-collapsed axes (spec §3.5):
-//   - DesiredMode (auto|raw|script|helper): what the user wants nocx to do
-//     with this destination, resolved by the profile cascade;
+//   - HostMode (auto|raw|script|helper): the method the HOST keeps, keyed by
+//     its host-key fingerprint (ADR-727g63tr);
 //   - ObservedDelivery (none|bootstrap-script|installed-script|helper): what
 //     actually happened this session, read by the renderer from the markers;
 //   - HelperConsent (unknown|granted|denied): persisted per MACHINE, keyed by
@@ -33,18 +33,19 @@ import type { LifecycleState } from './lifecycle/state'
  *  the Tier-B binary ran. Owned by the renderer, from the markers. */
 export type ObservedDelivery = 'none' | 'bootstrap-script' | 'installed-script' | 'helper'
 
-/** What the user wants nocx to do with this destination — the FIRST of the
- *  three axes (spec §3.5), resolved by the profile cascade and carried by
- *  the open ack. auto (the default, ADR-0033) is the name for "the user has
- *  not answered": it wraps and installs the scripts exactly as script does
- *  (N3), and additionally permits the helper to be OFFERED where a surface
- *  reaches for it (D8). script is that same answer given explicitly, and is
- *  never upgraded. helper allows the deployed binary and still integrates:
- *  the tiers are additive, so allowing it never withholds the scripts
- *  (§5.2). raw alone adds nothing — no rewrite, no remote write. There is
- *  no 'ask': asking is what auto does when no answer is stored for that
- *  host key. */
-export type DesiredMode = 'auto' | 'raw' | 'script' | 'helper'
+/** The integration method a HOST keeps — the FIRST of the three axes
+ *  (spec §3.5), carried by the open ack. It belongs to the machine, keyed by
+ *  its host-key fingerprint (ADR-727g63tr decision 1), so a saved connection
+ *  has no copy of its own and the connection editor edits the host record.
+ *  auto (ADR-0033) is the name for "nobody has answered for this host": it
+ *  wraps and installs the scripts exactly as script does (N3), and
+ *  additionally permits the helper to be OFFERED where a surface reaches for
+ *  it (D8). script is that same answer given explicitly, and is never
+ *  upgraded. helper allows the deployed binary and still integrates: the
+ *  tiers are additive, so allowing it never withholds the scripts (§5.2).
+ *  raw alone adds nothing — no rewrite, no remote write. There is no 'ask':
+ *  asking is what auto does when no answer is recorded for that host key. */
+export type HostMode = 'auto' | 'raw' | 'script' | 'helper'
 
 /** Helper consent for a MACHINE — the THIRD of the three axes (spec §3.5),
  *  keyed by the destination's host-key fingerprint rather than by the saved
@@ -71,7 +72,7 @@ export type ShellState =
 export type InputPresentation = 'editor' | 'terminal'
 
 /** The connection-scope launch policy (nocx-4t37.2) was replaced by the
- *  DesiredMode axis (nocx-mlm7): auto, script and helper all integrate at
+ *  HostMode axis (nocx-mlm7): auto, script and helper all integrate at
  *  session open; raw alone refuses every rewrite and remote write. There is
  *  no 'ask' — N3 makes the script footprint automatic product behaviour. */
 

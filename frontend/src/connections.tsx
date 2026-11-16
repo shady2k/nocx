@@ -66,7 +66,7 @@ import { log } from './log'
 import { showToast } from './ui/toast'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 import type { InventoryEntry, VaultClient } from './vault-client'
-import type { DesiredMode } from './capability'
+import type { HostMode } from './capability'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -198,18 +198,19 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 /** The closed portDiscovery modes, in display order (spec D3). */
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
-/** The closed desired modes, in display order (spec §3.5, nocx-mlm7), with
- *  honest labels: auto is the default and means "not answered" — the scripts
- *  install automatically (N3) and the helper is OFFERED when something needs
- *  it (D8, ADR-0033); script is that answer given explicitly, so the helper
- *  is never offered; raw adds nothing; helper allows the Tier-B binary
- *  outright. auto leads because it is what an unedited connection already
- *  is — the list starts where the user starts. */
-const DESIRED_MODES: { value: DesiredMode; labelKey: string; labelFallback: string }[] = [
+/** The closed host modes, in display order (spec §3.5, ADR-727g63tr), with
+ *  honest labels: auto is the absence of an answer for this host — the
+ *  connect-time ask decides when the host is first reached (ADR-0033), and
+ *  that is also every answer for a destination known_hosts holds no key for;
+ *  script is that answer given explicitly, so the helper is never offered; raw
+ *  adds nothing; helper allows the Tier-B binary, whose deployment the machine
+ *  still has to permit at connect. auto leads because it is what a host nobody
+ *  has answered is — the list starts where the user starts. */
+const HOST_MODES: { value: HostMode; labelKey: string; labelFallback: string }[] = [
   {
     value: 'auto',
     labelKey: 'connections.mode.desiredAuto',
-    labelFallback: 'Auto — install scripts, ask before the helper',
+    labelFallback: 'Auto — ask when the host is first reached',
   },
   {
     value: 'script',
@@ -347,6 +348,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Selection / dialog state ─────────────────────────────────────────────
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [dialogOpen, setDialogOpen] = createSignal(false)
+  /** The integration method the edited connection's HOST keeps
+   *  (ADR-727g63tr decision 1). It is not a profile field, so it does not ride
+   *  `setOption` or the dirty tracking: the record is the host's and a write
+   *  takes effect at once, for every later open of that machine. `auto` is
+   *  what a draft and a host with no trusted key show, because neither has an
+   *  answer anywhere. */
+  const [hostMode, setHostMode] = createSignal<HostMode>('auto')
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   /** The literal a person has typed into a password field and not yet stored.
    *  Two fields, two drafts: the profile editor's and the group defaults'.
@@ -754,8 +762,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // Delivery-mode options, tracked so a locale switch re-renders the label.
   // Serves both Selects that offer the modes — the group editor's default and
   // the connection editor's Advanced section — so the two never drift.
-  const desiredModeOptions = createMemo(() =>
-    DESIRED_MODES.map((m) => ({ value: m.value, label: t(m.labelKey, m.labelFallback) })),
+  const hostModeOptions = createMemo(() =>
+    HOST_MODES.map((m) => ({ value: m.value, label: t(m.labelKey, m.labelFallback) })),
   )
 
   const importHint = createMemo(() => {
@@ -1189,7 +1197,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     { key: 'readyTimeout', label: t('connections.group.fieldReadyTimeout', 'Ready timeout (ms)') },
     { key: 'agentForward', label: t('connections.group.fieldAgentForward', 'Agent forward') },
     { key: 'portDiscovery', label: t('connections.group.fieldPortDiscovery', 'Port discovery') },
-    { key: 'desiredMode', label: t('connections.group.fieldDeliveryMode', 'Delivery mode') },
   ]
 
   /** Human-readable field labels for the impact summary. */
@@ -1203,7 +1210,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       readyTimeout: t('connections.impact.fieldReadyTimeout', 'ready timeout'),
       agentForward: t('connections.impact.fieldAgentForwarding', 'agent forwarding'),
       portDiscovery: t('connections.impact.fieldPortDiscovery', 'port discovery'),
-      desiredMode: t('connections.impact.fieldDeliveryMode', 'delivery mode'),
     }
     return m[key] ?? key
   }
@@ -1348,20 +1354,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={(gv(key) as string) ?? ''}
                 onChange={(v) => setG(key, v || '')}
                 options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
-                placeholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
-              />
-            </div>
-          </Field>
-        )
-      }
-      if (key === 'desiredMode') {
-        return (
-          <Field for={`group-default-${key}`} label={label}>
-            <div class="cm-field-row">
-              <Select
-                value={(gv(key) as string) ?? ''}
-                onChange={(v) => setG(key, v || '')}
-                options={desiredModeOptions()}
                 placeholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
               />
             </div>
@@ -1808,6 +1800,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
     closeQuickConnect()
     setProfileSection('general')
+    setHostMode('auto')
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
@@ -1822,6 +1815,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function openEditDialog(profile: SSHProfile) {
     setProfileSection('general')
     setEditing(profile)
+    void loadHostMode(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
     // Open on the key source the connection actually uses: the bound secret,
@@ -1837,9 +1831,71 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     void loadSecretRows()
   }
 
+  /** Read the host's method for the connection being edited. A draft names no
+   *  connection, so there is nothing to ask and auto is the answer it already
+   *  shows. A slow answer for a dialog that has since opened another
+   *  connection is dropped rather than painted over the newer one. */
+  async function loadHostMode(profile: SSHProfile): Promise<void> {
+    setHostMode('auto')
+    if (!profile.id) return
+    try {
+      const answer = await props.client.hostMode(profile.id)
+      if (editing()?.id !== profile.id) return
+      setHostMode(answer.mode)
+    } catch (err) {
+      log.error('Could not read the host integration method', {
+        profileId: profile.id,
+        message: (err as Error).message,
+      })
+      showToast({
+        level: 'danger',
+        message: t(
+          'connections.toasts.hostModeReadFailed',
+          'Could not read the integration method for this host.',
+        ),
+      })
+    }
+  }
+
+  /** Write the chosen method to the connection's HOST. The control follows the
+   *  person at once and goes back where it was if the backend refuses, because
+   *  a select left showing a method nothing recorded is the surface lying about
+   *  the fact it draws (ADR-8: the record is the one owner of the answer). */
+  async function changeHostMode(next: HostMode): Promise<void> {
+    const profile = editing()
+    if (!profile) return
+    const previous = hostMode()
+    if (next === previous) return
+    // The control follows the person first and goes back if the answer cannot
+    // stand. A native select keeps whatever was picked until its bound value
+    // is reassigned, so leaving the signal alone would leave the control
+    // showing a method nothing recorded.
+    setHostMode(next)
+    if (!profile.id) {
+      setHostMode(previous)
+      showToast({
+        level: 'warning',
+        message: t(
+          'connections.toasts.hostModeSaveFirst',
+          'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
+        ),
+      })
+      return
+    }
+    try {
+      const answer = await props.client.setHostMode(profile.id, next)
+      if (editing()?.id === profile.id) setHostMode(answer.mode)
+      if (answer.note) showToast({ level: 'warning', message: answer.note })
+    } catch (err) {
+      setHostMode(previous)
+      showToast({ level: 'danger', message: (err as Error).message })
+    }
+  }
+
   function closeDialog() {
     setDialogOpen(false)
     setEditing(null)
+    setHostMode('auto')
     setProfilePasswordOpen(false)
     setProfilePasswordValue('')
     setMintedPasswordNames(new Map())
@@ -2829,14 +2885,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   >
                     <div class="cm-field-row">
                       <Select
-                        value={fvStr('desiredMode')}
-                        onChange={(v) => setOption('desiredMode', v || undefined)}
-                        options={desiredModeOptions()}
-                        placeholder={t('connections.editor.inherited', '&mdash; Inherited &mdash;')}
+                        id="desired-mode"
+                        value={hostMode()}
+                        onChange={(v) => void changeHostMode(v as HostMode)}
+                        options={hostModeOptions()}
                       />
                     </div>
                   </Field>
-                  <Show when={fvStr('desiredMode') === 'helper'}>
+                  <Show when={hostMode() === 'helper'}>
                     <p class="cm-hint">
                       {t(
                         'connections.editor.helperHint',

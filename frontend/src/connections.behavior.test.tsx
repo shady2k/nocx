@@ -139,7 +139,16 @@ function createMockClient(overrides?: {
     .spyOn(pc, 'connectionTest')
     .mockResolvedValue(overrides?.connectionTestResult ?? { outcome: 'accepted' })
   const trustHostKey = vi.spyOn(pc, 'trustHostKey').mockResolvedValue({ fingerprint: 'SHA256:abc' })
-  return { client: pc, connectionTest, trustHostKey }
+  // The host record: a saved connection has no method of its own, so the
+  // editor asks the HOST through the backend (ADR-727g63tr decision 1). Every
+  // mount stubs both calls; a test that is about either overrides it.
+  const hostMode = vi
+    .spyOn(pc, 'hostMode')
+    .mockImplementation(async (profileId) => ({ profileId, mode: 'auto' }))
+  const setHostMode = vi
+    .spyOn(pc, 'setHostMode')
+    .mockImplementation(async (profileId, mode) => ({ profileId, mode }))
+  return { client: pc, connectionTest, trustHostKey, hostMode, setHostMode }
 }
 
 function mount(
@@ -153,7 +162,8 @@ function mount(
     vaultClient?: VaultClient
   },
 ) {
-  const { client, connectionTest, trustHostKey } = createMockClient(overrides)
+  const { client, connectionTest, trustHostKey, hostMode, setHostMode } =
+    createMockClient(overrides)
   const vaultController = overrides?.vaultController
   const vaultClient =
     overrides?.vaultClient ??
@@ -207,7 +217,15 @@ function mount(
     ),
     { container },
   )
-  return { container, client, connectionTest, trustHostKey, openSecretCreate }
+  return {
+    container,
+    client,
+    connectionTest,
+    trustHostKey,
+    hostMode,
+    setHostMode,
+    openSecretCreate,
+  }
 }
 
 afterEach(() => {
@@ -2865,11 +2883,17 @@ describe('portDiscovery', () => {
   })
 })
 
-// ── desiredMode + helperConsent (spec §3.5, nocx-mlm7) ───────────────────
+// ── the host's integration method (ADR-727g63tr decision 1) ──────────────
+//
+// The method belongs to the MACHINE, keyed by its host-key fingerprint, so the
+// editor reads and writes the host record through the backend and the saved
+// connection carries no copy. A person changing this select changes what every
+// later open of that host does.
 
-describe('desiredMode', () => {
-  it('saves an explicit mode choice on the profile through the patch route', async () => {
+describe('the host integration method', () => {
+  it("shows the method the connection's host keeps", async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    client.hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script' })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
@@ -2877,56 +2901,87 @@ describe('desiredMode', () => {
     const label = container.querySelector('label[for="desired-mode"]')
     expect(label, 'Delivery mode field not found').toBeTruthy()
     const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
+    await vi.waitFor(() => {
+      expect(select.value, 'the select must show the host record').toBe('script')
+    })
+  })
+
+  it('writes a change to the host record and not to the profile', async () => {
+    const { container, client, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const patch = vi.spyOn(client, 'patchProfile')
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const select = container
+      .querySelector('label[for="desired-mode"]')!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'helper' } })
 
-    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
-    const dialog = findDialogByTitleContaining(container, 'prod-web')!
-    clickButtonByText(container, 'Save Connection', dialog)
-
     await vi.waitFor(() => {
-      expect(patchSpy).toHaveBeenCalled()
+      expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'helper')
     })
-    const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
-    expect(params.set?.['options.desiredMode']).toBe('helper')
+    expect(patch, 'the host method must not ride the profile patch').not.toHaveBeenCalled()
   })
 
-  it('the group defaults editor offers desiredMode as an inheritable default', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
-    await waitForProfiles(container, 3)
-    await openGroupEditorByName(container, 'Production')
-    selectGroupSection(container, 'Advanced')
+  it('goes back to the recorded method when the host has no known key', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const sentence =
+      "This host's key is not known yet, so nocx cannot remember a method for it. Connect to it once, then choose."
+    client.setHostMode.mockRejectedValue(new RpcError(sentence, -32603))
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
 
-    const label = container.querySelector('label[for="group-default-desiredMode"]')
-    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
-    expect(select, 'Group delivery mode select not found').toBeTruthy()
+    const select = container
+      .querySelector('label[for="desired-mode"]')!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'raw' } })
 
-    const applySpy = vi.spyOn(client, 'groupApply')
-    const dialog = findDialogByTitle(container, 'Edit Group: Production')!
-    clickButtonByText(container, 'Save Group', dialog)
-
     await vi.waitFor(() => {
-      expect(applySpy).toHaveBeenCalled()
+      expect(select.value, 'a refused write must not leave the new value showing').toBe('auto')
     })
-    const sent = applySpy.mock.calls[0][0]
-    expect(sent[0].defaults?.['desiredMode']).toBe('raw')
+    expect(toasts().map((toast) => toast.message)).toContain(sentence)
   })
 
-  it('a helper selection offers no per-connection consent control', async () => {
+  it('says the method will not survive a restart when the record could not be saved', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const note =
+      "The method applies to this host, but the host's record was not saved, so this host will be asked again after a restart."
+    client.setHostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', note })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+
+    const select = container
+      .querySelector('label[for="desired-mode"]')!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'raw' } })
+
+    await vi.waitFor(() => {
+      expect(select.value).toBe('raw')
+      expect(toasts().map((toast) => toast.message)).toContain(note)
+    })
+  })
+
+  it('offers no per-connection consent control for a helper selection', async () => {
     // ADR-0105 (nocx-1kejz.3). The control that used to sit here promised a
     // rule nothing applied ("a Helper selection without granted consent
     // behaves as raw"), while the deployment decision read a fingerprint
     // store keyed by the MACHINE and never this field. A person set Granted
     // and was asked anyway, or set nothing and believed the helper was
-    // blocked. So the selection offers no consent question at all: the
-    // connect-time ask is where the machine answers, once.
+    // blocked. Editing the host's method does not answer that question
+    // either: the connect-time ask is where the machine answers, once.
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
 
-    const modeLabel = container.querySelector('label[for="desired-mode"]')
-    const modeSelect = modeLabel!
+    const modeSelect = container
+      .querySelector('label[for="desired-mode"]')!
       .closest('.ui-field')
       ?.querySelector('.ui-select') as HTMLSelectElement
     fireEvent.change(modeSelect, { target: { value: 'helper' } })
@@ -2938,6 +2993,41 @@ describe('desiredMode', () => {
     // …and what replaces it says where the answer is given, so the person is
     // not left looking for a control that is gone.
     expect(container.textContent).toContain('Permission to deploy it belongs to the machine')
+  })
+
+  it('shows auto on a connection that has not been saved, and says to save it first', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: [] })
+    await waitForProfiles(container, 0)
+
+    clickButtonByText(container, '+ New connection')
+    await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
+    fireEvent.input(container.querySelector('#quick-connect-input')!, {
+      target: { value: 'web.example.com' },
+    })
+    clickButtonByText(container, 'Next')
+    await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
+    selectProfileSection(container, 'Advanced')
+
+    const select = container
+      .querySelector('label[for="desired-mode"]')!
+      .closest('.ui-field')
+      ?.querySelector('.ui-select') as HTMLSelectElement
+    expect(select.value, 'a draft has no host record, so it shows auto').toBe('auto')
+
+    fireEvent.change(select, { target: { value: 'script' } })
+
+    // A draft names no profile id, so there is nothing for the backend to
+    // resolve and nowhere to keep an answer. The select stays where it was and
+    // the toast says what to do, rather than a control that silently does
+    // nothing.
+    await vi.waitFor(() => {
+      expect(toasts().map((toast) => toast.message)).toContain(
+        'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
+      )
+    })
+    expect(hostMode).not.toHaveBeenCalled()
+    expect(setHostMode).not.toHaveBeenCalled()
+    expect(select.value).toBe('auto')
   })
 })
 

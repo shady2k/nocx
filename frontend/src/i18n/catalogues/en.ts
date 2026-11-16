@@ -520,6 +520,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.testFailedHead': 'Test failed:',
   'connections.toasts.trustHostKeyFailedHead': 'Could not trust the host key:',
   'connections.toasts.enterHost': 'Enter a host, alias, or connection string',
+  'connections.toasts.hostModeReadFailed': 'Could not read the integration method for this host.',
+  'connections.toasts.hostModeSaveFirst':
+    'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
   'connections.toasts.parseFailedHead': 'Could not parse',
   'connections.toasts.parseFailedTail': 'try "user@host:port" or "ssh://user@host:port"',
   'connections.toasts.saved': 'Saved',
@@ -708,7 +711,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.add': 'Add forward',
   'connections.forward.empty': 'No forwards — add one to open it automatically on connect.',
   'connections.forward.removeHead': 'Remove forward',
-  'connections.mode.desiredAuto': 'Auto — install scripts, ask before the helper',
+  'connections.mode.desiredAuto': 'Auto — ask when the host is first reached',
   'connections.mode.desiredScript': 'Script — scripts only, never the helper',
   'connections.mode.desiredRaw': 'Raw — no integration',
   'connections.mode.desiredHelper': 'Helper — deploy the nocx binary',

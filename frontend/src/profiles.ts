@@ -3,6 +3,9 @@ import type { ConnectionTestResult } from './generated/connections.probe'
 import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { ConnectionsSetIntegrationMethodResult } from './generated/connections.setIntegrationMethod'
+import type { ConnectionsHostModeResult } from './generated/connections.hostMode'
+import type { ConnectionsSetHostModeResult } from './generated/connections.setHostMode'
+import type { HostMode } from './capability'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
@@ -505,6 +508,26 @@ export class ProfileClient {
     profileId?: string,
   ): Promise<ConnectionsSetIntegrationMethodResult> {
     return this.call('connections.setIntegrationMethod', { fingerprint, method, host, profileId })
+  }
+
+  /** The integration method a saved connection's HOST keeps, in the closed set
+   *  the host record carries (ADR-727g63tr decision 1). `auto` is not an
+   *  answer but the absence of one: the connect-time ask decides, and for a
+   *  destination known_hosts holds no key for it is the only value there is.
+   *  The backend resolves the connection's destination — alias, port, jump
+   *  route — exactly as an open would, because the record is keyed by the
+   *  host-key fingerprint that resolution produces. */
+  hostMode(profileId: string): Promise<ConnectionsHostModeResult> {
+    return this.call('connections.hostMode', { profileId })
+  }
+
+  /** Set the integration method for the connection's HOST. `auto` forgets the
+   *  record so the next open asks again. Choosing helper here records the
+   *  METHOD only: permission to deploy the binary is the machine's and is
+   *  asked at connect (ADR-0105). `note` is present when the record could not
+   *  be saved and will not survive a restart. */
+  setHostMode(profileId: string, mode: HostMode): Promise<ConnectionsSetHostModeResult> {
+    return this.call('connections.setHostMode', { profileId, mode })
   }
 
   /**

@@ -302,6 +302,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.testFailedHead': 'Проверка не удалась:',
   'connections.toasts.trustHostKeyFailedHead': 'Не удалось доверять ключу хоста:',
   'connections.toasts.enterHost': 'Введите хост, алиас или строку подключения',
+  'connections.toasts.hostModeReadFailed': 'Не удалось прочитать метод интеграции для этого хоста.',
+  'connections.toasts.hostModeSaveFirst':
+    'Сначала сохраните подключение — метод принадлежит хосту, а nocx узнаёт его при первом подключении.',
   'connections.toasts.parseFailedHead': 'Не удалось разобрать',
   'connections.toasts.parseFailedTail':
     'попробуйте формат "user@host:port" или "ssh://user@host:port"',
@@ -495,7 +498,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.empty':
     'Пробросов нет — добавьте один, чтобы открывать его автоматически при подключении.',
   'connections.forward.removeHead': 'Удалить проброс',
-  'connections.mode.desiredAuto': 'Авто — установить скрипты, спрашивать перед хелпером',
+  'connections.mode.desiredAuto': 'Авто — спросить при первом подключении к хосту',
   'connections.mode.desiredScript': 'Скрипты — только скрипты, никогда хелпер',
   'connections.mode.desiredRaw': 'Raw — без интеграции',
   'connections.mode.desiredHelper': 'Хелпер — развернуть бинарный файл nocx',

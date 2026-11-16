@@ -16,7 +16,8 @@
  * editor reads and writes the host record (connections.hostMode /
  * connections.setHostMode), and a change applies to every later open of that
  * machine. This spec watches that whole path through the product's own seams —
- * the ask's dialog, the editor's Delivery mode select, and a second open.
+ * the ask's dialog, the editor's Integration method select and its Save
+ * Connection, and a second open.
  *
  * # No timing
  *
@@ -36,7 +37,7 @@ const TAB = '.nocx-tab'
 const LIVE = '.pane.active .terminal-live-container'
 const EDITOR = '.pane.active .nocx-editor-input'
 const ASK = 'Choose how nocx connects'
-const DELIVERY_MODE = '#desired-mode'
+const INTEGRATION_METHOD = '#profile-integration-method'
 
 function trustHostKey(fixture: SshdFixture): void {
   const sshDir = path.join(readStand().home, '.ssh')
@@ -153,13 +154,15 @@ test('the editor changes the host method and the next tab opens by it', async ({
     await expect(editor).toBeVisible()
     await editor.getByRole('tab', { name: 'Advanced' }).click()
 
-    const mode = page.locator(DELIVERY_MODE)
+    const mode = page.locator(INTEGRATION_METHOD)
     await expect(mode).toHaveValue('raw', { timeout: 10_000 })
     await mode.selectOption('script')
 
-    // The select writes the host record at once. The BACKEND's answer is the
-    // observable: the editor shows the value it was told to show, and only the
-    // record says the open that follows will use it.
+    // The selection is a draft: the record is written by Save, and the
+    // BACKEND's answer is the observable — the select shows what it was told
+    // to show, and only the record says the open that follows will use it.
+    await editor.getByRole('button', { name: 'Save Connection', exact: true }).click()
+    await expect(editor).not.toBeVisible()
     await expect
       .poll(
         async () =>
@@ -168,8 +171,6 @@ test('the editor changes the host method and the next tab opens by it', async ({
         { timeout: 15_000 },
       )
       .toBe('script')
-    await editor.getByRole('button', { name: 'Save Connection', exact: true }).click()
-    await expect(editor).not.toBeVisible()
 
     // ── 3. A NEW tab to that host opens by the chosen method ────────────
     await openFromPalette(page, profileName)

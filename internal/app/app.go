@@ -51,6 +51,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -986,6 +987,12 @@ func New(opts ...Option) (*App, error) {
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
 	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
+	// The HOST record (ADR-727g63tr decision 1): the integration method each
+	// machine keeps, by host-key fingerprint — beside consent and a separate
+	// fact from it. The connect-time ask writes it, the open path and git.open
+	// read it, and without this line the mode is the profile's again on every
+	// run while the tests still prove the store works.
+	hostModes := hostmode.NewStore(logger, docStore, "host-modes.json")
 	// The helper-backed git factory and the registry that owns its live
 	// helper channels (remote-helper design D8, D25): one registry serves
 	// both the factory's per-session helpers and the uninstall surface's
@@ -1024,6 +1031,7 @@ func New(opts ...Option) (*App, error) {
 	// method per op would put a capability on a dispatch that has no use for it
 	// — the narrowness rule this file's own comments keep.
 	helperReg.tools = overHelper
+	helperReg.modes = hostModes
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
@@ -1470,6 +1478,10 @@ func New(opts ...Option) (*App, error) {
 		// git-lane selection both read, so a grant this writes is the answer
 		// either reads back.
 		transport.WithHelperConsentWriter(helperConsent),
+		// The other half of the connect-time ask (ADR-727g63tr decision 1): the
+		// answer it writes is the HOST's mode, and this is the record every open
+		// of that host reads it back from.
+		transport.WithHostModeStore(hostModes),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable

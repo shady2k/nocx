@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
@@ -143,7 +144,11 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 			withStore(store),
 			withHelperArtifactAvailable(available),
 		)
-		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: effectiveModeFor(sess)}) {
+		// THE MODE IS THE HOST'S (ADR-727g63tr decision 1): the same record the
+		// open path reads, by the same fingerprint. A connection's stored
+		// delivery mode is not consulted here any more — two panes riding one
+		// host must not disagree about whether it may carry a helper.
+		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: hostModeFor(reg.modes, sess.HostKeyFingerprint())}) {
 		case DesiredHelper:
 			if perr != nil {
 				// The probe's failure is a fact with a state (§6), never
@@ -221,7 +226,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				}}
 			}
 			return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
-				Message: refusedHelperReason(sess, store),
+				Message: refusedHelperReason(sess, store, reg.modes),
 			}}
 		}
 	}, reg
@@ -262,14 +267,15 @@ func unsupportedPlatformMessage(p deploy.Platform, artifactErr error) string {
 // refusedHelperReason is the resolver's Refused account for a machine whose
 // mode or stored answer forbids the helper: the actionable reason the
 // not-available error carries, never a generic refusal.
-func refusedHelperReason(sess session.Session, store *consent.Store) string {
-	// Every message here names a mode the connection form actually offers.
-	// Before ADR-0033 this text told the user to pick "Auto", which was a
-	// value only this package knew — an instruction that could not be
-	// followed.
-	switch effectiveModeFor(sess) {
+func refusedHelperReason(sess session.Session, store *consent.Store, modes *hostmode.Store) string {
+	// Every message names the surface that owns the answer. Since
+	// ADR-727g63tr decision 1 that surface is the HOST record, not the
+	// connection: two tabs to one machine share one method, and telling a
+	// person to change "this connection" would send them to a field that no
+	// longer decides anything.
+	switch hostModeFor(modes, sess.HostKeyFingerprint()) {
 	case profile.DesiredRaw:
-		return "this connection is set to Raw, which does not run the nocx helper — change its Delivery mode to Auto or Helper to open repositories here"
+		return "this host's integration method is Raw, which does not run the nocx helper — set it to Helper to open repositories here"
 	case profile.DesiredScript:
 		// An answer, not a gap: script asked for the shell tiers and not
 		// the binary, so this is not a refusal to explain away but a
@@ -277,7 +283,7 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 		// way to "allow it outright", because since ADR-0105 no Delivery
 		// mode is: the machine is asked, once, whatever the connection
 		// says.
-		return "this connection is set to Script, which installs the shell integration but not the nocx helper — set its Delivery mode to Auto or Helper to ask for the helper on this machine"
+		return "this host's integration method is Script, which installs the shell integration but not the nocx helper — set it to Helper to ask for the helper on this machine"
 	}
 	if store != nil {
 		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok {
@@ -555,18 +561,21 @@ type installedHelper struct {
 // machine is the typed identity a lane is opened with.
 func (i installedHelper) machine() proto.Machine { return proto.Machine{Dir: i.dir} }
 
-// effectiveModeFor re-derives the session's resolved desired mode from the
-// connect options the session was opened with (session.Reg stamps the
-// resolved cascade answer as WithDesiredMode). An absent answer means no
-// profile spoke for this destination — a direct host or an ad-hoc open —
-// and resolves to profile.DesiredAuto, the same value the cascade's
-// hardcoded default carries (ADR-0033).
-func effectiveModeFor(sess session.Session) profile.DesiredMode {
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range sess.SSHOptions() {
-		o(cfg)
+// hostModeFor is the integration method the HOST keeps (ADR-727g63tr decision
+// 1), read from the record by the host-key fingerprint a dial observed. It is
+// the ONE answer to "which method does this host use", so two connections to
+// one machine — from two profiles, or from a profile and a typed line — resolve
+// the same mode.
+//
+// A host with no record, and a caller with no store (a test's shape, never the
+// composition root's), is auto: "not yet answered" (ADR-0033), which is the
+// connect-time ask. The store's own Lookup is nil-safe, so the nil case needs
+// no test of its own here.
+func hostModeFor(modes *hostmode.Store, fingerprint string) profile.DesiredMode {
+	if mode, ok := modes.Lookup(fingerprint); ok {
+		return profile.DesiredMode(mode)
 	}
-	return profile.DesiredMode(cfg.DesiredMode)
+	return profile.DesiredAuto
 }
 
 // destinationIdentityFor renders the display identity (user@host:port) the
@@ -664,8 +673,15 @@ type helperRegistry struct {
 	blockRows     blockRowsSink
 	log           *slog.Logger
 	consent       *consent.Store
-	registry      *session.Reg
-	lifecycle     lifecyclechannel.Kernel
+	// modes is the HOST record: the integration method each machine keeps,
+	// keyed by host-key fingerprint (ADR-727g63tr decision 1). It is the one
+	// answer to "which method does this host use" for every connection to it,
+	// and it is a different question from consent beside it. Nil (a test
+	// double, or a build that wired none) reads every host as auto — not yet
+	// answered — which is the ask.
+	modes     *hostmode.Store
+	registry  *session.Reg
+	lifecycle lifecyclechannel.Kernel
 	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
 	// session integration axis, the same seam the local pty factory uses.
 	// It is a separate seam from the published facts for the same reason it
@@ -984,10 +1000,18 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		return transport.HostedSessionOpen{}, nil, false, nil
 	}
 	opts := session.SSHOptionsFromConfig(cfg.Remote)
-	mode := profile.DesiredMode(cfg.Remote.DesiredMode)
 	endProbe := diagnostics.Stage(ctx, diagnostics.StageProbe)
 	hold, fingerprint, platform, available, err := probeHelperPlatformHeld(ctx, cfg.Host, opts, r.install, r.source)
 	endProbe(err)
+	// THE MODE ARRIVES WITH THE FINGERPRINT, and that order is the design
+	// rather than an accident: the record is keyed by the machine's host key,
+	// so which method this host uses is answerable only once a dial has seen
+	// one. Before that — a host nobody has connected to, or a probe that got
+	// far enough to offer a key but no further — the answer is auto, "not yet
+	// answered" (ADR-0033), which is the connect-time ask. `mode` below is
+	// therefore read from the record and never from the connection's stored
+	// delivery mode (ADR-727g63tr decision 1 supersedes that place).
+	mode := hostModeFor(r.modes, fingerprint)
 	if err != nil {
 		// The connect-time helper ask (ADR-0068, owner's decision
 		// 2026-09-16). An unknown or changed host key is the ONE probe
@@ -999,11 +1023,26 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		// succeeded) is answered exactly as before: swallowed here, so the
 		// local opener's own dial a moment later produces the real,
 		// definitive refusal.
-		if ask := helperConsentAskForProbeFailure(cfg.Host, mode, err, r.consent); ask != nil {
+		if ask := helperConsentAskForProbeFailure(cfg.Host, offeredHostKeyFingerprint(err), err, r.consent, r.modes); ask != nil {
 			return transport.HostedSessionOpen{}, hold, true, ask
 		}
+		// A probe that failed before any key was seen leaves no fingerprint,
+		// so the host is auto by the same rule as one nobody answered for; a
+		// host-key failure names the key it was offered, and the record may
+		// already carry an answer for it. Either way the fall-through open
+		// below uses the host's mode, and NOT the connection's stored one.
+		cfg.Remote.DesiredMode = string(hostModeFor(r.modes, offeredHostKeyFingerprint(err)))
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
+	// THE OPEN'S OWN CONFIG CARRIES THE HOST'S ANSWER. Every later reader of
+	// this config takes the mode from it — the local opener's spawn (which
+	// decisions the shell scripts from the mode), the open ack's
+	// desiredMode, and the integration axis that reads the ack's gate — so
+	// stamping it here is what makes one host resolve one mode for the whole
+	// open rather than only for the helper selection. cfg.Remote is a pointer
+	// and this is deliberate: the transport built this config and reads it
+	// back after Open returns (ws_session_handlers.go's openResult).
+	cfg.Remote.DesiredMode = string(mode)
 	resolver := newResolver(
 		withStore(r.consent),
 		withHelperArtifactAvailable(available),
@@ -1044,27 +1083,31 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 // failure is a host-key trust decision the SAME dialog can carry it beside
 // (owner's decision 2026-09-16: never two dialogs in sequence).
 //
-// THE MODES THAT MAY ASK ARE THE MODES THAT MAY HAVE THE HELPER: silence
-// (auto, which is "not answered") and an explicit `helper` (ADR-0105 —
-// naming the method is not the machine's permission). An explicit `script`
-// is an answer and asks nothing, and `raw` never reaches here at all.
+// THE MODES THAT MAY ASK ARE THE MODES THAT MAY HAVE THE HELPER, and since
+// ADR-727g63tr decision 1 they are read from the HOST record by the very
+// fingerprint the probe failure offered: auto (which is "not yet answered")
+// and helper (ADR-0105 — naming the method is not the machine's permission).
+// A host recorded script is an answer and asks nothing, even for a key this
+// route's known_hosts has not seen yet; a host recorded raw never reaches here
+// at all.
 //
-// Returns nil for every case that must NOT ask here: `script`, a probe
-// failure that is not a host-key one, or a fingerprint ADR-0034 has already
-// answered through some OTHER route to the same machine ("one machine, one
-// answer" — TestOneMachineOneAnswerAcrossConnections). In every nil case the
-// existing mechanism answers on its own: the local opener's own dial produces
-// the ordinary host-key-only refusal a moment later (or, for an already-
-// answered fingerprint, the key gets trusted and the very next probe resolves
-// the machine's already-recorded answer without asking again).
-func helperConsentAskForProbeFailure(host string, mode profile.DesiredMode, probeErr error, store *consent.Store) error {
-	if mode == "" {
-		mode = profile.DesiredAuto
-	}
+// The fingerprint is the argument this question is asked BY, not something
+// derived after the mode: without one the host has no record at all, and there
+// is nothing to consult.
+//
+// Returns nil for every case that must NOT ask here: a host recorded script,
+// a probe failure that is not a host-key one, or a fingerprint ADR-0034 has
+// already answered through some OTHER route to the same machine ("one machine,
+// one answer" — TestOneMachineOneAnswerAcrossConnections). In every nil case
+// the existing mechanism answers on its own: the local opener's own dial
+// produces the ordinary host-key-only refusal a moment later (or, for an
+// already-answered fingerprint, the key gets trusted and the very next probe
+// resolves the machine's already-recorded answer without asking again).
+func helperConsentAskForProbeFailure(host, fingerprint string, probeErr error, store *consent.Store, modes *hostmode.Store) error {
+	mode := hostModeFor(modes, fingerprint)
 	if mode != profile.DesiredAuto && mode != profile.DesiredHelper {
 		return nil
 	}
-	fingerprint := offeredHostKeyFingerprint(probeErr)
 	if fingerprint == "" || store == nil {
 		return nil
 	}

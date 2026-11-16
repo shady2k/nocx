@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -780,6 +781,11 @@ type WSServer struct {
 	// (connections.trustHostKey — accept-on-first-use). When nil, the
 	// handler returns a JSON-RPC error.
 	hostKeyTruster HostKeyTruster
+	// hostModes is the HOST record: the integration method each machine keeps,
+	// by host-key fingerprint (ADR-727g63tr decision 1). The connect-time ask
+	// writes it (ws_integration_method.go) and the open path reads it, which is
+	// what makes the mode the host's rather than a saved connection's.
+	hostModes *hostmode.Store
 	// helperConsentWriter grants the machine's helper consent when the
 	// connect-time ask is answered "helper" (connections.setIntegrationMethod
 	// — ADR-0069). When nil, choosing helper fails; choosing raw or script

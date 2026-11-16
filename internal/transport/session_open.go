@@ -71,14 +71,16 @@ type OpenSpec struct {
 	ProfileID string
 	Host      string
 	User      string
-	// DesiredMode is a one-shot integration-method override for a direct-host
-	// ssh open with no saved profile (ADR-0069): the connect-time ask has
-	// nowhere to persist a hand-typed connection's answer, so the renderer's
-	// retry carries the chosen method here instead. Empty (the ordinary
-	// case) leaves the resolved destination's own mode untouched. A profile
-	// open ignores this field — its answer was already written to the
-	// profile's desiredMode by connections.setIntegrationMethod, which the
-	// resolver reads fresh on every open.
+	// DesiredMode is open.params.desiredMode: the one-shot integration-method
+	// override ADR-0069 introduced for the retry of a hand-typed connection,
+	// which had nowhere to persist the answer. It is carried and validated
+	// exactly as before, and it NO LONGER DECIDES ANYTHING: since
+	// ADR-727g63tr decision 1 the mode is the HOST's, recorded by the
+	// connect-time ask for a saved connection and a typed one alike, and read
+	// by the open path by the fingerprint the dial observes. The choice this
+	// field carried is found there, so the retry behaves as it did — the
+	// host record holds the same answer. The field leaves with the profile's
+	// copy in nocx-oalo1.11.2, which is why it is still accepted here.
 	DesiredMode string
 	// Shell pins the far shell the launcher targets. Anything unrecognised
 	// is ignored with a warn, never honoured.

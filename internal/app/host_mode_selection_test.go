@@ -1,0 +1,214 @@
+package app
+
+// The integration method belongs to the HOST (ADR-727g63tr decision 1, whose
+// context is ADR-0069's ask and ADR-0105's "a method is not a permission").
+// These tests are section 5.10's lifecycle scenario 1 and the ask's own
+// once-per-host property, exercised at the seam the open path uses:
+// openHoldingLease plus the host record.
+//
+// The record is the PRODUCTION store over a temporary document, and the answer
+// is written with the same call connections.setIntegrationMethod makes, so what
+// is proven here is the pair of writes the product performs and not a double of
+// either half.
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/transport"
+)
+
+// mustRecordHostMode is the answer write, with the fingerprint the ask named —
+// the same store and the same call the connect-time ask's RPC performs.
+func mustRecordHostMode(t *testing.T, modes *hostmode.Store, fingerprint string, mode hostmode.Mode) {
+	t.Helper()
+	if err := modes.Set(fingerprint, mode); err != nil {
+		t.Fatalf("record %q for %s: %v", mode, fingerprint, err)
+	}
+}
+
+// askOf fails unless err is the connect-time ask, and returns it.
+func askOf(t *testing.T, err error) *transport.ErrHelperConsentNeeded {
+	t.Helper()
+	var ask *transport.ErrHelperConsentNeeded
+	if !errors.As(err, &ask) {
+		t.Fatalf("err = %v, want the connect-time ask", err)
+	}
+	return ask
+}
+
+// TestTwoProfilesToOneHostResolveTheHostsOneMode is section 5.10's lifecycle
+// scenario 1 at the open path: two connections to ONE host, opened with two
+// profiles that store different modes, resolve the mode the host keeps — the
+// same one for both — because the mode is the host's and the connection's copy
+// is not consulted any more.
+//
+// Both halves are here: a host recorded script with profiles stored raw and
+// helper (no helper comes up for either, and the open's own config carries
+// script, which is what decides the shell scripts), and a host recorded helper
+// with profiles stored raw and script (both are served by the far helper).
+func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
+	t.Run("the host's script wins over a profile stored raw and one stored helper", func(t *testing.T) {
+		provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+		store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+		r := newTestRegistry(t, provider, store)
+		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Script)
+
+		for _, stored := range []profile.DesiredMode{profile.DesiredRaw, profile.DesiredHelper} {
+			t.Run(string(stored), func(t *testing.T) {
+				cfg := remoteConfigFor(stored)
+				opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-"+string(stored))
+				hold.release()
+				if err != nil {
+					t.Fatalf("openHoldingLease: %v", err)
+				}
+				if selected || opened.Session != nil {
+					t.Fatalf("selected=%v session=%v, want neither: the host is recorded script", selected, opened.Session)
+				}
+				if got := cfg.Remote.DesiredMode; got != string(hostmode.Script) {
+					t.Fatalf("the open's mode = %q, want the host's script — every later reader of this config "+
+						"(the shell-script gate, the open ack, the integration axis) takes the mode from it", got)
+				}
+			})
+		}
+		// ONE MODE MEANS ONE ANSWER ABOUT THE HELPER: neither open installed
+		// or dialled one, and the host's consent was never granted.
+		if got := provider.laneCount(); got != 0 {
+			t.Errorf("%d helper lanes were brought up, want 0 for a host recorded script", got)
+		}
+	})
+
+	t.Run("the host's helper wins over a profile stored raw and one stored script", func(t *testing.T) {
+		provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+		store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
+		r := newTestRegistry(t, provider, store)
+		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)
+
+		for _, stored := range []profile.DesiredMode{profile.DesiredRaw, profile.DesiredScript} {
+			t.Run(string(stored), func(t *testing.T) {
+				cfg := remoteConfigFor(stored)
+				opened, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-"+string(stored))
+				hold.release()
+				if err != nil {
+					t.Fatalf("openHoldingLease: %v", err)
+				}
+				if !selected || opened.Session == nil {
+					t.Fatalf("selected=%v session=%v, want the far helper serving this host", selected, opened.Session)
+				}
+				if got := cfg.Remote.DesiredMode; got != string(hostmode.Helper) {
+					t.Fatalf("the open's mode = %q, want the host's helper", got)
+				}
+			})
+		}
+	})
+}
+
+// TestAHostWithNoRecordAsksAndAnsweringRecordsIt is the paired normal case: the
+// question exists, and the answer lands where the next open reads it. It is one
+// test because the pairing is the property — an ask that records nothing is a
+// dialog raised on every connect forever.
+func TestAHostWithNoRecordAsksAndAnsweringRecordsIt(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	r := newTestRegistry(t, provider, store)
+
+	if _, ok := r.modes.Lookup("SHA256:fake"); ok {
+		t.Fatal("the stand starts with a host record; this test is about no record")
+	}
+
+	_, hold, selected, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	hold.release()
+	if !selected {
+		t.Fatal("selected = false, want the ask before the open proceeds")
+	}
+	ask := askOf(t, err)
+	if ask.Cause != nil {
+		t.Fatalf("ask.Cause = %v, want nil — the probe dial succeeded", ask.Cause)
+	}
+	if mode, ok := r.modes.Lookup(ask.Fingerprint); ok {
+		t.Fatalf("the ask already recorded %q; nothing may be written before the person answers", mode)
+	}
+
+	// THE ANSWER, through the same store call connections.setIntegrationMethod
+	// makes.
+	mustRecordHostMode(t, r.modes, ask.Fingerprint, hostmode.Script)
+
+	mode, ok := r.modes.Lookup(ask.Fingerprint)
+	if !ok || mode != hostmode.Script {
+		t.Fatalf("the answer was not found by its fingerprint: %q/%v", mode, ok)
+	}
+}
+
+// TestAnsweringTheAskOnceStopsTheSecondOpenAsking is ADR-0034's "one machine,
+// one answer" carried to the method: the ask is raised once per host, and a
+// SECOND connection to it — from another profile, storing a mode that would
+// itself have asked (ADR-0105) — is silent.
+func TestAnsweringTheAskOnceStopsTheSecondOpenAsking(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	r := newTestRegistry(t, provider, store)
+
+	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	hold.release()
+	ask := askOf(t, err)
+	mustRecordHostMode(t, r.modes, ask.Fingerprint, hostmode.Raw)
+
+	cfg := remoteConfigFor(profile.DesiredHelper)
+	opened, hold2, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-2")
+	hold2.release()
+	if selected || opened.Session != nil {
+		t.Fatalf("selected=%v session=%v — a helper-stored profile must not be asked a second time for this host", selected, opened.Session)
+	}
+	if err != nil {
+		t.Fatalf("the second open raised %v, want no ask at all — the host has answered", err)
+	}
+	if got := cfg.Remote.DesiredMode; got != string(hostmode.Raw) {
+		t.Fatalf("the second open's mode = %q, want the host's raw", got)
+	}
+}
+
+// refusingDocumentStore is a disk that answers no: reads find nothing and
+// writes fail. It is the shape of the failure assertion 4 is about.
+type refusingDocumentStore struct{}
+
+func (refusingDocumentStore) Read(string, any) (bool, error) { return false, nil }
+func (refusingDocumentStore) Write(string, any) error        { return errors.New("disk is full") }
+func (refusingDocumentStore) Delete(string) error            { return errors.New("disk is full") }
+
+// TestAFailedHostRecordWriteStillAnswersThisOpen is assertion 4's open-path
+// half: the store cannot persist the answer, and the ask is answered anyway —
+// the second open does not ask again, and the host's mode is in force. What the
+// person is TOLD about it is the transport's response and the pane head
+// (ws_integration_method_test.go, connection-head.test.tsx); what is proven
+// here is that the product never falls back into the dialog because a disk was
+// full.
+func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	r := newTestRegistry(t, provider, store)
+	r.modes = hostmode.NewStore(log.NewSlogAdapter(discardLogger(t)), refusingDocumentStore{}, "host-modes.json")
+
+	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredScript), "claim-1")
+	hold.release()
+	ask := askOf(t, err)
+
+	if err := r.modes.Set(ask.Fingerprint, hostmode.Script); !errors.Is(err, hostmode.ErrNotSaved) {
+		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
+	}
+
+	cfg := remoteConfigFor(profile.DesiredRaw)
+	_, hold2, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-2")
+	hold2.release()
+	if err != nil || selected {
+		t.Fatalf("the second open selected=%v err=%v, want the remembered answer and no ask", selected, err)
+	}
+	if got := cfg.Remote.DesiredMode; got != string(hostmode.Script) {
+		t.Fatalf("the second open's mode = %q, want the answer kept for this run (script)", got)
+	}
+}

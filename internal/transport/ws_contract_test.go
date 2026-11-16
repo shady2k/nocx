@@ -1545,7 +1545,7 @@ func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
 func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
 	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, nil)
+	srv, _ := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 

@@ -43,6 +43,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -1306,26 +1307,31 @@ func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
 	}
 }
 
-// TestHelperSelectionExplicitRawWritesNothing: a machine at explicit raw is
-// never asked and never written to (consent design §4.2); the selection
-// answers the resolver's Refused as a reason with no earned state, and
-// git.open's not-available error carries it.
-func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
+// TestHelperSelectionAHostRecordedRawWritesNothing: a host whose record says
+// raw is never asked and never written to (consent design §4.2) — the
+// connection's own stored mode is not consulted (ADR-727g63tr decision 1), so
+// the session here is even built at helper and the host's record still wins.
+// The selection answers the resolver's Refused as a reason with no earned
+// state, and git.open's not-available error carries it.
+func TestHelperSelectionAHostRecordedRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	reg.modes = newTestHostModes(t)
+	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Raw)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredHelper})
 	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for explicit raw", selection)
+		t.Fatalf("selection = %+v, want no factory for a host recorded raw", selection)
 	}
 	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
 		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("explicit raw wrote %d uploads, want 0", provider.install.uploadCount())
+		t.Fatalf("a host recorded raw wrote %d uploads, want 0", provider.install.uploadCount())
 	}
 }
 
@@ -1367,11 +1373,14 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	reg.modes = newTestHostModes(t)
+	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Script)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredHelper})
 	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for an explicit script — it was never upgraded", selection)
+		t.Fatalf("selection = %+v, want no factory for a host recorded script — it was never upgraded", selection)
 	}
 	if selection.Refusal == nil {
 		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")

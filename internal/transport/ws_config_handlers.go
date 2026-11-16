@@ -2222,7 +2222,7 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 		// the config domain gate, rather than in seamSpecs: unlike
 		// connections.trustHostKey it can write the profile store.
 		regResponder(configSub, catalog.OpConnectionsSetIntegrationMethod, params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
-			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
+			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, modes: s.hostModes, r: r, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		// Role choices are kept per agent through the config operation.

@@ -238,10 +238,20 @@ const readoptAttemptTimeout = 15 * time.Second
 // upgrade meets sessions whose machine has simply never been asked. The old
 // sentence — "this machine no longer consents" — would have said the opposite
 // of what happened to every one of them.
-func readoptConsentRefusal(outcome Outcome, host string) string {
+func readoptConsentRefusal(outcome Outcome, mode profile.DesiredMode, host string) string {
 	if outcome == ConsentRequired {
 		return "nocx has not been told whether it may use its helper on " + host +
 			" — reconnect that connection to be asked"
+	}
+	// REFUSED has two causes since the mode became the host's (ADR-727g63tr
+	// decision 1): the machine declined, or the host's own integration method
+	// does not run the helper at all. Saying "no longer consents" for the
+	// second would name a withdrawal nobody made.
+	switch mode {
+	case profile.DesiredRaw:
+		return "this host's integration method is Raw, so its helper sessions were not re-adopted"
+	case profile.DesiredScript:
+		return "this host's integration method is Script, so its helper sessions were not re-adopted"
 	}
 	return "this machine no longer consents to the nocx helper"
 }
@@ -266,9 +276,14 @@ func (rp *readoptPass) stageReadopt(ctx context.Context, p content.PendingSessio
 		return fmt.Errorf("the saved connection no longer resolves to the host and account holding this session")
 	}
 	if rp.registry.consent != nil && p.Fingerprint != "" {
+		// THE MODE IS THE HOST'S, read by the fingerprint the durable binding
+		// kept (ADR-727g63tr decision 1). The saved connection's own stored
+		// mode is not consulted: a host whose method is raw has no helper
+		// sessions to re-adopt, whatever one profile once said.
+		mode := hostModeFor(rp.registry.modes, p.Fingerprint)
 		resolver := newResolver(withStore(rp.registry.consent), withHelperArtifactAvailable(true))
-		if got := resolver.Resolve(Machine{Fingerprint: p.Fingerprint, Mode: profile.DesiredMode(cfg.DesiredMode)}); got != DesiredHelper {
-			return errors.New(readoptConsentRefusal(got, p.Host))
+		if got := resolver.Resolve(Machine{Fingerprint: p.Fingerprint, Mode: mode}); got != DesiredHelper {
+			return errors.New(readoptConsentRefusal(got, mode, p.Host))
 		}
 	}
 	f := &sessionFactory{
@@ -355,12 +370,13 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 			// from the store.
 			withHelperArtifactAvailable(true),
 		)
+		mode := hostModeFor(rp.registry.modes, p.Fingerprint)
 		if got := resolver.Resolve(Machine{
 			Fingerprint: p.Fingerprint,
-			Mode:        profile.DesiredMode(cfg.DesiredMode),
+			Mode:        mode,
 		}); got != DesiredHelper {
 			return nil, fmt.Errorf("%s, so %s was not asked about its sessions",
-				readoptConsentRefusal(got, p.Host), p.Host)
+				readoptConsentRefusal(got, mode, p.Host), p.Host)
 		}
 	}
 

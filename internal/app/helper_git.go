@@ -1022,7 +1022,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		// succeeded) is answered exactly as before: swallowed here, so the
 		// local opener's own dial a moment later produces the real,
 		// definitive refusal.
-		if ask := helperConsentAskForProbeFailure(cfg.Host, offeredHostKeyFingerprint(err), err, r.consent, r.modes); ask != nil {
+		if ask := helperConsentAskForProbeFailure(cfg.ProfileID, cfg.Host, offeredHostKeyFingerprint(err), err, r.consent, r.modes); ask != nil {
 			return transport.HostedSessionOpen{}, hold, true, ask
 		}
 		// A probe that failed before any key was seen leaves no fingerprint,
@@ -1067,7 +1067,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		// delivery was in force. The method a connection keeps and the
 		// permission a machine gives are two answers to two questions, and
 		// this arm is where the second one is obtained.
-		return transport.HostedSessionOpen{}, hold, true, transport.NewHelperConsentNeeded(cfg.Host, fingerprint, nil)
+		return transport.HostedSessionOpen{}, hold, true, transport.NewHelperConsentNeeded(cfg.ProfileID, cfg.Host, fingerprint, nil)
 	default:
 		// Refused: raw, script, an explicit helper that failed elsewhere,
 		// or auto with a recorded decline. Falls through to the local
@@ -1102,7 +1102,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 // produces the ordinary host-key-only refusal a moment later (or, for an
 // already-answered fingerprint, the key gets trusted and the very next probe
 // resolves the machine's already-recorded answer without asking again).
-func helperConsentAskForProbeFailure(host, fingerprint string, probeErr error, store *consent.Store, modes *hostmode.Store) error {
+func helperConsentAskForProbeFailure(profileID, host, fingerprint string, probeErr error, store *consent.Store, modes *hostmode.Store) error {
 	mode := hostModeFor(modes, fingerprint)
 	if mode != hostmode.Auto && mode != hostmode.Helper {
 		return nil
@@ -1113,7 +1113,7 @@ func helperConsentAskForProbeFailure(host, fingerprint string, probeErr error, s
 	if _, answered := store.Lookup(fingerprint); answered {
 		return nil
 	}
-	return transport.NewHelperConsentNeeded(host, fingerprint, probeErr)
+	return transport.NewHelperConsentNeeded(profileID, host, fingerprint, probeErr)
 }
 
 // offeredHostKeyFingerprint reads the fingerprint an unknown-or-changed

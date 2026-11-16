@@ -241,3 +241,21 @@ func TestDeliversScripts(t *testing.T) {
 		}
 	}
 }
+
+func TestPersistManyIsAllOrNothing(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Persist("one", Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Persist("two", Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PersistMany([]string{"one", "two"}, Script); err != nil {
+		t.Fatal(err)
+	}
+	for _, fp := range []string{"one", "two"} {
+		if got, ok := s.Lookup(fp); !ok || got != Script {
+			t.Errorf("Lookup(%s) = %q/%v", fp, got, ok)
+		}
+	}
+}

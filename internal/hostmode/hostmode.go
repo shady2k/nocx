@@ -226,6 +226,44 @@ func (s *Store) record(fingerprint string, mode Mode, durable bool) error {
 	return nil
 }
 
+// PersistMany changes the records for a host in one document write. An Auto
+// mode removes every supplied fingerprint; other modes set every one. A
+// failed write leaves both the durable document and in-memory map unchanged.
+func (s *Store) PersistMany(fingerprints []string, mode Mode) error {
+	if len(fingerprints) == 0 {
+		return nil
+	}
+	if mode != Auto {
+		if _, ok := Parse(string(mode)); !ok {
+			return fmt.Errorf("host mode: %q is not an integration method", mode)
+		}
+	}
+	for _, fp := range fingerprints {
+		if fp == "" {
+			return ErrEmptyFingerprint
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	next := make(map[string]Mode, len(s.modes)+len(fingerprints))
+	for k, v := range s.modes {
+		next[k] = v
+	}
+	for _, fp := range fingerprints {
+		if mode == Auto {
+			delete(next, fp)
+		} else {
+			next[fp] = mode
+		}
+	}
+	if err := s.writeDoc(next); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, err)
+	}
+	s.modes = next
+	return nil
+}
+
 // Remove forgets the host's recorded method, which is how "auto" is reached:
 // the next open asks again (ADR-0033). A host with no record is already in
 // that state, so removing it is not an error — the caller asked for the state

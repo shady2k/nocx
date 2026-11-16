@@ -540,6 +540,18 @@ export interface HelperConsentAskEvidence {
   profileId?: string
 }
 
+/** What the connect-time ask resolved to. `note` is present when the backend
+ *  answered with the method but could not write the host's record: the answer
+ *  stands for this open — the retried open uses it and does not ask again —
+ *  and the sentence says it will not be remembered after a restart. It is
+ *  carried here rather than shown as a toast because the head is where a
+ *  statement about a pane's host belongs, and a toast fades whether or not the
+ *  fact still holds. */
+export interface HelperConsentAnswer {
+  method: IntegrationMethod
+  note?: string
+}
+
 function helperConsentAskFromOpenError(
   err: unknown,
   profileId?: string,
@@ -877,19 +889,18 @@ export interface TerminalContentHooks {
    *  Abort closes a pending decision when the tab is closed. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
   /** An SSH connection needs a person's choice of integration method for
-   *  this destination before it may proceed (ADR-0069's connect-time ask) —
-   *  with the host-key evidence carried alongside when the same dial also
-   *  needs a trust decision. The promise resolves with the chosen method
-   *  once it was written (to the saved connection's desiredMode, or —
-   *  absent a profileId — nowhere, since a hand-typed connection carries the
-   *  choice on the retried open instead); mount then retries. null means the
-   *  person closed the dialog, or trusted only the host key, without
-   *  choosing a method — the open fails. Abort closes a pending decision
-   *  when the tab is closed. */
+   *  this HOST before it may proceed (ADR-727g63tr decision 1 — the ask
+   *  itself is ADR-0069) with the host-key evidence carried alongside when
+   *  the same dial also needs a trust decision. The promise resolves with the
+   *  chosen method, plus a sentence when the backend could not remember it;
+   *  mount then retries, and the sentence goes to the pane's head. null means
+   *  the person closed the dialog, or trusted only the host key, without
+   *  choosing a method — the open fails. Abort closes a pending decision when
+   *  the tab is closed. */
   onHelperConsentAsk?: (
     ask: HelperConsentAskEvidence,
     signal: AbortSignal,
-  ) => Promise<IntegrationMethod | null>
+  ) => Promise<HelperConsentAnswer | null>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -3275,19 +3286,25 @@ export class TerminalContent extends BasePaneContent {
         // from ever raising two dialogs in sequence.
         const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
         if (ask && this.hooks.onHelperConsentAsk) {
-          const method = await this.hooks.onHelperConsentAsk(ask, signal)
-          if (!method) {
+          const answer = await this.hooks.onHelperConsentAsk(ask, signal)
+          if (!answer) {
             throw new Error(`The connection to ${ask.host} needs an answer before it can continue`)
           }
           if (signal.aborted) {
             throw new Error('SSH open cancelled')
           }
-          // A hand-typed connection (no saved profile) has nowhere to keep
-          // the answer — connections.setIntegrationMethod wrote nothing for
-          // it to persist — so the retry itself carries the chosen method,
-          // for this session alone (ADR-0069). A saved connection needs no
-          // override: the write already updated its desiredMode, and the
-          // resolver reads that fresh on every open.
+          // THE ANSWER IS THE HOST'S EITHER WAY (ADR-727g63tr decision 1). A
+          // record the backend could not write is kept for this run and said
+          // out loud, in the head, rather than lost silently or turned into a
+          // dialog the person answers again on the next connect.
+          this._connectionHead?.note(answer.note ?? null)
+          const method = answer.method
+          // The retry also carries the chosen method, for a connection with
+          // no saved profile (ADR-0069's one-shot override). Since
+          // ADR-727g63tr decision 1 the answer is the HOST's too — the RPC
+          // wrote it by fingerprint — so this param is no longer the only
+          // place the choice lives; it goes with open.params.desiredMode in
+          // nocx-oalo1.11.2.
           if (!this.sshOpts?.profileId) {
             this._sessionDesiredModeOverride = method
           }

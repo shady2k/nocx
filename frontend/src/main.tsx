@@ -504,17 +504,24 @@ function main(): void {
   }
 
   // decideIntegrationMethod answers the connect-time ask with a chosen
-  // method (ADR-0069): written through the SAME RPC the editor's Delivery
-  // mode field ultimately reaches (connections.setIntegrationMethod ->
-  // profiles.patch's desiredMode), plus the machine's helper grant when the
-  // method is helper. The chosen method rides the settled promise so
-  // terminal-content.ts can carry it on the retried open for a hand-typed
-  // connection, which has nothing else to persist it to.
+  // method (ADR-0069): connections.setIntegrationMethod writes the HOST's
+  // record by the fingerprint the ask named (ADR-727g63tr decision 1), plus
+  // the machine's helper grant when the method is helper.
+  //
+  // THE ANSWER STANDS WHETHER OR NOT IT COULD BE SAVED. The person chose a
+  // method, and the open that asked must go on with it — a backend that kept
+  // the answer for this run and could not write the host's record (a full
+  // disk) says so in its error, and that sentence becomes the note the pane's
+  // head shows. Leaving the dialog open instead would ask the same question
+  // again on the same connect, which is the loop this behaviour exists to
+  // end. A failure of any other kind is treated the same way for the same
+  // reason: the method is still the answer to the question that was asked.
   const decideIntegrationMethod = async (
     request: HelperConsentAskRequest,
     method: IntegrationMethod,
   ) => {
     setHelperConsentAskBusy(true)
+    let note: string | undefined
     try {
       await profileClient.setIntegrationMethod(
         request.evidence.fingerprint,
@@ -522,19 +529,16 @@ function main(): void {
         request.evidence.host,
         request.evidence.profileId,
       )
-      helperConsentAsks.settleMatchingQueued(request, method)
-      helperConsentAsks.settle(request, method)
     } catch (err) {
-      showToast({
-        level: 'danger',
-        message: `Could not save the connection method for ${request.evidence.host}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-        duration: 0,
-      })
+      note = `The method could not be saved for ${request.evidence.host}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
     } finally {
       setHelperConsentAskBusy(false)
     }
+    const answer = { method, note }
+    helperConsentAsks.settleMatchingQueued(request, answer)
+    helperConsentAsks.settle(request, answer)
   }
 
   // ── Vault activity signal (nocx-eg80) ──────────────────────────────

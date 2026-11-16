@@ -981,7 +981,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'script' })
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -1036,7 +1036,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('helper')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'helper' })
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -1111,10 +1111,55 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     }
   })
 
-  // A hand-typed ssh with no saved connection has nowhere to keep the
-  // answer — connections.setIntegrationMethod writes nothing for it to
-  // persist — so the retry itself must carry the chosen method, for this
-  // session alone (ADR-0069's own words).
+  // ASSERTION 4's VISIBLE HALF (ADR-727g63tr decision 1). The host's record
+  // could not be written: the backend kept the answer for this run and said so,
+  // the renderer's answer carries that sentence, and the pane's head is where a
+  // statement about a host belongs — a toast fades whether or not the fact
+  // still holds, and a silent failure is the soft degrade AGENTS.md forbids.
+  it('says in the head that the host record was not saved, and still retries with the answer', async () => {
+    const openSSHSession = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RpcError(
+          'nocx has not been told whether it may use its helper on db.example.com:22',
+          -32603,
+          {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          },
+        ),
+      )
+      .mockResolvedValueOnce(makeSession())
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({
+      method: 'script',
+      note: 'the method could not be saved for db.example.com:22: the host record was not saved',
+    })
+    const client = makeClient({ openSSHSession })
+
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+      },
+      client,
+    )
+    try {
+      // The open went on with the answer — the ask is not raised again.
+      expect(openSSHSession).toHaveBeenCalledTimes(2)
+      expect(tab.pane.textContent).toContain('the host record was not saved')
+    } finally {
+      teardown()
+    }
+  })
+
+  // A hand-typed ssh still carries the chosen method on the retried open
+  // while open.params.desiredMode exists (ADR-0069's one-shot override). Since
+  // ADR-727g63tr decision 1 the answer is also the HOST's, recorded by
+  // fingerprint, so this param is no longer the only place a typed
+  // connection's choice lives — nocx-oalo1.11.2 removes the param and this
+  // carrying together.
   it('a hand-typed connection with no saved profile carries the chosen method on the retried open', async () => {
     const openSSHSessionByHost = vi
       .fn()
@@ -1130,7 +1175,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'script' })
     const client = makeClient({ openSSHSessionByHost })
 
     const { teardown } = await mountTerminal(

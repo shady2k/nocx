@@ -1,5 +1,8 @@
-import type { IntegrationMethod } from './host-key-dialog'
-import type { HelperConsentAskEvidence, HostKeyErrorEvidence } from './terminal-content'
+import type {
+  HelperConsentAnswer,
+  HelperConsentAskEvidence,
+  HostKeyErrorEvidence,
+} from './terminal-content'
 
 interface QueuedAsk<Evidence, Answer> {
   evidence: Evidence
@@ -99,20 +102,25 @@ export class OpenHostKeyRequestQueue extends AskQueue<HostKeyErrorEvidence, bool
   }
 }
 
-export type HelperConsentAskRequest = QueuedAsk<HelperConsentAskEvidence, IntegrationMethod | null>
+export type HelperConsentAskRequest = QueuedAsk<
+  HelperConsentAskEvidence,
+  HelperConsentAnswer | null
+>
 
 /**
  * Serialises the connect-time integration-method ask (ADR-0069) without
- * losing the requesting tab: two panes opening auto connections to the SAME
+ * losing the requesting tab: two panes opening connections to the SAME
  * machine at once must not raise the dialog twice, and answering one answers
- * both — the fingerprint is the identity ADR-0034 already keys the consent
- * grant by, so it is what "the same question" means here. A decline (Cancel,
- * or trusting only the host key) resolves null — there is no method to
- * retry with, so the caller's open fails and the next connect asks again.
+ * both — the fingerprint is the identity the host's record is keyed by, so it
+ * is what "the same question" means here. A decline (Cancel, or trusting only
+ * the host key) resolves null — there is no method to retry with, so the
+ * caller's open fails and the next connect asks again. An answer carries the
+ * method and, when the backend could not remember it, the sentence its head
+ * must say.
  */
 export class HelperConsentAskQueue extends AskQueue<
   HelperConsentAskEvidence,
-  IntegrationMethod | null
+  HelperConsentAnswer | null
 > {
   constructor(onActiveChange: (request: HelperConsentAskRequest | null) => void) {
     super(onActiveChange, (a, b) => a.fingerprint === b.fingerprint, null)

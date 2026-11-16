@@ -145,6 +145,9 @@ func TestHostModeReadsTheFirstKnownFingerprintRecord(t *testing.T) {
 			if err := modes.Set("SHA256:second", hostmode.Raw); err != nil {
 				t.Fatal(err)
 			}
+			if err := modes.Set("SHA256:rotated", hostmode.Helper); err != nil {
+				t.Fatal(err)
+			}
 			srv := startHostModeServer(t, modes, &fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}}, &fakeHostKeyIndex{fingerprints: tt.fingerprints})
 			got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
 			if got.Mode != tt.want {

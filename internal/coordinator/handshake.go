@@ -151,7 +151,10 @@ package coordinator
 // methods, connections.hostMode and connections.setHostMode, are how the
 // connection editor reads and writes the host record now; a 38 window does not
 // know them, which is the second half of the same incompatibility.
-const ProtocolVersion = 39
+// 40 (nocx-oalo1.11.1, ALX-53): an applied integration-method answer is
+// always a result, with required hostRecordSaved stating its durability.
+// An error never means that the answer was applied.
+const ProtocolVersion = 40
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

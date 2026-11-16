@@ -14,6 +14,10 @@
  */
 export interface ConnectionsSetIntegrationMethodResult {
   /**
+   * Whether the host record was saved. False means the answer applies only until restart.
+   */
+  hostRecordSaved: boolean
+  /**
    * SHA256 fingerprint of the host key the answer was recorded under.
    */
   fingerprint: string

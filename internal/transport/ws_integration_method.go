@@ -75,8 +75,9 @@ type integrationMethodParams struct {
 // method — so the renderer's retry is keyed on the identity the backend
 // actually acted on rather than trusting its own copy of the request back.
 type integrationMethodResult struct {
-	Fingerprint string `json:"fingerprint"`
-	Method      string `json:"method"`
+	Fingerprint     string `json:"fingerprint"`
+	Method          string `json:"method"`
+	HostRecordSaved bool   `json:"hostRecordSaved"`
 }
 
 type integrationMethodHandlers struct {
@@ -90,7 +91,7 @@ type integrationMethodHandlers struct {
 // connect-time ask.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.setIntegrationMethod","params":{"fingerprint":"SHA256:MKEj…","host":"1.2.3.4:22","profileId":"ssh-1","method":"script"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","hostRecordSaved":true}}
 func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	var params integrationMethodParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -107,18 +108,11 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// THE HOST RECORD IS THE ANSWER (ADR-727g63tr decision 1), and it is
-	// written first so that nothing below can leave the answer unrecorded
-	// while claiming otherwise. A typed connection has no profile to write and
-	// is no longer the exception it was: its choice is the host's too.
-	//
-	// A store that cannot persist keeps the answer for this run and reports
-	// ErrNotSaved; the request still answers below — with the sentence — because
-	// the open the person answered for must proceed. An answer that vanished
-	// into a failed write would put them back in the same dialog on every
-	// connect.
+	// The host record owns the answer for saved and typed connections alike
+	// (ADR-727g63tr decision 1). Refuse before granting consent if no store
+	// can retain the chosen mode.
 	if h.modes == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host mode store not available (no store wired)", Data: map[string]any{"answerApplied": false}})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host mode store not available (no store wired)"})
 		return
 	}
 	// The machine grant, by fingerprint (ADR-0034) — only for helper.
@@ -126,11 +120,11 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 	// this host uses" and "may a binary be deployed here") stay unmerged.
 	if mode == hostmode.Helper {
 		if h.granter == nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Helper consent not available (no granter wired)", Data: map[string]any{"answerApplied": false}})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Helper consent not available (no granter wired)"})
 			return
 		}
 		if err := h.granter.Grant(params.Fingerprint); err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed", Data: map[string]any{"answerApplied": false}})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed"})
 			return
 		}
 	}
@@ -138,35 +132,27 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 	// consent write must never leave a durable helper mode without consent.
 	recordErr := h.modes.Set(params.Fingerprint, mode)
 
-	// THE ANSWER STANDS; THE FAILURE TO REMEMBER IT IS SAID, NOT SWALLOWED.
-	// The answer is in memory (hostmode.Store keeps it), so the retried open
-	// uses it and does not ask again — and the person is told it will not
-	// survive a restart. The renderer settles the ask either way and shows
-	// this sentence in the pane's head (terminal-content.ts), which is the
-	// only channel a per-pane statement has before the pane's session exists.
+	// A failed host-record write still applies the answer for this run.
+	// This is success with hostRecordSaved=false, so the renderer can retry
+	// the open and explain that the host will ask again after restart.
 	if recordErr != nil {
 		// The detail is the developer's (a document store that could not
 		// write); the person gets the sentence that tells them what it means
 		// for them. Never the store's own error text in a pane.
 		h.warn("the host's record could not be saved; the answer stands for this run",
 			"fingerprint", params.Fingerprint, "mode", params.Method, "error", recordErr)
-		_ = h.r.TryError(req.ID, RPCError{
-			Code:    -32603,
-			Message: "The host's record was not saved, so this host will be asked again after a restart",
-			Data:    map[string]any{"answerApplied": true},
-		})
-		return
 	}
 
 	_ = h.r.TryResult(req.ID, mustMarshal(integrationMethodResult{
-		Fingerprint: params.Fingerprint,
-		Method:      params.Method,
+		Fingerprint:     params.Fingerprint,
+		Method:          params.Method,
+		HostRecordSaved: recordErr == nil,
 	}))
 }
 
 // warn writes one line about a write that failed while the answer stood. The
-// handler holds the logger because the sentence the person reads travels in
-// the response; the log line is for the developer who has to find the store.
+// handler holds the logger for the developer who has to find the store;
+// the response carries only whether the record was saved.
 func (h integrationMethodHandlers) warn(msg string, args ...any) {
 	if h.log != nil {
 		h.log.Warn(msg, args...)

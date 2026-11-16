@@ -15,6 +15,8 @@
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { decideIntegrationMethod } from './integration-method-decision'
+import { HelperConsentAskQueue } from './host-key-controller'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -34,7 +36,7 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMMAND_BLOCK_SURFACE_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
-import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import type { HelperConsentAskEvidence, PaneIdentity, PaneScreenReading } from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
@@ -1112,43 +1114,59 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
   // the renderer's answer carries that sentence, and the pane's head is where a
   // statement about a host belongs — a toast fades whether or not the fact
   // still holds, and a silent failure is the soft degrade AGENTS.md forbids.
-  it('says in the head that the host record was not saved, and still retries with the answer', async () => {
-    const openSSHSession = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new RpcError(
-          'nocx has not been told whether it may use its helper on db.example.com:22',
-          -32603,
-          {
+  for (const hostRecordSaved of [false, true]) {
+    it(`uses the decision result in the head and reopens without another ask (saved=${hostRecordSaved})`, async () => {
+      const openSSHSession = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new RpcError('method required', -32603, {
             host: 'db.example.com:22',
             fingerprint: 'SHA256:trusted',
             helperAsk: true,
-          },
-        ),
+          }),
+        )
+        .mockImplementation(() => Promise.resolve(makeSession()))
+      const setIntegrationMethod = vi.fn().mockResolvedValue({
+        fingerprint: 'SHA256:trusted',
+        method: 'script',
+        hostRecordSaved,
+      })
+      const queue = new HelperConsentAskQueue((request) => {
+        if (request)
+          void decideIntegrationMethod(request, 'script', {
+            helperConsentAsks: queue,
+            profileClient: { setIntegrationMethod },
+            setHelperConsentAskBusy: vi.fn(),
+            showToast: vi.fn(),
+          })
+      })
+      const onHelperConsentAsk = vi.fn((evidence: HelperConsentAskEvidence, signal: AbortSignal) =>
+        queue.request(evidence, signal),
       )
-      .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue({
-      method: 'script',
-      note: 'the method could not be saved for db.example.com:22: the host record was not saved',
-    })
-    const client = makeClient({ openSSHSession })
-
-    const { tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      {
+      const client = makeClient({ openSSHSession })
+      const options = {
         ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
         hooks: { onHelperConsentAsk },
-      },
-      client,
-    )
-    try {
-      // The open went on with the answer — the ask is not raised again.
-      expect(openSSHSession).toHaveBeenCalledTimes(2)
-      expect(tab.pane.textContent).toContain('the host record was not saved')
-    } finally {
-      teardown()
-    }
-  })
+      }
+      const first = await mountTerminal(makeClipboard(), options, client)
+      try {
+        expect(openSSHSession).toHaveBeenCalledTimes(2)
+        const note = `The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart`
+        if (hostRecordSaved) expect(first.tab.pane.textContent).not.toContain(note)
+        else await vi.waitFor(() => expect(first.tab.pane.textContent).toContain(note))
+        const second = await mountTerminal(makeClipboard(), options, client)
+        try {
+          expect(openSSHSession).toHaveBeenCalledTimes(3)
+          expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+          expect(setIntegrationMethod).toHaveBeenCalledTimes(1)
+        } finally {
+          second.teardown()
+        }
+      } finally {
+        first.teardown()
+      }
+    })
+  }
 
   // THE RETRY CARRIES NO METHOD (ADR-727g63tr decision 1). The answer was
   // recorded for the HOST by the fingerprint the ask named, so the second open

@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -324,15 +323,61 @@ func TestIntegrationMethod_GrantFailure(t *testing.T) {
 	if got := result.Error.Message; got != "Record helper consent failed" {
 		t.Errorf("error message = %q, want stable non-sensitive consent failure", got)
 	}
-	var data struct {
-		AnswerApplied bool `json:"answerApplied"`
+	var envelope struct {
+		Error map[string]json.RawMessage `json:"error"`
 	}
-	encoded, _ := json.Marshal(result.Error.Data)
-	if err := json.Unmarshal(encoded, &data); err != nil || data.AnswerApplied {
-		t.Errorf("answerApplied data = %s, want false", encoded)
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal error envelope: %v", err)
+	}
+	if data, present := envelope.Error["data"]; present {
+		t.Errorf("error data = %s, want absent", data)
 	}
 	if mode, ok := modes.Lookup("SHA256:abc"); ok {
 		t.Errorf("mode after consent failure = %q, want no record", mode)
+	}
+}
+
+func TestIntegrationMethod_ErrorsHaveNoDataAndDoNotApplyAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		method      string
+		fingerprint string
+		noStore     bool
+	}{
+		{name: "missing fingerprint", method: "helper"},
+		{name: "invalid method", fingerprint: "SHA256:abc", method: "auto"},
+		{name: "missing store", fingerprint: "SHA256:abc", method: "helper", noStore: true},
+		{name: "missing granter", fingerprint: "SHA256:abc", method: "helper"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			modes := newHostModeStore(t)
+			if tc.noStore {
+				modes = nil
+			}
+			srv, _ := startIntegrationMethodServerWithStore(t, nil, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": tc.fingerprint, "method": tc.method,
+			})
+			var envelope struct {
+				Error map[string]json.RawMessage `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error == nil {
+				t.Fatalf("expected error: %s", resp)
+			}
+			if data, present := envelope.Error["data"]; present {
+				t.Errorf("error data = %s, want absent", data)
+			}
+			if modes != nil {
+				if mode, ok := modes.Lookup(tc.fingerprint); ok {
+					t.Errorf("mode after error = %q, want no record", mode)
+				}
+			}
+		})
 	}
 }
 
@@ -420,21 +465,19 @@ func TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo(t *testin
 		"method":      "script",
 	})
 	var result struct {
+		Result struct {
+			HostRecordSaved *bool `json:"hostRecordSaved"`
+		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result.Error == nil {
-		t.Fatal("a record that could not be written was reported as saved")
+	if result.Error != nil {
+		t.Fatalf("an applied answer must succeed: %s", resp)
 	}
-	if !strings.Contains(result.Error.Message, "not saved") {
-		t.Errorf("error = %q, want it to say the host's record was not saved", result.Error.Message)
-	}
-	var errorData struct { AnswerApplied bool `json:"answerApplied"` }
-	encoded, _ := json.Marshal(result.Error.Data)
-	if err := json.Unmarshal(encoded, &errorData); err != nil || !errorData.AnswerApplied {
-		t.Errorf("answerApplied data = %s, want true", encoded)
+	if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
+		t.Fatalf("want result.hostRecordSaved=false: %s", resp)
 	}
 	// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
 	// retries does not fall back into the same dialog.

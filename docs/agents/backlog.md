@@ -175,8 +175,9 @@ keeps every later change.
   no required review or required check; the stable promotion is the owner's own trial
   (ADR-gvnw2nv8); and for two weeks before this the SSH foundation and the fixes had already
   landed one pull request per stage, merged by the coordinator on green CI. A run lands each
-  accepted stage on its own, and the next stage builds on what landed. Merging still needs the
-  owner's yes where AGENTS.md says so.
+  accepted stage on its own, and the next stage builds on what landed. The coordinator merges
+  on green without asking the owner (AGENTS.md "Git authority", the owner's decision of
+  2026-11-16); architecture questions and goal, scope and priorities stay the owner's.
 
 - **Backlog adapter:** [`adapter.mjs`](../../.githooks/backlog-gate/adapter.mjs) reads the
   tracked export for historical and gate exports. `--at <rev>` reads any revision

@@ -137,7 +137,12 @@ package coordinator
 // 36 (nocx-a62cl.13.1): agent.runState carries the agent's stated token usage.
 // 37 (nocx-oalo1.5.5): the merged SSH foundation adds pane.connection,
 // pane.reconnect and pane.opened, and retires session.liveness.
-const ProtocolVersion = 37
+// 38 (nocx-a62cl.6): agent.steer sends a message into the turn a window is
+// watching and says what became of it (steered, or kept for the next
+// question), and agent.cancel and agent.runState carry droppedSteers, the
+// messages a cancelled turn's agent never used, so a window built against 37
+// could neither steer nor ask a dropped message next.
+const ProtocolVersion = 38
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

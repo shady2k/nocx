@@ -66,6 +66,9 @@ func main() {
 	var cancel context.CancelFunc
 	var done chan struct{}
 	turn := 0
+	// queuedSteers is what this agent took for a running turn and has not
+	// used: the cancel's answer names them, so nothing is guessed.
+	var queuedSteers []string
 	for command := range commands {
 		switch command.Name {
 		case "initialize":
@@ -129,6 +132,34 @@ func main() {
 			done = make(chan struct{})
 			emit(protocol.Line{Kind: "response", ID: command.ID})
 			go func(done chan struct{}) { defer close(done); run(ctx, script, prompt, steps, emit) }(done)
+		case "steer":
+			if command.Steer == nil {
+				emit(protocol.Line{Kind: "response", ID: command.ID, Reason: "missing steer"})
+				continue
+			}
+			// It is QUEUED, the way pi queues one: this agent has no model call
+			// to deliver it into, so a cancel removes it and says so.
+			queuedSteers = append(queuedSteers, command.Steer.Text)
+			if script.SteerFile != "" {
+				file, openErr := os.OpenFile(script.SteerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if openErr != nil {
+					os.Exit(2)
+				}
+				_, _ = file.WriteString(command.Steer.Text + "\n")
+				_ = file.Close()
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID})
+		case "clear_queue":
+			// pi's own answer shape: the messages this agent took and has not
+			// used, named by the command that removes them. The cancel sends it
+			// BEFORE abort, so the answer arrives while the turn can still take
+			// it (ADR-4khgzeyp decision 3).
+			payload := any(nil)
+			if len(queuedSteers) > 0 {
+				payload = map[string]any{"steering": queuedSteers}
+				queuedSteers = nil
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID, Payload: payload})
 		case "abort":
 			if script.IgnoreAbort {
 				continue

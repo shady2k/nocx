@@ -59,6 +59,7 @@
 @import './styles/components/composer-frame.css';
 @import './styles/components/secret-value-field.css';
 @import './styles/components/block-notice.css';
+@import './styles/components/person-message.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';

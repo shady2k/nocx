@@ -33,11 +33,19 @@ type TurnOrder struct {
 
 	mu   sync.Mutex
 	tail <-chan struct{}
-	// declined is the first decline of this turn, and the sentence every
-	// call behind it is refused with. The first one stands: the later calls
-	// are refused because of it, and their own refusals must not overwrite
-	// what actually happened.
+	// declined is the first decline of this turn, and the sentence the calls
+	// QUEUED BEHIND IT AT THAT MOMENT are refused with. The first one stands:
+	// those calls are refused because of it, and their own refusals must not
+	// overwrite what actually happened.
 	declined *Declined
+	// declinedThrough is the arrival number of the last call that existed
+	// when declined was recorded. A call that arrives LATER is not covered:
+	// a person's message during a pending approval answered the calls they
+	// could see, and the model that reads the refusal and proposes again is
+	// asking a new question (ADR-anntnxdj decision 4).
+	declinedThrough uint64
+	// arrivals numbers this turn's calls in arrival order.
+	arrivals uint64
 }
 
 func newTurnOrder() *TurnOrder {
@@ -63,10 +71,15 @@ func (o *TurnOrder) enter(ctx context.Context) (func(), *Declined, error) {
 type turnReservation struct {
 	order    *TurnOrder
 	previous <-chan struct{}
+	// arrival is where this call stands in the turn's order of arrivals,
+	// which is what a decline recorded before it decides.
+	arrival uint64
 }
 
 func (o *TurnOrder) reserve() (*turnReservation, func()) {
 	o.mu.Lock()
+	o.arrivals++
+	arrival := o.arrivals
 	previous := o.tail
 	done := make(chan struct{})
 	o.tail = done
@@ -88,7 +101,7 @@ func (o *TurnOrder) reserve() (*turnReservation, func()) {
 			}
 		})
 	}
-	return &turnReservation{order: o, previous: previous}, finish
+	return &turnReservation{order: o, previous: previous, arrival: arrival}, finish
 }
 
 func (r *turnReservation) enter(ctx context.Context) (func(), *Declined, error) {
@@ -106,17 +119,44 @@ func (r *turnReservation) enter(ctx context.Context) (func(), *Declined, error) 
 	r.order.slot <- struct{}{}
 	r.order.mu.Lock()
 	declined := r.order.declined
+	if r.arrival > r.order.declinedThrough {
+		// This call arrived after the person answered: their message is not
+		// its answer.
+		declined = nil
+	}
 	r.order.mu.Unlock()
 	return func() { <-r.order.slot }, declined, nil
 }
 
-// declinedBy records a person's no as this turn's answer for the calls behind
-// the one they declined.
+// declinedBy records a person's no as this turn's answer for the calls queued
+// behind the one they declined. It covers exactly the calls that had arrived
+// when the ANSWER settled — the cutoff the answer carries — so a call that
+// arrived between the settlement and this call is a new question and is asked
+// about like any other.
+//
+// A NEWER decline REPLACES the earlier one: the person has spoken again, and
+// their latest words are the answer the calls behind the newest declined call
+// are given. It is safe because the calls of the earlier batch have already
+// entered — the order serializes them — and `declinedThrough` only grows, so
+// nothing that was already refused changes its reason after the fact.
 func (o *TurnOrder) declinedBy(answer Declined) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.declined == nil {
-		refusal := answer
-		o.declined = &refusal
+	refusal := answer
+	o.declined = &refusal
+	through := answer.Through
+	if through > o.arrivals {
+		// A cutoff from another turn's order, or none at all: never wider than
+		// what this turn has actually accepted.
+		through = o.arrivals
 	}
+	o.declinedThrough = through
+}
+
+// ArrivalCutoff is how many calls this turn has accepted so far: the boundary
+// a person's answer covers, read at the moment it settles (ADR-anntnxdj §2).
+func (o *TurnOrder) ArrivalCutoff() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.arrivals
 }

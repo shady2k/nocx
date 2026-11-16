@@ -10,6 +10,7 @@
 import { Dispatcher } from './dispatcher'
 import type { AgentCancel } from './generated/agent.cancel'
 import type { AgentStatusResult } from './generated/agent.status'
+import type { AgentSteer } from './generated/agent.steer'
 
 export class AgentClient {
   constructor(private readonly dispatcher: Dispatcher) {}
@@ -20,5 +21,11 @@ export class AgentClient {
 
   cancel(runId: number): Promise<AgentCancel> {
     return this.dispatcher.call<AgentCancel>('agent.cancel', { runId })
+  }
+
+  /** Hand a person's message to the turn that is answering. It answers once
+   *  the agent took the message — a turn that ended first refuses it. */
+  steer(runId: number, text: string): Promise<AgentSteer> {
+    return this.dispatcher.call<AgentSteer>('agent.steer', { runId, text })
   }
 }

@@ -165,6 +165,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 300000,
     answerMs: null,
   },
+  'agent.steer': {
+    waiting: 'Handing your message to the agent',
+    row: 'never',
+    expired: 'outcome-unknown',
+    merge: 'none',
+    domain: 'session',
+    turnMs: 30000,
+    maxMs: 300000,
+    answerMs: null,
+  },
   'agent.type': {
     waiting: 'Waiting for the model',
     row: 'past-wait',

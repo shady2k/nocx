@@ -88,16 +88,49 @@ type agentCancelParams struct {
 	RunID int64 `json:"runId"`
 }
 
+// agentSteerParams is a person's message to the turn that is already running:
+// the run it belongs to, and the words. Nothing else travels — the message is
+// not a question, so it carries no grants and no cwd.
+type agentSteerParams struct {
+	RunID int64  `json:"runId"`
+	Text  string `json:"text"`
+}
+
 // agentCancelResponse is the real result of agent.cancel. cancelled is true
 // only when this request closed a live run; an already-terminal or unknown
 // run is answered as an error rather than being reported as stopped.
 type agentCancelResponse struct {
-	RunID         int64    `json:"runId"`
-	State         string   `json:"state"`
-	Cancelled     bool     `json:"cancelled"`
-	Error         string   `json:"error,omitempty"`
-	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
+	RunID         int64  `json:"runId"`
+	State         string `json:"state"`
+	Cancelled     bool   `json:"cancelled"`
+	Error         string `json:"error,omitempty"`
+	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
+	// DroppedSteers are the person's messages the cancelled turn's agent had
+	// queued and dropped. The reserved response carries them as well as the
+	// runState notification, because that notification may be dropped under
+	// outbound pressure and these are messages a person must not lose.
+	DroppedSteers []string `json:"droppedSteers,omitempty"`
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
+}
+
+// What happened to a person's message. Two values and no third: it went into
+// the turn the person was watching, or it will be asked as that conversation's
+// next question (ADR-anntnxdj decision 4).
+const (
+	// steerSteered is the message the agent took inside the running turn.
+	steerSteered = "steered"
+	// steerNextQuestion is the message the turn could not take: the agent does
+	// not steer, the turn ended first, or the agent did not accept it in time.
+	steerNextQuestion = "next_question"
+)
+
+// agentSteerResponse is the real result of agent.steer: the run the message was
+// about, and what became of it. The outcome is stated rather than derived from
+// a flag, because the block shows the message differently for each — inline in
+// the answer, or inline and waiting to be asked next.
+type agentSteerResponse struct {
+	RunID   int64  `json:"runId"`
+	Outcome string `json:"outcome"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -141,6 +174,22 @@ type agentRunControl struct {
 	usage              *content.RunUsage
 	answeringModel     string
 	actorTerminalState content.RunState
+	// steerer is the running turn's way in for a person's message — the
+	// harness Turn askHarness started. It is attached once and never
+	// replaced: a steer addresses the turn that is answering, and a turn that
+	// has ended refuses the message itself.
+	steerer agentharness.Steerer
+	// steerBoundary writes a person's message into the turn's record, in order
+	// with the answer's runs (nocx-a62cl.6.4). Nil until the stream installs it.
+	steerBoundary func(ctx context.Context, text string) error
+	// turnCutoff is the turn's arrivals counter, installed with the run's tool
+	// chain: the calls a person's answer covers are the ones queued by the time
+	// it settles (ADR-anntnxdj §2).
+	turnCutoff func() uint64
+	// droppedSteers is what a cancelled turn's agent had queued and dropped:
+	// messages nobody used, which become the conversation's next questions
+	// (ADR-4khgzeyp decision 3). Set when the turn reports its terminal.
+	droppedSteers []string
 }
 
 type agentRunDrive struct {
@@ -178,6 +227,52 @@ func (c *agentRunControl) beginDrive(parent context.Context) (context.Context, f
 func agentRunControlFromContext(ctx context.Context) *agentRunControl {
 	control, _ := ctx.Value(agentRunControlContextKey{}).(*agentRunControl)
 	return control
+}
+
+// attachSteerer names the running turn a person's message goes into. The
+// harness Turn is the only thing that can deliver it: the actor owns the
+// agent process, and asking the connector instead would be a second route to
+// the same session.
+func (c *agentRunControl) attachSteerer(steerer agentharness.Steerer) {
+	c.mu.Lock()
+	c.steerer = steerer
+	c.mu.Unlock()
+}
+
+// attachSteerBoundary names the stream's way of writing a person's message into
+// the turn's record. It is installed by the stream and cleared when the stream
+// ends, because it is the stream that owns the order the answer's runs land in.
+func (c *agentRunControl) attachSteerBoundary(boundary func(ctx context.Context, text string) error) {
+	c.mu.Lock()
+	c.steerBoundary = boundary
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) attachedSteerBoundary() func(ctx context.Context, text string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.steerBoundary
+}
+
+// attachTurnCutoff names the turn's arrivals counter: how many of its calls
+// have arrived so far, the boundary a person's answer covers (ADR-anntnxdj §2).
+// Nil for a run whose chain has no order to cover.
+func (c *agentRunControl) attachTurnCutoff(cutoff func() uint64) {
+	c.mu.Lock()
+	c.turnCutoff = cutoff
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) attachedTurnCutoff() func() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnCutoff
+}
+
+func (c *agentRunControl) attachedSteerer() agentharness.Steerer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.steerer
 }
 
 func (c *agentRunControl) attachRunLease(lease *runLease) bool {
@@ -395,6 +490,11 @@ type agentRunState struct {
 	Error         string            `json:"error,omitempty"`
 	DroppedDeltas int               `json:"droppedDeltas,omitempty"`
 	UnarmedBounds []string          `json:"unarmedBounds,omitempty"`
+	// DroppedSteers are the person's messages the cancelled turn's agent had
+	// queued and dropped: nobody used them, so they are asked as this
+	// conversation's next questions (ADR-4khgzeyp decision 3). Present only
+	// when at least one was dropped.
+	DroppedSteers []string `json:"droppedSteers,omitempty"`
 	// Notices are what the RUN must state about ITSELF — today, only that it
 	// stopped asking to widen a scope because it reached the bound on how
 	// often one answer may ask (design §5.3). A silent stop is the soft
@@ -605,6 +705,11 @@ const (
 	agentAskReasoning   agentAskEventKind = "reasoning"
 	agentAskToolCall    agentAskEventKind = "tool_call"
 	agentAskToolStarted agentAskEventKind = "tool_started"
+	// agentAskSteer is a person's message, delivered into the stream so the
+	// ledger records it in the turn's order (nocx-a62cl.6.4). It is not a
+	// notification: the renderer drew the line from agent.steer's own answer,
+	// and only the durable record needs the seat.
+	agentAskSteer agentAskEventKind = "steer"
 )
 
 type agentAskEvent struct {
@@ -1334,6 +1439,26 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			// accepted tool-call events from requests that merely arrived.
 			toolCallsExecuted.Add(1)
 			return nil
+		case agentAskSteer:
+			// THE PERSON'S MESSAGE IS A BOUNDARY, like the tool call above and
+			// for the same reason: the prose that was streaming ends here, at
+			// the point the person spoke, the message takes the next seat, and
+			// the next delta opens the next run (ADR-0040, ADR-0019). A
+			// failure aborts the stream: a message the person sees but the
+			// ledger never held is the live view lying about what was recorded.
+			if prose.EntryID != "" {
+				sealed := prose
+				prose = content.ProseBlock{}
+				if sealErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+					return svc.SealProse(ctx, sealed.EntryID)
+				}); sealErr != nil {
+					return sealErr
+				}
+			}
+			return h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+				_, submitErr := svc.SubmitSteer(ctx, rc.entryID, rc.runID, ev.Text)
+				return submitErr
+			})
 		case agentAskReasoning:
 			reasoningChars.Add(int64(len(ev.Text)))
 			// Also not persisted, and for the stronger reason: the durable
@@ -1525,6 +1650,11 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 		runTools = tools
 		authority = tools
 		fatal = tools.Fatal()
+		// The turn's arrivals, for the answers that settle on it: a decline
+		// covers the calls queued by then (ADR-anntnxdj §2).
+		if rc.control != nil {
+			rc.control.attachTurnCutoff(tools.TurnArrivalCutoff)
+		}
 	}
 	conversation := string(rc.sessionID)
 	if rc.paneID != nil {
@@ -1548,6 +1678,42 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	if err != nil {
 		return err
 	}
+	if steerer, ok := turn.(agentharness.Steerer); ok && rc.control != nil {
+		rc.control.attachSteerer(steerer)
+	}
+	// A person's message is written into the turn's record from HERE, on this
+	// stream's own goroutine, so it lands in the order the answer's runs do
+	// (nocx-a62cl.6.4). agent.steer runs on another goroutine, so it hands the
+	// text over and waits for the ledger rather than writing out of order.
+	steers := make(chan steerBoundaryWrite)
+	// The stream can END while a steer is being delivered — a failed run takes
+	// its fatal and leaves — and a boundary write to a stream nobody is reading
+	// would hold the handler until the connection died. The write says so
+	// instead: the agent already has the message, and the record is what is lost,
+	// which the caller logs.
+	streamDone := make(chan struct{})
+	defer close(streamDone)
+	if rc.control != nil {
+		rc.control.attachSteerBoundary(func(ctx context.Context, text string) error {
+			write := steerBoundaryWrite{text: text, ack: make(chan error, 1)}
+			select {
+			case steers <- write:
+			case <-streamDone:
+				return errSteerStreamGone
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			select {
+			case ackErr := <-write.ack:
+				return ackErr
+			case <-streamDone:
+				return errSteerStreamGone
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		defer rc.control.attachSteerBoundary(nil)
+	}
 	var fatalErr error
 	var emissionErr error
 	started := make(map[string]struct{})
@@ -1555,6 +1721,8 @@ stream:
 	for {
 		var event agentharness.Event
 		select {
+		case write := <-steers:
+			write.ack <- emit(agentAskEvent{Kind: agentAskSteer, Text: write.text})
 		case detail := <-details:
 			var detailErr error
 			if _, ok := started[detail.call.CallID]; !ok {
@@ -1609,9 +1777,18 @@ stream:
 	}
 	stopDelivery()
 	outcome, err := turn.Wait(context.WithoutCancel(ctx))
+	// A cancelled turn hands back exactly the messages its agent had queued and
+	// dropped (ADR-4khgzeyp decision 3): they were never used, so the block says
+	// they are asked next and the renderer asks them. Read after Wait, which is
+	// when the agent has finished dropping them.
+	var dropped []string
+	if handback, ok := turn.(agentharness.SteerHandback); ok {
+		dropped = handback.DroppedSteers()
+	}
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		rc.control.answeringModel = outcome.Model
+		rc.control.droppedSteers = dropped
 		if u := outcome.Usage; u != nil {
 			rc.control.usage = &content.RunUsage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadTokens, CacheWrite: u.CacheWriteTokens}
 		}
@@ -1699,12 +1876,14 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	rc.control.mu.Lock()
 	cancelAccepted := rc.control.cancelled
 	actorTerminalState := rc.control.actorTerminalState
+	droppedSteers := append([]string(nil), rc.control.droppedSteers...)
 	rc.control.mu.Unlock()
 	result := agentCancelResponse{
 		RunID:         p.RunID,
 		State:         string(content.RunCancelled),
 		Cancelled:     cancelAccepted,
 		DroppedDeltas: rc.control.droppedDeltaCount(),
+		DroppedSteers: droppedSteers,
 		UnarmedBounds: unarmedRunLeaseSentences(rc),
 	}
 	if !cancelAccepted {
@@ -1714,6 +1893,141 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		result.Error = sentence
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(result))
+}
+
+// handleSteer delivers a person's message into the run that is answering it
+// (ADR-anntnxdj decision 4). It answers only once the agent took the message:
+// a message the turn ended under is refused, and says so, rather than being
+// reported delivered into a block that has already closed.
+func (h agentHandlers) handleSteer(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
+		return
+	}
+	var p agentSteerParams
+	if msg := decodeParamsStrict(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+		return
+	}
+	ctx, _ = log.StartTrace(ctx, runTrace(p.RunID))
+	// The run registry is the one owner of "which turn is live": a run whose
+	// terminal was written is gone from it, and its message has nowhere to go.
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[p.RunID]
+	h.pendingRunsMu.Unlock()
+	if !ok || rc.control == nil {
+		// THE RUN MAY HAVE CLOSED BETWEEN THE RENDERER DRAWING ITS TURN AND
+		// THIS FRAME ARRIVING. A message naming a run of THIS conversation that
+		// has terminalized is not an error: the turn was on screen when the
+		// person typed, and the message is asked as the conversation's next
+		// question (ADR-4khgzeyp decision 3, nocx-a62cl.6.1). Anything else —
+		// an id that names nothing, another window's run — is still refused.
+		if h.steerTargetIsAClosedRunOfThisConversation(ctx, p.RunID) {
+			h.log.Info("agent steer: the run had already ended, so the message is asked next", "run", p.RunID)
+			_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+			return
+		}
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: run is not active (it may already be terminal or never existed)",
+		})
+		return
+	}
+	// A message typed while a call awaits approval ANSWERS that question
+	// (ADR-anntnxdj decision 4): the call is declined in the person's own
+	// words, the calls already queued behind it are refused with the same
+	// sentence by the turn's own order, and only then does the message reach
+	// the agent. The question's wait sends agent.approvalRetired on its way
+	// out, so the prompt leaves the block at once.
+	if wait := h.takePendingAnswerWait(p.RunID); wait != nil {
+		answered := wait.settleLocked(assistant.Declined{Reason: assistant.PersonMessageResult(wait.tool, p.Text)})
+		wait.mu.Unlock()
+		if !answered {
+			h.log.Warn("agent steer: the open question was settled by somebody else", "run", p.RunID, "tool", wait.tool)
+		}
+	}
+	// WHAT THE CONNECTOR DOES WITH A MESSAGE IS ITS OWN STATEMENT, not something
+	// this handler finds out by trying (ADR-anntnxdj decision 4). An agent that
+	// cannot steer still gets the person's answer to the question above; the
+	// message itself is kept and asked as the conversation's next question.
+	if h.harness != nil && h.harness.Facts().Steering == agentharness.QueuesNextQuestion {
+		h.log.Info("agent steer: the agent queues the message as the next question", "run", p.RunID)
+		_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+		return
+	}
+	steerer := rc.control.attachedSteerer()
+	if steerer != nil {
+		if err := steerer.Steer(ctx, p.Text); err == nil {
+			h.log.Info("agent steer: the agent took the person's message", "run", p.RunID)
+			// AND THE TURN'S RECORD TAKES IT (nocx-a62cl.6.4): the ledger is
+			// the record of what is shown (ADR-0019), so the message is written
+			// into the turn's order here, where the person sent it. The agent
+			// already has it, so a record that cannot be written is logged
+			// rather than reported as a failed steer: the message was said.
+			if boundary := rc.control.attachedSteerBoundary(); boundary != nil {
+				if recordErr := boundary(ctx, p.Text); recordErr != nil {
+					h.log.Warn("agent steer: the message could not be written into the turn's record",
+						"run", p.RunID, "error", recordErr)
+				}
+			} else {
+				h.log.Warn("agent steer: the turn has no stream to write the message into", "run", p.RunID)
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerSteered}))
+			return
+		} else if !isSteerNotTaken(err) {
+			h.log.Warn("agent steer: the message was not delivered", "run", p.RunID, "reason", err)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprint(err)})
+			return
+		}
+	}
+	// The turn did not take it — it is not reaching the agent yet, it ended
+	// first, it was cancelled, or the agent did not accept it within the turn's
+	// bound. The message is not lost: it becomes the next question
+	// (ADR-4khgzeyp decision 3).
+	h.log.Info("agent steer: the turn did not take the message, so it is asked next", "run", p.RunID)
+	_ = h.r.TryResult(req.ID, mustMarshal(agentSteerResponse{RunID: p.RunID, Outcome: steerNextQuestion}))
+}
+
+// errSteerStreamGone is the boundary write's answer when the run's stream has
+// already ended: the agent has the message, and the turn's record cannot take it
+// — a lost record, never a lost message.
+var errSteerStreamGone = errors.New("the turn's stream has ended")
+
+// steerBoundaryWrite is one person's message handed to the stream, and the
+// answer: the ledger holds it, or it does not.
+type steerBoundaryWrite struct {
+	text string
+	ack  chan error
+}
+
+// steerTargetIsAClosedRunOfThisConversation reports whether runID names an agent
+// run that has terminalized and belongs to a session this connection holds: the
+// one case where a message that arrived after the turn is still this
+// conversation's, and is asked next rather than refused (nocx-a62cl.6.1).
+func (h agentHandlers) steerTargetIsAClosedRunOfThisConversation(ctx context.Context, runID int64) bool {
+	if h.op == nil || h.state == nil {
+		return false
+	}
+	var target content.SteerTarget
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		found, targetErr := svc.SteerTarget(ctx, runID)
+		target = found
+		return targetErr
+	})
+	if err != nil || !target.Terminal || target.SessionID == "" {
+		return false
+	}
+	return h.state.has(session.ID(target.SessionID))
+}
+
+// isSteerNotTaken reports whether a turn's refusal of a person's message means
+// "ask it next" rather than a failure the person must read as an error: no turn
+// left to land in, an agent whose protocol has no steering, or a turn that
+// ended before the agent accepted it.
+func isSteerNotTaken(err error) bool {
+	return errors.Is(err, agentharness.ErrSteerNotTaken) ||
+		errors.Is(err, agentharness.ErrTurnNotRunning) ||
+		errors.Is(err, agentharness.ErrNotSteerable)
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact
@@ -2214,6 +2528,22 @@ func validateAgentCancelRaw(raw json.RawMessage) string {
 	return ""
 }
 
+func validateAgentSteerRaw(raw json.RawMessage) string {
+	var p agentSteerParams
+	// Strict: the message and the run it belongs to, and nothing else. A
+	// typo'd field would otherwise be an empty message delivered to a turn.
+	if msg := decodeParamsStrict(raw, &p); msg != "" {
+		return msg
+	}
+	if p.RunID <= 0 {
+		return "runId must be the backend-minted run id"
+	}
+	if strings.TrimSpace(p.Text) == "" || utf8.RuneCountInString(p.Text) > maxQuestionRunes {
+		return "text is required and bounded"
+	}
+	return ""
+}
+
 // declineKindForScope maps the wire's answer scope to the declined record's
 // standing half — the sentence the model is refused with. "once" covers the
 // call only; "session" and "always" are the standing noes the middleware
@@ -2275,9 +2605,11 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 	}
 	model := rc.model
 	var usage *content.RunUsage
+	var droppedSteers []string
 	if rc.control != nil {
 		rc.control.mu.Lock()
 		usage = rc.control.usage
+		droppedSteers = append([]string(nil), rc.control.droppedSteers...)
 		if rc.control.answeringModel != "" {
 			model = rc.control.answeringModel
 		}
@@ -2313,6 +2645,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		RunID:         rc.runID,
 		State:         string(state),
 		DroppedDeltas: dropped,
+		DroppedSteers: droppedSteers,
 		UnarmedBounds: unarmedBounds,
 		Notices:       notices,
 	}
@@ -2602,6 +2935,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 		reg(contentSub, catalog.OpAgentCancel, params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
+		}),
+		reg(contentSub, catalog.OpAgentSteer, params(validateAgentSteerRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSteer(ctx, req) }
 		}),
 		reg(contentSub, catalog.OpAgentApprove, params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)

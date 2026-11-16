@@ -34,6 +34,12 @@ export interface AgentCancel {
    */
   droppedDeltas?: number
   /**
+   * The person's messages the cancelled turn's agent had queued for steering and dropped: nobody used them, so they are asked as this conversation's next questions (ADR-4khgzeyp decision 3). Present only when at least one was dropped; a message the agent had already delivered is never listed.
+   *
+   * @minItems 1
+   */
+  droppedSteers?: [string, ...string[]]
+  /**
    * Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.
    *
    * @minItems 1

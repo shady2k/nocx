@@ -77,12 +77,17 @@ const (
 	EntryShell  EntryKind = "shell"
 	EntryAsk    EntryKind = "ask"
 	EntryAction EntryKind = "action"
-	// EntryText is one run of assistant prose (ADR-0040): a thing that was
+	// EntryText is one run of prose in a turn (ADR-0040): a thing that was
 	// PRINTED, not attempted. It has no intent, no execution and no outcome
 	// to wait for, so the schema's CHECK pins its shape — inside a block
 	// (parent and pos), empty intent, born closed and successful. Everything
 	// drawn in the scrollback is an entry, and this is the kind that makes
 	// that true of what the model writes between its calls.
+	//
+	// WHOSE prose it is comes from `source`, never from a second kind: the
+	// model's answer and the person's own message into the running turn are
+	// the same row shape, and the restored block draws each from the pair
+	// (nocx-a62cl.6.4).
 	EntryText EntryKind = "text"
 	// EntryFrame is a captured frame (design §2.2): a row the ledger owns —
 	// it has no output and no outcome (a capture is a fact, complete at
@@ -1059,6 +1064,17 @@ type ProseBlock struct {
 	EntryID string
 	// ArtifactID is that block's body, open until the block is sealed.
 	ArtifactID string
+}
+
+// SteerTarget is what a message that names a run can still reach: whose the run
+// was, and whether it has closed (nocx-a62cl.6.1).
+type SteerTarget struct {
+	// SessionID is the session the turn's ask named. Empty for a run recorded
+	// without one, and then nothing can be assumed about which conversation the
+	// message belonged to.
+	SessionID string
+	// Terminal is true once the run has reached a state no turn returns from.
+	Terminal bool
 }
 
 // ProseFacts is the part of a TEXT entry's payload the ledger reads back:
@@ -2169,6 +2185,28 @@ type LedgerRepository interface {
 	// than an error, because the caller's fact is "this block is finished",
 	// which is true either way.
 	SealProse(ctx context.Context, entryID string) error
+	// SubmitSteer writes ONE person's message into a turn's causal order: the
+	// `text` child at the turn's next free seat with `source` set to the
+	// person, and its words as that child's body, both in one transaction.
+	//
+	// It is prose of the same kind the answer's runs are, because that is what
+	// the block draws (ADR-0040), and `source` is the ledger's existing answer
+	// to "whose is this row" — the same fact a restored block's badge is
+	// painted from. A separate kind would answer "who spoke" twice
+	// (nocx-a62cl.6.4).
+	//
+	// The words are written COMPLETE, unlike a streamed answer: a person typed
+	// them, so the body is born sealed. runID is the agent-lane execution the
+	// turn is running under, refused for another turn's run for the same
+	// reason OpenProse refuses it.
+	SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (ProseBlock, error)
+	// SteerTarget answers what a message naming runID can still reach: the
+	// session its turn belongs to, and whether the run has already
+	// terminalized. It is the fact a message that arrived too late needs
+	// (nocx-a62cl.6.1): the run is still this conversation's, so the message is
+	// asked next rather than refused, and an id that names nothing is refused.
+	// ErrNoSuchRun when no agent run carries id.
+	SteerTarget(ctx context.Context, runID int64) (SteerTarget, error)
 	// RunState returns the assistant run state of one execution: the
 	// durable state a reconnecting renderer reads (design §7 — it never
 	// infers liveness from notifications having stopped). Nil when the

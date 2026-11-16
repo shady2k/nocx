@@ -21,6 +21,7 @@ var (
 	OpAgentRulesSetEnabled            = methodHandle("agent.rules.setEnabled")
 	OpAgentRunResolved                = methodHandle("agent.runResolved")
 	OpAgentStatus                     = methodHandle("agent.status")
+	OpAgentSteer                      = methodHandle("agent.steer")
 	OpAgentType                       = methodHandle("agent.type")
 	OpAgentAccessForget               = methodHandle("agentAccess.forget")
 	OpAgentAccessList                 = methodHandle("agentAccess.list")

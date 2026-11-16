@@ -25,6 +25,8 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import { attrsToStyle, type TerminalSnapshot } from './serializer'
 import { runsFromSGR } from './sgr-read'
 import { t } from '../i18n/locale-model'
+import { personMessageLabels } from '../i18n/kit-labels'
+import { PersonMessage } from '../ui/person-message'
 import { appendAgentFacts, type AgentUsage } from './agent-facts'
 
 /** What a restored block is made of: the entry's facts, and its body. */
@@ -228,6 +230,23 @@ export interface RestoredCause {
   effect?: string | null
   resource?: { kind: string; id: string } | null
   opensBlock?: boolean
+}
+
+/**
+ * A `text` child whose SOURCE is the person is not the model's prose: it is the
+ * message they sent into the running turn, which the live block draws as the
+ * kit's PersonMessage line (nocx-a62cl.6.4). The restore draws the same line
+ * from the same body, so a reloaded turn reads as the live one did — the
+ * ledger is the record of what is shown (ADR-0019).
+ *
+ * It is one `text` row and not a kind of its own for the same reason the live
+ * path needed no second kind: `source` is the ledger's answer to "whose is
+ * this row", and a second discriminator would be that question answered twice.
+ */
+export function restoredPersonMessage(cause: RestoredCause, body: string | null): PersonMessage {
+  const line = new PersonMessage(body ?? '', personMessageLabels())
+  line.root.dataset.entryId = cause.entryId
+  return line
 }
 
 /** What a restored TURN is made of: the block's own facts, plus the children

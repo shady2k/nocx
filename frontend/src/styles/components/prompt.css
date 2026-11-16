@@ -211,3 +211,18 @@
   width: 100%;
   min-width: 0;
 }
+
+/* A PROMPT THAT DOES NOT OWN THE SURFACE UNDER IT (Prompt's modal={false}).
+   The agent approval asks a question the person may answer with a message
+   typed into the composer the question is about (ADR-anntnxdj decision 4), so
+   the scrim must not eat that click and the sheet must not dim what the person
+   is about to use. The overlay stays where it is — it is what places the panel
+   — and only the panel takes the pointer. */
+.ui-prompt-overlay[data-modal='false'] {
+  background: none;
+  pointer-events: none;
+}
+
+.ui-prompt-overlay[data-modal='false'] > .ui-prompt {
+  pointer-events: auto;
+}

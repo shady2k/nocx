@@ -48,6 +48,19 @@ type Steerer interface {
 	Steer(ctx context.Context, text string) error
 }
 
+// SteerHandback is the capability a turn has after it was cancelled: it says
+// which of the person's messages the agent had queued and dropped with the
+// turn. Those are precisely the ones nobody used, so they are the ones the
+// caller asks as the conversation's next questions — a message pi had already
+// delivered is not handed back, because asking it again would run it twice
+// (ADR-4khgzeyp decision 3).
+//
+// It is read AFTER Wait returns; before that the turn has not finished dropping
+// anything.
+type SteerHandback interface {
+	DroppedSteers() []string
+}
+
 // ModelReadiness checks a specific chosen model instead of the native default.
 type ModelReadiness interface {
 	ReadinessForModel(ctx context.Context, model string) Readiness
@@ -73,12 +86,32 @@ const (
 	NocxToolsByInstruction ToolBoundary = "nocx_tools_by_instruction"
 )
 
+// Steering states what a connector does with a person's message sent while a
+// turn runs. It is a FACT the connector states, never a capability guessed from
+// an error at call time: the block draws the message differently for each, and
+// the core decides whether to hand the message to the agent or keep it for the
+// next question (ADR-anntnxdj decision 4).
+type Steering string
+
+const (
+	// Steers means the message reaches the agent inside the running turn,
+	// before its next model call.
+	Steers Steering = "steers"
+	// QueuesNextQuestion means the agent cannot take it while it answers, and
+	// the message is kept and asked as the conversation's next question once
+	// the current turn ends.
+	QueuesNextQuestion Steering = "queues_next_question"
+)
+
 // Facts describes guarantees, not a guess based on the agent's name. A connector
 // unable to report the answering model cannot promise to pin it across turns.
 type Facts struct {
 	ToolBoundary              ToolBoundary
 	ContinuesConversationByID bool
 	ReportsAnsweringModel     bool
+	// Steering is what happens to a message a person sends while a turn runs.
+	// Every supported connector states one of the two.
+	Steering Steering
 }
 
 // EventKind names one kind of event in a turn's ordered stream. The set is

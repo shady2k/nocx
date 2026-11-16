@@ -69,14 +69,28 @@ type scriptedAgentFixture struct {
 	script       protocol.Script
 }
 
+// newScriptedAgent builds the fixture agent. It STEERS: a message sent while
+// it answers reaches it, which is what most of this package's steer tests are
+// about. newQueueingAgent is the other half of the contract — an agent that
+// takes no message while it answers (ADR-anntnxdj decision 4).
 func newScriptedAgent(t *testing.T, script protocol.Script) *scriptedAgentFixture {
+	t.Helper()
+	return newScriptedAgentWith(t, script, true)
+}
+
+func newQueueingAgent(t *testing.T, script protocol.Script) *scriptedAgentFixture {
+	t.Helper()
+	return newScriptedAgentWith(t, script, false)
+}
+
+func newScriptedAgentWith(t *testing.T, script protocol.Script, steers bool) *scriptedAgentFixture {
 	t.Helper()
 	agent, helper := buildAskPrograms(t)
 	dir := t.TempDir()
 	for _, field := range []struct {
 		p    *string
 		name string
-	}{{&script.PromptFile, "prompt"}, {&script.PIDFile, "pid"}, {&script.ResultFile, "result"}, {&script.HangFile, "hang"}, {&script.EnvironmentFile, "environment"}} {
+	}{{&script.PromptFile, "prompt"}, {&script.PIDFile, "pid"}, {&script.ResultFile, "result"}, {&script.HangFile, "hang"}, {&script.EnvironmentFile, "environment"}, {&script.SteerFile, "steer"}} {
 		if *field.p == "" {
 			*field.p = filepath.Join(dir, field.name)
 		}
@@ -121,7 +135,10 @@ func newScriptedAgent(t *testing.T, script protocol.Script) *scriptedAgentFixtur
 			}
 		}
 	}
-	connector := fakeconnectortest.New(fakeconnectortest.Config{AgentPath: agent, Script: script, Base: base})
+	// The fixture's agent STEERS: these tests are about a message reaching the
+	// agent that is answering. The queueing half is the fixture's default and
+	// has its own tests (nocx-a62cl.6.3).
+	connector := fakeconnectortest.New(fakeconnectortest.Config{AgentPath: agent, Script: script, Base: base, Steers: steers})
 	t.Cleanup(func() { _ = connector.Close(context.Background()) })
 	return &scriptedAgentFixture{t: t, harness: connector, script: script, endpointLogs: endpointLogs}
 }

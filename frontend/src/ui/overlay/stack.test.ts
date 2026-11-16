@@ -40,9 +40,9 @@ describe('overlay stack', () => {
   })
 
   it('pop fails for unknown entry', () => {
-    expect(popOverlay({ id: 'ghost', close: () => true, prevFocus: null, element: null })).toBe(
-      false,
-    )
+    expect(
+      popOverlay({ id: 'ghost', escape: true, close: () => true, prevFocus: null, element: null }),
+    ).toBe(false)
   })
 
   it('pop only the top entry preserves bottom', () => {
@@ -101,6 +101,16 @@ describe('overlay stack', () => {
     const close = vi.fn(() => true)
     pushOverlay(close)
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('Escape is not taken from a surface the overlay does not own', () => {
+    // A question asked over a composer the person may reply in (Prompt's
+    // modal={false}) must not swallow the Escape that belongs to whatever
+    // they are in: pressing it out there is not a refusal of the question.
+    const close = vi.fn(() => true)
+    pushOverlay(close, null, document.createElement('div'), { escape: false })
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }))
     expect(close).not.toHaveBeenCalled()
   })
 

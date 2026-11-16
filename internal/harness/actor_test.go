@@ -34,6 +34,10 @@ func (shellProtocol) BeginTurn(TurnSpec) []Step {
 
 func (shellProtocol) CancelSequence() []Command { return []Command{{Name: "abort"}} }
 
+// The shell fixtures have no steering: they exist to prove process and turn
+// lifetime, and a steer is refused by the actor before anything is written.
+func (shellProtocol) SteerCommand(string) (Command, bool) { return Command{}, false }
+
 func (shellProtocol) Encode(id string, c Command) ([]byte, error) {
 	return []byte(id + " " + c.Name + "\n"), nil
 }

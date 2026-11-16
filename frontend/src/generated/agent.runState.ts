@@ -37,6 +37,12 @@ export interface AgentRunState {
    */
   droppedDeltas?: number
   /**
+   * The person's messages the cancelled turn's agent had queued for steering and dropped: nobody used them, so they are asked as this conversation's next questions (ADR-4khgzeyp decision 3). Present only when at least one was dropped; a message the agent had already delivered is never listed.
+   *
+   * @minItems 1
+   */
+  droppedSteers?: [string, ...string[]]
+  /**
    * Human-readable sentences the RUN states about ITSELF — today, only that it stopped asking the person to widen a scope because it reached the bound on how often one answer may ask (design §5.3). Present only when there is one; a silent stop would be a soft degrade, and a notice on every run is a notice nobody reads.
    *
    * @minItems 1

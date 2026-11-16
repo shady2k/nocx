@@ -27,7 +27,7 @@
 // this file asserts.
 import { describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
-import { restoredBlock, restoredTurn } from './restored-block'
+import { restoredBlock, restoredPersonMessage, restoredTurn } from './restored-block'
 import { arrangedByCause, blocksForPane, type RestorableBlock } from '../restore-client'
 import type { Caused } from '../generated/ledger.get'
 import { DEFAULT_SNAPSHOT } from './serializer'
@@ -55,6 +55,12 @@ function flowOf(el: HTMLElement): string[] {
   const piece = (c: Element): void => {
     if (c.classList.contains('term-line')) {
       out.push(`text:${c.textContent ?? ''}`)
+      return
+    }
+    // The person's line is read by its WORDS, not by its class: a restored
+    // one that dropped the message would still match on the class name.
+    if (c.classList.contains('ui-person-message')) {
+      out.push(`said:${c.querySelector('.ui-person-message__text')?.textContent ?? ''}`)
       return
     }
     out.push(c.className)
@@ -107,6 +113,8 @@ const AFTER = 'line 3 is wrong'
 // command, and joining them here would be this test quietly re-inventing the
 // cut it exists to prove nobody has to make.
 const COMMAND = 'cat -n a.txt'
+// The message a person sent while the answer was streaming (nocx-a62cl.6.4).
+const STEER = 'also check the second log'
 
 describe('a restored turn reads the same as the live turn it came from', () => {
   /** The live turn, driven through the engine exactly as the ask surface
@@ -363,6 +371,74 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     expect(badgeOf(theirs)).toBe('agent')
     expect(badgeOf(mine)).not.toBe(badgeOf(theirs))
   })
+  // ── the person's message, restored where it was sent (nocx-a62cl.6.4) ──
+
+  it('draws a message sent into the turn between the same two runs, live and restored', () => {
+    // LIVE: the answer streams, the person speaks, the answer goes on — the
+    // line lands between the two runs because that is where it arrived.
+    const { inner, manager } = newManager()
+    const live = manager.addAnswerBlock(QUESTION, '/repo')
+    live.el.dataset.entryId = 'turn-1'
+    live.append(BEFORE)
+    live.steer(STEER)
+    live.append(AFTER)
+    live.close('success')
+
+    // RESTORED: the same turn off the ledger, where the message is a `text`
+    // child whose SOURCE is the person.
+    const causes: Caused[] = [
+      {
+        entryId: 'txt-1',
+        position: 0,
+        kind: 'text',
+        source: 'assistant',
+        intent: '',
+        args: null,
+        effect: null,
+        resource: null,
+        opensBlock: false,
+      },
+      {
+        entryId: 'say-1',
+        position: 1,
+        kind: 'text',
+        source: 'user',
+        intent: '',
+        args: null,
+        effect: null,
+        resource: null,
+        opensBlock: false,
+      },
+      {
+        entryId: 'txt-2',
+        position: 2,
+        kind: 'text',
+        source: 'assistant',
+        intent: '',
+        args: null,
+        effect: null,
+        resource: null,
+        opensBlock: false,
+      },
+    ]
+    const restored = draw(
+      [block('turn-1', QUESTION, 'shell')],
+      causes,
+      new Map([
+        ['txt-1', BEFORE],
+        ['txt-2', AFTER],
+        ['say-1', STEER],
+      ]),
+    )
+    const liveTurnEl = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')!
+    const restoredTurnEl = restored.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')!
+
+    // The same three pieces in the same order, the message in the middle —
+    // and the words are the person's, not an empty line that happens to carry
+    // the right class.
+    expect(flowOf(restoredTurnEl)).toEqual(flowOf(liveTurnEl))
+    expect(flowOf(liveTurnEl)).toEqual([`text:${BEFORE}`, `said:${STEER}`, `text:${AFTER}`])
+  })
 })
 
 // ── the restored side, through the same seam the pane reaches ────────────
@@ -413,6 +489,9 @@ function draw(
       (cause) => {
         if (cause.kind === 'text') {
           const body = childBodies.get(cause.entryId)
+          // The product's own branch, through the product's own helper: a text
+          // child whose source is the person is the message they sent in.
+          if (cause.source === 'user') return restoredPersonMessage(cause, body ?? null).root
           return restoredBlock(
             {
               id: id++,

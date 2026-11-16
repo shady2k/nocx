@@ -33,6 +33,24 @@ type recordingQuestioner struct {
 	answer      Answer
 	kind        DeclineKind
 	before      func()
+	// cutoff is where a person's answer settles, for the tests that exercise
+	// the turn's order: the real approver stamps the arrivals covered by the
+	// answer at that moment (Declined.Through), and a stand-in that answered
+	// without one would be claiming a decline covered nothing.
+	cutoff func() uint64
+}
+
+// settled is the answer as it leaves the person: a decline carries the arrival
+// cutoff read HERE, the moment it settles.
+func (q *recordingQuestioner) settled() Answer {
+	if q.cutoff == nil {
+		return q.answer
+	}
+	if declined, ok := q.answer.(Declined); ok && declined.Through == 0 {
+		declined.Through = q.cutoff()
+		return declined
+	}
+	return q.answer
 }
 
 func (q *recordingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answer {
@@ -50,7 +68,7 @@ func (q *recordingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answe
 	if q.before != nil {
 		q.before()
 	}
-	return q.answer
+	return q.settled()
 }
 
 // AskEgress is the same answer for a screen's question about bytes that already
@@ -71,7 +89,7 @@ func (q *recordingQuestioner) AskEgress(_ context.Context, req *EgressRequest) A
 	if q.before != nil {
 		q.before()
 	}
-	return q.answer
+	return q.settled()
 }
 
 // withPerson runs one Ask with a person answering every question with the

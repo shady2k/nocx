@@ -19,6 +19,20 @@ const DefaultMaxLineBytes = 4 << 20
 
 var ErrCancelled = errors.New("the turn was cancelled")
 
+// ErrTurnNotRunning refuses a person's message that has no turn to land in —
+// the turn ended, was cancelled, or has not reached the agent yet.
+var ErrTurnNotRunning = errors.New("harness: the turn is not running")
+
+// ErrNotSteerable refuses a person's message when the agent's own protocol has
+// no steering: the message cannot be delivered into a turn already under way.
+var ErrNotSteerable = errors.New("harness: this agent does not take a message while it answers")
+
+// ErrSteerNotTaken is what a person's message gets when the turn could not take
+// it: the turn ended, was cancelled, or the agent did not accept it within the
+// turn's own bound. The message is not lost — it becomes the conversation's
+// next question (ADR-4khgzeyp decision 3).
+var ErrSteerNotTaken = errors.New("harness: the turn did not take the message")
+
 type TurnError struct{ Reason string }
 
 func (e *TurnError) Error() string { return e.Reason }
@@ -44,8 +58,29 @@ type Codec interface {
 	Setup() []Step
 	BeginTurn(TurnSpec) []Step
 	CancelSequence() []Command
+	// SteerCommand is the command that carries a person's message into the
+	// turn already running. ok is false when the agent's protocol has no
+	// steering, and the actor refuses the message rather than writing a
+	// command the agent cannot read (ADR-anntnxdj decision 4).
+	SteerCommand(text string) (Command, bool)
 	Encode(id string, command Command) ([]byte, error)
 	Decode(line []byte) (Decoded, error)
+}
+
+// SteerRecovery is the optional codec capability of reading back the person's
+// messages a cancel dropped. The agent's own queue is the authority — pi's
+// clear_queue answers with the steering texts it removed — so the connector
+// decodes them rather than the actor guessing from timing (ADR-4khgzeyp
+// decision 3). ok is false for a response that is not such an answer.
+type SteerRecovery interface {
+	DroppedSteers(payload any) (texts []string, ok bool)
+	// QueueClear is the command that asks the agent what it still holds for
+	// steering, and whose answer DroppedSteers reads. A turn that ends with a
+	// message whose delivery is unknown asks this once, so the message is
+	// settled by the agent's own answer rather than by the actor's guess — and
+	// so nothing left in the agent's queue leaks into the next turn
+	// (ADR-4khgzeyp decision 3).
+	QueueClear() Command
 }
 
 // Step is a response-dependent command. Check may inspect the matched response

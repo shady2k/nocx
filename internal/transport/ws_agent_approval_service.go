@@ -139,6 +139,11 @@ func (s approvalService) wait(ctx context.Context, runIDText, tool, reason strin
 	}
 	wait := newAnswerWait(s.clock, tool, s.limit)
 	wait.binding = proposal
+	// The turn's own arrivals counter, when this run has one: a run with no
+	// tool chain has no order and nothing to cover.
+	if s.rc.control != nil {
+		wait.cutoff = s.rc.control.attachedTurnCutoff()
+	}
 	s.handlers.beginAnswerWait(runID, wait, reason)
 	defer s.handlers.endAnswerWait(runID, wait)
 
@@ -246,6 +251,11 @@ type answerWait struct {
 
 	mu      sync.Mutex
 	settled bool
+	// cutoff answers how many of the turn's calls had arrived at the moment
+	// this wait SETTLES — read inside the same lock as the settlement, because
+	// a decline covers exactly the calls that existed then and a reading taken
+	// later has moved (ADR-anntnxdj §2). Nil for a wait with no turn to order.
+	cutoff func() uint64
 }
 
 func newAnswerWait(clock notify.Clock, tool string, limit time.Duration) *answerWait {
@@ -287,6 +297,15 @@ func (w *answerWait) settleLocked(a assistant.Answer) bool {
 		return false
 	}
 	w.settled = true
+	// THE CUTOFF IS TAKEN WITH THE SETTLEMENT, under the lock that decides it:
+	// the answer means "the calls that were queued behind this one when I was
+	// given", and that set is only knowable here. Every decline goes through
+	// this one gate — the person's, the expiry's, the server's — so no caller
+	// has to remember to stamp it.
+	if declined, ok := a.(assistant.Declined); ok && declined.Through == 0 && w.cutoff != nil {
+		declined.Through = w.cutoff()
+		a = declined
+	}
 	w.answers <- a
 	return true
 }
@@ -362,6 +381,33 @@ func (h agentHandlers) endAnswerWait(runID int64, w *answerWait) {
 	rc.approvalWait = nil
 	rc.pendingReason = ""
 	h.pendingRuns[runID] = rc
+}
+
+// takePendingAnswerWait claims whatever question this run has open. It is the
+// claim a person's MESSAGE makes (ADR-anntnxdj decision 4): they answered the
+// question they were looking at, so the message names no binding of its own. A
+// nil result means no question is open — the ordinary case for a message typed
+// while the agent simply answers — and the message declines nothing.
+func (h agentHandlers) takePendingAnswerWait(runID int64) *answerWait {
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[runID]
+	if !ok || rc.approvalWait == nil {
+		h.pendingRunsMu.Unlock()
+		return nil
+	}
+	w := rc.approvalWait
+	rc.approvalWait = nil
+	rc.pendingReason = ""
+	h.pendingRuns[runID] = rc
+	h.pendingRunsMu.Unlock()
+	// The same claim rule as agent.approve's: whoever holds settlement
+	// authority under the wait's own lock is the one that answers it.
+	w.mu.Lock()
+	if w.settled {
+		w.mu.Unlock()
+		return nil
+	}
+	return w
 }
 
 // takeAnswerWait claims the pending question agent.approve is answering. A nil

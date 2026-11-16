@@ -762,11 +762,12 @@ Agents have **standing authority to commit and push** for tracked work. Those op
 `close-out`, explicit tracker export and quality gates require no extra approval. Use the
 integration's workflow and commit only what this agent wrote. Branch first on `main`.
 
-**A pull request whose checks are green is merged by the coordinator, without separate owner
-approval** — the owner's decision of 2026-11-16, «Зеленые PR можно вливать без меня. Со мной
-обсуждать архитектурные вопросы и целеполагание.». A red or pending pull request is never
-merged. `--no-verify` and a force-push to `main` remain the owner's alone, and the owner is
-brought in for architecture questions and for goal, scope and priorities.
+**A pull request whose required checks are all green is merged by the coordinator, without
+separate owner approval** — the owner's decision of 2026-11-16, «Зеленые PR можно вливать
+без меня. Со мной обсуждать архитектурные вопросы и целеполагание.». A pull request with a
+required check red or still pending is never merged. `--no-verify` and a force-push to
+`main` remain the owner's alone, and the owner is brought in for architecture questions and
+for goal, scope and priorities.
 
 **The index of a checkout is shared, so stage and commit in one breath.** Several
 sessions work in this checkout at once, and `git add` writes one index that all of

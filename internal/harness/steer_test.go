@@ -443,6 +443,13 @@ func droppedSteersOf(t *testing.T, turn Turn) []string {
 // queueProtocol is an agent that keeps the messages it cannot use: a steer is
 // queued (and answered only when the answer file exists), and the queue-clearing
 // command answers with exactly what is left, in pi's shape.
+//
+// IT EMPTIES ITS QUEUE BEFORE IT ANSWERS, which is what pi does: the answer names
+// the messages the queue no longer holds. The order is the fixture's too, because
+// a caller that has read the answer has read a finished removal — printing first
+// left the message readable for a moment after the answer that removed it, and a
+// test checking the queue then could catch a message the agent had already
+// dropped (nocx-a62cl.6.3, fix round 4).
 type queueProtocol struct {
 	shellProtocol
 	dir string
@@ -462,8 +469,8 @@ steer)
   [ -f "$f" ] && echo end ;;
 clear_queue)
   list=$(awk 'NF{printf "%s\"%s\"",(n++?",":""),$0}' "$q")
-  echo "response $id [$list]"
-  : > "$q" ;;
+  : > "$q"
+  echo "response $id [$list]" ;;
 esac
 done`
 	return Launch{Argv: []string{"/bin/sh", "-c", script}}, nil

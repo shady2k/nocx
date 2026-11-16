@@ -48,3 +48,50 @@ func main() {
 }`
   assert.equal(violationsInText('main.go', source).length, 1)
 })
+
+test('error values do not hide a logger on the same line or inside a result literal', () => {
+  const source = `package x
+func f(cause error, lg Logger) {
+  lg.Error("failed", "cause", cause.Error())
+  result := []string{cause.Error()}
+  result = append(result, cause.Error(
+    /* no arguments */
+  ))
+}`
+  assert.deepEqual(
+    violationsInText('x.go', source).map((v) => v.text),
+    ['lg.Error("failed", "cause", cause.Error())'],
+  )
+})
+
+test('net/http.Error is a response function under its real import alias', () => {
+  for (const alias of ['http', 'web']) {
+    const source = `package x
+import ${alias} "net/http"
+func f(w ${alias}.ResponseWriter) {
+  ${alias}.Error(w, "bad request", ${alias}.StatusBadRequest)
+}`
+    assert.deepEqual(violationsInText('x.go', source), [])
+  }
+})
+
+test('a logger named http or shadowing the HTTP import still needs context', () => {
+  const source = `package x
+import web "net/http"
+func f(w web.ResponseWriter, http Logger) {
+  web.Error(w, "bad request", web.StatusBadRequest)
+  http.Error("actual log")
+}`
+  assert.deepEqual(
+    violationsInText('x.go', source).map((v) => v.text),
+    ['http.Error("actual log")'],
+  )
+  assert.equal(
+    violationsInText(
+      'x.go',
+      `import "net/http"
+func f() { http := newLogger(); http.Error("actual log") }`,
+    ).length,
+    1,
+  )
+})

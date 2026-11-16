@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.tabbyExecute.schema.json",
+  "title": "TabbyImportResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profilesImported", "groupsImported"],
+  "properties": {
+    "profilesImported": { "type": "integer", "minimum": 0 },
+    "groupsImported": { "type": "integer", "minimum": 0 },
+    "importErrors": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -214,6 +214,12 @@
     "reason": "The stream must observe the actor terminal after accepted endpoint calls settle before closing the ledger run. Request cancellation initiates actor cancellation but cannot cancel this settlement observer; operation scope values survive."
   },
   {
+    "file": "internal/transport/ws_config_handlers.go",
+    "text": "ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tabbyCleanupTimeout)",
+    "kind": "unscoped-context",
+    "reason": "A failed Tabby import must roll back its newly minted secrets even after request cancellation. WithoutCancel retains invocation values; cleanup stays inside the admitted config/vault operation, has a 30-second provider deadline, and retains unresolved IDs in the existing plan store. Cancellation and deadline regressions cover this settlement path (nocx-o2ubr)."
+  },
+  {
     "file": "internal/transport/ws.go",
     "text": "ctx := context.WithoutCancel(parent)",
     "reason": "A disconnected window must retire completed and live conversation sessions. Teardown starts its own internal operation scope independently of the disconnected socket context; the session actor bounds process retirement."

@@ -10,10 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/profile"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -43,161 +41,41 @@ func TestParseTabbyConfig(t *testing.T) {
 	if p.Type != "ssh" {
 		t.Errorf("type = %q, want ssh", p.Type)
 	}
-	if p.Options.Host != "prod-web1.example.com" {
-		t.Errorf("host = %q", p.Options.Host)
+	if p.Options["host"].Value != "prod-web1.example.com" {
+		t.Errorf("host = %q", p.Options["host"].Value)
 	}
-	if p.Options.User != "deploy" {
-		t.Errorf("user = %q", p.Options.User)
+	if p.Options["user"].Value != "deploy" {
+		t.Errorf("user = %q", p.Options["user"].Value)
 	}
 }
 
-func TestImportSSHProfilesOnly(t *testing.T) {
-	data, _ := os.ReadFile("testdata/tabby-config.yml")
-	cfg, err := ParseTabbyConfig(data)
+func TestPrepareFixtureProfilesAndGroups(t *testing.T) {
+	data, err := os.ReadFile("testdata/tabby-config.yml")
 	if err != nil {
-		t.Fatalf("ParseTabbyConfig: %v", err)
+		t.Fatal(err)
 	}
-
-	profStore := newMemStore()
-	if err := ImportProfiles(cfg, profStore, "ssh"); err != nil {
-		t.Fatalf("ImportProfiles: %v", err)
+	got, err := PrepareTabbyImport(data, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	profs, _ := profStore.LoadProfiles()
-	if len(profs) != 3 {
-		t.Fatalf("imported %d profiles, want 3 (all are ssh)", len(profs))
+	if len(got.Profiles) != 3 || len(got.Groups) != 3 {
+		t.Fatal("fixture profiles or groups missing")
 	}
-	for _, p := range profs {
-		if p.Type != "ssh" {
-			t.Errorf("non-ssh profile imported: %q", p.Type)
-		}
+	if got.Profiles[1].Group != "g-dev" || got.Groups[1].ParentGroupID != "g-prod" {
+		t.Fatal("nested grouping lost")
+	}
+	if *got.Profiles[2].Options.KeepaliveInterval != 10000 {
+		t.Fatal("global native defaults lost")
 	}
 }
 
-func TestImportGroups(t *testing.T) {
-	data, _ := os.ReadFile("testdata/tabby-config.yml")
-	cfg, _ := ParseTabbyConfig(data)
-
-	profStore := newMemStore()
-	if err := ImportGroups(cfg, profStore); err != nil {
-		t.Fatalf("ImportGroups: %v", err)
-	}
-
-	groups, _ := profStore.LoadGroups()
-	if len(groups) != 3 {
-		t.Fatalf("imported %d groups, want 3", len(groups))
-	}
-
-	var dev *profile.ProfileGroup
-	for i, g := range groups {
-		if g.ID == "g-dev" {
-			dev = &groups[i]
-		}
-	}
-	if dev == nil {
-		t.Fatal("g-dev not imported")
-	}
-	if dev.ParentGroupID != "g-prod" {
-		t.Errorf("g-dev parentGroupId = %q, want g-prod", dev.ParentGroupID)
-	}
-	if dev.Name != "Development" {
-		t.Errorf("g-dev name = %q, want Development", dev.Name)
-	}
-}
-
-func TestImportPreservesNestedGrouping(t *testing.T) {
-	data, _ := os.ReadFile("testdata/tabby-config.yml")
-	cfg, _ := ParseTabbyConfig(data)
-
-	profStore := newMemStore()
-	_ = ImportGroups(cfg, profStore)
-	_ = ImportProfiles(cfg, profStore, "ssh")
-
-	profs, _ := profStore.LoadProfiles()
-	var devBox *profile.SSHProfile
-	for i, p := range profs {
-		if p.Name == "dev-box" {
-			devBox = &profs[i]
-		}
-	}
-	if devBox == nil {
-		t.Fatal("dev-box profile not imported")
-	}
-	if devBox.Group != "g-dev" {
-		t.Errorf("dev-box group = %q, want g-dev", devBox.Group)
-	}
-}
-
-func TestDedupByHostPortUser(t *testing.T) {
-	data, _ := os.ReadFile("testdata/tabby-config.yml")
-	cfg, _ := ParseTabbyConfig(data)
-
-	profStore := newMemStore()
-	_ = ImportProfiles(cfg, profStore, "ssh")
-	// Re-import should not duplicate.
-	_ = ImportProfiles(cfg, profStore, "ssh")
-
-	profs, _ := profStore.LoadProfiles()
-	if len(profs) != 3 {
-		t.Errorf("after re-import, %d profiles (should dedup to 3)", len(profs))
-	}
-}
-
-func TestImportToJSONStore(t *testing.T) {
-	data, _ := os.ReadFile("testdata/tabby-config.yml")
-	cfg, _ := ParseTabbyConfig(data)
-
-	dir := t.TempDir()
-	store := profile.NewJSONStore(filepath.Join(dir, "imported.json"))
-
-	if err := ImportProfiles(cfg, store, "ssh"); err != nil {
-		t.Fatalf("ImportProfiles to JSONStore: %v", err)
-	}
-	if err := ImportGroups(cfg, store); err != nil {
-		t.Fatalf("ImportGroups to JSONStore: %v", err)
-	}
-
-	// Reload from disk to verify persistence.
-	store2 := profile.NewJSONStore(filepath.Join(dir, "imported.json"))
-	profs, _ := store2.LoadProfiles()
-	if len(profs) != 3 {
-		t.Errorf("reloaded %d profiles, want 3", len(profs))
-	}
-	groups, _ := store2.LoadGroups()
-	if len(groups) != 3 {
-		t.Errorf("reloaded %d groups, want 3", len(groups))
-	}
-}
-
-func TestImportHandlesNonSSHProfiles(t *testing.T) {
-	// A config with a mix of ssh and non-ssh profiles should import only ssh.
-	yaml := []byte(`
-version: 8
-profiles:
-  - id: "ssh:custom:ssh1:1111"
-    type: ssh
-    name: ssh1
-    options: {host: h1, port: 22, user: u1}
-  - id: "local:custom:loc1:2222"
-    type: local
-    name: loc1
-    options: {command: /bin/zsh}
+func TestPrepareSkipsNonSSHProfiles(t *testing.T) {
+	got := prepareFixture(t, `profiles:
+  - {id: "ssh:p", type: ssh, options: {host: example}}
+  - {id: "local:p", type: local, options: {command: /bin/sh}}
 `)
-	cfg, err := ParseTabbyConfig(yaml)
-	if err != nil {
-		t.Fatalf("ParseTabbyConfig: %v", err)
-	}
-
-	store := newMemStore()
-	if err := ImportProfiles(cfg, store, "ssh"); err != nil {
-		t.Fatalf("ImportProfiles: %v", err)
-	}
-	profs, _ := store.LoadProfiles()
-	if len(profs) != 1 {
-		t.Fatalf("imported %d profiles, want 1 (ssh only)", len(profs))
-	}
-	if profs[0].Type != "ssh" {
-		t.Errorf("type = %q, want ssh", profs[0].Type)
+	if len(got.Profiles) != 1 || got.Profiles[0].Type != "ssh" {
+		t.Fatal("non-SSH profile imported")
 	}
 }
 
@@ -235,11 +113,10 @@ func encryptTestVault(t *testing.T, contents *TabbyVaultContents, passphrase str
 	ciphertext := make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
 	return &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(ciphertext),
-		KeySalt:   hex.EncodeToString(salt),
-		IV:        hex.EncodeToString(iv),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(ciphertext),
+		KeySalt:  hex.EncodeToString(salt),
+		IV:       hex.EncodeToString(iv),
 	}
 }
 
@@ -311,8 +188,8 @@ func TestDecryptTabbyVaultWrongVersion(t *testing.T) {
 	}
 }
 
-func TestDecryptTabbyVaultNotEncrypted(t *testing.T) {
-	v := &TabbyVault{Version: 1, Encrypted: false, Contents: "AAAA", KeySalt: "00", IV: "00000000000000000000000000000000"}
+func TestDecryptTabbyVaultMalformedNativeEnvelope(t *testing.T) {
+	v := &TabbyVault{Version: 1, Contents: "AAAA", KeySalt: "00", IV: "00000000000000000000000000000000"}
 	_, err := DecryptTabbyVault(v, "passphrase")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -344,11 +221,10 @@ func TestDecryptTabbyVaultInvalidSaltHex(t *testing.T) {
 
 func TestDecryptTabbyVaultWrongSaltLength(t *testing.T) {
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(make([]byte, 16)),
-		KeySalt:   hex.EncodeToString(make([]byte, 4)),
-		IV:        hex.EncodeToString(make([]byte, 16)),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(make([]byte, 16)),
+		KeySalt:  hex.EncodeToString(make([]byte, 4)),
+		IV:       hex.EncodeToString(make([]byte, 16)),
 	}
 	_, err := DecryptTabbyVault(v, "pass")
 	if err != ErrDecryptFailed {
@@ -370,11 +246,10 @@ func TestDecryptTabbyVaultInvalidIVHex(t *testing.T) {
 
 func TestDecryptTabbyVaultWrongIVLength(t *testing.T) {
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(make([]byte, 16)),
-		KeySalt:   hex.EncodeToString(make([]byte, 8)),
-		IV:        hex.EncodeToString(make([]byte, 8)),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(make([]byte, 16)),
+		KeySalt:  hex.EncodeToString(make([]byte, 8)),
+		IV:       hex.EncodeToString(make([]byte, 8)),
 	}
 	_, err := DecryptTabbyVault(v, "pass")
 	if err != ErrDecryptFailed {
@@ -396,11 +271,10 @@ func TestDecryptTabbyVaultInvalidContentsBase64(t *testing.T) {
 
 func TestDecryptTabbyVaultEmptyContents(t *testing.T) {
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  "",
-		KeySalt:   hex.EncodeToString(make([]byte, 8)),
-		IV:        hex.EncodeToString(make([]byte, 16)),
+		Version:  1,
+		Contents: "",
+		KeySalt:  hex.EncodeToString(make([]byte, 8)),
+		IV:       hex.EncodeToString(make([]byte, 16)),
 	}
 	_, err := DecryptTabbyVault(v, "pass")
 	if err != ErrDecryptFailed {
@@ -410,11 +284,10 @@ func TestDecryptTabbyVaultEmptyContents(t *testing.T) {
 
 func TestDecryptTabbyVaultCiphertextNotBlockAligned(t *testing.T) {
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString([]byte("short")),
-		KeySalt:   hex.EncodeToString(make([]byte, 8)),
-		IV:        hex.EncodeToString(make([]byte, 16)),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString([]byte("short")),
+		KeySalt:  hex.EncodeToString(make([]byte, 8)),
+		IV:       hex.EncodeToString(make([]byte, 16)),
 	}
 	_, err := DecryptTabbyVault(v, "pass")
 	if err != ErrDecryptFailed {
@@ -424,11 +297,10 @@ func TestDecryptTabbyVaultCiphertextNotBlockAligned(t *testing.T) {
 
 func TestDecryptTabbyVaultGarbageDecryptsToInvalidJSON(t *testing.T) {
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		KeySalt:   hex.EncodeToString(make([]byte, 8)),
-		IV:        hex.EncodeToString(make([]byte, 16)),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		KeySalt:  hex.EncodeToString(make([]byte, 8)),
+		IV:       hex.EncodeToString(make([]byte, 16)),
 	}
 	_, err := DecryptTabbyVault(v, "some-passphrase")
 	if err != ErrDecryptFailed {
@@ -442,11 +314,10 @@ func TestDecryptTabbyVaultCiphertextTooLarge(t *testing.T) {
 		big[i] = 'A'
 	}
 	v := &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  string(big),
-		KeySalt:   hex.EncodeToString(make([]byte, 8)),
-		IV:        hex.EncodeToString(make([]byte, 16)),
+		Version:  1,
+		Contents: string(big),
+		KeySalt:  hex.EncodeToString(make([]byte, 8)),
+		IV:       hex.EncodeToString(make([]byte, 16)),
 	}
 	_, err := DecryptTabbyVault(v, "pass")
 	if err != ErrDecryptFailed {
@@ -456,7 +327,7 @@ func TestDecryptTabbyVaultCiphertextTooLarge(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONMissingType(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"key":"k","value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -465,7 +336,7 @@ func TestDecryptTabbyVaultJSONMissingType(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONMissingKey(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -474,7 +345,7 @@ func TestDecryptTabbyVaultJSONMissingKey(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONMissingValue(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","key":"k"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -483,16 +354,15 @@ func TestDecryptTabbyVaultJSONMissingValue(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONMissingConfig(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"secrets":[{"type":"password","key":"k","value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
-	_, err := DecryptTabbyVault(v, "pw")
-	if err != ErrDecryptFailed {
-		t.Fatalf("expected ErrDecryptFailed, got %v", err)
+	got, err := DecryptTabbyVault(ciphertext, "pw")
+	if err != nil || len(got.DecodedSecrets()) != 1 {
+		t.Fatalf("native secrets-only vault rejected: %v", err)
 	}
 }
 
 func TestDecryptTabbyVaultJSONMissingSecrets(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -501,7 +371,7 @@ func TestDecryptTabbyVaultJSONMissingSecrets(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONUnknownSecretField(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","key":"k","value":"v","extra":"x"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -510,7 +380,7 @@ func TestDecryptTabbyVaultJSONUnknownSecretField(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONUnknownTopLevelField(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[],"extra":"x"}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -519,7 +389,7 @@ func TestDecryptTabbyVaultJSONUnknownTopLevelField(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONTrailingTokens(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[]}trailing`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -528,7 +398,7 @@ func TestDecryptTabbyVaultJSONTrailingTokens(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONEmptyType(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"","key":"k","value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -538,7 +408,7 @@ func TestDecryptTabbyVaultJSONEmptyType(t *testing.T) {
 func TestDecryptTabbyVaultJSONMissingKeyField(t *testing.T) {
 	// Key omitted entirely (nil RawMessage).
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -590,7 +460,7 @@ func TestDecryptTabbyVaultJSONKeyTooLarge(t *testing.T) {
 		t.Fatalf("test key too small: %d", len(keyJSON))
 	}
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","key":`+keyJSON+`,"value":"v"}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -615,7 +485,7 @@ func TestDecryptTabbyVaultJSONEmptyValue(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONValueIsNull(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","key":"k","value":null}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -624,7 +494,7 @@ func TestDecryptTabbyVaultJSONValueIsNull(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONValueIsObject(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":[{"type":"password","key":"k","value":{}}]}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -634,7 +504,7 @@ func TestDecryptTabbyVaultJSONValueIsObject(t *testing.T) {
 func TestDecryptTabbyVaultJSONTypeTooLong(t *testing.T) {
 	typ := string(make([]byte, tabbyMaxSecretTypeLen+1))
 	ciphertext := encryptTestPlaintext(t, fmt.Sprintf(`{"config":null,"secrets":[{"type":%q,"key":"k","value":"v"}]}`, typ))
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -644,7 +514,7 @@ func TestDecryptTabbyVaultJSONTypeTooLong(t *testing.T) {
 func TestDecryptTabbyVaultJSONValueTooLong(t *testing.T) {
 	value := string(make([]byte, tabbyMaxSecretValueLen+1))
 	ciphertext := encryptTestPlaintext(t, fmt.Sprintf(`{"config":null,"secrets":[{"type":"password","key":"k","value":%q}]}`, value))
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -688,7 +558,7 @@ func TestDecryptTabbyVaultExactMaxSecrets(t *testing.T) {
 
 func TestDecryptTabbyVaultJSONNotAnObject(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `"just a string"`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -697,7 +567,7 @@ func TestDecryptTabbyVaultJSONNotAnObject(t *testing.T) {
 
 func TestDecryptTabbyVaultSecretsNotArray(t *testing.T) {
 	ciphertext := encryptTestPlaintext(t, `{"config":null,"secrets":"not-an-array"}`)
-	v := &TabbyVault{Version: 1, Encrypted: true, Contents: ciphertext.Contents, KeySalt: ciphertext.KeySalt, IV: ciphertext.IV}
+	v := ciphertext
 	_, err := DecryptTabbyVault(v, "pw")
 	if err != ErrDecryptFailed {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
@@ -735,10 +605,9 @@ func encryptTestPlaintextFromBytes(t *testing.T, plaintext []byte, passphrase st
 	ciphertext := make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
 	return &TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(ciphertext),
-		KeySalt:   hex.EncodeToString(salt),
-		IV:        hex.EncodeToString(iv),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(ciphertext),
+		KeySalt:  hex.EncodeToString(salt),
+		IV:       hex.EncodeToString(iv),
 	}
 }

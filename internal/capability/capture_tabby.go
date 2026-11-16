@@ -107,17 +107,23 @@ func (s *captureSaveService) RewriteRedaction(ctx context.Context, entryID strin
 // Tabby import — the config + vault write of profiles.tabby*
 // ---------------------------------------------------------------------------
 
-// TabbyImportService is the domain surface of the Tabby import flow: the
-// config reads the planner needs, the vault write the executor needs, and
-// the atomic config write. The plan/parse logic stays with the handler
-// (it owns the Tabby YAML grammar); this service is the only store access.
+// TabbyImportService owns the config reads, merge validation, and reversible
+// secret writes needed by the import handler. Source parsing belongs to importer.
 type TabbyImportService interface {
 	ListProfiles() ([]profile.SSHProfile, error)
 	ListGroups() ([]profile.ProfileGroup, error)
 	// CreateSecret stores value with its catalogue metadata (ADR-0016);
 	// when no vault is wired, the plain store records it namelessly.
 	CreateSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
+	DeleteSecret(ctx context.Context, id credential.SecretID) error
+	ValidateImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) error
 	AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult
+}
+
+// TabbyImportVault exposes only the mint and rollback operations import needs.
+type TabbyImportVault interface {
+	CreateNamed(context.Context, credential.Secret, vault.SecretMeta) (credential.SecretID, error)
+	Delete(context.Context, credential.SecretID) error
 }
 
 // TabbyImportOperation is the typed operation for profiles.importTabby,
@@ -136,7 +142,7 @@ func NewTabbyImportOperation(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
-	vaultLifecycle SecretVault,
+	vaultLifecycle TabbyImportVault,
 	store credential.SecretStore,
 ) TabbyImportOperation {
 	g := &guard{}
@@ -155,7 +161,7 @@ func newTabbyImportService(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
-	vaultLifecycle SecretVault,
+	vaultLifecycle TabbyImportVault,
 	store credential.SecretStore,
 ) *tabbyImportService {
 	return &tabbyImportService{guard: g, profiles: profiles, groups: groups, svc: svc, vault: vaultLifecycle, store: store}
@@ -166,7 +172,7 @@ type tabbyImportService struct {
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
 	svc      *profile.ProfileService
-	vault    SecretVault
+	vault    TabbyImportVault
 	store    credential.SecretStore
 }
 
@@ -194,6 +200,26 @@ func (s *tabbyImportService) CreateSecret(ctx context.Context, value credential.
 	return s.vault.CreateNamed(ctx, value, meta)
 }
 
+func (s *tabbyImportService) DeleteSecret(ctx context.Context, id credential.SecretID) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.vault == nil {
+		return s.store.Delete(ctx, id)
+	}
+	return s.vault.Delete(ctx, id)
+}
+
+func (s *tabbyImportService) ValidateImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.svc.ValidateImport(profiles, groups)
+}
+
 func (s *tabbyImportService) AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult {
+	if err := s.guard.check(); err != nil {
+		return &profile.ImportResult{ImportErrors: []string{err.Error()}}
+	}
 	return s.svc.AtomicImport(profiles, groups)
 }

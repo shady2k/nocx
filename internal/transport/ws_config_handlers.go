@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -29,7 +30,6 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/importer"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -1455,9 +1455,8 @@ func (h settingsHandlers) handleSet(ss capability.SettingsService, req jsonrpcRe
 	_ = h.r.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }
 
-// tabbyHandlers answers the Tabby import methods. The parse/plan logic stays
-// in the handler (it owns the Tabby YAML grammar); the TabbyImportService is
-// the only store access (migration map). configWired controls the
+// tabbyHandlers owns plan lifecycle and execution; importer owns source parsing.
+// TabbyImportService is the only store access. configWired controls the
 // "profiles not available" refusal; executeWired the "import not available"
 // refusal; storeWired the "credential store not available" refusal — all
 // three are the old handler's nil-checks, preserved as construction facts.
@@ -1468,7 +1467,6 @@ type tabbyHandlers struct {
 	storeWired   bool // credential store wired (secrets can be minted)
 	plans        tabbyPlanStore
 	providerName func(context.Context) string // transport-owned answer to "which store would hold imported secrets"
-	log          log.Logger
 	r            Responder
 }
 
@@ -1572,12 +1570,12 @@ func (h settingsHandlers) handleSecretExists(ss capability.SettingsService, req 
 	_ = h.r.TryResult(req.ID, mustMarshal(map[string]bool{"exists": exists}))
 }
 
-// tabbyPlanStore is the transport-owned one-time import plan store: plans
-// are decrypted server-side and never reach the renderer; the handler gets
-// exactly the four plan-lifecycle operations, nothing else.
+// tabbyPlanStore owns executable previews and residual cleanup from abandoned
+// attempts. Neither decrypted source nor secret identifiers reach the renderer.
 type tabbyPlanStore interface {
 	storePlan(plan *importPlan) (string, error)
 	claimPlan(token string) *importPlan
+	claimCleanupPlan() (string, *importPlan)
 	releasePlan(token string)
 	finishPlan(token string)
 }
@@ -1605,7 +1603,12 @@ func (h tabbyHandlers) handleTabbyPreview(ctx context.Context, req jsonrpcReques
 			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Tabby preview: ", err))
 			return nil
 		}
-		_ = plan // stored server-side by preview.PlanToken
+		token, err := h.plans.storePlan(plan)
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store plan: ", err))
+			return nil
+		}
+		preview.PlanToken = token
 		_ = h.r.TryResult(req.ID, mustMarshal(preview))
 		return nil
 	})
@@ -1660,48 +1663,10 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 	defer release()
 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.TabbyImportService) error {
-		// Mint every secret, binding each password onto the profile whose
-		// options match the target the tabby vault keyed it to (ADR-0017 §1).
-		// Passphrases are minted as unbound rows: a passphrase belongs to a
-		// private key the import cannot fingerprint, and the connection
-		// editor binds it.
-		for _, cp := range plan.creds {
-			kind := vault.KindPassword
-			if cp.isPassphrase {
-				kind = vault.KindKeyPassphrase
-			}
-			secretID, err := svc.CreateSecret(ctx, credential.NewSecret(cp.secret),
-				vault.SecretMeta{Name: cp.name, Kind: kind})
-			if err != nil {
-				release()
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
-				return nil
-			}
-			if cp.isPassphrase {
-				continue
-			}
-			for i := range plan.profiles {
-				o := &plan.profiles[i].Options
-				port := 0
-				if o.Port != nil {
-					port = *o.Port
-				}
-				user := ""
-				if o.User != nil {
-					user = *o.User
-				}
-				if user == cp.targetUser && o.Host == cp.targetHost && port == cp.targetPort {
-					o.PasswordSecret = string(secretID)
-					break
-				}
-			}
-		}
-
-		// No credential records are imported: the bindings live on the profiles.
-		result := svc.AtomicImport(plan.profiles, plan.groups)
-		if len(result.ImportErrors) > 0 {
+		result, err := h.executeTabbyImport(ctx, svc, plan)
+		if err != nil {
 			release()
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Import failed: ", err))
 			return nil
 		}
 
@@ -1737,7 +1702,39 @@ func (h tabbyHandlers) handleImportTabby(ctx context.Context, req jsonrpcRequest
 	}
 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.TabbyImportService) error {
-		h.doImportTabby(ctx, svc, params, req)
+		plan, _, err := h.planTabbyImport(ctx, svc, params.Config, params.Passphrase)
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Tabby import: ", err))
+			return nil
+		}
+		if cleanupErr := h.cleanupPendingTabbyPlans(ctx, svc); cleanupErr != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Import cleanup pending: ", cleanupErr))
+			return nil
+		}
+		// Reserve ownership before any mint, so even failed rollback has a
+		// home. A later request must settle this attempt before minting again.
+		token, err := h.plans.storePlan(plan)
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store plan: ", err))
+			return nil
+		}
+		if h.plans.claimPlan(token) == nil {
+			h.plans.finishPlan(token)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Import plan unavailable"})
+			return nil
+		}
+		result, err := h.executeTabbyImport(ctx, svc, plan)
+		if len(plan.pendingSecrets) > 0 {
+			plan.retainCleanupOnly()
+			h.plans.releasePlan(token)
+		} else {
+			h.plans.finishPlan(token)
+		}
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Import failed: ", err))
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(result.ProfilesImported))
 		return nil
 	})
 	if err != nil {
@@ -1745,203 +1742,128 @@ func (h tabbyHandlers) handleImportTabby(ctx context.Context, req jsonrpcRequest
 	}
 }
 
-// doImportTabby is the shared import body; it responds to req on every path.
-func (h tabbyHandlers) doImportTabby(ctx context.Context, svc capability.TabbyImportService, params struct {
-	Config     string `json:"config"`
-	Passphrase string `json:"passphrase,omitempty"`
-}, req jsonrpcRequest,
-) {
-	cfg, err := importer.ParseTabbyConfig([]byte(params.Config))
-	if err != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Parse Tabby config: " + err.Error()})
-		return
+// Cleanup survives request cancellation but must release the config/vault gate
+// even when a provider cannot finish deleting. Unfinished IDs stay owned.
+const tabbyCleanupTimeout = 30 * time.Second
+
+// rollbackTabbySecrets retains failed deletions on the plan. A retry must
+// finish this cleanup before minting anything else. Cancellation of the request
+// does not cancel cleanup, and every cleanup failure remains in the returned error.
+func rollbackTabbySecrets(ctx context.Context, svc capability.TabbyImportService, plan *importPlan) error {
+	if len(plan.pendingSecrets) == 0 {
+		return nil
 	}
-
-	// Decrypt vault and build credentials + profile matching.
-	// Profiles carry their secret bindings directly (ADR-0017): the minted
-	// password reference goes into the profile's own options, matched by the
-	// connection target the tabby vault keyed it to.
-	type pwKey struct {
-		user, host string
-		port       int
-	}
-	pwLookup := make(map[pwKey]credential.SecretID)
-
-	if cfg.Vault != nil && cfg.Vault.Encrypted {
-		if !h.storeWired {
-			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", errors.New("credential store not available")))
-			return
-		}
-		if params.Passphrase == "" {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Vault is encrypted: passphrase required"})
-			return
-		}
-		vaultContents, err := importer.DecryptTabbyVault(cfg.Vault, params.Passphrase)
-		if err != nil {
-			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Decrypt vault: ", err))
-			return
-		}
-
-		// Plan every secret before creating any, so a shape we cannot read
-		// never leaves an orphaned secret behind.
-		//
-		// A secret we cannot interpret is SKIPPED, never fatal. Tabby's vault
-		// is shared by every plugin the user has installed, so an unknown type
-		// is normal rather than exceptional — and aborting on one would throw
-		// away the profiles and groups that imported fine. The shapes below are
-		// verified against tabby-ssh/src/services/passwordStorage.service.ts.
-		type secretPlan struct {
-			ts        importer.TabbySecret
-			val       string
-			keyName   string // private-key identifier (key-passphrase)
-			keyTarget *pwKey // connection target (password)
-		}
-		plans := make([]secretPlan, 0, len(vaultContents.DecodedSecrets()))
-		skipped := 0
-		for _, sec := range vaultContents.DecodedSecrets() {
-			var val string
-			if err := json.Unmarshal(sec.Value, &val); err != nil || val == "" {
-				h.log.Warn("tabby import: skipping secret with unreadable value", "type", sec.Type)
-				skipped++
-				continue
-			}
-			switch sec.Type {
-			case "ssh:password":
-				// getVaultKeyForConnection → {user, host, port}
-				var t struct {
-					User string `json:"user"`
-					Host string `json:"host"`
-					Port int    `json:"port"`
-				}
-				if err := json.Unmarshal(sec.Key, &t); err != nil || t.Host == "" {
-					h.log.Warn("tabby import: skipping password secret with unreadable key")
-					skipped++
-					continue
-				}
-				plans = append(plans, secretPlan{
-					ts:        sec,
-					val:       val,
-					keyTarget: &pwKey{user: t.User, host: t.Host, port: t.Port},
-				})
-			case "ssh:key-passphrase":
-				// getVaultKeyForPrivateKey → {hash: id}. It is an object, not a
-				// string: reading it as a string failed for every real Tabby
-				// vault and, before this, aborted the whole import.
-				var k struct {
-					Hash string `json:"hash"`
-				}
-				if err := json.Unmarshal(sec.Key, &k); err != nil || k.Hash == "" {
-					h.log.Warn("tabby import: skipping key-passphrase secret with unreadable key")
-					skipped++
-					continue
-				}
-				plans = append(plans, secretPlan{ts: sec, val: val, keyName: privateKeyLabel(k.Hash)})
-			default:
-				// Everything else, including Tabby's "file" secrets. Those hold
-				// base64 file CONTENT — usually a private key — which is not a
-				// credential secret and does not belong in a password slot.
-				// Importing key material is its own feature, not a side effect
-				// of this one.
-				h.log.Info("tabby import: skipping secret of unhandled type", "type", sec.Type)
-				skipped++
-			}
-		}
-		if skipped > 0 {
-			h.log.Info("tabby import: some vault secrets were not imported", "skipped", skipped, "imported", len(plans))
-		}
-
-		// All secrets validated. Create each one in the SecretStore, carrying
-		// the name the credential will bear (ADR-0016: the secret owns its
-		// name, and an import mints both together).
-		for _, p := range plans {
-			name := p.keyName
-			kind := vault.KindKeyPassphrase
-			if p.ts.Type == "ssh:password" {
-				name = p.keyTarget.user + "@" + p.keyTarget.host
-				kind = vault.KindPassword
-			}
-			secretID, err := svc.CreateSecret(ctx, credential.NewSecret(p.val),
-				vault.SecretMeta{Name: name, Kind: kind})
-			if err != nil {
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
-				return
-			}
-			switch p.ts.Type {
-			case "ssh:password":
-				// The secret is bound to the connection it belongs to; no
-				// credential record is minted (ADR-0017 §1).
-				pwLookup[*p.keyTarget] = secretID
-			case "ssh:key-passphrase":
-				// Passphrases stay unbound rows: a passphrase belongs to a
-				// private key, and the imported key is a path whose
-				// fingerprint is not readable at import time. The connection
-				// editor's secret picker binds it where the user chooses.
-				_ = p.keyName
-			}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tabbyCleanupTimeout)
+	defer cancel()
+	pending := plan.pendingSecrets[:0]
+	var cleanupErr error
+	for _, id := range plan.pendingSecrets {
+		if err := svc.DeleteSecret(ctx, id); err != nil {
+			pending = append(pending, id)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("rollback imported secret: %w", err))
 		}
 	}
-
-	// Domain service path: atomic import.
-	var profiles []profile.SSHProfile
-	for _, tp := range cfg.Profiles {
-		if tp.Type != "ssh" {
-			continue
-		}
-		p := importer.ConvertProfile(tp)
-		if p.Options.User != nil && p.Options.Host != "" {
-			port := 0
-			if p.Options.Port != nil {
-				port = *p.Options.Port
-			}
-			user := ""
-			if p.Options.User != nil {
-				user = *p.Options.User
-			}
-			if secretID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
-				p.Options.PasswordSecret = string(secretID)
-			}
-		}
-		profiles = append(profiles, p)
-	}
-
-	var groups []profile.ProfileGroup
-	for _, tg := range cfg.Groups {
-		var defaults *profile.ProfileDefaults
-		if tg.Defaults != nil {
-			d, err := profile.DecodeDefaults(tg.Defaults)
-			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)})
-				return
-			}
-			defaults = &d
-		}
-		groups = append(groups, profile.ProfileGroup{
-			ID:            tg.ID,
-			ParentGroupID: tg.ParentGroupID,
-			Name:          tg.Name,
-			Icon:          tg.Icon,
-			Color:         tg.Color,
-			Defaults:      defaults,
-			Editable:      true,
-		})
-	}
-
-	result := svc.AtomicImport(profiles, groups)
-	if len(result.ImportErrors) > 0 {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
-		return
-	}
-	_ = h.r.TryResult(req.ID, mustMarshal(result.ProfilesImported))
+	plan.pendingSecrets = pending
+	return cleanupErr
 }
 
-// planTabbyImport parses a Tabby config, decrypts its vault (if passphrase
-// supplied), and plans every profile, group, and secret WITHOUT writing
-// anything. Returns the full importPlan for execution and a preview response
-// for the renderer. The plan is stored server-side by the returned token.
-// The only store access is through the TabbyImportService (the collision
-// reads); everything else is pure parsing.
+type tabbyPasswordTarget struct {
+	user, host string
+	port       int
+}
+
+func (h tabbyHandlers) cleanupPendingTabbyPlans(ctx context.Context, svc capability.TabbyImportService) error {
+	for {
+		token, plan := h.plans.claimCleanupPlan()
+		if plan == nil {
+			return nil
+		}
+		if err := rollbackTabbySecrets(ctx, svc, plan); err != nil {
+			h.plans.releasePlan(token)
+			return err
+		}
+		if plan.cleanupOnly {
+			h.plans.finishPlan(token)
+		} else {
+			// A new preview may settle an older failed attempt without
+			// invalidating that attempt's still-valid retry token.
+			h.plans.releasePlan(token)
+		}
+	}
+}
+
+// executeTabbyImport is shared by one-shot and preview/execute imports.
+// Only this attempt's minted secrets are rolled back; the immutable source
+// profiles are copied so failed attempts never leave stale secret references.
+func (h tabbyHandlers) executeTabbyImport(ctx context.Context, svc capability.TabbyImportService, plan *importPlan) (*profile.ImportResult, error) {
+	if err := h.cleanupPendingTabbyPlans(ctx, svc); err != nil {
+		return nil, err
+	}
+	if err := rollbackTabbySecrets(ctx, svc, plan); err != nil {
+		return nil, err
+	}
+	if err := svc.ValidateImport(plan.profiles, plan.groups); err != nil {
+		return nil, err
+	}
+	if len(plan.creds) > 0 && !h.storeWired {
+		return nil, errors.New("credential store not available")
+	}
+	profiles := plan.profiles
+	if len(plan.creds) > 0 {
+		profiles = append([]profile.SSHProfile(nil), profiles...)
+	}
+	passwords := make(map[tabbyPasswordTarget]credential.SecretID)
+	inline := make(map[string]credential.SecretID)
+	plan.pendingSecrets = make([]credential.SecretID, 0, len(plan.creds))
+	for _, cp := range plan.creds {
+		kind := vault.KindPassword
+		if cp.isPassphrase {
+			kind = vault.KindKeyPassphrase
+		}
+		id, err := svc.CreateSecret(ctx, credential.NewSecret(cp.secret), vault.SecretMeta{Name: cp.name, Kind: kind})
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("store secret: %w", err), rollbackTabbySecrets(ctx, svc, plan))
+		}
+		plan.pendingSecrets = append(plan.pendingSecrets, id)
+		if cp.isPassphrase {
+			continue
+		}
+		if cp.profileID != "" {
+			inline[cp.profileID] = id
+		} else {
+			passwords[tabbyPasswordTarget{cp.targetUser, cp.targetHost, cp.targetPort}] = id
+		}
+	}
+	for i := range profiles {
+		p := &profiles[i]
+		user, port := "root", 22
+		if p.Options.User != nil {
+			user = *p.Options.User
+		}
+		if p.Options.Port != nil {
+			port = *p.Options.Port
+		}
+		if id, ok := inline[p.ID]; ok {
+			p.Options.PasswordSecret = string(id)
+		} else if id, ok := passwords[tabbyPasswordTarget{user, p.Options.Host, port}]; ok {
+			p.Options.PasswordSecret = string(id)
+		} else if id, ok := passwords[tabbyPasswordTarget{user, "", port}]; ok && p.Options.PasswordSecret == "" {
+			p.Options.PasswordSecret = string(id)
+		}
+	}
+	result := svc.AtomicImport(profiles, plan.groups)
+	if len(result.ImportErrors) > 0 {
+		return nil, errors.Join(errors.New(strings.Join(result.ImportErrors, "; ")), rollbackTabbySecrets(ctx, svc, plan))
+	}
+	// The profile commit now owns these secrets: never roll them back afterward.
+	plan.pendingSecrets = nil
+	return result, nil
+}
+
+// planTabbyImport converts source data through importer and validates the merge
+// without writes. Both handlers reserve plan ownership before execution.
 func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.TabbyImportService, configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
-	cfg, err := importer.ParseTabbyConfig([]byte(configYAML))
+	prepared, err := importer.PrepareTabbyImport([]byte(configYAML), passphrase)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1952,109 +1874,78 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 	var credentials []credentialPlan
 	skipped := make([]SkippedInfo, 0)
 
-	if cfg.Vault != nil && cfg.Vault.Encrypted {
-		if passphrase == "" {
-			return nil, nil, errors.New("vault is encrypted: passphrase required")
+	for _, sec := range prepared.Secrets {
+		var val string
+		umErr := json.Unmarshal(sec.Value, &val)
+		if umErr != nil || val == "" {
+			skipped = append(skipped, SkippedInfo{
+				SecretType: sec.Type,
+				Reason:     "unreadable value",
+			})
+			continue
 		}
-		vaultContents, decryptErr := importer.DecryptTabbyVault(cfg.Vault, passphrase)
-		if decryptErr != nil {
-			return nil, nil, decryptErr
-		}
-
-		for _, sec := range vaultContents.DecodedSecrets() {
-			var val string
-			umErr := json.Unmarshal(sec.Value, &val)
-			if umErr != nil || val == "" {
+		switch sec.Type {
+		case "ssh:password":
+			var t struct {
+				User *string `json:"user"`
+				Host *string `json:"host"`
+				Port *int    `json:"port"`
+			}
+			umErr = json.Unmarshal(sec.Key, &t)
+			if umErr != nil || t.Host == nil {
 				skipped = append(skipped, SkippedInfo{
 					SecretType: sec.Type,
-					Reason:     "unreadable value",
+					Reason:     "unreadable key (missing host)",
 				})
 				continue
 			}
-			switch sec.Type {
-			case "ssh:password":
-				var t struct {
-					User string `json:"user"`
-					Host string `json:"host"`
-					Port int    `json:"port"`
-				}
-				umErr = json.Unmarshal(sec.Key, &t)
-				if umErr != nil || t.Host == "" {
-					skipped = append(skipped, SkippedInfo{
-						SecretType: sec.Type,
-						Reason:     "unreadable key (missing host)",
-					})
-					continue
-				}
-				name := t.User + "@" + t.Host
-				credentials = append(credentials, credentialPlan{
-					name:       name,
-					secret:     val,
-					targetUser: t.User,
-					targetHost: t.Host,
-					targetPort: t.Port,
-				})
+			user, port := "root", 22
+			if t.User != nil {
+				user = *t.User
+			}
+			if t.Port != nil {
+				port = *t.Port
+			}
+			name := user + "@" + *t.Host
+			credentials = append(credentials, credentialPlan{
+				name:       name,
+				secret:     val,
+				targetUser: user,
+				targetHost: *t.Host,
+				targetPort: port,
+				profileID:  sec.ProfileID,
+			})
 
-			case "ssh:key-passphrase":
-				var k struct {
-					Hash string `json:"hash"`
-				}
-				umErr = json.Unmarshal(sec.Key, &k)
-				if umErr != nil || k.Hash == "" {
-					skipped = append(skipped, SkippedInfo{
-						SecretType: sec.Type,
-						Reason:     "unreadable key (missing hash)",
-					})
-					continue
-				}
-				keyName := privateKeyLabel(k.Hash)
-				credentials = append(credentials, credentialPlan{
-					name:         keyName,
-					secret:       val,
-					isPassphrase: true,
-				})
-
-			default:
+		case "ssh:key-passphrase":
+			var k struct {
+				Hash string `json:"hash"`
+			}
+			umErr = json.Unmarshal(sec.Key, &k)
+			if umErr != nil || k.Hash == "" {
 				skipped = append(skipped, SkippedInfo{
 					SecretType: sec.Type,
-					Reason:     "unhandled secret type",
+					Reason:     "unreadable key (missing hash)",
 				})
+				continue
 			}
+			keyName := privateKeyLabel(k.Hash)
+			credentials = append(credentials, credentialPlan{
+				name:         keyName,
+				secret:       val,
+				isPassphrase: true,
+			})
+
+		default:
+			skipped = append(skipped, SkippedInfo{
+				SecretType: sec.Type,
+				Reason:     "unhandled secret type",
+			})
 		}
 	}
 
-	// Convert profiles.
-	var profiles []profile.SSHProfile
-	for _, tp := range cfg.Profiles {
-		if tp.Type != "ssh" {
-			continue
-		}
-		p := importer.ConvertProfile(tp)
-		// Profiles no longer link to credentials (ADR-0017): a profile's
-		// secret references are backend-owned, and an import brings none.
-		profiles = append(profiles, p)
-	}
-
-	// Convert groups.
-	var groups []profile.ProfileGroup
-	for _, tg := range cfg.Groups {
-		var defaults *profile.ProfileDefaults
-		if tg.Defaults != nil {
-			d, decodeErr := profile.DecodeDefaults(tg.Defaults)
-			if decodeErr != nil {
-				return nil, nil, fmt.Errorf("group %q defaults: %w", tg.Name, decodeErr)
-			}
-			defaults = &d
-		}
-		groups = append(groups, profile.ProfileGroup{
-			ID:            tg.ID,
-			ParentGroupID: tg.ParentGroupID,
-			Name:          tg.Name,
-			Icon:          tg.Icon,
-			Color:         tg.Color,
-			Defaults:      defaults,
-			Editable:      true,
-		})
+	profiles, groups := prepared.Profiles, prepared.Groups
+	if validationErr := svc.ValidateImport(profiles, groups); validationErr != nil {
+		return nil, nil, validationErr
 	}
 
 	// Build per-entry preview lists.
@@ -2064,7 +1955,10 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 
 	// Determine which profiles collide (for setting their action).
 	existingProfileIDs := make(map[string]bool)
-	existingProfs, _ := svc.ListProfiles()
+	existingProfs, err := svc.ListProfiles()
+	if err != nil {
+		return nil, nil, fmt.Errorf("list profiles: %w", err)
+	}
 	for _, p := range existingProfs {
 		existingProfileIDs[p.ID] = true
 	}
@@ -2073,8 +1967,6 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 		if p.ID != "" && existingProfileIDs[p.ID] {
 			action = "overwrite"
 		}
-		// No import-time credential linking remains (ADR-0017): a profile's
-		// secret references are backend-owned and imports carry none.
 		profileEntries = append(profileEntries, ProfileEntry{Name: p.Name, Action: action})
 	}
 	for _, g := range groups {
@@ -2097,15 +1989,12 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 		GroupNames:       groupNames,
 		SecretEntries:    secretEntries,
 		SkippedSecrets:   skipped,
+		Warnings:         prepared.Warnings,
 	}
 
 	// Detect collisions by checking against current store state.
-	existingIDs := make(map[string]bool, len(existingProfs))
-	for _, p := range existingProfs {
-		existingIDs[p.ID] = true
-	}
 	for _, p := range profiles {
-		if p.ID != "" && existingIDs[p.ID] {
+		if p.ID != "" && existingProfileIDs[p.ID] {
 			preview.Collisions = append(preview.Collisions, CollisionInfo{
 				Kind:   "profile",
 				Name:   p.Name,
@@ -2114,7 +2003,10 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 		}
 	}
 
-	existingGroups, _ := svc.ListGroups()
+	existingGroups, err := svc.ListGroups()
+	if err != nil {
+		return nil, nil, fmt.Errorf("list groups: %w", err)
+	}
 	existingGIDs := make(map[string]bool, len(existingGroups))
 	for _, g := range existingGroups {
 		existingGIDs[g.ID] = true
@@ -2132,17 +2024,12 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 	// Determine secret provider.
 	preview.SecretProvider = h.providerName(ctx)
 
-	// Build the plan and store it.
+	// The plan retains credentials only on the backend.
 	plan := &importPlan{
 		profiles: profiles,
 		groups:   groups,
 		creds:    credentials,
 	}
-	token, err := h.plans.storePlan(plan)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store plan: %w", err)
-	}
-	preview.PlanToken = token
 
 	return plan, preview, nil
 }
@@ -2362,15 +2249,15 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 				return h.handleWindowObserve
 			}),
 		regResponder(tabbySub, catalog.OpProfilesImportTabby, params(validateTabbyImportRaw), func(r Responder) handlerFunc {
-			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
+			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleImportTabby(ctx, req) }
 		}),
 		regResponder(tabbySub, catalog.OpProfilesTabbyPreview, params(validateTabbyImportRaw), func(r Responder) handlerFunc {
-			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
+			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyPreview(ctx, req) }
 		}),
 		regResponder(tabbySub, catalog.OpProfilesTabbyExecute, params(validateTabbyExecuteRaw), func(r Responder) handlerFunc {
-			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
+			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyExecute(ctx, req) }
 		}),
 	}
@@ -2391,15 +2278,13 @@ func (s *WSServer) vaultRowResolver() capability.RowResolver {
 	return nil
 }
 
-// vaultSecretSeam returns the SecretVault seam for the tabby import (the
-// vault's catalogue-aware secret surface), or nil when no vault is wired —
-// CreateSecret then records namelessly through the plain store, exactly as
-// before.
-func (s *WSServer) vaultSecretSeam() capability.SecretVault {
+// vaultSecretSeam exposes catalogue-aware creation and rollback, or nil when
+// no vault is wired and the plain credential store is used.
+func (s *WSServer) vaultSecretSeam() capability.TabbyImportVault {
 	if s.vaultLifecycle == nil {
 		return nil
 	}
-	if sv, ok := s.vaultLifecycle.(capability.SecretVault); ok {
+	if sv, ok := s.vaultLifecycle.(capability.TabbyImportVault); ok {
 		return sv
 	}
 	return nil

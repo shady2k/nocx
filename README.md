@@ -23,6 +23,22 @@ Tabs, command output, notes and interface layout restore after restart; running 
 
 A terminal, SSH connection manager, secrets vault and file-backed API client in one local-first app. The assistant can act in the same scrollback, with user approval; the configured model provider’s data-retention policy still applies.
 
+## Import from Tabby
+
+Open **Settings → Connections → Import… → Tabby config** and select Tabby's
+configuration file. Plain configurations, encrypted vaults and fully encrypted
+configurations are supported; enter the Tabby vault passphrase when needed.
+Preview the profiles, groups, secrets and overwrite conflicts before importing.
+
+The importer resolves Tabby's SSH profile and group defaults into each connection,
+including explicit `false` and zero values. It preserves a single file-based private
+key path and local, remote and dynamic forwards. Imported passwords are linked to
+all matching connections; an inline profile password takes precedence.
+
+Multiple private keys, `vault://` keys and unsupported options are listed as
+warnings rather than silently discarded. Review these before confirming; imported
+defaults are snapshots, not a live link to Tabby's group settings.
+
 ## Install (macOS)
 
 Install the cask from our third-party tap:

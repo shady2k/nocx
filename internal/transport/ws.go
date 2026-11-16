@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -1294,9 +1295,18 @@ type planEntry struct {
 // importPlan is the complete decrypted plan for a Tabby import.
 // Stored server-side by opaque token; secrets never leave the backend.
 type importPlan struct {
-	profiles []profile.SSHProfile
-	groups   []profile.ProfileGroup
-	creds    []credentialPlan
+	profiles       []profile.SSHProfile
+	groups         []profile.ProfileGroup
+	creds          []credentialPlan
+	pendingSecrets []credential.SecretID // failed rollback must finish before retry can mint
+	cleanupOnly    bool                  // abandoned attempt: retains IDs, never decrypted source
+}
+
+func (p *importPlan) retainCleanupOnly() {
+	p.profiles = nil
+	p.groups = nil
+	p.creds = nil
+	p.cleanupOnly = true
 }
 
 // credentialPlan pairs a decrypted tabby secret with the connection target it
@@ -1312,6 +1322,7 @@ type credentialPlan struct {
 	targetUser   string
 	targetHost   string
 	targetPort   int
+	profileID    string // inline source password, bound only to this profile
 }
 
 // planTTL is how long a plan remains valid after creation.
@@ -1330,11 +1341,16 @@ func (s *WSServer) storePlan(plan *importPlan) (string, error) {
 		s.planStore = make(map[string]*planEntry)
 	}
 
-	// Evict expired entries before adding.
+	// Claimed plans cannot be scavenged. Expired failed attempts retain only
+	// cleanup ownership; expiry must never turn a failed deletion into an orphan.
 	now := time.Now()
 	for k, e := range s.planStore {
-		if now.Sub(e.createdAt) > planTTL {
-			delete(s.planStore, k)
+		if !e.inProgress && now.Sub(e.createdAt) > planTTL {
+			if len(e.plan.pendingSecrets) > 0 {
+				e.plan.retainCleanupOnly()
+			} else {
+				delete(s.planStore, k)
+			}
 		}
 	}
 
@@ -1357,15 +1373,41 @@ func (s *WSServer) claimPlan(token string) *importPlan {
 	s.planMu.Lock()
 	defer s.planMu.Unlock()
 	e, ok := s.planStore[token]
-	if !ok || e.inProgress {
+	if !ok || e.inProgress || e.plan.cleanupOnly {
 		return nil
 	}
 	if time.Since(e.createdAt) > planTTL {
-		delete(s.planStore, token)
+		if len(e.plan.pendingSecrets) > 0 {
+			e.plan.retainCleanupOnly()
+		} else {
+			delete(s.planStore, token)
+		}
 		return nil
 	}
 	e.inProgress = true
 	return e.plan
+}
+
+// claimCleanupPlan transfers an unclaimed failed attempt to the import handler
+// for cleanup under the config/vault gate, including still-retryable previews.
+// Claimed attempts are never eligible. The product vault journal owns recovery
+// across restarts; plain-store ownership here is in-process only.
+func (s *WSServer) claimCleanupPlan() (string, *importPlan) {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	for token, entry := range s.planStore {
+		if entry.inProgress {
+			continue
+		}
+		if !entry.plan.cleanupOnly && time.Since(entry.createdAt) > planTTL && len(entry.plan.pendingSecrets) > 0 {
+			entry.plan.retainCleanupOnly()
+		}
+		if len(entry.plan.pendingSecrets) > 0 {
+			entry.inProgress = true
+			return token, entry.plan
+		}
+	}
+	return "", nil
 }
 
 // releasePlan clears the in-progress flag so the plan can be retried (e.g.
@@ -5040,43 +5082,21 @@ func parsePrivateKeyMaterial(keyText string) (fingerprint string, passphraseWant
 	return "", false, &errInvalidKeyMaterial{msg: fmt.Sprintf("not a valid private key: %v", parseErr)}
 }
 
-// handleImportTabby parses a Tabby config YAML and imports SSH profiles,
-// groups, and optionally vault secrets into the wired profile/group
-// repositories and SecretStore.
-//
-// When the config carries an encrypted vault section and passphrase is provided,
-// every decrypted secret is stored via Vault.Create and bound to the profile
-// whose connection target the tabby vault keyed it to, by host+port+user. An
-// encrypted vault without a passphrase is an error.
-//
-// Order (ADR-0011 §4): secrets are written first, then the metadata that
-// references them. A crash mid-import orphans secrets — reconciliation
-// recovers on next start. The reverse would leave metadata pointing at
-// nothing, which is a broken profile the user must repair by hand.
-//
-// Collision policy (nocx-y910.1): profiles and groups overwrite on duplicate
-// ID.
-//
-// The passphrase is a parameter of the operation, asked once, stored nowhere
-// — no field, no cache, no package variable.
-// privateKeyLabel names the secret that carries an imported private-key
-// passphrase. Tabby identifies the key only by a hash, which is unreadable on
-// its own, so the label says what it is and keeps enough of the hash to tell
-// two of them apart.
 // ── Tabby import preview types ──────────────────────────────────────────
 
 // TabbyPreviewResponse is returned by profiles.tabbyPreview.
 type TabbyPreviewResponse struct {
-	ProfilesToImport int             `json:"profilesToImport"`
-	GroupsToImport   int             `json:"groupsToImport"`
-	SecretsToImport  int             `json:"secretsToImport"`
-	ProfileEntries   []ProfileEntry  `json:"profileEntries,omitempty"`
-	GroupNames       []string        `json:"groupNames,omitempty"`
-	SecretEntries    []SecretEntry   `json:"secretEntries,omitempty"`
-	SkippedSecrets   []SkippedInfo   `json:"skippedSecrets,omitempty"`
-	Collisions       []CollisionInfo `json:"collisions,omitempty"`
-	SecretProvider   string          `json:"secretProvider"`
-	PlanToken        string          `json:"planToken"`
+	ProfilesToImport int                      `json:"profilesToImport"`
+	GroupsToImport   int                      `json:"groupsToImport"`
+	SecretsToImport  int                      `json:"secretsToImport"`
+	ProfileEntries   []ProfileEntry           `json:"profileEntries,omitempty"`
+	GroupNames       []string                 `json:"groupNames,omitempty"`
+	SecretEntries    []SecretEntry            `json:"secretEntries,omitempty"`
+	SkippedSecrets   []SkippedInfo            `json:"skippedSecrets,omitempty"`
+	Collisions       []CollisionInfo          `json:"collisions,omitempty"`
+	Warnings         []importer.ImportWarning `json:"warnings,omitempty"`
+	SecretProvider   string                   `json:"secretProvider"`
+	PlanToken        string                   `json:"planToken"`
 }
 
 // ProfileEntry describes one profile the import would create or modify.
@@ -5108,11 +5128,6 @@ type CollisionInfo struct {
 type tabbyExecuteParams struct {
 	PlanToken string `json:"planToken"`
 }
-
-// planTabbyImport parses a Tabby config, decrypts its vault (if passphrase
-// supplied), and plans every profile, group, and secret WITHOUT writing
-// anything. Returns the full importPlan for execution and a preview response
-// for the renderer. The plan is stored server-side by the returned token.
 
 // secretProviderName returns a human-readable name for where secrets would be
 // stored. Uses the vault lifecycle if wired, otherwise returns "secret store".

@@ -50,10 +50,12 @@ type TabbySecret struct {
 	Type  string          `json:"type"`
 	Key   json.RawMessage `json:"key"`
 	Value json.RawMessage `json:"value"`
+	// ProfileID scopes synthetic inline passwords; native JSON cannot set it.
+	ProfileID string `json:"-"`
 }
 
 // TabbyVaultContents is the strictly validated, decrypted contents of a Tabby vault.
-// Config is an arbitrary JSON value (open-ended). Secrets are required.
+// Config is optional for a secrets-only vault. Secrets are required.
 // Both are RawMessage so nil distinguishes "missing" from "explicitly null".
 type TabbyVaultContents struct {
 	Config  json.RawMessage `json:"config"`
@@ -74,15 +76,19 @@ func (c *TabbyVaultContents) DecodedSecrets() []TabbySecret { return c.decodedSe
 // The decrypted JSON is strictly validated:
 //   - only known fields accepted at every level (DisallowUnknownFields)
 //   - no trailing data after the JSON value
-//   - config and secrets are both required (but config may be null)
+//   - secrets are required; config may be absent in a secrets-only vault
 //   - every secret must have non-empty type and value
 //   - key is an open-ended JSON value (string, object, etc.), bounded by raw byte length
 //   - bounded lengths on every string and array
 func DecryptTabbyVault(vault *TabbyVault, passphrase string) (*TabbyVaultContents, error) {
-	if vault == nil || !vault.Encrypted || passphrase == "" {
+	if vault == nil || passphrase == "" {
 		return nil, ErrDecryptFailed
 	}
 	if vault.Version != 1 {
+		return nil, ErrDecryptFailed
+	}
+	if len(vault.KeySalt) != tabbySaltLen*2 || len(vault.IV) != tabbyIVLen*2 ||
+		len(vault.Contents) > base64.StdEncoding.EncodedLen(tabbyMaxCiphertextLen) {
 		return nil, ErrDecryptFailed
 	}
 
@@ -187,11 +193,7 @@ func parseVaultContentsStrict(data []byte) (*TabbyVaultContents, error) {
 
 // validateContents enforces field presence, bounded lengths, and structure.
 func validateContents(c *TabbyVaultContents) error {
-	// Config and secrets are both required fields. RawMessage encodes
-	// field-absent as nil vs. json-null as the bytes "null".
-	if c.Config == nil {
-		return fmt.Errorf("missing required field: config")
-	}
+	// Config may be absent: native secrets-only vaults omit it.
 	if c.Secrets == nil {
 		return fmt.Errorf("missing required field: secrets")
 	}

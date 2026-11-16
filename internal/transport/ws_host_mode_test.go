@@ -124,31 +124,39 @@ func TestHostModeReadsTheHostRecordThroughTheProfilesDestination(t *testing.T) {
 	}
 }
 
-// TestHostModeReadsTheFirstKnownFingerprintRecord verifies the key observed
-// by the destination selects the corresponding host record, including key
-// rotation where the old key's record must not control the new key.
-func TestHostModeReadsTheFirstKnownFingerprintRecord(t *testing.T) {
+// TestHostModeReadsTheFirstRecordedKnownFingerprint checks that the read
+// reaches later fingerprints and follows the key currently known after rotation.
+func TestHostModeReadsTheFirstRecordedKnownFingerprint(t *testing.T) {
 	tests := []struct {
 		name         string
 		fingerprints []string
+		seed         map[string]hostmode.Mode
 		want         string
 	}{
-		{name: "multiple known keys select recorded fingerprint", fingerprints: []string{"SHA256:unrecorded", "SHA256:second"}, want: "raw"},
-		{name: "rotated key selects its own method", fingerprints: []string{"SHA256:rotated"}, want: "helper"},
+		{
+			name:         "uses a record on the second known key",
+			fingerprints: []string{"SHA256:unrecorded", "SHA256:second"},
+			seed:         map[string]hostmode.Mode{"SHA256:second": hostmode.Raw},
+			want:         "raw",
+		},
+		{
+			name:         "rotation uses new key record instead of retired key",
+			fingerprints: []string{"SHA256:new-key"},
+			seed:         map[string]hostmode.Mode{"SHA256:retired-key": hostmode.Script, "SHA256:new-key": hostmode.Raw},
+			want:         "raw",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			modes := newHostModeStore(t)
-			if err := modes.Set("SHA256:first", hostmode.Script); err != nil {
-				t.Fatal(err)
+			for fingerprint, mode := range tt.seed {
+				if err := modes.Set(fingerprint, mode); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := modes.Set("SHA256:second", hostmode.Raw); err != nil {
-				t.Fatal(err)
-			}
-			if err := modes.Set("SHA256:rotated", hostmode.Helper); err != nil {
-				t.Fatal(err)
-			}
-			srv := startHostModeServer(t, modes, &fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}}, &fakeHostKeyIndex{fingerprints: tt.fingerprints})
+			srv := startHostModeServer(t, modes,
+				&fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}},
+				&fakeHostKeyIndex{fingerprints: tt.fingerprints})
 			got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
 			if got.Mode != tt.want {
 				t.Fatalf("host mode = %q, want %q for fingerprints %v", got.Mode, tt.want, tt.fingerprints)

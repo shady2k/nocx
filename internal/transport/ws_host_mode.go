@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
@@ -168,7 +169,7 @@ func (h hostModeHandlers) handleSetHostMode(ctx context.Context, req jsonrpcRequ
 			h.warn("the host's method could not be saved; it stands for this run",
 				"profile", params.ProfileID, "fingerprint", fingerprint, "mode", params.Mode, "error", err)
 		default:
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record the host's method failed: " + err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record the host's method failed: " + fmt.Sprint(err)})
 			return
 		}
 	}

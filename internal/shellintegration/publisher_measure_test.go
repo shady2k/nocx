@@ -326,9 +326,15 @@ import (
 // The zsh and posix tiers still read a frame the way they did: neither is the
 // local pane's tier, and neither starts a child to poll. The 63-call maximum is
 // unchanged.
+//
+// 2026-11-16, fifteenth move (nocx-a62cl.6.5): 93,951 -> 93,965, **+14**, the
+// length prefix goes back to `dd bs=1 count=4 | od`: `od -N4` reads its input
+// through stdio, so on a socket it took the frame's body with its header and
+// ci-mac's nested bash child never sent prompt_ready. The elapsed-time wait
+// stays; the comment that says why dd is longer than the one it replaces.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 93951
+	measuredMaxPublishBytes = 93965
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

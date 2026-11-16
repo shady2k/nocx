@@ -171,3 +171,9 @@ two forks, and their silence, from the path between `hello` and `prompt_ready`.
 The zsh tier polls with `zselect` and starts no child; `nocx.posix` has no
 launch window. The worst path remains replacement plus sweep with the launch
 carrier absent, at fault `remove#4`.
+
+The same day the length prefix went back to `dd bs=1 count=4 | od` (**93,965**,
++14): `od -N4` reads through stdio, so on a socket it consumed the frame's body
+with its header, and on macOS a nested bash child under fish sent `hello` and
+never `prompt_ready` (ci-mac, PR #831). The elapsed-time wait is kept; the
+63-call maximum is unchanged.

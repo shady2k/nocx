@@ -270,7 +270,7 @@ __nocx_lc_probe_readable() {
 
 # Wait for the transport to become readable, bounded by the handshake
 # timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
-# binary length prefix must be read by od instead. A closed channel fails on
+# binary length prefix must be read by dd|od instead. A closed channel fails on
 # the first probe instead of waiting it out (fail-open, decision 3).
 #
 # THE BOUND IS ELAPSED TIME, AND THE POLL IS A SLICE, because the answer here
@@ -318,13 +318,14 @@ __nocx_lc_wait_readable() {
 __nocx_lc_read_frame() {
     local __hdr __len LC_ALL=C __t="${1:-}"
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
-    # ONE helper, not three: `od -N4` reads the length prefix whole, so the
-    # accept is one process creation away from the bytes rather than a
-    # pipeline whose every member is a fork that a loaded machine can lose —
-    # and whose loss (with stderr discarded, as it must be) is
-    # indistinguishable from "no frame". The whitespace `tr` removed is
-    # removed here by the shell itself.
-    __hdr="$(od -An -tx1 -N4 <&"$__nocx_lc_fd" 2>/dev/null)"
+    # `dd bs=1 count=4` and not `od -N4`: od reads its input through stdio,
+    # so on a socket it takes a whole buffer — the frame's body with its
+    # header — and -N only limits what it prints. The body is then gone and
+    # the read below finds nothing (macOS ci-mac, a nested bash child under
+    # fish: hello sent, prompt_ready never). dd with a one-byte block reads
+    # exactly the four bytes and leaves the body on the channel
+    # (nocx-a62cl.6.5).
+    __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1)"
     __hdr="${__hdr//[[:space:]]/}"
     [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hdr ))

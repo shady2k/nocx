@@ -133,8 +133,8 @@ func TestHostModeReadsTheFirstKnownFingerprintRecord(t *testing.T) {
 		fingerprints []string
 		want         string
 	}{
-		{name: "multiple known keys select recorded fingerprint", fingerprints: []string{"SHA256:first", "SHA256:second"}, want: "raw"},
-		{name: "rotated key does not inherit old key method", fingerprints: []string{"SHA256:rotated"}, want: "auto"},
+		{name: "multiple known keys select recorded fingerprint", fingerprints: []string{"SHA256:unrecorded", "SHA256:second"}, want: "raw"},
+		{name: "rotated key selects its own method", fingerprints: []string{"SHA256:rotated"}, want: "helper"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

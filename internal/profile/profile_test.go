@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -505,6 +506,26 @@ func TestProfileDefaultsUnmarshal_UnknownKeyRecorded(t *testing.T) {
 	}
 	if err := d.Validate(); err == nil {
 		t.Fatal("Validate should error for unknown keys")
+	}
+}
+
+func TestProfileDefaultsUnmarshal_DropsLegacyDesiredMode(t *testing.T) {
+	var d ProfileDefaults
+	if err := json.Unmarshal([]byte(`{"desiredMode":"helper"}`), &d); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("legacy desiredMode must not be treated as an unknown key: %v", err)
+	}
+	if got := d.UnknownKeys(); len(got) != 0 {
+		t.Fatalf("UnknownKeys = %v, want none", got)
+	}
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "desiredMode") {
+		t.Fatalf("marshaled defaults retain legacy desiredMode: %s", encoded)
 	}
 }
 

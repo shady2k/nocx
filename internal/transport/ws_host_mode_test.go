@@ -124,6 +124,47 @@ func TestHostModeReadsTheHostRecordThroughTheProfilesDestination(t *testing.T) {
 	}
 }
 
+// TestHostModeReadsTheFirstRecordedKnownFingerprint checks that the read
+// reaches later fingerprints and follows the key currently known after rotation.
+func TestHostModeReadsTheFirstRecordedKnownFingerprint(t *testing.T) {
+	tests := []struct {
+		name         string
+		fingerprints []string
+		seed         map[string]hostmode.Mode
+		want         string
+	}{
+		{
+			name:         "uses a record on the second known key",
+			fingerprints: []string{"SHA256:unrecorded", "SHA256:second"},
+			seed:         map[string]hostmode.Mode{"SHA256:second": hostmode.Raw},
+			want:         "raw",
+		},
+		{
+			name:         "rotation uses new key record instead of retired key",
+			fingerprints: []string{"SHA256:new-key"},
+			seed:         map[string]hostmode.Mode{"SHA256:retired-key": hostmode.Script, "SHA256:new-key": hostmode.Raw},
+			want:         "raw",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modes := newHostModeStore(t)
+			for fingerprint, mode := range tt.seed {
+				if err := modes.Set(fingerprint, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv := startHostModeServer(t, modes,
+				&fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}},
+				&fakeHostKeyIndex{fingerprints: tt.fingerprints})
+			got := hostModeCall(t, srv, "connections.hostMode", map[string]any{"profileId": "ssh-1"})
+			if got.Mode != tt.want {
+				t.Fatalf("host mode = %q, want %q for fingerprints %v", got.Mode, tt.want, tt.fingerprints)
+			}
+		})
+	}
+}
+
 // TestHostModeIsAutoForAHostNobodyAnswered: no record is auto, which is what
 // the editor shows for a connection whose key nobody has trusted yet.
 func TestHostModeIsAutoForAHostNobodyAnswered(t *testing.T) {

@@ -1,6 +1,6 @@
 import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
-import { integrationMethodAnswerApplied } from './integration-method-failure'
+import { decideIntegrationMethod } from './integration-method-decision'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
@@ -138,7 +138,7 @@ import {
   HelperConsentAskQueue,
   type HelperConsentAskRequest,
 } from './host-key-controller'
-import { HostKeyDialog, AgentApprovalDialog, type IntegrationMethod } from './host-key-dialog'
+import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
@@ -502,44 +502,6 @@ function main(): void {
     } finally {
       setHelperConsentAskBusy(false)
     }
-  }
-
-  // decideIntegrationMethod answers the connect-time ask with a chosen
-  // method (ADR-0069): connections.setIntegrationMethod writes the HOST's
-  // record by the fingerprint the ask named (ADR-727g63tr decision 1), plus
-  // the machine's helper grant when the method is helper.
-  //
-  // A host-record write failure is distinct from failures before the answer
-  // was applied. The backend marks that one case in RPC error data, not text.
-  const decideIntegrationMethod = async (
-    request: HelperConsentAskRequest,
-    method: IntegrationMethod,
-  ) => {
-    setHelperConsentAskBusy(true)
-    let note: string | undefined
-    try {
-      await profileClient.setIntegrationMethod(
-        request.evidence.fingerprint,
-        method,
-        request.evidence.host,
-      )
-    } catch (err) {
-      if (integrationMethodAnswerApplied(err)) {
-        note = `The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart`
-      } else {
-        showToast({
-          level: 'danger',
-          message: `Could not apply the integration method for ${request.evidence.host}. The choice was not saved.`,
-          duration: 0,
-        })
-        return
-      }
-    } finally {
-      setHelperConsentAskBusy(false)
-    }
-    const answer = { method, note }
-    helperConsentAsks.settleMatchingQueued(request, answer)
-    helperConsentAsks.settle(request, answer)
   }
 
   // ── Vault activity signal (nocx-eg80) ──────────────────────────────
@@ -2077,7 +2039,14 @@ function main(): void {
               helperAsk={{ fingerprint: request.evidence.fingerprint }}
               busy={helperConsentAskBusy()}
               onAcceptHostKey={() => void acceptHelperAskHostKey(request)}
-              onChooseMethod={(method) => void decideIntegrationMethod(request, method)}
+              onChooseMethod={(method) =>
+                void decideIntegrationMethod(request, method, {
+                  profileClient,
+                  helperConsentAsks,
+                  setHelperConsentAskBusy,
+                  showToast,
+                })
+              }
               onClose={() => helperConsentAsks.settle(request, null)}
             />
           )}

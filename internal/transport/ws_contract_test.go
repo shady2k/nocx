@@ -33,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -1529,41 +1530,65 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 
 func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
-	for _, tc := range []integrationMethodResult{
-		{Fingerprint: "SHA256:abc", Method: "raw"},
-		{Fingerprint: "SHA256:abc", Method: "script"},
-		{Fingerprint: "SHA256:abc", Method: "helper"},
-	} {
-		raw, err := json.Marshal(tc)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+	for _, method := range []string{"raw", "script", "helper"} {
+		for _, saved := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/saved=%t", method, saved), func(t *testing.T) {
+				dto := integrationMethodResult{
+					Fingerprint:     "SHA256:abc",
+					Method:          method,
+					HostRecordSaved: saved,
+				}
+				raw, err := json.Marshal(dto)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				validateJSON(t, schema, raw, "connections.setIntegrationMethod DTO")
+			})
 		}
-		validateJSON(t, schema, raw, "connections.setIntegrationMethod result ("+tc.Method+")")
 	}
 }
 
 func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
-	granter := &fakeHelperConsentGranter{}
-	srv, _ := startIntegrationMethodServer(t, granter, nil)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
+	for _, saved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("saved=%t", saved), func(t *testing.T) {
+			modes := newHostModeStore(t)
+			if !saved {
+				modes = hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
+			}
+			srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
 
-	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "helper",
-	})
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct{}       `json:"error,omitempty"`
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": "SHA256:abc",
+				"method":      "helper",
+			})
+			var envelope struct {
+				Result json.RawMessage `json:"result"`
+				Error  *struct{}       `json:"error,omitempty"`
+			}
+			if err := json.Unmarshal(resp, &envelope); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("unexpected RPC error: %s", resp)
+			}
+			validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
+			var result struct {
+				HostRecordSaved *bool `json:"hostRecordSaved"`
+			}
+			if err := json.Unmarshal(envelope.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.HostRecordSaved == nil || *result.HostRecordSaved != saved {
+				t.Fatalf("want hostRecordSaved=%t: %s", saved, resp)
+			}
+			if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Helper {
+				t.Fatalf("host record = %q/%v, want helper kept for this run", mode, ok)
+			}
+		})
 	}
-	if err := json.Unmarshal(resp, &envelope); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	if envelope.Error != nil {
-		t.Fatalf("unexpected RPC error: %s", resp)
-	}
-	validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
 }
 
 // ── the connect-time helper ask (ADR-0068) ──────────────────────────────

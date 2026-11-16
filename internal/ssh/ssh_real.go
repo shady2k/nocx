@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base32"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -174,6 +176,59 @@ func knownHostsTargetAddr(targetAddr string, cfg *ConnectConfig) string {
 	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hash.Sum(nil))
 	routeHost := "nocx-v1-" + strings.ToLower(encoded)
 	return net.JoinHostPort(routeHost, "22")
+}
+
+// KnownHostsFingerprintsFor answers the SHA-256 fingerprints this machine's
+// known_hosts holds for a destination, resolved exactly as a dial resolves it:
+// the alias through ~/.ssh/config, the port from the config or the profile,
+// and — when the route has jumps — the route identity the key is stored under
+// (knownHostsTargetAddr). That last part is why this lives here rather than at
+// a caller: the storage identity has one owner, and a second derivation would
+// agree with this one everywhere anyone looked.
+//
+// An empty answer is NOT a fault. A host nobody has trusted has no key, which
+// is the state "not yet answered" the connection editor shows as auto. A
+// missing known_hosts file is the same answer for the same reason. A file that
+// does not parse IS a fault and is reported: the dial refuses such a store
+// rather than pretending it is empty (TrustHostKey says why), and a caller that
+// silently read it as empty would hide a broken store behind an innocent
+// "nobody answered".
+func (rc *RealClient) KnownHostsFingerprintsFor(ctx context.Context, host string, cfg *ConnectConfig) ([]string, error) {
+	resolved, err := rc.resolveConfig(ctx, host, cfg)
+	if err != nil {
+		return nil, err
+	}
+	addr := knownHostsTargetAddr(
+		net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port)), cfg)
+	return rc.knownHostsFingerprints(addr)
+}
+
+// knownHostsFingerprints answers every key known_hosts offers for addr. The
+// enumeration is the same one coveringLines uses: a public key that cannot
+// match anything makes the library report every key covering the host instead
+// of stopping at the first, and the fingerprints are what that report carries.
+func (rc *RealClient) knownHostsFingerprints(addr string) ([]string, error) {
+	cb, err := knownhosts.New(rc.knownHostsFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("known_hosts does not parse: %w", err)
+	}
+	checkErr := cb(addr, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}, knownHostsProbe{})
+	if checkErr == nil {
+		// Unreachable: the probe key cannot equal a parsed key.
+		return nil, nil
+	}
+	var keyErr *knownhosts.KeyError
+	if !errors.As(checkErr, &keyErr) {
+		return nil, fmt.Errorf("known_hosts lookup for %s: %w", addr, checkErr)
+	}
+	out := make([]string, 0, len(keyErr.Want))
+	for _, want := range keyErr.Want {
+		out = append(out, gossh.FingerprintSHA256(want.Key))
+	}
+	return out, nil
 }
 
 // TrustHostKey records the offered public key for addr in known_hosts. It is

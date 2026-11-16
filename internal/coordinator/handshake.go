@@ -151,7 +151,15 @@ package coordinator
 // methods, connections.hostMode and connections.setHostMode, are how the
 // connection editor reads and writes the host record now; a 38 window does not
 // know them, which is the second half of the same incompatibility.
-const ProtocolVersion = 39
+// 40 (nocx-oalo1.11.2): the editor's five states are on the wire. The host-mode
+// read gains `hostKnown`, without which a 39 window cannot tell "nobody
+// answered" from "never connected" and would show a method it could not write;
+// the write loses `note`, because a record that could not be persisted is now
+// an error carrying the reason the field shows, and nothing about the host
+// changes. The connect-time ask carries `profileId`, which is where a 39
+// window's copy would claim a typed ssh can be changed "from the connection's
+// settings" it does not have.
+const ProtocolVersion = 40
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

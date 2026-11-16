@@ -98,6 +98,35 @@ func TestKnownHostsFingerprintsForUsesTheRouteIdentity(t *testing.T) {
 	}
 }
 
+// TestKnownHostsFingerprintsForReturnsEveryKeyForOneDestination ensures each
+// negotiated key can find its host record, rather than only the first line.
+func TestKnownHostsFingerprintsForReturnsEveryKeyForOneDestination(t *testing.T) {
+	hosts := sshHome(t)
+	first, second := newTestHostKey(t), newTestHostKey(t)
+	if err := os.WriteFile(hosts, []byte(knownhosts.Line([]string{"127.0.0.1:2222"}, first)+"\n"+knownhosts.Line([]string{"127.0.0.1:2222"}, second)+"\n"), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	client := knownHostsClient(t, NewStubConfigResolver())
+	got, err := client.KnownHostsFingerprintsFor(context.Background(), "127.0.0.1", &ConnectConfig{Port: 2222})
+	if err != nil {
+		t.Fatalf("KnownHostsFingerprintsFor: %v", err)
+	}
+	want := map[string]bool{gossh.FingerprintSHA256(first): false, gossh.FingerprintSHA256(second): false}
+	for _, fp := range got {
+		if _, ok := want[fp]; ok {
+			want[fp] = true
+		}
+	}
+	for fp, found := range want {
+		if !found {
+			t.Errorf("fingerprint %s missing from %v", fp, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("fingerprints = %v, want exactly both known keys", got)
+	}
+}
+
 // TestKnownHostsFingerprintsForAnswersNothingForAnUnknownOrMissingStore: a
 // host nobody has trusted has no fingerprint, which is "not answered" — the
 // state the editor shows as auto. The missing file is the same answer for the

@@ -180,23 +180,8 @@ func (s *Store) Set(fingerprint string, mode Mode) error {
 	return s.record(fingerprint, mode, false)
 }
 
-// Persist records the host's method only when the document was written, so a
-// failed write leaves the host exactly as it was.
-//
-// IT IS THE CONNECTION EDITOR'S WRITE, and it is a second operation rather
-// than a flag because the two callers can promise different things. The ask
-// cannot retry: its answer is needed by the open that is waiting, which is why
-// Set keeps a failed answer for this run. The editor CAN retry — its Save is
-// still on screen — and it reports the failure as a field error, "Not saved:
-// {reason}", with the chosen value left in the control. An answer that stayed
-// in memory there would make that sentence false: the field would say nothing
-// was saved while the open path went on using it.
-func (s *Store) Persist(fingerprint string, mode Mode) error {
-	return s.record(fingerprint, mode, true)
-}
-
-// record is the one write both Set and Persist perform; durable is the only
-// difference and it is about a FAILED write alone.
+// record is the single-fingerprint write used by the connect-time answer.
+// durable controls whether a failed write updates memory for this run.
 func (s *Store) record(fingerprint string, mode Mode, durable bool) error {
 	if fingerprint == "" {
 		return ErrEmptyFingerprint
@@ -226,38 +211,39 @@ func (s *Store) record(fingerprint string, mode Mode, durable bool) error {
 	return nil
 }
 
-// Remove forgets the host's recorded method, which is how "auto" is reached:
-// the next open asks again (ADR-0033). A host with no record is already in
-// that state, so removing it is not an error — the caller asked for the state
-// it is in, and only an empty fingerprint is refused.
-//
-// # A failed removal changes nothing
-//
-// The editor's auto is the only caller, and its Save stays open with a field
-// error when the record could not be written ("Not saved: {reason}"). Keeping
-// the old answer in memory is what makes that sentence true: nothing about the
-// host has changed, so the method on disk stays the method in force. It is the
-// editor's rule as Persist states it, applied to the other direction.
-func (s *Store) Remove(fingerprint string) error {
-	if fingerprint == "" {
-		return ErrEmptyFingerprint
+// PersistMany changes the records for a host in one document write. An Auto
+// mode removes every supplied fingerprint; other modes set every one. A
+// failed write leaves both the durable document and in-memory map unchanged.
+func (s *Store) PersistMany(fingerprints []string, mode Mode) error {
+	if len(fingerprints) == 0 {
+		return nil
+	}
+	if mode != Auto {
+		if _, ok := Parse(string(mode)); !ok {
+			return fmt.Errorf("host mode: %q is not an integration method", mode)
+		}
+	}
+	for _, fp := range fingerprints {
+		if fp == "" {
+			return ErrEmptyFingerprint
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loadLocked()
-	if _, ok := s.modes[fingerprint]; !ok {
-		return nil
-	}
-	next := make(map[string]Mode, len(s.modes))
+	next := make(map[string]Mode, len(s.modes)+len(fingerprints))
 	for k, v := range s.modes {
-		if k == fingerprint {
-			continue
-		}
 		next[k] = v
 	}
-	werr := s.writeDoc(next)
-	if werr != nil {
-		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, werr)
+	for _, fp := range fingerprints {
+		if mode == Auto {
+			delete(next, fp)
+		} else {
+			next[fp] = mode
+		}
+	}
+	if err := s.writeDoc(next); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, err)
 	}
 	s.modes = next
 	return nil

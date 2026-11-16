@@ -184,24 +184,14 @@ func (h hostModeHandlers) handleSetHostMode(ctx context.Context, req jsonrpcRequ
 	// host only when the document was written, so a failure here is a refusal
 	// the form reports and retries — never an answer kept quietly in memory
 	// while the field says it was not saved.
-	for _, fingerprint := range fingerprints {
-		var err error
-		if mode == hostmode.Auto {
-			err = h.modes.Remove(fingerprint)
-		} else {
-			err = h.modes.Persist(fingerprint, mode)
-		}
-		switch {
-		case err == nil:
-		case errors.Is(err, hostmode.ErrNotSaved):
-			h.warn("the host's method could not be saved; nothing about the host changed",
-				"profile", params.ProfileID, "fingerprint", fingerprint, "mode", params.Mode, "error", err)
+	if err := h.modes.PersistMany(fingerprints, mode); err != nil {
+		if errors.Is(err, hostmode.ErrNotSaved) {
+			h.warn("the host's method could not be saved; nothing about the host changed", "profile", params.ProfileID, "mode", params.Mode, "error", err)
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: hostModeNotSaved})
 			return
-		default:
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record the host's method failed: " + fmt.Sprint(err)})
-			return
 		}
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record the host's method failed: " + fmt.Sprint(err)})
+		return
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(hostModeWriteResult{ProfileID: params.ProfileID, Mode: string(mode)}))
 }

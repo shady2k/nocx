@@ -125,96 +125,6 @@ func (refusingStore) Read(string, any) (bool, error) { return false, nil }
 func (refusingStore) Write(string, any) error        { return errors.New("disk is full") }
 func (refusingStore) Delete(string) error            { return errors.New("disk is full") }
 
-// TestRemovingARecordMakesTheHostUnansweredAgain: auto is not a record
-// (ADR-0033), so "ask me again" is a removal rather than a fourth value. The
-// connection editor's auto does this, and the next open must find no answer —
-// not an emptied one — because the difference between silence and an answer is
-// what decides whether the connect-time ask is raised.
-func TestRemovingARecordMakesTheHostUnansweredAgain(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.Set("SHA256:abc", Script); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	if err := s.Remove("SHA256:abc"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if mode, ok := s.Lookup("SHA256:abc"); ok {
-		t.Fatalf("Lookup after Remove = %q/%v, want no record", mode, ok)
-	}
-}
-
-// TestRemovalSurvivesANewStore: the removal is a document write like the
-// answer was, so a host answered again stays answered across a restart.
-func TestRemovalSurvivesANewStore(t *testing.T) {
-	first, dir := newTestStore(t)
-	if err := first.Set("SHA256:abc", Helper); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	if err := first.Remove("SHA256:abc"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	second := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "host-modes.json")
-	if mode, ok := second.Lookup("SHA256:abc"); ok {
-		t.Fatalf("a new store over the same directory found %q, want no record", mode)
-	}
-}
-
-// TestRemovingAHostWithNoRecordIsNotAnError: the editor asks for auto on a
-// host nobody answered for, which is the state it is already in. A refusal
-// there would report a lost write for a write that had nothing to forget.
-func TestRemovingAHostWithNoRecordIsNotAnError(t *testing.T) {
-	s, _ := newTestStore(t)
-	if err := s.Remove("SHA256:nobody"); err != nil {
-		t.Fatalf("Remove on an unanswered host = %v, want nil", err)
-	}
-	if err := s.Remove(""); !errors.Is(err, ErrEmptyFingerprint) {
-		t.Fatalf("Remove under the empty fingerprint = %v, want ErrEmptyFingerprint", err)
-	}
-}
-
-// TestAFailedRemovalLeavesTheAnswerInForce: auto is a REMOVAL, and a removal
-// that could not be written must not silently take effect here either. The
-// connection editor reports it as "Not saved: {reason}" and stays open with
-// Save still available, so nothing about the host has changed — and the answer
-// still on disk stays the answer the open path reads.
-func TestAFailedRemovalLeavesTheAnswerInForce(t *testing.T) {
-	s := NewStore(log.NewSlogAdapter(nil), refusingStore{}, "host-modes.json")
-	// The ask's own rule answers for this run, which is how a record gets here
-	// on a store that cannot write.
-	if err := s.Set("SHA256:abc", Raw); !errors.Is(err, ErrNotSaved) {
-		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
-	}
-	if err := s.Remove("SHA256:abc"); !errors.Is(err, ErrNotSaved) {
-		t.Fatalf("Remove on a store that cannot write = %v, want ErrNotSaved", err)
-	}
-	if mode, ok := s.Lookup("SHA256:abc"); !ok || mode != Raw {
-		t.Fatalf("Lookup after a failed Remove = %q/%v, want raw still in force", mode, ok)
-	}
-}
-
-// TestAFailedPersistLeavesTheHostUnchanged is the editor's other half. Its Save
-// writes the profile first and the host record second, and reports a split
-// outcome: a record that could not be written must leave the host exactly as
-// it was, or the field would say "Not saved" about a method that is in force.
-func TestAFailedPersistLeavesTheHostUnchanged(t *testing.T) {
-	s := NewStore(log.NewSlogAdapter(nil), refusingStore{}, "host-modes.json")
-	if err := s.Set("SHA256:abc", Raw); !errors.Is(err, ErrNotSaved) {
-		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
-	}
-	if err := s.Persist("SHA256:abc", Helper); !errors.Is(err, ErrNotSaved) {
-		t.Fatalf("Persist on a store that cannot write = %v, want ErrNotSaved", err)
-	}
-	if mode, ok := s.Lookup("SHA256:abc"); !ok || mode != Raw {
-		t.Fatalf("Lookup after a failed Persist = %q/%v, want raw still in force", mode, ok)
-	}
-	if err := s.Persist("SHA256:nobody", Script); !errors.Is(err, ErrNotSaved) {
-		t.Fatalf("Persist on an unanswered host = %v, want ErrNotSaved", err)
-	}
-	if mode, ok := s.Lookup("SHA256:nobody"); ok {
-		t.Fatalf("Lookup after a failed Persist = %q/%v, want no record", mode, ok)
-	}
-}
-
 // TestDeliversScripts is the open-time gate, stated once because it is read in
 // three places: internal/ssh gates the session open on it, internal/transport
 // decides from it whether a session even REQUESTED integration, and the
@@ -239,5 +149,62 @@ func TestDeliversScripts(t *testing.T) {
 		if got := tc.mode.DeliversScripts(); got != tc.want {
 			t.Errorf("Mode(%q).DeliversScripts() = %v, want %v — %s", tc.mode, got, tc.want, tc.why)
 		}
+	}
+}
+
+func TestPersistManyIsAllOrNothing(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Set("one", Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("two", Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PersistMany([]string{"one", "two"}, Script); err != nil {
+		t.Fatal(err)
+	}
+	for _, fp := range []string{"one", "two"} {
+		if got, ok := s.Lookup(fp); !ok || got != Script {
+			t.Errorf("Lookup(%s) = %q/%v", fp, got, ok)
+		}
+	}
+}
+
+type failingBulkDocumentStore struct {
+	storage.DocumentStore
+	fail bool
+}
+
+func (s *failingBulkDocumentStore) Write(name string, doc any) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	return s.DocumentStore.Write(name, doc)
+}
+
+func TestPersistManyFailureLeavesMemoryAndDiskUnchanged(t *testing.T) {
+	ds := &failingBulkDocumentStore{DocumentStore: storage.NewDocumentStore(t.TempDir())}
+	s := NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
+	for _, fp := range []string{"one", "two"} {
+		if err := s.Set(fp, Raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var before modeDocument
+	if found, err := ds.Read("host-modes.json", &before); err != nil || !found {
+		t.Fatalf("read before: found=%v err=%v", found, err)
+	}
+	ds.fail = true
+	if err := s.PersistMany([]string{"one", "two"}, Script); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("PersistMany = %v, want ErrNotSaved", err)
+	}
+	for _, fp := range []string{"one", "two"} {
+		if got, ok := s.Lookup(fp); !ok || got != Raw {
+			t.Errorf("memory %s = %q/%v", fp, got, ok)
+		}
+	}
+	var after modeDocument
+	if found, err := ds.Read("host-modes.json", &after); err != nil || !found || after.Modes["one"] != before.Modes["one"] || after.Modes["two"] != before.Modes["two"] {
+		t.Fatalf("disk changed: before=%+v after=%+v found=%v err=%v", before, after, found, err)
 	}
 }

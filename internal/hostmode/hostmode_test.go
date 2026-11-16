@@ -259,3 +259,42 @@ func TestPersistManyIsAllOrNothing(t *testing.T) {
 		}
 	}
 }
+
+type failingBulkDocumentStore struct {
+	storage.DocumentStore
+	fail bool
+}
+
+func (s *failingBulkDocumentStore) Write(name string, doc any) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	return s.DocumentStore.Write(name, doc)
+}
+
+func TestPersistManyFailureLeavesMemoryAndDiskUnchanged(t *testing.T) {
+	ds := &failingBulkDocumentStore{DocumentStore: storage.NewDocumentStore(t.TempDir())}
+	s := NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
+	for _, fp := range []string{"one", "two"} {
+		if err := s.Persist(fp, Raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var before modeDocument
+	if found, err := ds.Read("host-modes.json", &before); err != nil || !found {
+		t.Fatalf("read before: found=%v err=%v", found, err)
+	}
+	ds.fail = true
+	if err := s.PersistMany([]string{"one", "two"}, Script); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("PersistMany = %v, want ErrNotSaved", err)
+	}
+	for _, fp := range []string{"one", "two"} {
+		if got, ok := s.Lookup(fp); !ok || got != Raw {
+			t.Errorf("memory %s = %q/%v", fp, got, ok)
+		}
+	}
+	var after modeDocument
+	if found, err := ds.Read("host-modes.json", &after); err != nil || !found || after.Modes["one"] != before.Modes["one"] || after.Modes["two"] != before.Modes["two"] {
+		t.Fatalf("disk changed: before=%+v after=%+v found=%v err=%v", before, after, found, err)
+	}
+}

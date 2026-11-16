@@ -352,6 +352,38 @@ func TestSetHostModeAutoIsAtomicAcrossKnownKeys(t *testing.T) {
 	}
 }
 
+func TestSetHostModeWritesOneDocumentForAllKnownKeys(t *testing.T) {
+	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 99}
+	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
+	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
+		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := ds.calls
+	srv := startHostModeServer(t, modes, &fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}}, &fakeHostKeyIndex{fingerprints: []string{"SHA256:one", "SHA256:two"}})
+	got := hostModeCall(t, srv, "connections.setHostMode", map[string]any{"profileId": "ssh-1", "mode": "script"})
+	if got.Mode != "script" || ds.calls != before+1 {
+		t.Fatalf("result=%+v document writes=%d, want one", got, ds.calls-before)
+	}
+}
+
+func TestSetHostModeAutoWritesOneDocumentForAllKnownKeys(t *testing.T) {
+	ds := &failNthDocumentWrite{DocumentStore: storage.NewDocumentStore(t.TempDir()), failAt: 99}
+	modes := hostmode.NewStore(log.NewSlogAdapter(nil), ds, "host-modes.json")
+	for _, fp := range []string{"SHA256:one", "SHA256:two"} {
+		if err := modes.Persist(fp, hostmode.Raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := ds.calls
+	srv := startHostModeServer(t, modes, &fakeHostModeResolver{host: "host.example", cfg: &ssh.ConnectConfig{}}, &fakeHostKeyIndex{fingerprints: []string{"SHA256:one", "SHA256:two"}})
+	got := hostModeCall(t, srv, "connections.setHostMode", map[string]any{"profileId": "ssh-1", "mode": "auto"})
+	if got.Mode != "auto" || ds.calls != before+1 {
+		t.Fatalf("result=%+v document writes=%d, want one", got, ds.calls-before)
+	}
+}
+
 func TestSetHostModeReportsARecordItCouldNotWrite(t *testing.T) {
 	modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
 	srv := startHostModeServer(t, modes,

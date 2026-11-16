@@ -302,13 +302,16 @@ func TestHelperConsentAskForProbeFailure_UnknownKeyAsksOnce(t *testing.T) {
 	modes := newTestHostModes(t)
 	probeErr := &ssh.ErrUnknownHostKey{Addr: "h:22", Fingerprint: "SHA256:offered", KeyAlgo: "ssh-ed25519"}
 
-	err := helperConsentAskForProbeFailure("h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
+	err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) {
 		t.Fatalf("err = %v, want *transport.ErrHelperConsentNeeded", err)
 	}
 	if ask.Fingerprint != "SHA256:offered" {
 		t.Errorf("fingerprint = %q, want the offered one", ask.Fingerprint)
+	}
+	if ask.ProfileID != "ssh:prod-db" {
+		t.Errorf("profileId = %q, want the connection the open named", ask.ProfileID)
 	}
 	if !errors.Is(ask.Cause, error(probeErr)) && ask.Cause != probeErr {
 		t.Errorf("ask.Cause = %v, want the original host-key error so the renderer's host-key evidence can be built from it", ask.Cause)
@@ -324,7 +327,7 @@ func TestHelperConsentAskForProbeFailure_ChangedKeyAsksToo(t *testing.T) {
 	modes := newTestHostModes(t)
 	probeErr := &ssh.ErrHostKeyMismatch{Addr: "h:22", Fingerprint: "SHA256:new", Expected: "SHA256:old"}
 
-	err := helperConsentAskForProbeFailure("h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
+	err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) {
 		t.Fatalf("err = %v, want *transport.ErrHelperConsentNeeded", err)
@@ -346,7 +349,7 @@ func TestHelperConsentAskForProbeFailure_AHostRecordedRawOrScriptNeverAsks(t *te
 			modes := newTestHostModes(t)
 			mustRecordHostMode(t, modes, "SHA256:offered", recorded)
 
-			if err := helperConsentAskForProbeFailure("h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes); err != nil {
+			if err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes); err != nil {
 				t.Errorf("a host recorded %q: err = %v, want nil — it answered, so it may not be asked", recorded, err)
 			}
 		})
@@ -362,7 +365,7 @@ func TestHelperConsentAskForProbeFailure_AHostWithNoRecordAsks(t *testing.T) {
 	modes := newTestHostModes(t)
 	probeErr := &ssh.ErrUnknownHostKey{Addr: "h:22", Fingerprint: "SHA256:offered", KeyAlgo: "ssh-ed25519"}
 
-	err := helperConsentAskForProbeFailure("h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
+	err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes)
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) {
 		t.Fatalf("err = %v, want *transport.ErrHelperConsentNeeded — a host with no record is auto, and auto is the ask", err)
@@ -379,7 +382,7 @@ func TestHelperConsentAskForProbeFailure_AHostWithNoRecordAsks(t *testing.T) {
 func TestHelperConsentAskForProbeFailure_NonHostKeyFailureNeverAsks(t *testing.T) {
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	modes := newTestHostModes(t)
-	if err := helperConsentAskForProbeFailure("h:22", "", errors.New("dial tcp: connection refused"), store, modes); err != nil {
+	if err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", "", errors.New("dial tcp: connection refused"), store, modes); err != nil {
 		t.Errorf("err = %v, want nil for a non-host-key probe failure", err)
 	}
 }
@@ -394,7 +397,7 @@ func TestHelperConsentAskForProbeFailure_AlreadyAnsweredFingerprintNeverAsksAgai
 	modes := newTestHostModes(t)
 	probeErr := &ssh.ErrUnknownHostKey{Addr: "h:22", Fingerprint: "SHA256:offered"}
 
-	if err := helperConsentAskForProbeFailure("h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes); err != nil {
+	if err := helperConsentAskForProbeFailure("ssh:prod-db", "h:22", offeredHostKeyFingerprint(probeErr), probeErr, store, modes); err != nil {
 		t.Errorf("err = %v, want nil — this fingerprint already has an answer", err)
 	}
 }

@@ -779,8 +779,9 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     // The git panel never asks (ADR-0068): git.open answers the SAME
     // not-available error a raw or Script connection gets, rendered as the
     // ordinary failed-open card — naming the setting that would change it
-    // (Delivery mode Helper, or Auto to be offered the ask again) rather
-    // than offering to ask again itself. Script is an ANSWER under
+    // (the host's Integration method set to Helper, or Auto to be offered the
+    // ask again) rather than offering to ask again itself. Script is an
+    // ANSWER under
     // ADR-0069 (internal/app/helper_git.go's refusedHelperReason), not a
     // decline recorded against the machine — there is no more "declined"
     // to read back here; the connect-time ask no longer writes one.

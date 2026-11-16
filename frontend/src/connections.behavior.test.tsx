@@ -17,6 +17,7 @@ import type { VaultClient, InventoryEntry } from './vault-client'
 import type { DialogClient } from './dialog-client'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
+import { log } from './log'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
@@ -141,13 +142,17 @@ function createMockClient(overrides?: {
   const trustHostKey = vi.spyOn(pc, 'trustHostKey').mockResolvedValue({ fingerprint: 'SHA256:abc' })
   // The host record: a saved connection has no method of its own, so the
   // editor asks the HOST through the backend (ADR-727g63tr decision 1). Every
-  // mount stubs both calls; a test that is about either overrides it.
+  // mount stubs both calls; a test that is about either overrides it. The
+  // default read answers a host whose key is known and whose method nobody
+  // answered — the state a test that does not care about the field starts in.
   const hostMode = vi
     .spyOn(pc, 'hostMode')
-    .mockImplementation(async (profileId) => ({ profileId, mode: 'auto' }))
+    .mockImplementation((profileId) =>
+      Promise.resolve({ profileId, mode: 'auto', hostKnown: true }),
+    )
   const setHostMode = vi
     .spyOn(pc, 'setHostMode')
-    .mockImplementation(async (profileId, mode) => ({ profileId, mode }))
+    .mockImplementation((profileId, mode) => Promise.resolve({ profileId, mode }))
   return { client: pc, connectionTest, trustHostKey, hostMode, setHostMode }
 }
 
@@ -1311,7 +1316,11 @@ function selectGroupSection(container: HTMLElement, label: string) {
 // ── Helper: open the profile edit dialog for a named profile ─────────────
 
 async function openProfileEditor(container: HTMLElement, profileName: string) {
-  const editBtn = container.querySelector('.ui-collection-row__actions [aria-label^="Edit "]')
+  // BY NAME, not "the first edit button": a test that opens one connection
+  // after another (the stale-answer tests) must reach the one it names.
+  const editBtn = container.querySelector(
+    `.ui-collection-row__actions [aria-label="Edit ${profileName}"]`,
+  )
   expect(editBtn, `Edit button for "${profileName}" not found`).toBeTruthy()
   ;(editBtn! as HTMLElement).click()
 
@@ -2887,118 +2896,114 @@ describe('portDiscovery', () => {
 //
 // The method belongs to the MACHINE, keyed by its host-key fingerprint, so the
 // editor reads and writes the host record through the backend and the saved
-// connection carries no copy. A person changing this select changes what every
-// later open of that host does.
+// connection carries no copy. The mockup's frames 1–5 are this field's five
+// states, and each test drives one through the surface a person reaches: the
+// Advanced section and Save Connection.
 
 describe('the host integration method', () => {
-  it("shows the method the connection's host keeps", async () => {
+  /** The field's subtree, addressed the way its label addresses the control. */
+  function methodField(container: HTMLElement) {
+    const label = container.querySelector('label[for="profile-integration-method"]')
+    expect(label, 'Integration method field not found').toBeTruthy()
+    const field = label!.closest('.ui-field') as HTMLElement
+    const select = field.querySelector('.ui-select') as HTMLSelectElement
+    expect(select, 'Integration method select not found').toBeTruthy()
+    return {
+      field,
+      select,
+      description: field.querySelector('.ui-field-desc')?.textContent,
+      error: field.querySelector('.ui-field-error')?.textContent,
+    }
+  }
+
+  async function openAdvanced(container: HTMLElement) {
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Advanced')
+  }
+
+  const KNOWN_HOST_DESC =
+    'Set for the machine web.example.com, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.'
+  const CHANGE_HINT =
+    'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.'
+  const UNKNOWN_HOST_DESC =
+    'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.'
+  const DIALOG_TITLE = 'Edit Connection: prod-web'
+
+  it('frame 1: shows the host’s method, names whose setting it is, and hints only while the choice differs', async () => {
     const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script' })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script', hostKnown: true })
     await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Advanced')
+    await openAdvanced(container)
 
-    const label = container.querySelector('label[for="desired-mode"]')
-    expect(label, 'Delivery mode field not found').toBeTruthy()
-    const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
-    await vi.waitFor(() => {
-      expect(select.value, 'the select must show the host record').toBe('script')
-    })
-  })
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('script'))
+    const { select, description, error } = methodField(container)
+    expect(select.disabled, 'a known host’s method is settable').toBe(false)
+    expect(description).toBe(KNOWN_HOST_DESC)
+    expect(error).toBeUndefined()
+    expect(container.textContent, 'the hint is not a permanent line').not.toContain(CHANGE_HINT)
 
-  it('writes a change to the host record and not to the profile', async () => {
-    const { container, client, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const patch = vi.spyOn(client, 'patchProfile')
-    await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Advanced')
-
-    const select = container
-      .querySelector('label[for="desired-mode"]')!
-      .closest('.ui-field')
-      ?.querySelector('.ui-select') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'helper' } })
-
-    await vi.waitFor(() => {
-      expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'helper')
-    })
-    expect(patch, 'the host method must not ride the profile patch').not.toHaveBeenCalled()
-  })
-
-  it('goes back to the recorded method when the host has no known key', async () => {
-    const { container, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const sentence =
-      "This host's key is not known yet, so nocx cannot remember a method for it. Connect to it once, then choose."
-    setHostMode.mockRejectedValue(new RpcError(sentence, -32603))
-    await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Advanced')
-
-    const select = container
-      .querySelector('label[for="desired-mode"]')!
-      .closest('.ui-field')
-      ?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(select, { target: { value: 'raw' } })
-
-    await vi.waitFor(() => {
-      expect(select.value, 'a refused write must not leave the new value showing').toBe('auto')
-    })
-    expect(toasts().map((toast) => toast.message)).toContain(sentence)
-  })
-
-  it('says the method will not survive a restart when the record could not be saved', async () => {
-    const { container, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    const note =
-      "The method applies to this host, but the host's record was not saved, so this host will be asked again after a restart."
-    setHostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', note })
-    await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Advanced')
-
-    const select = container
-      .querySelector('label[for="desired-mode"]')!
-      .closest('.ui-field')
-      ?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(select, { target: { value: 'raw' } })
-
-    await vi.waitFor(() => {
-      expect(select.value).toBe('raw')
-      expect(toasts().map((toast) => toast.message)).toContain(note)
-    })
-  })
-
-  it('offers no per-connection consent control for a helper selection', async () => {
-    // ADR-0105 (nocx-1kejz.3). The control that used to sit here promised a
-    // rule nothing applied ("a Helper selection without granted consent
-    // behaves as raw"), while the deployment decision read a fingerprint
-    // store keyed by the MACHINE and never this field. A person set Granted
-    // and was asked anyway, or set nothing and believed the helper was
-    // blocked. Editing the host's method does not answer that question
-    // either: the connect-time ask is where the machine answers, once.
-    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
-    await waitForProfiles(container, 1)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Advanced')
-
-    const modeSelect = container
-      .querySelector('label[for="desired-mode"]')!
-      .closest('.ui-field')
-      ?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(modeSelect, { target: { value: 'helper' } })
-
-    expect(
-      container.querySelector('label[for="helper-consent"]'),
-      'a helper selection must not offer a per-connection consent control',
-    ).toBeNull()
-    // …and what replaces it says where the answer is given, so the person is
-    // not left looking for a control that is gone.
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('helper'))
+    expect(container.textContent).toContain(CHANGE_HINT)
+    // The existing helper note stays where it was, and no per-connection
+    // consent control returns (ADR-0105).
     expect(container.textContent).toContain('Permission to deploy it belongs to the machine')
+    expect(container.querySelector('label[for="helper-consent"]')).toBeNull()
+
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    await vi.waitFor(() => expect(container.textContent).not.toContain(CHANGE_HINT))
   })
 
-  it('shows auto on a connection that has not been saved, and says to save it first', async () => {
-    const { container, hostMode, setHostMode } = mount({ profiles: [] })
-    await waitForProfiles(container, 0)
+  it('frame 1: writes the chosen method when Save Connection is pressed, and not before', async () => {
+    const { container, client, hostMode, setHostMode } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+    })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    const patch = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
 
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    expect(setHostMode, 'a selection must not write the host record').not.toHaveBeenCalled()
+
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'script'))
+    expect(patch, 'the host method must not ride the profile patch').not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+  })
+
+  it('frame 1: writes Auto as a removal of the host record', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+
+    fireEvent.change(methodField(container).select, { target: { value: 'auto' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'auto'))
+  })
+
+  it('frame 2: a host nocx has never connected to shows Auto, disabled, and says when it becomes settable', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'auto', hostKnown: false })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() => expect(methodField(container).description).toBe(UNKNOWN_HOST_DESC))
+    const { select } = methodField(container)
+    expect(select.disabled, 'there is no fingerprint to write an answer under').toBe(true)
+    expect(select.value, 'the effective value is shown, not hidden').toBe('auto')
+
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+    expect(setHostMode).not.toHaveBeenCalled()
+  })
+
+  it('frame 2: a connection that has never been saved shows the same disabled field', async () => {
+    const { container, hostMode } = mount({ profiles: [] })
+    await waitForProfiles(container, 0)
     clickButtonByText(container, '+ New connection')
     await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
     fireEvent.input(container.querySelector('#quick-connect-input')!, {
@@ -3008,26 +3013,266 @@ describe('the host integration method', () => {
     await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
     selectProfileSection(container, 'Advanced')
 
-    const select = container
-      .querySelector('label[for="desired-mode"]')!
-      .closest('.ui-field')
-      ?.querySelector('.ui-select') as HTMLSelectElement
-    expect(select.value, 'a draft has no host record, so it shows auto').toBe('auto')
-
-    fireEvent.change(select, { target: { value: 'script' } })
-
-    // A draft names no profile id, so there is nothing for the backend to
-    // resolve and nowhere to keep an answer. The select stays where it was and
-    // the toast says what to do, rather than a control that silently does
-    // nothing.
-    await vi.waitFor(() => {
-      expect(toasts().map((toast) => toast.message)).toContain(
-        'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
-      )
-    })
-    expect(hostMode).not.toHaveBeenCalled()
-    expect(setHostMode).not.toHaveBeenCalled()
+    const { select, description } = methodField(container)
+    expect(select.disabled).toBe(true)
     expect(select.value).toBe('auto')
+    expect(description).toBe(UNKNOWN_HOST_DESC)
+    expect(hostMode, 'a draft names no connection to ask about').not.toHaveBeenCalled()
+  })
+
+  it('frame 2b: an edited address says to save before the new address resolves', async () => {
+    const { container, client, hostMode, setHostMode } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+    })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    const [prodWeb] = MOCK_PROFILES
+    const update = vi.spyOn(client, 'updateProfile').mockResolvedValue({
+      ...prodWeb,
+      options: { ...prodWeb.options, host: 'other.example.com' },
+    })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+
+    selectProfileSection(container, 'General')
+    fireEvent.input(container.querySelector('#profile-host')!, {
+      target: { value: 'other.example.com' },
+    })
+    selectProfileSection(container, 'Advanced')
+
+    await vi.waitFor(() => expect(methodField(container).select.disabled).toBe(true))
+    expect(methodField(container).select.value).toBe('auto')
+    expect(methodField(container).description).toBe(
+      'Save the connection to see the method for the new address.',
+    )
+
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(update).toHaveBeenCalled())
+    expect(
+      setHostMode,
+      'the field is for the address the connection had saved',
+    ).not.toHaveBeenCalled()
+  })
+
+  it('frame 3: shows Loading… while the host lookup is running', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockImplementation(() => new Promise(() => {}))
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() => expect(methodField(container).select.disabled).toBe(true))
+    expect(methodField(container).select.value).toBe('')
+    expect(methodField(container).select.textContent).toContain('Loading…')
+  })
+
+  it('frame 3: a failed read disables the field, gives the reason and offers Retry, which re-reads only', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockRejectedValueOnce(new RpcError('settings store is locked', -32603))
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() =>
+      expect(methodField(container).error).toBe(
+        "Could not read this machine's method: settings store is locked",
+      ),
+    )
+    const failed = methodField(container)
+    expect(failed.select.disabled, 'a default is never shown as if read').toBe(true)
+    expect(failed.select.value).toBe('auto')
+    expect(failed.select.getAttribute('aria-invalid')).toBe('true')
+
+    hostMode.mockResolvedValueOnce({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    clickButtonByText(container, 'Retry')
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+    expect(hostMode).toHaveBeenCalledTimes(2)
+    expect(methodField(container).error).toBeUndefined()
+    expect(methodField(container).select.disabled).toBe(false)
+  })
+
+  it('frame 3: saving the rest does not write a field whose value could not be read', async () => {
+    const { container, client, hostMode, setHostMode } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+    })
+    hostMode.mockRejectedValueOnce(new RpcError('settings store is locked', -32603))
+    const patch = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).error).toBeTruthy())
+
+    fireEvent.input(container.querySelector('#profile-keepalive-interval')!, {
+      target: { value: '5000' },
+    })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(patch).toHaveBeenCalled())
+    expect(setHostMode).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+  })
+
+  it('frame 4: a failed host write keeps the dialog open, says both halves, and the same Save retries', async () => {
+    const { container, client, hostMode, setHostMode } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+    })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    const patch = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+    setHostMode.mockRejectedValueOnce(new RpcError('settings store is read-only', -32603))
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+
+    fireEvent.change(methodField(container).select, { target: { value: 'helper' } })
+    fireEvent.input(container.querySelector('#profile-keepalive-interval')!, {
+      target: { value: '5000' },
+    })
+    // The person may be looking at another section when they press Save; the
+    // failed field's section is the one that must be shown.
+    selectProfileSection(container, 'General')
+    clickButtonByText(container, 'Save Connection')
+
+    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'helper'))
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeTruthy())
+    expect(patch, 'the profile is written first and it was written').toHaveBeenCalled()
+
+    await vi.waitFor(() =>
+      expect(methodField(container).error).toBe('Not saved: settings store is read-only'),
+    )
+    const kept = methodField(container)
+    expect(kept.select.value, 'the chosen value stays in the control').toBe('helper')
+    await vi.waitFor(() => expect(document.activeElement).toBe(kept.select))
+    expect(container.textContent).toContain(CHANGE_HINT)
+    expect(
+      toasts().some(
+        (toast) =>
+          toast.level === 'warning' &&
+          toast.message ===
+            'The connection was saved, but the integration method for web.example.com was not: settings store is read-only. Save Connection to retry.',
+      ),
+      'the toast names what was saved and what was not, and how to retry',
+    ).toBe(true)
+
+    setHostMode.mockResolvedValueOnce({ profileId: 'ssh:p1', mode: 'helper' })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+    expect(setHostMode).toHaveBeenCalledTimes(2)
+  })
+
+  // A HOST-METHOD ANSWER BELONGS TO THE EDITOR THAT ASKED (review ALX-51).
+  // A write can settle after the person has left the connection it was for, and
+  // applying it then would paint A's failure — its field error, its section, its
+  // focus and its toast — over B, which is the connection now on screen. The
+  // editor therefore applies an answer only while the same connection is still
+  // being edited AND no newer request has been made for it.
+  it('drops a write failure that arrives after the editor moved to another connection', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
+    hostMode.mockImplementation((profileId) =>
+      Promise.resolve({ profileId, mode: 'raw', hostKnown: true }),
+    )
+    let rejectA: ((reason?: unknown) => void) | undefined
+    setHostMode.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectA = reject
+        }),
+    )
+    const errors = vi.spyOn(log, 'error').mockImplementation(() => {})
+
+    await waitForProfiles(container, 2)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'script'))
+
+    // The person gives up on prod-web while its write is still in flight, and
+    // opens prod-db.
+    clickButtonByText(container, 'Cancel')
+    await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
+    await openProfileEditor(container, 'prod-db')
+    selectProfileSection(container, 'Advanced')
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+    // …and is looking at General when the old refusal arrives.
+    selectProfileSection(container, 'General')
+
+    rejectA!(new RpcError('settings store is read-only', -32603))
+    // The refusal is still logged — the developer's record of it — and only
+    // that: no field error, no toast, no section switch, no focus on B.
+    await vi.waitFor(() => expect(errors).toHaveBeenCalled())
+    expect(methodField(container).error, 'B’s field must not show A’s failure').toBeUndefined()
+    expect(container.textContent).not.toContain('settings store is read-only')
+    expect(
+      toasts().some((toast) => toast.message.includes('web.example.com')),
+      'A’s split-outcome toast names A, and must not be raised while B is edited',
+    ).toBe(false)
+    expect(
+      methodField(container).select.closest('[hidden]'),
+      'the failed save must not reopen Advanced over the section B is on',
+    ).not.toBeNull()
+    expect(document.activeElement).not.toBe(methodField(container).select)
+  })
+
+  it('lets a newer write for one connection settle before an older one', async () => {
+    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
+    const writes: {
+      resolve: (value: { profileId: string; mode: 'auto' | 'raw' | 'script' | 'helper' }) => void
+      reject: (reason?: unknown) => void
+    }[] = []
+    setHostMode.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          writes.push({ resolve, reject })
+        }),
+    )
+    const warnings = vi.spyOn(log, 'warn').mockImplementation(() => {})
+
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+
+    // Two Saves for one connection, the second made before the first answered.
+    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(writes.length).toBe(1))
+    fireEvent.change(methodField(container).select, { target: { value: 'helper' } })
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() => expect(writes.length).toBe(2))
+
+    // The NEWER write fails and is what the field reports.
+    writes[1].reject(new RpcError('settings store is read-only', -32603))
+    await vi.waitFor(() =>
+      expect(methodField(container).error).toBe('Not saved: settings store is read-only'),
+    )
+
+    // The OLDER write succeeds afterwards. It must not clear the newer error,
+    // nor move the recorded value under the choice the person is looking at.
+    writes[0].resolve({ profileId: 'ssh:p1', mode: 'script' })
+    await vi.waitFor(() =>
+      expect(warnings.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'stale host-method write',
+      ),
+    )
+    expect(methodField(container).error).toBe('Not saved: settings store is read-only')
+    expect(methodField(container).select.value).toBe('helper')
+    expect(container.textContent).toContain(CHANGE_HINT)
+  })
+
+  it('frame 6: the field is called “Integration method”, not “Delivery mode”', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    expect(container.textContent).toContain('Integration method')
+    expect(container.textContent).not.toContain('Delivery mode')
+  })
+
+  it('frame 6: a group cannot hold a default for something that is not a connection’s', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES, groups: MOCK_GROUPS })
+    await waitForProfiles(container, 3)
+    await openGroupEditorByName(container, 'Production')
+    selectGroupSection(container, 'Advanced')
+    expect(
+      container.querySelector('label[for="group-default-deliveryMode"]'),
+      'the Delivery mode row is gone from the group’s Advanced defaults',
+    ).toBeNull()
+    expect(container.textContent).not.toContain('Delivery mode')
   })
 })
 

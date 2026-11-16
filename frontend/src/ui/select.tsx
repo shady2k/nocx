@@ -56,6 +56,18 @@ export interface SelectProps {
   placeholder?: string
   placeholderValue?: string
   disabled?: boolean
+  /**
+   * Whether the value on screen is one the caller refuses — a select whose
+   * options could not be read, so it shows a placeholder that is not the
+   * setting (the connection editor's failed host-method read,
+   * nocx-oalo1.11.2).
+   *
+   * The error text lives in the `Field` beside it; this is the native
+   * `aria-invalid` the same field's text controls carry, so a screen reader
+   * hears that the shown value is not to be trusted rather than reading it as
+   * the answer.
+   */
+  invalid?: boolean
 }
 
 export function Select(props: SelectProps) {
@@ -85,6 +97,7 @@ export function Select(props: SelectProps) {
       aria-label={props.ariaLabel}
       value={props.value}
       disabled={props.disabled === true}
+      aria-invalid={props.invalid === true ? 'true' : undefined}
       onChange={onChange}
     >
       <Show when={props.placeholder !== undefined}>

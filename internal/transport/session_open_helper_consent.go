@@ -47,6 +47,12 @@ import (
 // already show, without a second reader of those error types. Nil means the
 // key is already trusted and only the helper question remains.
 type ErrHelperConsentNeeded struct {
+	// ProfileID is the saved connection the open named, empty for a
+	// hand-typed ssh. It rides the wire so the renderer can say where the
+	// answer can be changed later by reading the ask's own data: a saved
+	// connection has settings of its own to point at, and a typed
+	// destination does not.
+	ProfileID string
 	// Host is the destination as the open path named it (session.Config's
 	// Host), for the sentence a person reads and for the wire's host field.
 	Host string
@@ -75,8 +81,8 @@ func (e *ErrHelperConsentNeeded) Unwrap() error { return e.Cause }
 // refusal is decided inside the helper opener (internal/app), a package
 // below transport in the open path's own layering (session_open.go's file
 // header), and openRefusal's carrier is unexported.
-func NewHelperConsentNeeded(host, fingerprint string, cause error) error {
-	return &ErrHelperConsentNeeded{Host: host, Fingerprint: fingerprint, Cause: cause}
+func NewHelperConsentNeeded(profileID, host, fingerprint string, cause error) error {
+	return &ErrHelperConsentNeeded{ProfileID: profileID, Host: host, Fingerprint: fingerprint, Cause: cause}
 }
 
 // helperConsentData is the open error's data field for the connect-time ask.
@@ -89,6 +95,7 @@ type helperConsentData struct {
 	Host        string                  `json:"host"`
 	Fingerprint string                  `json:"fingerprint"`
 	HelperAsk   bool                    `json:"helperAsk"`
+	ProfileID   string                  `json:"profileId,omitempty"`
 	HostKey     *connectionsTestHostKey `json:"hostKey,omitempty"`
 }
 
@@ -106,6 +113,7 @@ func answerHelperConsentNeeded(r Responder, req jsonrpcRequest, err error) bool 
 		Host:        ask.Host,
 		Fingerprint: ask.Fingerprint,
 		HelperAsk:   true,
+		ProfileID:   ask.ProfileID,
 		HostKey:     hostKeyInfoFromError(ask.Cause),
 	}
 	_ = respond(r, resp)

@@ -2036,7 +2036,10 @@ function main(): void {
           {(request) => (
             <HostKeyDialog
               evidence={request.evidence.hostKey}
-              helperAsk={{ fingerprint: request.evidence.fingerprint }}
+              helperAsk={{
+                fingerprint: request.evidence.fingerprint,
+                profileId: request.evidence.profileId,
+              }}
               busy={helperConsentAskBusy()}
               onAcceptHostKey={() => void acceptHelperAskHostKey(request)}
               onChooseMethod={(method) =>

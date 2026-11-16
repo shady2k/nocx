@@ -199,18 +199,19 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
 /** The closed host modes, in display order (spec §3.5, ADR-727g63tr), with
- *  honest labels: auto is the absence of an answer for this host — the
- *  connect-time ask decides when the host is first reached (ADR-0033), and
- *  that is also every answer for a destination known_hosts holds no key for;
- *  script is that answer given explicitly, so the helper is never offered; raw
- *  adds nothing; helper allows the Tier-B binary, whose deployment the machine
- *  still has to permit at connect. auto leads because it is what a host nobody
- *  has answered is — the list starts where the user starts. */
+ *  honest labels: auto is the absence of an answer for this host — choosing it
+ *  removes the record, so the connect-time ask decides on the next connection
+ *  (ADR-0033) — and it is also every answer for a destination known_hosts
+ *  holds no key for; script is that answer given explicitly, so the helper is
+ *  never offered; raw adds nothing; helper allows the Tier-B binary, whose
+ *  deployment the machine still has to permit at connect. auto leads because
+ *  it is what a host nobody has answered is — the list starts where the user
+ *  starts. */
 const HOST_MODES: { value: HostMode; labelKey: string; labelFallback: string }[] = [
   {
     value: 'auto',
-    labelKey: 'connections.mode.desiredAuto',
-    labelFallback: 'Auto — ask when the host is first reached',
+    labelKey: 'connections.mode.hostAuto',
+    labelFallback: 'Auto — ask on the next connection',
   },
   {
     value: 'script',
@@ -228,6 +229,19 @@ const HOST_MODES: { value: HostMode; labelKey: string; labelFallback: string }[]
     labelFallback: 'Helper — deploy the nocx binary',
   },
 ]
+
+/** What the connection editor knows about the edited connection's HOST
+ *  method (ADR-727g63tr decision 1), which is the states the mockup draws: a
+ *  draft names no connection; an edited address has not been resolved yet; the
+ *  lookup is in flight; it answered — and said whether the machine is known at
+ *  all; or it failed. The value a person chooses is kept apart from the record
+ *  that was read, because Save is what writes it (frames 1–4). */
+type HostModeState =
+  | { kind: 'draft' }
+  | { kind: 'addressChanged' }
+  | { kind: 'loading' }
+  | { kind: 'ready'; stored: HostMode; hostKnown: boolean }
+  | { kind: 'readFailed'; reason: string }
 
 // THE HELPER-CONSENT CONTROL IS GONE (ADR-0105, nocx-1kejz.3), and this is
 // where it used to be. It offered Unknown / Granted / Denied per saved
@@ -348,13 +362,22 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Selection / dialog state ─────────────────────────────────────────────
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [dialogOpen, setDialogOpen] = createSignal(false)
-  /** The integration method the edited connection's HOST keeps
-   *  (ADR-727g63tr decision 1). It is not a profile field, so it does not ride
-   *  `setOption` or the dirty tracking: the record is the host's and a write
-   *  takes effect at once, for every later open of that machine. `auto` is
-   *  what a draft and a host with no trusted key show, because neither has an
-   *  answer anywhere. */
-  const [hostMode, setHostMode] = createSignal<HostMode>('auto')
+  /** The HOST method field's state, the value a person has chosen, and the
+   *  reason a Save could not write it. None is a profile field: the record is
+   *  the host's (ADR-727g63tr decision 1), read when the editor opens and
+   *  written by Save, so `setOption` and the dirty tracking never see them. */
+  const [hostModeState, setHostModeState] = createSignal<HostModeState>({ kind: 'draft' })
+  const [hostModeChoice, setHostModeChoice] = createSignal<HostMode>('auto')
+  const [hostModeWriteError, setHostModeWriteError] = createSignal<string | undefined>(undefined)
+  /** The host-method request whose answer the editor may still apply. Every
+   *  read and every write takes the next number, so an answer that arrives
+   *  after a newer request — a Retry, a second Save, or another connection's
+   *  editor — is stale by construction and never painted over the current one
+   *  (review ALX-51: a failure for A must not draw A's error, section, focus
+   *  or toast over B). */
+  let hostModeRequest = 0
+  const hostModeAnswerIsCurrent = (request: number, profileId: string): boolean =>
+    request === hostModeRequest && editing()?.id === profileId
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   /** The literal a person has typed into a password field and not yet stored.
    *  Two fields, two drafts: the profile editor's and the group defaults'.
@@ -759,9 +782,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     ]
   })
 
-  // Delivery-mode options, tracked so a locale switch re-renders the label.
-  // Serves both Selects that offer the modes — the group editor's default and
-  // the connection editor's Advanced section — so the two never drift.
+  // Integration-method options, tracked so a locale switch re-renders the
+  // label. The editor's field is the only Select that offers them: a group
+  // cannot hold a default for something that is not a connection's (frame 6).
   const hostModeOptions = createMemo(() =>
     HOST_MODES.map((m) => ({ value: m.value, label: t(m.labelKey, m.labelFallback) })),
   )
@@ -1800,7 +1823,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
     closeQuickConnect()
     setProfileSection('general')
-    setHostMode('auto')
+    setHostModeState({ kind: 'draft' })
+    setHostModeChoice('auto')
+    setHostModeWriteError(undefined)
     setEditing(profile)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
@@ -1831,71 +1856,252 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     void loadSecretRows()
   }
 
-  /** Read the host's method for the connection being edited. A draft names no
-   *  connection, so there is nothing to ask and auto is the answer it already
-   *  shows. A slow answer for a dialog that has since opened another
-   *  connection is dropped rather than painted over the newer one. */
+  /** The saved connection whose host record the field edits, when the draft
+   *  still points at it. A draft has none: a method is keyed by the host's
+   *  fingerprint, which only a saved connection's destination can be resolved
+   *  to (ADR-727g63tr decision 1). */
+  const savedHostProfile = createMemo<SSHProfile | undefined>(() => {
+    const draft = editing()
+    if (!draft?.id) return undefined
+    return profiles().find((p) => p.id === draft.id)
+  })
+
+  /** Whether the draft's address differs from the one this connection has
+   *  saved. The record is keyed by the saved destination, so the field cannot
+   *  answer for an address nobody has resolved — the mockup's variant 2b.
+   *  Port 22 and an absent port are the same address. */
+  const hostAddressChanged = createMemo(() => {
+    const draft = editing()
+    const saved = savedHostProfile()
+    if (!draft || !saved) return false
+    return (
+      (draft.options.host ?? '') !== (saved.options.host ?? '') ||
+      String(draft.options.port ?? 22) !== String(saved.options.port ?? 22)
+    )
+  })
+
+  /** What the field draws. A draft and an edited address outrank the read,
+   *  because neither is an answer about the address on screen. */
+  const methodFieldState = createMemo<HostModeState>(() => {
+    const draft = editing()
+    if (!draft || !savedHostProfile()) return { kind: 'draft' }
+    if (hostAddressChanged()) return { kind: 'addressChanged' }
+    return hostModeState()
+  })
+
+  /** Whether the field can be written at all: the read answered and this
+   *  machine has a key to write the answer under. */
+  const methodSettable = (): boolean => {
+    const state = methodFieldState()
+    return state.kind === 'ready' && state.hostKnown
+  }
+
+  /** The value the control shows. Every state that cannot be set shows the
+   *  effective value — auto — rather than hiding the control (frame 2). The
+   *  loading state has no value to show and paints its placeholder. */
+  const methodValue = (): string =>
+    methodFieldState().kind === 'loading' ? '' : methodSettable() ? hostModeChoice() : 'auto'
+
+  /** The sentence under the field. A known machine's own description names it;
+   *  every other state says what makes the field settable, or that the read
+   *  failed (frames 1–3). */
+  const methodDescription = createMemo((): string | undefined => {
+    const state = methodFieldState()
+    switch (state.kind) {
+      case 'ready': {
+        if (!state.hostKnown) {
+          return t(
+            'connections.editor.methodUnknownHost',
+            'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+          )
+        }
+        const host = savedHostProfile()?.options.host ?? ''
+        return `${t('connections.editor.methodHostDescHead', 'Set for the machine')} ${host}${t(
+          'connections.editor.methodHostDescTail',
+          ', not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.',
+        )}`
+      }
+      case 'addressChanged':
+        return t(
+          'connections.editor.methodAddressChanged',
+          'Save the connection to see the method for the new address.',
+        )
+      case 'draft':
+        return t(
+          'connections.editor.methodUnknownHost',
+          'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+        )
+      case 'loading':
+      case 'readFailed':
+        return undefined
+    }
+  })
+
+  /** The field's error: the failed read's reason, or the failed write's — a
+   *  write failure is what the split-outcome Save leaves behind (frame 4). */
+  const methodError = createMemo((): string | undefined => {
+    const write = hostModeWriteError()
+    if (write !== undefined) {
+      return `${t('connections.editor.methodNotSavedHead', 'Not saved:')} ${write}`
+    }
+    const state = methodFieldState()
+    if (state.kind === 'readFailed') {
+      return `${t(
+        'connections.editor.methodReadFailedHead',
+        "Could not read this machine's method:",
+      )} ${state.reason}`
+    }
+    return undefined
+  })
+
+  /** The line that says when the change lands. Shown only while the choice
+   *  differs from the record: a hint that is always there is a hint nobody
+   *  reads (interface-rules.md). */
+  const methodChangeHint = createMemo((): string | undefined => {
+    const state = methodFieldState()
+    if (state.kind !== 'ready' || !state.hostKnown) return undefined
+    if (hostModeChoice() === state.stored) return undefined
+    return t(
+      'connections.editor.methodChangeHint',
+      'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.',
+    )
+  })
+
+  /** Read the host's method for the connection being edited — when the editor
+   *  opens and on Retry, never on a selection. A draft names no connection, so
+   *  there is nothing to ask. A slow answer for a dialog that has since opened
+   *  another connection is dropped rather than painted over the newer one. */
   async function loadHostMode(profile: SSHProfile): Promise<void> {
-    setHostMode('auto')
-    if (!profile.id) return
+    const request = ++hostModeRequest
+    setHostModeWriteError(undefined)
+    setHostModeChoice('auto')
+    if (!profile.id) {
+      setHostModeState({ kind: 'draft' })
+      return
+    }
+    setHostModeState({ kind: 'loading' })
     try {
       const answer = await props.client.hostMode(profile.id)
-      if (editing()?.id !== profile.id) return
-      setHostMode(answer.mode)
+      if (!hostModeAnswerIsCurrent(request, profile.id)) {
+        log.warn('dropping a stale host-method read', {
+          profileId: profile.id,
+          request,
+          current: hostModeRequest,
+        })
+        return
+      }
+      setHostModeChoice(answer.mode)
+      setHostModeState({ kind: 'ready', stored: answer.mode, hostKnown: answer.hostKnown })
     } catch (err) {
+      const reason = (err as Error).message
       log.error('Could not read the host integration method', {
         profileId: profile.id,
-        message: (err as Error).message,
+        message: reason,
       })
-      showToast({
-        level: 'danger',
-        message: t(
-          'connections.toasts.hostModeReadFailed',
-          'Could not read the integration method for this host.',
-        ),
-      })
+      // A read for a connection the editor has left — or one a newer Retry
+      // has replaced — says nothing about what is on screen now.
+      if (!hostModeAnswerIsCurrent(request, profile.id)) return
+      // The reason is the FIELD's, not a toast's: the control is disabled and
+      // Retry sits beside it (frame 3). A toast would fade while the control
+      // still had no value.
+      setHostModeState({ kind: 'readFailed', reason })
     }
   }
 
-  /** Write the chosen method to the connection's HOST. The control follows the
-   *  person at once and goes back where it was if the backend refuses, because
-   *  a select left showing a method nothing recorded is the surface lying about
-   *  the fact it draws (ADR-8: the record is the one owner of the answer). */
-  async function changeHostMode(next: HostMode): Promise<void> {
+  /** Retry re-reads only — it never writes, and it needs no other field. */
+  function retryHostMode() {
     const profile = editing()
-    if (!profile) return
-    const previous = hostMode()
-    if (next === previous) return
-    // The control follows the person first and goes back if the answer cannot
-    // stand. A native select keeps whatever was picked until its bound value
-    // is reassigned, so leaving the signal alone would leave the control
-    // showing a method nothing recorded.
-    setHostMode(next)
-    if (!profile.id) {
-      setHostMode(previous)
+    if (profile) void loadHostMode(profile)
+  }
+
+  /** The chosen method, when it differs from the host's record and the field
+   *  can be written at all. Null is "nothing to write": an unread field, a
+   *  draft, an edited address and an unchanged choice all answer nothing, and
+   *  a Save that wrote one of them would be writing under a guessed key or
+   *  writing a value nobody read (frames 2–3). */
+  function pendingHostMode(profileId: string): HostMode | null {
+    // The value submitted belongs to the connection that was on screen when
+    // Save was pressed. If the editor has since moved on, there is nothing to
+    // write — and reading the live field anyway would write B's choice to A's
+    // host record.
+    if (editing()?.id !== profileId) return null
+    const state = methodFieldState()
+    if (state.kind !== 'ready' || !state.hostKnown) return null
+    const chosen = hostModeChoice()
+    return chosen === state.stored ? null : chosen
+  }
+
+  /** Write the chosen method to the host record, AFTER the profile is saved.
+   *  The two stores can split: a failure here leaves the dialog open, shows
+   *  the section holding the field, keeps the chosen value with the reason as
+   *  its error, focuses it and names both halves in a warning toast (frame 4).
+   *
+   *  The mode is the value the Save submitted, captured by the caller, and
+   *  every answer is applied only if it is still the editor's current request
+   *  (see hostModeAnswerIsCurrent). 'stale' means the person moved on or a
+   *  newer write overtook this one: the outcome belongs to nothing on screen,
+   *  so the caller must not close a dialog or toast on its behalf. */
+  async function saveHostMode(
+    profile: SSHProfile,
+    mode: HostMode | null,
+  ): Promise<'ok' | 'failed' | 'stale'> {
+    if (mode === null) return 'ok'
+    const request = ++hostModeRequest
+    try {
+      await props.client.setHostMode(profile.id, mode)
+      if (!hostModeAnswerIsCurrent(request, profile.id)) {
+        log.warn('dropping a stale host-method write', {
+          profileId: profile.id,
+          mode,
+          request,
+          current: hostModeRequest,
+        })
+        return 'stale'
+      }
+      const state = methodFieldState()
+      if (state.kind === 'ready') {
+        setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
+      }
+      setHostModeWriteError(undefined)
+      return 'ok'
+    } catch (err) {
+      const reason = (err as Error).message
+      log.error('Could not save the host integration method', {
+        profileId: profile.id,
+        mode,
+        message: reason,
+      })
+      // THE ANSWER IS APPLIED ONLY TO THE EDITOR THAT ASKED. A refusal for a
+      // connection the person has left must not paint its error, section,
+      // focus or toast over the one now on screen (review ALX-51), and a
+      // refusal overtaken by a newer write must not clear that write's state.
+      if (!hostModeAnswerIsCurrent(request, profile.id)) return 'stale'
+      setHostModeWriteError(reason)
+      // The field may live on a section the person has since left, and the
+      // form's one reveal move is the same one the submit gate makes.
+      setProfileSection('advanced')
+      document.getElementById('profile-integration-method')?.focus()
+      const host = profile.options.host || profile.name
       showToast({
         level: 'warning',
-        message: t(
-          'connections.toasts.hostModeSaveFirst',
-          'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
-        ),
+        message: `${t(
+          'connections.toasts.methodSaveFailedHead',
+          'The connection was saved, but the integration method for',
+        )} ${host}${t('connections.toasts.methodSaveFailedMid', ' was not: ')}${reason}${t(
+          'connections.toasts.methodSaveFailedTail',
+          '. Save Connection to retry.',
+        )}`,
       })
-      return
-    }
-    try {
-      const answer = await props.client.setHostMode(profile.id, next)
-      if (editing()?.id === profile.id) setHostMode(answer.mode)
-      if (answer.note) showToast({ level: 'warning', message: answer.note })
-    } catch (err) {
-      setHostMode(previous)
-      showToast({ level: 'danger', message: (err as Error).message })
+      return 'failed'
     }
   }
 
   function closeDialog() {
     setDialogOpen(false)
     setEditing(null)
-    setHostMode('auto')
+    setHostModeState({ kind: 'draft' })
+    setHostModeChoice('auto')
+    setHostModeWriteError(undefined)
     setProfilePasswordOpen(false)
     setProfilePasswordValue('')
     setMintedPasswordNames(new Map())
@@ -2217,15 +2423,34 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       dirty.add('group')
     }
     const route = decideSaveRoute(profile, dirty)
+    // THE SUBMITTED METHOD, FIXED NOW. The profile write below is asynchronous
+    // and the person may open another connection before it returns; reading
+    // the field then would write that connection's choice to this one's host.
+    const hostMethod = pendingHostMode(profile.id)
 
     switch (route.kind) {
       case 'noop':
+        // Nothing about the connection changed — unless its HOST's method
+        // did. That is a change like any other and lives in the other store,
+        // so Save writes it even when the profile needs no write (frame 4).
+        // A stale or failed answer leaves the dialog as it is; a failure that
+        // is still current has already said so on the field.
+        if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
         closeDialog()
         return
 
       case 'update':
         try {
           const saved = await persistGuarded()
+          if ((await saveHostMode(saved, hostMethod)) !== 'ok') {
+            // The connection IS saved; the host's record is not (or the person
+            // has moved to another one). Keep the dialog so the same Save
+            // retries the second store, and refresh the list behind it for
+            // what has already been written.
+            await loadAll()
+            void loadSessionStatuses()
+            return
+          }
           closeDialog()
           await loadAll()
           await loadEffective([saved.id])
@@ -2263,6 +2488,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               })()
             : props.client.patchProfile({ id: profile.id, set: route.patchSet }))
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
+          if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
           closeDialog()
           showToast({
             level: 'success',
@@ -2879,20 +3105,41 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       />
                     </div>
                   </Field>
+                  {/* The method is the HOST's (ADR-727g63tr decision 1), so
+                      the field says whose setting it is, shows the effective
+                      value when it cannot be set yet, and writes on Save —
+                      never on the selection. */}
                   <Field
-                    for="desired-mode"
-                    label={t('connections.editor.fieldDeliveryMode', 'Delivery mode')}
+                    for="profile-integration-method"
+                    label={t('connections.editor.fieldIntegrationMethod', 'Integration method')}
+                    description={methodDescription()}
+                    error={methodError()}
                   >
                     <div class="cm-field-row">
                       <Select
-                        id="desired-mode"
-                        value={hostMode()}
-                        onChange={(v) => void changeHostMode(v as HostMode)}
+                        id="profile-integration-method"
+                        value={methodValue()}
+                        onChange={(v) => {
+                          setHostModeWriteError(undefined)
+                          setHostModeChoice(v as HostMode)
+                        }}
                         options={hostModeOptions()}
+                        placeholder={
+                          methodFieldState().kind === 'loading'
+                            ? t('connections.editor.methodLoading', 'Loading…')
+                            : undefined
+                        }
+                        disabled={!methodSettable()}
+                        invalid={methodError() !== undefined}
                       />
+                      <Show when={methodFieldState().kind === 'readFailed'}>
+                        <Button variant="ghost" onClick={retryHostMode}>
+                          {t('connections.editor.methodRetry', 'Retry')}
+                        </Button>
+                      </Show>
                     </div>
                   </Field>
-                  <Show when={hostMode() === 'helper'}>
+                  <Show when={hostModeChoice() === 'helper' && methodSettable()}>
                     <p class="cm-hint">
                       {t(
                         'connections.editor.helperHint',
@@ -2900,6 +3147,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       )}
                     </p>
                   </Show>
+                  <Show when={methodChangeHint()}>{(hint) => <p class="cm-hint">{hint()}</p>}</Show>
                   <div class="cm-check-group">
                     <Checkbox
                       label={t('connections.editor.fieldAgentForward', 'Agent forward')}

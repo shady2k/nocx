@@ -1620,7 +1620,7 @@ func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testin
 	reg := newRegWithStub(logger)
 	ws := NewWSServer(logger, reg,
 		WithHelperSessionOpener(&consentAskHelperOpener{
-			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:trusted", nil),
+			err: NewHelperConsentNeeded("ssh:test:1", "host.example.com:22", "SHA256:trusted", nil),
 		}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
@@ -1663,6 +1663,11 @@ func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testin
 	if !data.HelperAsk || data.Fingerprint != "SHA256:trusted" || data.HostKey != nil {
 		t.Errorf("data = %+v, want helperAsk with the trusted fingerprint and no hostKey", data)
 	}
+	// The connection the open named rides the ask, so the dialog can say where
+	// the answer can be changed later without guessing from renderer state.
+	if data.ProfileID != "ssh:test:1" {
+		t.Errorf("profileId = %q, want the connection the open named", data.ProfileID)
+	}
 }
 
 // TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract: the
@@ -1682,7 +1687,7 @@ func TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract(t *testi
 	}
 	ws := NewWSServer(logger, reg,
 		WithHelperSessionOpener(&consentAskHelperOpener{
-			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:offered", cause),
+			err: NewHelperConsentNeeded("ssh:test:1", "host.example.com:22", "SHA256:offered", cause),
 		}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {

@@ -151,9 +151,18 @@ package coordinator
 // methods, connections.hostMode and connections.setHostMode, are how the
 // connection editor reads and writes the host record now; a 38 window does not
 // know them, which is the second half of the same incompatibility.
-// 40 (nocx-oalo1.11.1, ALX-53): an applied integration-method answer is
-// always a result, with required hostRecordSaved stating its durability.
-// An error never means that the answer was applied.
+// 40 (nocx-oalo1.11.1, ALX-53; nocx-oalo1.11.2, ALX-72): the connection
+// editor's five states are on the wire, and the connect-time answer with them,
+// over one version carrying both. An applied integration-method answer is
+// always a result, with required hostRecordSaved stating its durability — an
+// error never means that the answer was applied. The host-mode read gains
+// `hostKnown`, without which a 39 window cannot tell "nobody answered" from
+// "never connected" and would show a method it could not write; the write
+// loses `note`, because a record that could not be persisted is now an error
+// carrying the reason the field shows, and nothing about the host changes. The
+// connect-time ask carries `profileId`, which is where a 39 window's copy would
+// claim a typed ssh can be changed "from the connection's settings" it does not
+// have.
 const ProtocolVersion = 40
 
 // RequestHello is the one request this socket answers today. Naming it

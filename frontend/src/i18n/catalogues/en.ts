@@ -520,13 +520,18 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.testFailedHead': 'Test failed:',
   'connections.toasts.trustHostKeyFailedHead': 'Could not trust the host key:',
   'connections.toasts.enterHost': 'Enter a host, alias, or connection string',
-  'connections.toasts.hostModeReadFailed': 'Could not read the integration method for this host.',
-  'connections.toasts.hostModeSaveFirst':
-    'Save this connection first — the method belongs to its host, which nocx learns when the host is first reached.',
   'connections.toasts.parseFailedHead': 'Could not parse',
   'connections.toasts.parseFailedTail': 'try "user@host:port" or "ssh://user@host:port"',
   'connections.toasts.saved': 'Saved',
   'connections.toasts.saveFailedHead': 'Could not save the connection:',
+  // Save's two stores can split (mockup frame 4): the connection is written,
+  // the host's method is not. The surface composes head + host + mid + reason
+  // + tail, because the host and the reason are values and the sentence has to
+  // stay grammatical in a language whose word order is not English's.
+  'connections.toasts.methodSaveFailedHead':
+    'The connection was saved, but the integration method for',
+  'connections.toasts.methodSaveFailedMid': ' was not: ',
+  'connections.toasts.methodSaveFailedTail': '. Save Connection to retry.',
   'connections.toasts.deleted': 'Deleted',
   'connections.toasts.deleteFailedHead': 'Could not delete',
   'connections.actions.edit': 'Edit',
@@ -614,7 +619,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.fieldReadyTimeout': 'Ready timeout (ms)',
   'connections.group.fieldAgentForward': 'Agent forward',
   'connections.group.fieldPortDiscovery': 'Port discovery',
-  'connections.group.fieldDeliveryMode': 'Delivery mode',
   'connections.group.notSetInherit': '— Not set (inherit) —',
   'connections.group.inheritedHint':
     'Inherited by every connection in this group and its subgroups, unless the connection overrides it.',
@@ -657,7 +661,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.impact.fieldReadyTimeout': 'ready timeout',
   'connections.impact.fieldAgentForwarding': 'agent forwarding',
   'connections.impact.fieldPortDiscovery': 'port discovery',
-  'connections.impact.fieldDeliveryMode': 'delivery mode',
   'connections.editor.title': 'Edit Connection:',
   'connections.editor.save': 'Save Connection',
   'connections.editor.create': 'Create Connection',
@@ -689,7 +692,23 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.fieldJumpServer': 'Jump server',
   'connections.editor.none': '&mdash; None &mdash;',
   'connections.editor.fieldPortDiscovery': 'Port discovery',
-  'connections.editor.fieldDeliveryMode': 'Delivery mode',
+  // The integration method is the HOST's (ADR-727g63tr decision 1). The mockup
+  // (docs/design/ssh-foundation/host-integration-method.html) is where these
+  // sentences are decided; the keys are its own.
+  'connections.editor.fieldIntegrationMethod': 'Integration method',
+  'connections.editor.methodHostDescHead': 'Set for the machine',
+  'connections.editor.methodHostDescTail':
+    ', not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.',
+  'connections.editor.methodChangeHint':
+    'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.',
+  'connections.editor.methodUnknownHost':
+    'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+  'connections.editor.methodAddressChanged':
+    'Save the connection to see the method for the new address.',
+  'connections.editor.methodLoading': 'Loading…',
+  'connections.editor.methodReadFailedHead': "Could not read this machine's method:",
+  'connections.editor.methodNotSavedHead': 'Not saved:',
+  'connections.editor.methodRetry': 'Retry',
   'connections.editor.inherited': '&mdash; Inherited &mdash;',
   'connections.editor.helperHint':
     'The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.',
@@ -711,7 +730,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.add': 'Add forward',
   'connections.forward.empty': 'No forwards — add one to open it automatically on connect.',
   'connections.forward.removeHead': 'Remove forward',
-  'connections.mode.desiredAuto': 'Auto — ask when the host is first reached',
+  'connections.mode.hostAuto': 'Auto — ask on the next connection',
   'connections.mode.desiredScript': 'Script — scripts only, never the helper',
   'connections.mode.desiredRaw': 'Raw — no integration',
   'connections.mode.desiredHelper': 'Helper — deploy the nocx binary',
@@ -1953,6 +1972,17 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.hostKey.changed': 'Host key changed',
   'connections.hostKey.choose': 'Choose how nocx connects',
   'connections.hostKey.unknown': 'Unknown host key',
+  // The connect-time ask (ADR-0069). The method is the machine's now
+  // (ADR-727g63tr decision 1), so the lead says where it is saved and the last
+  // sentence says where it can be changed — by asking the ask's OWN profileId
+  // which of the two sentences is true.
+  'connections.helperAsk.lead':
+    'Choose how nocx integrates with this machine. The method is saved for the machine — every tab to it, from any saved connection or a typed ssh, opens this way — and permission to deploy nocx’s helper here is remembered with it, so this is asked once.',
+  'connections.helperAsk.consent':
+    'Choosing Helper also allows nocx to deploy its helper binary on this machine; Raw and Script never do.',
+  'connections.helperAsk.changeLater': 'Change your mind later from the connection’s settings.',
+  'connections.helperAsk.changeLaterTyped':
+    'To change it later, save a connection to this machine and open its settings.',
   'connections.import.sshConfigPath': 'SSH config ({path})',
   'connections.probe.accepted': 'Accepted',
   'connections.probe.hostKeyChanged': 'Host key changed',

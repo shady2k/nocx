@@ -10,7 +10,7 @@
  */
 
 /**
- * The `open` JSON-RPC error's data field for the connect-time helper ask (ADR-0068, owner's decision 2026-09-16): an auto connection (ADR-0033) whose destination has no consent record (ADR-0034) for its host-key fingerprint is asked before the connect proceeds, instead of silently opening without the helper. This is domain-specific error data carried on a -32603 open failure, not a method result — see contracts/README.md 'Domain-specific error data continues to use its existing schema where one exists'. hostKey is present only when the same dial that needed this ask ALSO discovered the key is unknown or changed, so the renderer raises ONE dialog carrying both questions rather than two in sequence; its shape mirrors connections.probe.schema.json's hostKey field exactly (the two are read by the same renderer code, host-key-dialog.tsx).
+ * The `open` JSON-RPC error's data field for the connect-time helper ask (ADR-0068, owner's decision 2026-09-16): an auto connection (ADR-0033) whose destination has no consent record (ADR-0034) for its host-key fingerprint is asked before the connect proceeds, instead of silently opening without the helper. This is domain-specific error data carried on a -32603 open failure, not a method result — see contracts/README.md 'Domain-specific error data continues to use its existing schema where one exists'. hostKey is present only when the same dial that needed this ask ALSO discovered the key is unknown or changed, so the renderer raises ONE dialog carrying both questions rather than two in sequence; its shape mirrors connections.probe.schema.json's hostKey field exactly (the two are read by the same renderer code, host-key-dialog.tsx). profileId is present only when the open named a saved connection, and the renderer uses it to choose which sentence says where the answer can be changed later — the ask's own data, never a guess from renderer state.
  */
 export interface OpenHelperConsentData {
   /**
@@ -25,6 +25,10 @@ export interface OpenHelperConsentData {
    * Always true on this shape: its presence is what tells the renderer a helper decision is needed, distinct from an ordinary host-key-only open failure (which carries no helperAsk field at all).
    */
   helperAsk: true
+  /**
+   * The saved connection the open was started from, absent for a hand-typed ssh. The renderer chooses the sentence that says where the method can be changed later from this field alone: a saved connection points at its own settings, and a typed destination has none to point at. It is carried rather than derived because the renderer cannot tell from a host string whether a saved connection exists.
+   */
+  profileId?: string
   /**
    * Host-key evidence, present only when the key itself also needs a trust decision in the same refusal. Absent means the key is already trusted and only the helper question remains.
    */

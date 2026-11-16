@@ -519,8 +519,9 @@ export class ProfileClient {
   /** Set the integration method for the connection's HOST. `auto` forgets the
    *  record so the next open asks again. Choosing helper here records the
    *  METHOD only: permission to deploy the binary is the machine's and is
-   *  asked at connect (ADR-0105). `note` is present when the record could not
-   *  be saved and will not survive a restart. */
+   *  asked at connect (ADR-0105). A record that could not be persisted is an
+   *  RPC error whose message is the reason the editor puts after "Not saved: "
+   *  — nothing about the host changes, so the same Save can be pressed again. */
   setHostMode(profileId: string, mode: HostMode): Promise<ConnectionsSetHostModeResult> {
     return this.call('connections.setHostMode', { profileId, mode })
   }

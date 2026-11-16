@@ -172,20 +172,46 @@ func TestRemovingAHostWithNoRecordIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestAFailedRemovalStillForgetsForThisRun mirrors the answer's own rule: the
-// person asked to be asked again, and keeping the old answer in memory would
-// contradict the screen. The record is forgotten here, the write failure is
-// reported, and the host will be answered again after a restart.
-func TestAFailedRemovalStillForgetsForThisRun(t *testing.T) {
+// TestAFailedRemovalLeavesTheAnswerInForce: auto is a REMOVAL, and a removal
+// that could not be written must not silently take effect here either. The
+// connection editor reports it as "Not saved: {reason}" and stays open with
+// Save still available, so nothing about the host has changed — and the answer
+// still on disk stays the answer the open path reads.
+func TestAFailedRemovalLeavesTheAnswerInForce(t *testing.T) {
 	s := NewStore(log.NewSlogAdapter(nil), refusingStore{}, "host-modes.json")
+	// The ask's own rule answers for this run, which is how a record gets here
+	// on a store that cannot write.
 	if err := s.Set("SHA256:abc", Raw); !errors.Is(err, ErrNotSaved) {
 		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
 	}
 	if err := s.Remove("SHA256:abc"); !errors.Is(err, ErrNotSaved) {
 		t.Fatalf("Remove on a store that cannot write = %v, want ErrNotSaved", err)
 	}
-	if mode, ok := s.Lookup("SHA256:abc"); ok {
-		t.Fatalf("Lookup after a failed Remove = %q/%v, want the removal kept for this run", mode, ok)
+	if mode, ok := s.Lookup("SHA256:abc"); !ok || mode != Raw {
+		t.Fatalf("Lookup after a failed Remove = %q/%v, want raw still in force", mode, ok)
+	}
+}
+
+// TestAFailedPersistLeavesTheHostUnchanged is the editor's other half. Its Save
+// writes the profile first and the host record second, and reports a split
+// outcome: a record that could not be written must leave the host exactly as
+// it was, or the field would say "Not saved" about a method that is in force.
+func TestAFailedPersistLeavesTheHostUnchanged(t *testing.T) {
+	s := NewStore(log.NewSlogAdapter(nil), refusingStore{}, "host-modes.json")
+	if err := s.Set("SHA256:abc", Raw); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
+	}
+	if err := s.Persist("SHA256:abc", Helper); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("Persist on a store that cannot write = %v, want ErrNotSaved", err)
+	}
+	if mode, ok := s.Lookup("SHA256:abc"); !ok || mode != Raw {
+		t.Fatalf("Lookup after a failed Persist = %q/%v, want raw still in force", mode, ok)
+	}
+	if err := s.Persist("SHA256:nobody", Script); !errors.Is(err, ErrNotSaved) {
+		t.Fatalf("Persist on an unanswered host = %v, want ErrNotSaved", err)
+	}
+	if mode, ok := s.Lookup("SHA256:nobody"); ok {
+		t.Fatalf("Lookup after a failed Persist = %q/%v, want no record", mode, ok)
 	}
 }
 

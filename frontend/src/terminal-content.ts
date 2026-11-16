@@ -531,6 +531,10 @@ function hostKeyEvidenceFromOpenError(err: unknown): HostKeyErrorEvidence | null
 export interface HelperConsentAskEvidence {
   host: string
   fingerprint: string
+  /** The saved connection the open named; absent for a typed ssh. The ask's
+   *  dialog chooses where the answer can be changed later from this field —
+   *  the question's own data, never a guess from renderer state. */
+  profileId?: string
   hostKey: HostKeyErrorEvidence | null
 }
 
@@ -597,6 +601,8 @@ function helperConsentAskFromOpenError(err: unknown): HelperConsentAskEvidence |
   return {
     host: data.host,
     fingerprint: data.fingerprint,
+    profileId:
+      'profileId' in data && typeof data.profileId === 'string' ? data.profileId : undefined,
     hostKey,
   }
 }

@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@solidjs/testing-library'
 import { Field, type FieldProps } from './field'
+
+const CSS = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../styles/components/field.css'),
+  'utf8',
+)
 
 afterEach(() => cleanup())
 
@@ -58,6 +66,16 @@ describe('Field', () => {
   // of them — so the prop is gone rather than bounded. A prop needs two legitimate
   // consumers to exist; this had none, and the only class it ever carried in anger was
   // in this test.
+  // A description is a sentence, and a host name in it has no break
+  // opportunity: at 360px the connection editor's own description pushed the
+  // dialog's content wider than the panel (nocx-oalo1.11.2, mockup frame 5).
+  // `overflow-wrap: anywhere` is the kit's answer, not a surface repaint.
+  it('lets a description break a long unbroken word', () => {
+    const descRule = CSS.match(/\.ui-field-desc\s*\{([^}]*)\}/)
+    expect(descRule, '.ui-field-desc rule not found').toBeTruthy()
+    expect(descRule![1]).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+
   it('emits its identity and nothing else', () => {
     subject()
     const wrapper = screen.getByText('Hostname').closest('.ui-field')

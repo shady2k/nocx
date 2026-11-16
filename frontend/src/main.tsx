@@ -1,5 +1,6 @@
 import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { integrationMethodAnswerApplied } from './integration-method-failure'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
@@ -508,14 +509,8 @@ function main(): void {
   // record by the fingerprint the ask named (ADR-727g63tr decision 1), plus
   // the machine's helper grant when the method is helper.
   //
-  // THE ANSWER STANDS WHETHER OR NOT IT COULD BE SAVED. The person chose a
-  // method, and the open that asked must go on with it — a backend that kept
-  // the answer for this run and could not write the host's record (a full
-  // disk) says so in its error, and that sentence becomes the note the pane's
-  // head shows. Leaving the dialog open instead would ask the same question
-  // again on the same connect, which is the loop this behaviour exists to
-  // end. A failure of any other kind is treated the same way for the same
-  // reason: the method is still the answer to the question that was asked.
+  // A host-record write failure is distinct from failures before the answer
+  // was applied. The backend marks that one case in RPC error data, not text.
   const decideIntegrationMethod = async (
     request: HelperConsentAskRequest,
     method: IntegrationMethod,
@@ -529,9 +524,16 @@ function main(): void {
         request.evidence.host,
       )
     } catch (err) {
-      note = `The method could not be saved for ${request.evidence.host}: ${
-        err instanceof Error ? err.message : String(err)
-      }`
+      if (integrationMethodAnswerApplied(err)) {
+        note = `The method applies to this connection, but the host's record was not saved, so this host will be asked again after a restart`
+      } else {
+        showToast({
+          level: 'danger',
+          message: `Could not apply the integration method for ${request.evidence.host}. The choice was not saved.`,
+          duration: 0,
+        })
+        return
+      }
     } finally {
       setHelperConsentAskBusy(false)
     }

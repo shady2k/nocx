@@ -90,3 +90,10 @@ eslint-fixtures/
 output/
 
 .prime-report.md*
+
+# The design hand-off's mockup frames (nocx-oalo1.11.2) are a verbatim copy of
+# the HTML a reviewer signed off, inline product CSS included. Reformatting it
+# makes the committed copy stop being the artifact that was reviewed, and the
+# copy is what the next stage diffs its behaviour against. The prose rules
+# beside it (docs/design/interface-rules.md) are formatted as usual.
+docs/design/**/*.html

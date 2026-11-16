@@ -976,6 +976,9 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
             host: 'db.example.com:22',
             fingerprint: 'SHA256:trusted',
             helperAsk: true,
+            // The ask names the connection it belongs to, so the dialog can
+            // say where the answer can be changed later (frame 7).
+            profileId: 'ssh:test:1',
           },
         ),
       )
@@ -997,6 +1000,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         {
           host: 'db.example.com:22',
           fingerprint: 'SHA256:trusted',
+          profileId: 'ssh:test:1',
           hostKey: null,
         },
         expect.any(AbortSignal),

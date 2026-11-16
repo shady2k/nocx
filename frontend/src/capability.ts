@@ -50,7 +50,7 @@ export type HostMode = 'auto' | 'raw' | 'script' | 'helper'
 /** Helper consent for a MACHINE — the THIRD of the three axes (spec §3.5),
  *  keyed by the destination's host-key fingerprint rather than by the saved
  *  connection (ADR-0034), and answered at connect by the one ask (ADR-0069).
- *  A connection's delivery mode is not this consent: `helper` says which
+ *  A host's integration method is not this consent: `helper` says which
  *  method the person wants, and a machine nobody has answered for is asked
  *  before any binary is deployed on it (ADR-0105, nocx-1kejz.3). */
 export type HelperConsent = 'unknown' | 'granted' | 'denied'

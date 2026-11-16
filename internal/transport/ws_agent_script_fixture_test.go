@@ -27,14 +27,18 @@ import (
 )
 
 var askPrograms struct {
-	sync.Once
+	once               sync.Once
+	ready              chan struct{} // closed when the build finished, by TestMain's goroutine
 	dir, agent, helper string
 	err                error
 }
 
-func buildAskPrograms(t *testing.T) (string, string) {
-	t.Helper()
-	askPrograms.Do(func() {
+// buildAskPrograms builds the two fixture programs ONCE. TestMain starts it on
+// its own goroutine before the first test, so the link runs BESIDE the
+// sequential phase rather than inside the first test that asks for an agent —
+// where it was seconds of the suite's critical path (nocx-oalo1.11.3).
+func buildAskPrograms() {
+	askPrograms.once.Do(func() {
 		askPrograms.dir, askPrograms.err = os.MkdirTemp("", "nocx-ask-programs-")
 		if askPrograms.err != nil {
 			return
@@ -49,6 +53,14 @@ func buildAskPrograms(t *testing.T) (string, string) {
 			}
 		}
 	})
+}
+
+// askProgramsFor is buildAskPrograms waited for: the build itself belongs to
+// TestMain, and a test that needs the programs waits for it to finish and
+// answers its failure as its own.
+func askProgramsFor(t *testing.T) (string, string) {
+	t.Helper()
+	<-askPrograms.ready
 	if askPrograms.err != nil {
 		t.Fatal(askPrograms.err)
 	}
@@ -85,7 +97,7 @@ func newQueueingAgent(t *testing.T, script protocol.Script) *scriptedAgentFixtur
 
 func newScriptedAgentWith(t *testing.T, script protocol.Script, steers bool) *scriptedAgentFixture {
 	t.Helper()
-	agent, helper := buildAskPrograms(t)
+	agent, helper := askProgramsFor(t)
 	dir := t.TempDir()
 	for _, field := range []struct {
 		p    *string
@@ -214,7 +226,28 @@ func answerScript(deltas ...string) protocol.Script {
 }
 
 func TestMain(m *testing.M) {
+	// The fixture programs are linked while the tests run, not by the first
+	// test that needs one: the build blocks its own goroutine and nothing else
+	// (buildAskPrograms).
+	//
+	// A CHILD FIXTURE DOES NOT LINK. process_exit_linux_test.go re-executes
+	// this binary so it can be observed as an unreaped zombie, and that child
+	// must die at once — started here, a link would hold it alive until the
+	// link finished, and the parent's five-second wait for a zombie would be
+	// waiting for a compiler instead.
+	askPrograms.ready = make(chan struct{})
+	if os.Getenv("NOCX_TEST_PROCESS_EXIT_HELPER_MODE") == "child" {
+		close(askPrograms.ready)
+	} else {
+		go func() {
+			buildAskPrograms()
+			close(askPrograms.ready)
+		}()
+	}
 	code := m.Run()
+	// A run that failed early leaves the linker mid-flight; its temporary
+	// directory must outlive it, not the other way round.
+	<-askPrograms.ready
 	if askPrograms.dir != "" {
 		_ = os.RemoveAll(askPrograms.dir)
 	}

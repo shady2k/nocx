@@ -273,7 +273,7 @@ func assertActorTerminalWinsStop(t *testing.T, terminal protocol.Step, want cont
 
 func TestAgentHarnessSerializesToolAndAnswerDelivery(t *testing.T) {
 	backend := &concurrentDeliveryHarness{}
-	h := newAskHarnessWithOpts(t, answeringScript(), WithAgentHarness("test", backend), WithAgentPolicy(autonomousPolicyStore(t)))
+	h := newAskHarnessVault(t, answeringScript(), WithAgentHarness("test", backend), WithAgentPolicy(autonomousPolicyStore(t)))
 	handler := h.ws.agentTerminalizer(nil)
 	grant := h.ws.runGrantFor("test")
 	var active, maximum, toolCalls atomic.Int32
@@ -385,7 +385,7 @@ func TestAgentHarnessPlacesDelayedToolAtStreamBoundary(t *testing.T) {
 		{Kind: protocol.StepAnswer, Text: "after"},
 		{Kind: protocol.StepEnd, Model: "actual"},
 	}})
-	h := newAskHarnessWithOpts(t, answeringScript(), WithAgentHarness("test", backend.harness), WithAgentPolicy(autonomousPolicyStore(t)))
+	h := newAskHarnessVault(t, answeringScript(), WithAgentHarness("test", backend.harness), WithAgentPolicy(autonomousPolicyStore(t)))
 	handler := h.ws.agentTerminalizer(nil)
 	grant := h.ws.runGrantFor("test")
 	ledger := &boundaryDeliveryLedger{release: make(chan struct{}), entered: make(chan struct{})}

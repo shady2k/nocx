@@ -264,7 +264,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	}
 
 	// Auto is the absence of a record, so the next open asks again.
-	if err := r.modes.Remove(fingerprint); err != nil {
+	if err := r.modes.PersistMany([]string{fingerprint}, hostmode.Auto); err != nil {
 		t.Fatalf("the editor's auto: %v", err)
 	}
 	_, hold, selected, err = r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-auto-again")

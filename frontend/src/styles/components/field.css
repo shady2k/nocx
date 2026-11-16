@@ -15,10 +15,15 @@
   font-weight: 500;
 }
 
+/* A description is a sentence and may name a machine: a long host name has no
+   break opportunity, and at a 360px dialog (the connection editor's
+   integration method, nocx-oalo1.11.2) it pushed the panel wider than the
+   window. The wrap is the kit's, so no surface repaints it. */
 .ui-field-desc {
   font-size: var(--font-size-sm);
   color: var(--color-text-dim);
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .ui-field-error {

@@ -381,6 +381,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.preview.policyOverwrite': 'будет перезаписан',
   'connections.preview.policyRefuse': 'импорт отклонён (уже существует)',
   'connections.preview.skippedHeading': 'Пропущенные секреты',
+  'connections.preview.warningsHeading': 'Неподдерживаемые настройки',
+  'connections.preview.warningTitle': '{profile} — {field}',
   'connections.preview.destination': 'Назначение:',
   'connections.group.tabGeneral': 'Общие',
   'connections.group.tabConnection': 'Подключение',

@@ -9,11 +9,12 @@ import type { BackupRestorePreview as RestorePreview } from './generated/backup.
 import type { BackupRestoreResult as RestoreResult } from './generated/backup.restore'
 import type { BackupSaveFileResult as SaveFileResult } from './generated/backup.saveToFile'
 import type { SettingsDescribe } from './generated/settings.describe'
+import type { TabbyImportCount } from './generated/profiles.importTabby'
+import type { TabbyImportResult } from './generated/profiles.tabbyExecute'
+import type { TabbyPreviewResponse } from './generated/profiles.tabbyPreview'
 
-interface TabbyImportResult {
-  profilesImported: number
-  groupsImported: number
-}
+export type { TabbyPreviewResponse } from './generated/profiles.tabbyPreview'
+
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
 // JSON-RPC control-plane methods wired in nocx-fxs.5.
@@ -426,7 +427,7 @@ export class ProfileClient {
     return this.call('profiles.moveImpact', params)
   }
 
-  importTabby(configYAML: string, passphrase?: string): Promise<number> {
+  importTabby(configYAML: string, passphrase?: string): Promise<TabbyImportCount> {
     return this.call('profiles.importTabby', { config: configYAML, passphrase })
   }
 
@@ -699,44 +700,3 @@ export interface SessionStatus {
 
 export type RestoreStrategy = RestorePreview['strategy']
 export type { BackupCreateResult, RestorePreview, RestoreResult, SaveFileResult }
-
-// ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
-
-/** One profile to import and what would happen. */
-export interface ProfileEntry {
-  name: string
-  action: 'new' | 'overwrite' | 'needs-review'
-}
-
-/** One secret the import would create. */
-export interface SecretEntry {
-  name: string
-  type: 'password' | 'passphrase'
-}
-
-/** One skipped secret and why. */
-export interface SkippedInfo {
-  secretType: string
-  reason: string
-}
-
-/** One collision and the policy that applies. */
-export interface CollisionInfo {
-  kind: string
-  name: string
-  policy: string
-}
-
-/** Response from profiles.tabbyPreview. */
-export interface TabbyPreviewResponse {
-  profilesToImport: number
-  groupsToImport: number
-  secretsToImport: number
-  profileEntries?: ProfileEntry[]
-  groupNames?: string[]
-  secretEntries?: SecretEntry[]
-  skippedSecrets?: SkippedInfo[]
-  collisions?: CollisionInfo[]
-  secretProvider: string
-  planToken: string
-}

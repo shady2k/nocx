@@ -40,10 +40,5 @@ groups:
     name: Standalone
 profileDefaults:
   ssh:
-    keepaliveInterval: 10000
-vault:
-  version: 1
-  contents: ''
-  keySalt: ''
-  iv: ''
-  encrypted: false
+    options:
+      keepaliveInterval: 10000

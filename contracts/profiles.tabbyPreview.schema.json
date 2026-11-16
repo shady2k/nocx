@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.tabbyPreview.schema.json",
+  "title": "TabbyPreviewResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profilesToImport",
+    "groupsToImport",
+    "secretsToImport",
+    "secretProvider",
+    "planToken"
+  ],
+  "properties": {
+    "profilesToImport": { "type": "integer", "minimum": 0 },
+    "groupsToImport": { "type": "integer", "minimum": 0 },
+    "secretsToImport": { "type": "integer", "minimum": 0 },
+    "secretProvider": { "type": "string" },
+    "planToken": { "type": "string" },
+    "profileEntries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "action"],
+        "properties": {
+          "name": { "type": "string" },
+          "action": { "enum": ["new", "overwrite", "needs-review"] }
+        }
+      }
+    },
+    "groupNames": { "type": "array", "items": { "type": "string" } },
+    "secretEntries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "enum": ["password", "passphrase"] }
+        }
+      }
+    },
+    "skippedSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["secretType", "reason"],
+        "properties": { "secretType": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "collisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "name", "policy"],
+        "properties": {
+          "kind": { "type": "string" },
+          "name": { "type": "string" },
+          "policy": { "type": "string" }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile", "field", "reason"],
+        "properties": {
+          "profile": { "type": "string" },
+          "field": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

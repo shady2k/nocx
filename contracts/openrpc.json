@@ -15895,7 +15895,12 @@
         ],
         "preempts": []
       },
-      "x-nocx-noResultSchema": true
+      "result": {
+        "name": "profiles.importTabbyResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/profiles.importTabby.schema.json"
+        }
+      }
     },
     {
       "name": "profiles.list",
@@ -16345,7 +16350,12 @@
         ],
         "preempts": []
       },
-      "x-nocx-noResultSchema": true
+      "result": {
+        "name": "profiles.tabbyExecuteResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/profiles.tabbyExecute.schema.json"
+        }
+      }
     },
     {
       "name": "profiles.tabbyPreview",
@@ -16454,7 +16464,12 @@
         ],
         "preempts": []
       },
-      "x-nocx-noResultSchema": true
+      "result": {
+        "name": "profiles.tabbyPreviewResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/profiles.tabbyPreview.schema.json"
+        }
+      }
     },
     {
       "name": "profiles.update",
@@ -25975,6 +25990,15 @@
     },
     {
       "$ref": "https://nocx.local/contracts/profiles.effective.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/profiles.importTabby.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/profiles.tabbyExecute.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/profiles.tabbyPreview.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/roles.assign.schema.json"

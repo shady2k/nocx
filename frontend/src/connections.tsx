@@ -7,7 +7,17 @@
  * Pattern follows the manager surfaces: full-width list, editing in a Dialog.
  * Tabby import moved to Export / Backup / Import section.
  */
-import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
+import {
+  For,
+  Show,
+  createSignal,
+  createMemo,
+  createEffect,
+  on,
+  onMount,
+  onCleanup,
+  type JSX,
+} from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
@@ -22,6 +32,7 @@ import type { FootprintClient } from './footprint-client'
 import { FootprintSection } from './footprint-section'
 import { t } from './i18n/locale-model'
 import { EmptyState } from './ui/empty-state'
+import { StatusCard } from './ui/status-card'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
@@ -416,6 +427,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [importPassphrase, setImportPassphrase] = createSignal('')
   const [previewResult, setPreviewResult] = createSignal<TabbyPreviewResponse | null>(null)
   const [previewOpen, setPreviewOpen] = createSignal(false)
+  const [executeBusy, setExecuteBusy] = createSignal(false)
+  // A dismissed read must not reopen a dialog or settle a newer request.
+  let importGeneration = 0
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+    importGeneration++
+  })
   // Where the SSH config actually is, per the backend. Null until asked.
   const [sshConfigPath, setSSHConfigPath] = createSignal<SSHConfigPathResult | null>(null)
   // ── Group editor dialog ──────────────────────────────────────────────
@@ -782,6 +801,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   })
 
   function openImportDialog() {
+    if (importBusy() || executeBusy() || previewOpen()) return
     setImportSource('sshConfig')
     setImportFile(null)
     setImportPassphrase('')
@@ -801,14 +821,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   function closeImportDialog() {
+    if (importBusy() && importSource() !== 'tabby') return
+    importGeneration++
+    setImportBusy(false)
     setImportOpen(false)
     setImportFile(null)
     setImportPassphrase('')
   }
 
   async function runImport() {
+    if (!importOpen() || importBusy() || executeBusy()) return
     const source = importSource()
     const file = importFile()
+    const passphrase = importPassphrase() || undefined
     if (source !== 'sshConfig' && !file) {
       showToast({
         level: 'warning',
@@ -817,6 +842,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     }
 
+    const generation = ++importGeneration
     setImportBusy(true)
     try {
       switch (source) {
@@ -847,19 +873,22 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         }
         case 'tabby': {
           // Preview first, then open preview dialog for confirmation.
-          const preview = await props.client.tabbyPreview(
-            await file!.text(),
-            importPassphrase() || undefined,
-          )
+          const config = await file!.text()
+          if (generation !== importGeneration) return
+          const preview = await props.client.tabbyPreview(config, passphrase)
+          if (generation !== importGeneration) return
           setPreviewResult(preview)
           closeImportDialog()
           setPreviewOpen(true)
-          break
+          return
         }
       }
+      if (generation !== importGeneration) return
+      setImportBusy(false)
       closeImportDialog()
       await loadAll()
     } catch (err) {
+      if (generation !== importGeneration) return
       const message = (err as Error).message
       log.error('Import failed', { source, message })
       showToast({
@@ -867,21 +896,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         message: `${t('connections.import.failedHead', 'Import failed:')} ${message}`,
       })
     } finally {
-      setImportBusy(false)
+      if (generation === importGeneration) setImportBusy(false)
     }
   }
 
   function closePreview() {
+    if (executeBusy()) return
     setPreviewOpen(false)
     setPreviewResult(null)
   }
 
   async function executeImport() {
     const preview = previewResult()
-    if (!preview) return
+    if (!preview || !previewOpen() || executeBusy()) return
+    setExecuteBusy(true)
 
     const doExecute = async (): Promise<void> => {
+      if (disposed || previewResult() !== preview) return
       const result = await props.client.tabbyExecute(preview.planToken)
+      if (disposed || previewResult() !== preview) return
       setPreviewOpen(false)
       setPreviewResult(null)
       showToast({
@@ -891,31 +924,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       await loadAll()
     }
 
-    if (props.vaultController) {
-      try {
+    try {
+      if (props.vaultController) {
         await props.vaultController.saveSecretWithVault(doExecute, 'import connections')
-      } catch (err) {
-        // The user cancelled the vault prompt — nothing ran, nothing failed.
-        // The preview stays open so they can retry or close it deliberately.
-        if (err instanceof VaultOperationCancelledError) return
-        const message = (err as Error).message
-        log.error('Tabby import failed', { message })
-        showToast({
-          level: 'danger',
-          message: `${t('connections.import.tabbyFailedHead', 'Tabby import failed:')} ${message}`,
-        })
-      }
-    } else {
-      try {
+      } else {
         await doExecute()
-      } catch (err) {
-        const message = (err as Error).message
-        log.error('Tabby import failed', { message })
-        showToast({
-          level: 'danger',
-          message: `${t('connections.import.tabbyFailedHead', 'Tabby import failed:')} ${message}`,
-        })
       }
+    } catch (err) {
+      // Cancelling setup/unlock did not commit the plan. Keep it for retry.
+      if (disposed || previewResult() !== preview || err instanceof VaultOperationCancelledError)
+        return
+      const message = (err as Error).message
+      log.error('Tabby import failed', { message })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.import.tabbyFailedHead', 'Tabby import failed:')} ${message}`,
+      })
+    } finally {
+      if (!disposed) setExecuteBusy(false)
     }
   }
   function openGroupEditor(group: ProfileGroup) {
@@ -3084,6 +3110,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <Dialog
         open={importOpen()}
         onClose={closeImportDialog}
+        dismissible={!importBusy() || importSource() === 'tabby'}
         title={t('connections.import.title', 'Import Connections')}
         size="lg"
         footer={
@@ -3095,7 +3122,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   ? t('connections.import.previewButton', 'Preview')
                   : t('connections.import.importButton', 'Import')}
             </Button>
-            <Button variant="default" disabled={importBusy()} onClick={closeImportDialog}>
+            <Button
+              variant="default"
+              disabled={importBusy() && importSource() !== 'tabby'}
+              onClick={closeImportDialog}
+            >
               {t('connections.common.cancel', 'Cancel')}
             </Button>
           </>
@@ -3108,6 +3139,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 <Radio
                   value={src.value}
                   checked={importSource() === src.value}
+                  disabled={importBusy()}
                   onChange={(v) => {
                     setImportSource(v as ImportSource)
                     // A file chosen for one source is not a file for another.
@@ -3150,6 +3182,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             <TextField
               id="cm-import-passphrase"
               type="password"
+              disabled={importBusy()}
               value={importPassphrase()}
               onInput={(v) => setImportPassphrase(v)}
               placeholder={t(
@@ -3169,20 +3202,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Dialog
             open={previewOpen()}
             onClose={closePreview}
+            dismissible={!executeBusy()}
             title={t('connections.preview.title', 'Tabby Import Preview')}
             size="lg"
             footer={
               <>
                 <Button
                   variant="primary"
-                  disabled={importBusy()}
+                  disabled={executeBusy()}
                   onClick={() => void executeImport()}
                 >
-                  {importBusy()
+                  {executeBusy()
                     ? t('connections.import.importing', 'Importing…')
                     : t('connections.import.importButton', 'Import')}
                 </Button>
-                <Button variant="default" onClick={closePreview}>
+                <Button variant="default" disabled={executeBusy()} onClick={closePreview}>
                   {t('connections.common.cancel', 'Cancel')}
                 </Button>
               </>
@@ -3206,6 +3240,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   : t('connections.preview.secretMany', 'secrets')}
                 .
               </p>
+
+              <Show when={preview().warnings?.length}>
+                <Section title={t('connections.preview.warningsHeading', 'Unsupported settings')}>
+                  <For each={preview().warnings}>
+                    {(warning) => (
+                      <StatusCard
+                        tone="warning"
+                        title={t('connections.preview.warningTitle', '{profile} — {field}', {
+                          profile: warning.profile,
+                          field: warning.field,
+                        })}
+                        description={warning.reason}
+                      />
+                    )}
+                  </For>
+                </Section>
+              </Show>
 
               <Show when={preview().profileEntries && preview().profileEntries!.length > 0}>
                 <p>

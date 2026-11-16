@@ -597,6 +597,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.preview.policyOverwrite': 'will be overwritten',
   'connections.preview.policyRefuse': 'import refused (already exists)',
   'connections.preview.skippedHeading': 'Skipped secrets',
+  'connections.preview.warningsHeading': 'Unsupported settings',
+  'connections.preview.warningTitle': '{profile} — {field}',
   'connections.preview.destination': 'Destination:',
   'connections.group.tabGeneral': 'General',
   'connections.group.tabConnection': 'Connection',

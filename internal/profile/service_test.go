@@ -256,6 +256,57 @@ func TestAtomicImport_Transactional_LastRecordFailure(t *testing.T) {
 	}
 }
 
+func TestAtomicImport_InvalidBatchLeavesStoreUnchanged(t *testing.T) {
+	for _, name := range []string{"profile ID", "group ID", "duplicate profile", "duplicate group", "merged tree"} {
+		t.Run(name, func(t *testing.T) {
+			s, path := newTestService(t)
+			if err := s.SaveProfile(makeTestProfile("keep", "Keep", "keep.example.com")); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SaveGroup(makeTestGroup("parent", "Parent", nil)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SaveGroup(ProfileGroup{ID: "child", ParentGroupID: "parent"}); err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G304 -- t.TempDir() path, never user input
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profiles := []SSHProfile{makeTestProfile("new", "New", "new.example.com")}
+			groups := []ProfileGroup{{ID: "new-group"}}
+			switch name {
+			case "profile ID":
+				profiles = append(profiles, makeTestProfile("", "Invalid", "invalid.example.com"))
+			case "group ID":
+				groups = append(groups, ProfileGroup{})
+			case "duplicate profile":
+				profiles = append(profiles, profiles[0])
+			case "duplicate group":
+				groups = append(groups, groups[0])
+			case "merged tree":
+				groups = append(groups, ProfileGroup{ID: "parent", ParentGroupID: "child"})
+			}
+			if validationErr := s.ValidateImport(profiles, groups); validationErr == nil {
+				t.Fatal("invalid merge passed preflight")
+			}
+			result := s.AtomicImport(profiles, groups)
+			if len(result.ImportErrors) == 0 || result.ProfilesImported != 0 || result.GroupsImported != 0 {
+				t.Fatalf("invalid import reported committed records: %+v", result)
+			}
+			// #nosec G304 -- t.TempDir() path, never user input
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("failed import changed the store")
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot + AtomicReplace
 // ---------------------------------------------------------------------------

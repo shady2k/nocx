@@ -1,11 +1,8 @@
 /**
  * e2e: Tabby import preview + execute (bead nocx-kqw6)
  *
- * Verifies the full UI flow: upload a Tabby config with encrypted vault →
- * enter passphrase → preview → confirm → profile is created with resolvable
- * password secret.
- *
- * Uses its own ports (19890/19891) as prescribed by the brief.
+ * Verifies the full UI flow: upload a native Tabby config with encrypted vault →
+ * enter passphrase → preview → confirm → profile and its bound password appear.
  */
 
 import { expect } from '@playwright/test'
@@ -45,22 +42,24 @@ const serverBin = () => readStand().server
 // import left the secret unbound — "not used by anything" — and a test
 // asserting only that a row appeared was perfectly happy with it.
 const CONFIG_YAML = `\
-version: 1
+version: 8
 profiles:
   - id: "ssh:custom:e2e-test:1"
     type: "ssh"
     name: "E2E Tabby Import"
+    group: "g:e2e"
     options:
       host: "web.example.com"
-      port: 22
-      user: "deploy"
       auth: password
 groups:
   - id: "g:e2e"
     name: "E2E Group"
+    defaults:
+      ssh:
+        options:
+          user: deploy
 vault:
   version: 1
-  encrypted: true
   contents: "+oXSQiEp1Uwnkh9qinRzfD6d9hprCrNoGiXtfYBT7rN905+7XjW04Ga8u1D/VgP6g+FfqmM8FimVjbvmS14W32H38pw5doOQjoX2JSRE4ilj/drHwWbJQVg5lJsq5Gx9+PvN8b5JdMVMsngTtIkrO//ahlsnmBAF/ENrWU80hZZKvwRu79qMklTX3Hf9tGZH"
   keySalt: "cef74ecf5c5a9012"
   iv: "cdc44974813ca33f838446a2b370c1e2"
@@ -118,13 +117,11 @@ test.describe('Tabby import preview + execute', () => {
     backend?.stop()
   })
 
-  // The whole path, including the vault setup the import triggers on a machine
-  // with no OS keychain. The last assertion is the one that matters: the
-  // imported password RESOLVES. A profile row proves metadata was written and
-  // says nothing about the secret it points at, and this feature's entire job
-  // is moving secrets — an import that created rows referencing nothing would
-  // pass every weaker check.
-  test('imports Tabby encrypted config via preview -> confirm -> execute, profile+secret appear', async ({
+  // Exercise native vault storage (no invented nested encrypted flag), a
+  // group-default username and an omitted default port through the actual UI.
+  // The vault row must be bound, not merely present; transport regression
+  // tests separately assert the secret value resolves for the imported target.
+  test('imports native Tabby vault and group defaults via preview and confirmation', async ({
     page,
   }) => {
     const ep = await backend.start()
@@ -225,14 +222,5 @@ test.describe('Tabby import preview + execute', () => {
     const credRow = page.locator('.ui-collection-row').filter({ hasText: 'deploy@web.example.com' })
     await expect(credRow).toBeVisible({ timeout: 10_000 })
     await expect(credRow).not.toContainText('not used by anything')
-
-    // No console errors.
-    const consoleErrors: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') {
-        consoleErrors.push(msg.text())
-      }
-    })
-    expect(consoleErrors).toHaveLength(0)
   })
 })

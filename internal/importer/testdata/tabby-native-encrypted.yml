@@ -1,0 +1,9 @@
+# Generated independently with Node crypto: PBKDF2-SHA512/100000/AES-256-CBC.
+# Passphrase: native-fixture. Root encrypted flag is Tabby's actual format.
+version: 8
+encrypted: true
+vault:
+  version: 1
+  keySalt: '0102030405060708'
+  iv: '000102030405060708090a0b0c0d0e0f'
+  contents: 'E3u6re3SkA9+5L/hxWQ9a6ZNoj/F3dRsdExGm9XE/Pb10PvP5EWyTefeLBkar8MziEL3C3TvvmB+1cgWBr6aBy1UvkKgfQaH7iyUPYBw4/7IFnk4b1jegcpD2n5Usm7oyTVqRL4MmJL833rNUmW+Y0TXalqliP4NqEcSkFzKadixpx0TX1N4GammTPEOe1loUQqSA94jC8yaSRShjujO7A0YfA5o2SiAowOdiE0mEOhsl5ufAf+PcdheaH2PnQ9jP1ue6dcYWyRUZF2gDO6QgSZ4NmxuwpQ2ixRRE6ElzHf61k9Reiec71kilpWKVbtJXyFqxWn4heLint9/Yrk0M6X9fKX6nxK9GA4ZZiZWzNX4NBNnufFhRARXpVjeicoND1uduNAN9QjX+kv1mydlmpSi8r3TsXHJEH6VwMjmGPHLVSAHa8gXFS6YVKp5DMMMTL33lWK0S3pXnQ1r0Pc32C7HdXeM8R4dggn/D0hPd7kcDzIPbbyuRK5kos5i/LeyNaph6nZYKoDI1qLqwleLqScGM4b9JbNAqju6vtLqvEIwXW7t1efi+2z09ju/p24S6XShB3LO0UrpU+qxf23gBaCe4E1Xfq/1gF+H6jFD5bA='

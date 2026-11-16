@@ -51,11 +51,10 @@ func encryptTabbyVaultForTest(t *testing.T, plaintext, passphrase string) import
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
 
 	return importer.TabbyVault{
-		Version:   1,
-		Encrypted: true,
-		Contents:  base64.StdEncoding.EncodeToString(ciphertext),
-		KeySalt:   hex.EncodeToString(salt),
-		IV:        hex.EncodeToString(iv),
+		Version:  1,
+		Contents: base64.StdEncoding.EncodeToString(ciphertext),
+		KeySalt:  hex.EncodeToString(salt),
+		IV:       hex.EncodeToString(iv),
 	}
 }
 
@@ -85,8 +84,8 @@ groups:
     name: "Production"
 `
 	if vault != nil {
-		header += fmt.Sprintf("vault:\n  version: %d\n  encrypted: %t\n  contents: %q\n  keySalt: %q\n  iv: %q\n",
-			vault.Version, vault.Encrypted, vault.Contents, vault.KeySalt, vault.IV)
+		header += fmt.Sprintf("vault:\n  version: %d\n  contents: %q\n  keySalt: %q\n  iv: %q\n",
+			vault.Version, vault.Contents, vault.KeySalt, vault.IV)
 	}
 	return header
 }
@@ -127,7 +126,15 @@ func (f *failAfterStore) Get(_ context.Context, _ credential.SecretID) (credenti
 	return credential.Secret{}, nil
 }
 
-func (f *failAfterStore) Delete(_ context.Context, _ credential.SecretID) error {
+func (f *failAfterStore) Delete(_ context.Context, id credential.SecretID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, value := range f.created {
+		if credential.SecretID("test:"+value) == id {
+			f.created = append(f.created[:i], f.created[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -295,11 +302,9 @@ func TestImportTabby_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fixture config parse: %v", err)
 	}
-	t.Logf("parsed vault: encrypted=%v, nil=%v", cfg.Vault != nil && cfg.Vault.Encrypted, cfg.Vault == nil)
-	if cfg.Vault == nil || !cfg.Vault.Encrypted {
-		t.Fatal("fixture vault not parsed as encrypted — YAML fixture is wrong")
+	if cfg.Vault == nil {
+		t.Fatal("fixture vault not parsed")
 	}
-	t.Logf("profiles: %+v", cfg.Profiles[0])
 
 	resp := jsonrpcCall(t, conn, "profiles.importTabby", map[string]any{
 		"config":     config,
@@ -429,14 +434,8 @@ func TestImportTabby_InvalidSecretValue(t *testing.T) {
 }
 
 func TestImportTabby_CreateFailsMidway(t *testing.T) {
-	// Create fails on the 3rd of 5 secrets. Secrets 1-2 are created as orphans.
-	// The profile/credential metadata store is unchanged (import never reaches AtomicImport).
-	// Orphaned secrets will be cleaned up by reconciliation on next start.
-	//
-	// This test verifies:
-	//   1. The error is surfaced to the caller.
-	//   2. Orphaned secrets 1-2 exist in the SecretStore.
-	//   3. The metadata store has NO credentials (import never completed).
+	// A failure on the third mint must delete this attempt's first two secrets
+	// and leave the profile store untouched.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	svc := profile.NewProfileService(ps)
@@ -479,18 +478,15 @@ func TestImportTabby_CreateFailsMidway(t *testing.T) {
 		t.Fatal("expected error from failing SecretStore, got success")
 	}
 
-	// Secrets 1-2 were created (they're orphans now).
 	failStore.mu.Lock()
-	orphans := len(failStore.created)
+	remaining := len(failStore.created)
 	failStore.mu.Unlock()
-	if orphans != 2 {
-		t.Errorf("expected 2 orphaned secrets, got %d", orphans)
+	if remaining != 0 {
+		t.Errorf("failed import left %d secrets behind", remaining)
 	}
-	if orphans > 0 && failStore.created[0] != "s1" {
-		t.Errorf("expected orphan s1, got %q", failStore.created[0])
-	}
-	if orphans > 1 && failStore.created[1] != "s2" {
-		t.Errorf("expected orphan s2, got %q", failStore.created[1])
+	profiles, err := ps.LoadProfiles()
+	if err != nil || len(profiles) != 0 {
+		t.Fatalf("failed import changed profiles: %v, %v", profiles, err)
 	}
 }
 
@@ -1331,6 +1327,10 @@ func (s recordingPlanStore) claimPlan(string) *importPlan {
 func (s recordingPlanStore) releasePlan(string) { *s.events = append(*s.events, "release") }
 func (s recordingPlanStore) finishPlan(string)  { *s.events = append(*s.events, "finish") }
 
+func (s recordingPlanStore) claimCleanupPlan() (string, *importPlan) {
+	return "", nil
+}
+
 // sequenceResponder records the moment a response is handed to the outbound
 // queue, into the same sequence the plan store writes to. From that moment
 // the caller can be reading it, so everything the caller is entitled to act
@@ -1364,10 +1364,17 @@ func (o inlineTabbyOp) Disposition() capability.Disposition {
 
 // failingSecretService fails every CreateSecret — the vault-sealed shape the
 // retry exists for.
-type failingSecretService struct{ capability.TabbyImportService }
+type failingSecretService struct {
+	capability.TabbyImportService
+	validator *profile.ProfileService
+}
 
 func (failingSecretService) CreateSecret(context.Context, credential.Secret, vault.SecretMeta) (credential.SecretID, error) {
 	return "", errors.New("vault is sealed")
+}
+
+func (s failingSecretService) ValidateImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) error {
+	return s.validator.ValidateImport(profiles, groups)
 }
 
 // TestTabbyExecute_PlanIsReleasedBeforeTheFailureIsAnswered pins the ordering
@@ -1390,16 +1397,15 @@ func (failingSecretService) CreateSecret(context.Context, credential.Secret, vau
 func TestTabbyExecute_PlanIsReleasedBeforeTheFailureIsAnswered(t *testing.T) {
 	var events []string
 	plan := &importPlan{
-		profiles: []profile.SSHProfile{{Base: profile.Base{ID: "ssh:test:1", Name: "web"}}},
+		profiles: []profile.SSHProfile{{Base: profile.Base{ID: "ssh:test:1", Name: "web"}, Options: profile.StoredSSHProfileOptions{Host: "web.example.com"}}},
 		creds:    []credentialPlan{{name: "web", secret: "hunter2", targetHost: "web.example.com"}},
 	}
 	h := tabbyHandlers{
-		op:           inlineTabbyOp{svc: failingSecretService{}},
+		op:           inlineTabbyOp{svc: failingSecretService{validator: profile.NewProfileService(profile.NewJSONStore(filepath.Join(t.TempDir(), "p.json")))}},
 		configWired:  true,
 		executeWired: true,
 		storeWired:   true,
 		plans:        recordingPlanStore{plan: plan, events: &events},
-		log:          log.NewSlogAdapter(nil),
 		r:            sequenceResponder{events: &events},
 	}
 	h.handleTabbyExecute(context.Background(), jsonrpcRequest{

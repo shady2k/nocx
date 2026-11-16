@@ -117,99 +117,84 @@ func (s *ProfileService) SaveGroup(g ProfileGroup) error {
 //  4. Validates the full result.
 //  5. Writes once.
 func (s *ProfileService) AtomicImport(profiles []SSHProfile, groups []ProfileGroup) *ImportResult {
-	result := &ImportResult{}
-	hasFatal := false
-
-	// Step 1: Load current state.
-	storeData, err := s.store.LoadAll()
+	data, err := s.prepareImport(profiles, groups)
 	if err != nil {
-		result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("load store: %v", err))
-		return result
+		return &ImportResult{ImportErrors: []string{err.Error()}}
 	}
+	if err := s.store.WriteAll(data); err != nil {
+		return &ImportResult{ImportErrors: []string{fmt.Sprintf("write store: %v", err)}}
+	}
+	return &ImportResult{ProfilesImported: len(profiles), GroupsImported: len(groups)}
+}
 
-	// Step 2: Merge profiles — overwrite on duplicate ID.
+// ValidateImport checks the complete merge without writing. Importers call it
+// before minting secrets; AtomicImport repeats it against the current store.
+func (s *ProfileService) ValidateImport(profiles []SSHProfile, groups []ProfileGroup) error {
+	_, err := s.prepareImport(profiles, groups)
+	return err
+}
+
+func (s *ProfileService) prepareImport(profiles []SSHProfile, groups []ProfileGroup) (*storeData, error) {
+	data, err := s.store.LoadAll()
+	if err != nil {
+		return nil, fmt.Errorf("load store: %w", err)
+	}
+	profileIDs := make(map[string]int, len(data.Profiles))
+	for i, p := range data.Profiles {
+		profileIDs[p.ID] = i
+	}
+	seenProfiles := make(map[string]bool, len(profiles))
 	for _, p := range profiles {
 		if p.ID == "" {
-			result.ImportErrors = append(result.ImportErrors, "profile with empty ID skipped")
-			continue
+			return nil, ErrProfileIDRequired
 		}
+		if seenProfiles[p.ID] {
+			return nil, fmt.Errorf("duplicate imported profile ID: %s", p.ID)
+		}
+		seenProfiles[p.ID] = true
 		if p.Options.Host == "" {
-			result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("%s: host is required", p.ID))
-			hasFatal = true
-			continue
+			return nil, fmt.Errorf("%s: host is required", p.ID)
 		}
-
-		// Sync BehaviorOnSessionEnd from Base to Options for storage.
 		if p.BehaviorOnSessionEnd != "" {
 			v := p.BehaviorOnSessionEnd
 			p.Options.BehaviorOnSessionEnd = &v
 		} else {
 			p.Options.BehaviorOnSessionEnd = nil
 		}
-
-		found := false
-		for i, existing := range storeData.Profiles {
-			if existing.ID == p.ID {
-				storeData.Profiles[i] = p
-				found = true
-				break
-			}
+		if i, exists := profileIDs[p.ID]; exists {
+			data.Profiles[i] = p
+		} else {
+			data.Profiles = append(data.Profiles, p)
 		}
-		if !found {
-			storeData.Profiles = append(storeData.Profiles, p)
-		}
-		// Profiles no longer name credentials (ADR-0017): a profile's secret
-		// references are backend-owned and imports carry none.
-		result.ProfilesImported++
 	}
-
-	// Step 3: Merge groups — overwrite on duplicate ID.
+	groupIDs := make(map[string]int, len(data.Groups))
+	for i, g := range data.Groups {
+		groupIDs[g.ID] = i
+	}
+	seenGroups := make(map[string]bool, len(groups))
 	for _, g := range groups {
 		if g.ID == "" {
-			result.ImportErrors = append(result.ImportErrors, "group with empty ID skipped")
-			continue
+			return nil, ErrGroupIDRequired
 		}
+		if seenGroups[g.ID] {
+			return nil, fmt.Errorf("duplicate imported group ID: %s", g.ID)
+		}
+		seenGroups[g.ID] = true
 		if g.Defaults != nil {
 			if err := g.Defaults.Validate(); err != nil {
-				result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("%s: %v", g.ID, err))
-				hasFatal = true
-				continue
+				return nil, fmt.Errorf("%s: %w", g.ID, err)
 			}
 		}
-		found := false
-		for i, existing := range storeData.Groups {
-			if existing.ID == g.ID {
-				storeData.Groups[i] = g
-				found = true
-				break
-			}
-		}
-		if !found {
-			storeData.Groups = append(storeData.Groups, g)
-		}
-		result.GroupsImported++
-	}
-
-	// Validate group tree.
-	if len(storeData.Groups) > 0 {
-		if err := ValidateGroupTree(storeData.Groups); err != nil {
-			result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("group tree: %v", err))
-			hasFatal = true
+		if i, exists := groupIDs[g.ID]; exists {
+			data.Groups[i] = g
+		} else {
+			data.Groups = append(data.Groups, g)
 		}
 	}
-
-	if hasFatal {
-		// Return the result with errors but do NOT write — store is unchanged.
-		return result
+	if err := ValidateGroupTree(data.Groups); err != nil {
+		return nil, fmt.Errorf("group tree: %w", err)
 	}
-
-	// Step 5: Write once, atomically.
-	if err := s.store.WriteAll(storeData); err != nil {
-		result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("write store: %v", err))
-		return result
-	}
-
-	return result
+	return data, nil
 }
 
 // ---------------------------------------------------------------------------

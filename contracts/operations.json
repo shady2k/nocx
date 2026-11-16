@@ -1007,6 +1007,71 @@
       "preempts": []
     },
     {
+      "id": "agent.steer",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "session",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "session",
+            "model"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 300000,
+        "basis": "read",
+        "note": "read: the message waits for the agent's own acceptance; the run's bound governs how long a turn may answer"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Handing your message to the agent",
+      "row": "never",
+      "expired": "outcome-unknown",
+      "resources": [
+        {
+          "kind": "session",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "session",
+        "model"
+      ],
+      "preempts": []
+    },
+    {
       "id": "agent.type",
       "kind": "method",
       "owner": "request",

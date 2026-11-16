@@ -7,6 +7,8 @@ import type { Extension } from '@codemirror/state'
 import { Dispatcher } from './dispatcher'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCancel } from './generated/agent.cancel'
+import type { AgentSteer } from './generated/agent.steer'
+import type { PersonMessage } from './ui/person-message'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunReasoning } from './generated/agent.runReasoning'
 import type { AgentRunToolCall } from './generated/agent.runToolCall'
@@ -25,8 +27,17 @@ export interface AgentAskSeams {
   cancel: (runId: number) => Promise<AgentCancel>
   sessionId: () => string
   grants: () => ReadonlyArray<GrantBlock>
+  /** Take the marks the question carried. A message sent into a running turn
+   *  carries none — it reaches an agent that already holds the conversation —
+   *  so the marks stay for the next question rather than being dropped by a
+   *  submit that never used them. */
+  consumeGrants: () => void
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
+  /** Deliver a person's message into the turn that is answering, and answer
+   *  once the agent took it. The message is delivered, not queued as a new
+   *  question: the agent still holds the conversation. */
+  steer: (runId: number, text: string) => Promise<AgentSteer>
   onRefusal: (message: string) => void
   /** Called only after the backend accepts the turn, so a speculative
    *  overlay can change presentation without hiding itself on refusal. */
@@ -63,8 +74,24 @@ export class AgentInputTarget implements InputTarget {
   readonly routesToShell = false
   private readonly runs = new Map<
     number,
-    { handle: AnswerBlockHandle; settle: () => void; askId: string }
+    {
+      handle: AnswerBlockHandle
+      settle: () => void
+      askId: string
+      /** The messages this turn has been given, with the line each was drawn
+       *  on: a cancel names the ones the agent dropped, and the block restates
+       *  exactly those. */
+      steered: { text: string; line: PersonMessage }[]
+    }
   >()
+  /** Messages a turn kept for later, in the order the person sent them: each is
+   *  asked as the conversation's next question once that turn ends. */
+  private nextQuestions: string[] = []
+  /** Whether a kept message is already being asked. One question in flight per
+   *  conversation: the backend can run one turn at a time, and two asks started
+   *  in the same tick would both open a block and one would sit behind the
+   *  other's whole answer. */
+  private askingNext = false
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -86,6 +113,20 @@ export class AgentInputTarget implements InputTarget {
       throw new Error('The answering agent is not ready')
     }
     this.ensureSubscribed()
+    // A turn is running in this pane's conversation: the person is speaking to
+    // the agent that is answering, not asking a new question (ADR-anntnxdj
+    // decision 4). One turn, one block — the message lands in the block being
+    // written, at the point in the answer where it was sent.
+    const answering = this.runningRun()
+    if (answering !== null) {
+      await this.steer(answering.runId, answering.handle, doc)
+      return
+    }
+    await this.ask(doc)
+  }
+
+  /** Ask one question: a block of its own, a run of its own. */
+  private async ask(doc: string): Promise<void> {
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
     const attachedContent = this.seams
@@ -139,10 +180,64 @@ export class AgentInputTarget implements InputTarget {
         throw err
       })
     this.seams.onTurnAccepted?.(askId)
+    // The question took the marks it rode with it; nothing else claims them.
+    this.seams.consumeGrants()
     runId = ask.runId
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
-    this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
+    this.runs.set(ask.runId, {
+      handle,
+      askId,
+      steered: [],
+      settle: () => (settled = true),
+    })
+  }
+
+  /** The conversation's live turn, if one is being answered. The pane's runs
+   *  are the pane's conversation (§ conversation = the pane), and a run leaves
+   *  this map at its terminal, so what is found here is a turn still running. */
+  private runningRun(): { runId: number; handle: AnswerBlockHandle } | null {
+    for (const [runId, run] of this.runs) {
+      // A TURN IS ADDRESSABLE ONLY BY THE ID THE BACKEND MINTED. A run recorded
+      // without one has no turn to steer — there is nothing to name in
+      // agent.steer — so the person's next submit is a QUESTION again, which is
+      // the only thing that can work (nocx-a62cl.6.1).
+      if (!Number.isInteger(runId) || runId <= 0) continue
+      return { runId, handle: run.handle }
+    }
+    return null
+  }
+
+  /** Hand the person's message to the running turn. It is drawn only after the
+   *  agent took it: a message a turn ended under is refused by the backend,
+   *  and a block that had already shown it would be claiming a delivery that
+   *  never happened. */
+  private async steer(runId: number, handle: AnswerBlockHandle, text: string): Promise<void> {
+    let outcome: AgentSteer['outcome']
+    try {
+      outcome = (await this.seams.steer(runId, text)).outcome
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.seams.onRefusal(message)
+      throw err
+    }
+    // WHAT BECAME OF IT, as the backend stated it (ADR-anntnxdj decision 4). The
+    // message goes into the turn, or it is kept and asked once the turn ends —
+    // because the agent cannot steer, or because the turn could not take it. The
+    // block says which, and a kept message is asked as the conversation's next
+    // question as soon as this turn terminalizes.
+    const queued = outcome === 'next_question'
+    const line = handle.steer(text, queued ? 'next_question' : 'steered')
+    const run = this.runs.get(runId)
+    if (run !== undefined) run.steered.push({ text, line })
+    if (queued) {
+      this.nextQuestions.push(text)
+      // DRAIN ON ENQUEUE, not only at the terminal: the reply can arrive after
+      // the turn's terminal (the backend answers a message it could not take
+      // once it knows), and a queue drained only at the terminal would hold
+      // that message for ever.
+      this.askNextQuestions()
+    }
   }
 
   private settleRun(
@@ -151,6 +246,7 @@ export class AgentInputTarget implements InputTarget {
       state: AgentRunState['state']
       error?: string
       droppedDeltas?: number
+      droppedSteers?: string[]
       notices?: string[]
       unarmedBounds?: string[]
       usage?: AgentRunState['usage']
@@ -207,7 +303,57 @@ export class AgentInputTarget implements InputTarget {
         presentation.usage,
       )
     }
+    // A CANCELLED TURN HANDS BACK WHAT ITS AGENT DROPPED (ADR-4khgzeyp decision
+    // 3): the messages it had queued for steering and never used. The lines
+    // already drawn for them are restated as waiting — the same words, marked —
+    // and each is asked as the conversation's next question like any other kept
+    // message.
+    for (const dropped of presentation.droppedSteers ?? []) {
+      const index = run.steered.findIndex((entry) => entry.text === dropped)
+      if (index === -1) {
+        // A message this surface did not send (an extension's, or one from a
+        // previous window): it is still the person's, and it is still not lost.
+        this.nextQuestions.push(dropped)
+        continue
+      }
+      run.steered[index].line.markQueued()
+      run.steered.splice(index, 1)
+      this.nextQuestions.push(dropped)
+    }
+    this.askNextQuestions()
     this.seams.onTurnEnd?.(run.askId)
+    // The messages this turn could not take are asked now, as its successors:
+    // each opens its own block and is a question like any other (ADR-anntnxdj
+    // decision 4 — a message is never lost to the turn that could not take it).
+    this.askNextQuestions()
+  }
+
+  /**
+   * Ask whatever the just-finished turn kept for later, oldest first.
+   *
+   * One at a time, deliberately: `ask` opens a block and starts a run, and the
+   * question after it belongs to THAT run's conversation. This queue is the
+   * same pane's, so the next one waits for the run it follows — which is what
+   * "the conversation's next question" means.
+   */
+  private askNextQuestions(): void {
+    if (this.askingNext || this.nextQuestions.length === 0 || this.runs.size > 0) return
+    const [text, ...rest] = this.nextQuestions
+    this.nextQuestions = rest
+    this.askingNext = true
+    void this.ask(text)
+      .catch(() => {
+        // The refusal is already on screen (onRefusal); the message itself was
+        // the person's, and a turn that would not start must not swallow the
+        // rest of the queue.
+      })
+      .finally(() => {
+        this.askingNext = false
+        // The turn that just started holds the queue (runs.size), and asks the
+        // next one when it terminalizes; a turn that never started leaves the
+        // queue to this call.
+        this.askNextQuestions()
+      })
   }
 
   /**

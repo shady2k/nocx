@@ -21,6 +21,9 @@ func TestRunToolsReservedApprovalPrecedesLaterMutation(t *testing.T) {
 	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "do not proceed"}}
 	k := kernelForQuestioner(t, grant, &fakeLedger{}, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it, as the transport's wait
+	// stamps it: the calls queued by then are the ones it covers.
+	q.cutoff = k.order.ArrivalCutoff
 	tools := &RunTools{kernel: k}
 	first, releaseFirst := tools.ReserveInvocation(ToolInvocation{Context: context.Background(), Method: "files.read", RawParams: []byte(fmt.Sprintf(`{"path":%q}`, path))})
 	defer releaseFirst()

@@ -5,14 +5,47 @@ import { AgentInputTarget } from './agent-ask'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
 import { BlockNotice } from './ui/block-notice'
+import { PersonMessage, type PersonMessageState } from './ui/person-message'
 
 class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
+  /** What agent.steer answers: into the turn, or kept for the next question. */
+  steerOutcome: 'steered' | 'next_question' = 'steered'
+  /** When true, agent.steer answers only when the test releases it. */
+  holdSteer = false
+  private steerWaiters: ((outcome: 'steered' | 'next_question') => void)[] = []
+
+  /** Answer the oldest held agent.steer. */
+  releaseSteer(outcome: 'steered' | 'next_question'): void {
+    this.steerWaiters.shift()?.(outcome)
+  }
   private subs = new Map<string, (params: unknown) => void>()
+  private refusals = new Map<string, string>()
   next = { run: 7, answerEntry: 'answer-1' }
+
+  /** The next call of `method` answers with an error, as a backend refusal. */
+  refuse(method: string, message: string): void {
+    this.refusals.set(method, message)
+  }
 
   call<T = unknown>(method: string, params: unknown): Promise<T> {
     this.calls.push({ method, params })
+    const refusal = this.refusals.get(method)
+    if (refusal !== undefined) {
+      this.refusals.delete(method)
+      return Promise.reject(new Error(refusal))
+    }
+    if (method === 'agent.steer') {
+      const { runId } = params as { runId: number }
+      if (!this.holdSteer) {
+        return Promise.resolve({ runId, outcome: this.steerOutcome }) as Promise<T>
+      }
+      // A HELD steer: the test decides when (and with what) its reply lands,
+      // which is how a reply that arrives after the terminal is exercised.
+      return new Promise<{ runId: number; outcome: 'steered' | 'next_question' }>((resolve) => {
+        this.steerWaiters.push((outcome) => resolve({ runId, outcome }))
+      }) as Promise<T>
+    }
     if (method === 'agent.ask') {
       const res = {
         runId: this.next.run,
@@ -53,6 +86,9 @@ function grant(
 
 function makeTarget(grants: GrantBlock[] = []) {
   const dispatcher = new FakeDispatcher()
+  // The lines the turn drew for the person's messages, in the order they were
+  // sent: the surface restates exactly these when a cancel drops one.
+  const steeredLines: PersonMessage[] = []
   const handle: AnswerBlockHandle = {
     id: 1,
     el: document.createElement('div'),
@@ -60,21 +96,33 @@ function makeTarget(grants: GrantBlock[] = []) {
     toolCall: vi.fn(),
     reasoning: vi.fn(),
     notice: vi.fn(() => new BlockNotice({ text: '' })),
+    steer: vi.fn((text: string, state: PersonMessageState = 'steered') => {
+      const line = new PersonMessage(
+        text,
+        { label: 'You', aria: 'your message', queued: 'asked when this answer ends' },
+        state,
+      )
+      steeredLines.push(line)
+      return line
+    }),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
+  const consumeGrants = vi.fn()
   const target = new AgentInputTarget({
     dispatcher: dispatcher as never,
     cancel: vi.fn(() =>
       Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
     ),
+    steer: (runId: number, text: string) => dispatcher.call('agent.steer', { runId, text }),
     sessionId: () => 'session-a',
     cwd: () => '/repo',
     grants: () => grants,
+    consumeGrants,
     openAnswer: vi.fn(() => handle),
     onRefusal,
   })
-  return { dispatcher, handle, onRefusal, target }
+  return { dispatcher, handle, onRefusal, consumeGrants, steeredLines, target }
 }
 
 describe('AgentInputTarget', () => {
@@ -87,7 +135,7 @@ describe('AgentInputTarget', () => {
   })
 
   it('sends whole-block and row-window grant facts on the ask payload', async () => {
-    const { dispatcher, handle, target } = makeTarget([
+    const { dispatcher, handle, consumeGrants, target } = makeTarget([
       grant('item-1', 'git status', 'running'),
       grant('item-2', 'npm test', 'exited', { start: 4, count: 3 }),
     ])
@@ -112,6 +160,9 @@ describe('AgentInputTarget', () => {
     ])
     expect(ask!.params).not.toHaveProperty('rows')
     expect(handle.el.dataset.entryId).toBe('answer-1')
+    // The question carried the marks, so it takes them: the chip a person
+    // sees before pressing Enter is spent by the question that used it.
+    expect(consumeGrants).toHaveBeenCalledTimes(1)
   })
   it('preserves automatic frozen-frame provenance on the ask payload', async () => {
     const frozen = { ...grant('frame-1', 'top', 'running'), automatic: true as const }
@@ -317,6 +368,7 @@ describe('AgentInputTarget', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -334,7 +386,9 @@ describe('AgentInputTarget', () => {
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: vi.fn(
         (_question: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
           actions = provided
@@ -378,6 +432,7 @@ describe('AgentInputTarget', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -400,7 +455,9 @@ describe('AgentInputTarget', () => {
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: vi.fn(
         (_q: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
           actions = provided
@@ -476,6 +533,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -486,7 +544,9 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer,
       onRefusal: vi.fn(),
     })
@@ -518,6 +578,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -529,7 +590,9 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer,
       onRefusal,
     })
@@ -562,6 +625,7 @@ describe('AgentInputTarget refusal', () => {
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
+      steer: vi.fn(),
       close: vi.fn(),
     }
     const onRefusal = vi.fn()
@@ -572,7 +636,9 @@ describe('AgentInputTarget refusal', () => {
       ),
       sessionId: () => 's',
       cwd: () => '/',
+      steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
       grants: () => [],
+      consumeGrants: vi.fn(),
       openAnswer: () => handle,
       onRefusal,
     })
@@ -838,7 +904,9 @@ it('opens agent settings before allocating an answer or calling ask when no agen
     cancel: vi.fn(),
     sessionId: () => 'session-a',
     cwd: () => '/repo',
+    steer: vi.fn(() => Promise.resolve({ runId: 0, outcome: 'steered' as const })),
     grants: () => [],
+    consumeGrants: vi.fn(),
     openAnswer,
     onRefusal: vi.fn(),
     ensureReady,
@@ -847,4 +915,195 @@ it('opens agent settings before allocating an answer or calling ask when no agen
   expect(ensureReady).toHaveBeenCalledOnce()
   expect(openAnswer).not.toHaveBeenCalled()
   expect(dispatcher.calls).toEqual([])
+})
+
+describe('AgentInputTarget steering (nocx-a62cl.6.1)', () => {
+  it('sends a message typed while the turn runs as agent.steer, not a second ask', async () => {
+    const { dispatcher, handle, consumeGrants, target } = makeTarget()
+    await target.submit('what is in the log?')
+    // The question spent the marks it carried; from here the pane is clear,
+    // so anything taken below was taken by the steer.
+    consumeGrants.mockClear()
+
+    await target.submit('also check the second log')
+
+    const steer = dispatcher.calls.find((call) => call.method === 'agent.steer')
+    expect(steer!.params).toEqual({ runId: 7, text: 'also check the second log' })
+    expect(dispatcher.calls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
+    // The same turn shows it: no second answer block, and the message lands in
+    // the block that is still being written.
+    expect(handle.steer).toHaveBeenCalledWith('also check the second log', 'steered')
+    // The marks the person made belong to their next QUESTION: this submit
+    // carried none of them, so dropping them would throw away a choice
+    // nothing used.
+    expect(consumeGrants).not.toHaveBeenCalled()
+  })
+
+  it('asks again once the turn has ended', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('first question')
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+
+    await target.submit('second question')
+
+    expect(dispatcher.calls.filter((call) => call.method === 'agent.ask')).toHaveLength(2)
+    expect(dispatcher.calls.some((call) => call.method === 'agent.steer')).toBe(false)
+  })
+
+  it('says so when the message could not be delivered, and does not draw it', async () => {
+    const { dispatcher, handle, onRefusal, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.refuse('agent.steer', 'harness: the turn is not running')
+
+    await expect(target.submit('too late')).rejects.toThrow('the turn is not running')
+
+    expect(onRefusal).toHaveBeenCalledWith('harness: the turn is not running')
+    expect(handle.steer).not.toHaveBeenCalled()
+  })
+})
+
+describe('AgentInputTarget and a message the turn could not take (nocx-a62cl.6.3)', () => {
+  it('draws it as kept, and asks it as the next question when the turn ends', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.steerOutcome = 'next_question'
+
+    await target.submit('ask me the other thing instead')
+
+    // The message is drawn where the person sent it, marked as kept — this
+    // answer will not be its answer.
+    expect(handle.steer).toHaveBeenCalledWith('ask me the other thing instead', 'next_question')
+    // Nothing asked it yet: the conversation still has the turn that could not
+    // take it.
+    expect(dispatcher.calls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
+
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+
+    // Its question opens a block of its own, after the turn it could not join.
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('ask me the other thing instead')
+  })
+
+  it('asks it after a cancelled turn too — the message is not lost', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.steerOutcome = 'next_question'
+    await target.submit('ask me the other thing instead')
+
+    dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled' })
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+  })
+
+  it('keeps the order of several kept messages', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('first question')
+    dispatcher.steerOutcome = 'next_question'
+    await target.submit('one')
+    await target.submit('two')
+
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBeGreaterThanOrEqual(2)
+    const questions = dispatcher.calls
+      .filter((call) => call.method === 'agent.ask')
+      .map((call) => (call.params as { question: string }).question)
+    expect(questions[1]).toBe('one')
+  })
+})
+
+describe('a message the agent took and the cancel dropped (nocx-a62cl.6.3)', () => {
+  it('restates its line as waiting and asks it as the next question', async () => {
+    const { dispatcher, handle, steeredLines, target } = makeTarget()
+    await target.submit('what is in the log?')
+    await target.submit('ask me the other thing instead')
+    expect(handle.steer).toHaveBeenCalledWith('ask me the other thing instead', 'steered')
+    const line = steeredLines[0]
+    const markQueued = vi.spyOn(line, 'markQueued')
+
+    // The agent had it queued; the cancel dropped it and named it.
+    dispatcher.emit('agent.runState', {
+      runId: 7,
+      state: 'cancelled',
+      droppedSteers: ['ask me the other thing instead'],
+    })
+
+    // The line already on screen says so now — the same words, marked — and
+    // the message is asked as the conversation's next question.
+    expect(markQueued).toHaveBeenCalledTimes(1)
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('ask me the other thing instead')
+  })
+
+  it('asks a dropped message it did not draw — it is still the person\u2019s', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+
+    dispatcher.emit('agent.runState', {
+      runId: 7,
+      state: 'cancelled',
+      droppedSteers: ['an extension queued this'],
+    })
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('an extension queued this')
+  })
+})
+
+describe('I1 — one disposition per message, whatever the order of events (nocx-a62cl.6.1)', () => {
+  it('asks a message whose next_question reply lands AFTER the turn ended', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.holdSteer = true
+    const steering = target.submit('ask me the other thing instead')
+
+    // The run terminalizes first: the renderer's queue was empty when it did.
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+    // ...and only then does the backend say the message was kept.
+    dispatcher.releaseSteer('next_question')
+    await steering
+
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const next = dispatcher.calls.filter((call) => call.method === 'agent.ask')[1]
+    expect((next.params as { question: string }).question).toBe('ask me the other thing instead')
+  })
+
+  it('keeps one question in flight when several kept replies arrive together', async () => {
+    const { dispatcher, target } = makeTarget()
+    await target.submit('what is in the log?')
+    dispatcher.holdSteer = true
+    const first = target.submit('one')
+    const second = target.submit('two')
+
+    // The run is gone, and both replies land without a turn to queue behind.
+    dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
+    dispatcher.releaseSteer('next_question')
+    dispatcher.releaseSteer('next_question')
+    await Promise.all([first, second])
+
+    // One question is asked — the conversation cannot run two — and the other
+    // waits for it.
+    await expect
+      .poll(() => dispatcher.calls.filter((call) => call.method === 'agent.ask').length)
+      .toBe(2)
+    const asked = dispatcher.calls
+      .filter((call) => call.method === 'agent.ask')
+      .map((call) => (call.params as { question: string }).question)
+    expect(asked[1]).toBe('one')
+  })
 })

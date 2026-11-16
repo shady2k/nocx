@@ -272,6 +272,7 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'agent.ask',
       'agent.approve',
       'agent.cancel',
+      'agent.steer',
       'agent.status',
       'agent.emitting',
       'agent.calibration',

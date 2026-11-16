@@ -149,6 +149,15 @@ func realPiDriver(t *testing.T, s harnesstest.DriverSetup) harnesstest.Fixture {
 	switch s.Scenario {
 	case harnesstest.Ordered:
 		script = []fakemodel.Response{{Deltas: []fakemodel.Delta{{Text: "Hel"}, {Thinking: "thinking", Block: gate}, {Text: "lo"}}, Usage: &fakemodel.Usage{InputTokens: 3, OutputTokens: 5, CacheReadTokens: 2}}}
+	case harnesstest.Steering:
+		// Held after its first words; the message then reaches pi, which
+		// delivers it before its next model call — the second response is that
+		// call.
+		script = []fakemodel.Response{
+			{Deltas: []fakemodel.Delta{{Text: "Hel"}, {Text: "lo", Block: gate}}},
+			{Text: []string{"answered with the message"}},
+			end,
+		}
 	case harnesstest.CancelStream:
 		script = []fakemodel.Response{{Deltas: []fakemodel.Delta{{Text: "Hel"}, {Text: "lo", Block: gate}}}}
 	case harnesstest.ParentStream:

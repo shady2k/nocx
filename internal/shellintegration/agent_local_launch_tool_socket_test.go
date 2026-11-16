@@ -23,6 +23,14 @@ import (
 	"github.com/creack/pty"
 )
 
+// localHandshakeBudgetEnv is the pane's lifecycle handshake budget, in the
+// product's own spelling (internal/shellintegration/scripts/nocx.bash reads
+// it, and channel_exec_test.go's TCP helper sets it the same way). It is
+// deliberately below waitForHandshake's backstop: the pane then always
+// answers — with its handshake, or by failing open — before the wait's own
+// ceiling can fire.
+const localHandshakeBudgetEnv = "NOCX_LIFECYCLE_TIMEOUT_MS=3000"
+
 // startLocalBashPane boots a real bash pane through the exact function a
 // local pane is started with, with the tool socket (if any) and the fake
 // agent binary already in place — nobody exports anything by hand.
@@ -65,9 +73,18 @@ func startLocalBashPaneWithToken(t *testing.T, k *nestedKernel, agentToolSocketP
 		extraFiles = append(extraFiles, launch.AgentToolTokenFile)
 	}
 	cmd.ExtraFiles = extraFiles
+	// THE PANE'S OWN HANDSHAKE BUDGET IS STATED, NOT ASSUMED (nocx-a62cl.6.5).
+	// A pane that cannot read its accept fails open — a conventional
+	// terminal with its native prompt and no lifecycle frame ever again
+	// (ADR-0004) — and it decides that on the budget below. The test's wait
+	// has a backstop of its own, and when the two are the same ten seconds
+	// the backstop is what fails, so the failure says "timed out" about a
+	// pane whose own answer was "I gave up". Stating a budget well inside
+	// the backstop makes the pane's decision, not the clock, the thing the
+	// wait observes.
 	cmd.Env = append(
 		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null",
-			"PATH="+binDir+":"+os.Getenv("PATH")),
+			"PATH="+binDir+":"+os.Getenv("PATH"), localHandshakeBudgetEnv),
 		launch.Env...,
 	)
 

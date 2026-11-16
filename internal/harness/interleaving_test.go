@@ -59,6 +59,8 @@ func (p *interleaveProtocol) BeginTurn(TurnSpec) []Step {
 	return []Step{{Command: Command{Name: "barrier"}, Barrier: true}, {Command: Command{Name: "prompt-" + p.mode}, Prompt: true}}
 }
 func (p *interleaveProtocol) CancelSequence() []Command { return []Command{{Name: "abort"}} }
+
+func (p *interleaveProtocol) SteerCommand(string) (Command, bool) { return Command{}, false }
 func (p *interleaveProtocol) Encode(id string, c Command) ([]byte, error) {
 	if c.Name == "blocked" {
 		payload, ok := c.Payload.(string)

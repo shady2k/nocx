@@ -44,7 +44,13 @@ type Connector struct {
 }
 
 func (*Connector) Facts() harness.Facts {
-	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ContinuesConversationByID: true, ReportsAnsweringModel: true}
+	return harness.Facts{
+		ToolBoundary:              harness.NocxToolsOnly,
+		ContinuesConversationByID: true,
+		ReportsAnsweringModel:     true,
+		// pi's steer is queued and delivered before its next model call.
+		Steering: harness.Steers,
+	}
 }
 
 type environment struct{ overrides []string }

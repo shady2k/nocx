@@ -1506,6 +1506,15 @@ func PersonDeclineResult(tool string, kind DeclineKind) string {
 	return refusalResult(tool, RefusedByPerson, kind)
 }
 
+// PersonMessageResult is the sentence a call's result carries when the person
+// answered its question with a MESSAGE instead of a button (ADR-anntnxdj
+// decision 4). Their words travel verbatim: the message is what the model must
+// act on, and it is the only account of why the call did not run that a person
+// actually gave.
+func PersonMessageResult(tool, message string) string {
+	return "REFUSED: nocx did not run your call to " + tool + ": the person answered with a message instead — \"" + message + "\". Do not run this call; act on their message instead."
+}
+
 // NoAnswerResult is the sentence an ask's declared limit puts in the call's
 // slot when nobody answered. It is a refusal — no answer is never a yes — and
 // it is written here, beside every other refusal sentence, so the model reads

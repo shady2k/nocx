@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.steer.params.schema.json",
+  "title": "AgentSteerParams",
+  "description": "Params for agent.steer (ADR-anntnxdj decision 4): a person's message to the turn that is already running. The message is not a question \u2014 it carries no grants, no cwd and no attachments \u2014 because it reaches the agent that already holds the conversation's context, before its next model call.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "text"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id of the conversation's running turn.",
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "text": {
+      "description": "The person's message, as they typed it. Bounded like a question: the same person types both and neither is a log.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    }
+  }
+}

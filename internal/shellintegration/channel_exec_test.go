@@ -573,6 +573,15 @@ func (s *channelShell) hasSessionCommand(name string) bool {
 // waitForHandshake waits until the kernel has accepted hello and the first
 // prompt_ready — the handshake completed and the shell is at its first
 // ready prompt. Event-driven, so the shell's first prompt is never raced.
+//
+// The ceiling is a BACKSTOP, not the assertion, and the two must not be the
+// same number as each other: a pane that cannot read its accept gives up on
+// its OWN budget and fails open, and a ceiling that expires first turns the
+// pane's answer into "timed out" — a report that cannot be told apart from a
+// machine that was merely slow (nocx-a62cl.6.5). Every caller that starts a
+// pane with its own budget states one below this ceiling
+// (agent_local_launch_tool_socket_test.go:localHandshakeBudgetEnv;
+// startChannelShellCfgMode already passed NOCX_LIFECYCLE_TIMEOUT_MS).
 func (s *channelShell) waitForHandshake() {
 	s.t.Helper()
 	waittest.WaitForTimeoutDetail(s.t, "lifecycle handshake (hello and prompt_ready)", 10*time.Second,

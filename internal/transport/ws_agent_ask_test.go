@@ -92,6 +92,16 @@ func askHarnessParallel(t *testing.T) {
 var askHarnessParallelised sync.Map
 
 func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
+	return newAskHarnessAgent(t, script, false, extra...)
+}
+
+// newAskHarnessQueueing is newAskHarnessWithOpts with an agent that cannot take
+// a message while it answers: the queueing half of the harness contract.
+func newAskHarnessQueueing(t *testing.T, script protocol.Script, extra ...WSServerOption) *askHarness {
+	return newAskHarnessAgent(t, script, true, extra...)
+}
+
+func newAskHarnessAgent(t *testing.T, script protocol.Script, queueing bool, extra ...WSServerOption) *askHarness {
 	askHarnessParallel(t)
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
@@ -127,6 +137,9 @@ func newAskHarnessWithOpts(t *testing.T, script protocol.Script, extra ...WSServ
 	askPaneIn(t, db)
 
 	agent := newScriptedAgent(t, script)
+	if queueing {
+		agent = newQueueingAgent(t, script)
+	}
 	// The real client binds the run kernel; model turns still use the subprocess harness.
 	kernel, _, err := assistant.NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {

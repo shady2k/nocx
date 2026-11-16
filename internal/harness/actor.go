@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -87,6 +88,11 @@ type request struct {
 	cancel bool
 	reply  chan error
 	close  bool
+	// steer is a person's message for the running turn, and steering says a
+	// request carries one. Its acceptance, or the refusal, is answered on
+	// reply.
+	steer    string
+	steering bool
 }
 type actorTurn struct {
 	ctx      context.Context
@@ -96,9 +102,48 @@ type actorTurn struct {
 	done     chan struct{}
 	terminal Event
 	number   uint64
+	// dropped is what the agent had queued for steering and the cancel threw
+	// away. The actor writes it before publishing the terminal, so it is safe
+	// to read once Done is closed.
+	dropped []string
+}
+
+// DroppedSteers reports the person's messages the cancelled turn dropped out of
+// the agent's own queue. They were never used, so they become the
+// conversation's next questions (ADR-4khgzeyp decision 3).
+func (t *actorTurn) DroppedSteers() []string {
+	select {
+	case <-t.done:
+		return append([]string(nil), t.dropped...)
+	default:
+		return nil
+	}
 }
 
 func (t *actorTurn) Events() <-chan Event { return t.events }
+
+// Steer delivers a person's message into the turn while it runs
+// (ADR-anntnxdj decision 4). It returns once the agent has accepted the
+// message, and ErrTurnNotRunning when there is no turn left to land in.
+func (t *actorTurn) Steer(ctx context.Context, text string) error {
+	reply := make(chan error, 1)
+	select {
+	case <-t.done:
+		return ErrTurnNotRunning
+	case t.session.in <- request{turn: t, steer: text, steering: true, reply: reply}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.session.done:
+		return ErrTurnNotRunning
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (t *actorTurn) Cancel(ctx context.Context) error {
 	reply := make(chan error, 1)
 	select {
@@ -310,7 +355,67 @@ type pendingStep struct {
 	id               string
 	generation, turn uint64
 	step             Step
+	// steerAck answers a person's message when the agent accepts it. Nil for
+	// every other command: only a steer's response means somebody is waiting.
+	steerAck chan error
 }
+
+// queuedSteer is a person's message the turn has taken but the agent has not:
+// one command is outstanding at a time, so a message typed while the agent is
+// starting, or while its answer is being read, waits here until its turn comes.
+// deadline is the turn's own bound (Base.ShutdownTimeout) — the same ten
+// seconds a cancel gets — after which the message is handed back to be asked as
+// the next question.
+type queuedSteer struct {
+	text     string
+	ack      chan error
+	deadline time.Time
+}
+
+// resolveDroppedSteers reconciles the agent's queue answer with what this turn
+// was holding, and answers exactly one channel per message (nocx-a62cl.6.3):
+//
+//   - a message the agent ACKNOWLEDGED and the answer names was never used: its
+//     sender was already told the turn had taken it, so it is RETURNED for the
+//     run to report (the `droppedSteers` presentation), never answered twice;
+//   - a message the actor WROTE but was never acknowledged is still waiting on
+//     its own reply: the answer names it, so it never landed, and the caller is
+//     told so directly — and NOT returned, or the same words would be asked
+//     twice;
+//   - anything else the answer names (a message from another window, an
+//     extension's) is the person's all the same, and is returned.
+func resolveDroppedSteers(texts []string, acknowledged map[string]int, written **queuedSteer, pending *pendingStep) []string {
+	var returned []string
+	for _, text := range texts {
+		if acknowledged[text] > 0 {
+			acknowledged[text]--
+			returned = append(returned, text)
+			continue
+		}
+		if current := *written; current != nil && current.text == text {
+			current.ack <- ErrSteerNotTaken
+			*written = nil
+			if pending != nil {
+				pending.steerAck = nil
+			}
+			continue
+		}
+		returned = append(returned, text)
+	}
+	// A written message the answer does NOT name was DELIVERED: the agent had
+	// it before the turn stopped, and asking the same words again would run them
+	// twice. This is the one place that decides, and the cancel's answer and the
+	// turn's own end both come through here.
+	if current := *written; current != nil {
+		current.ack <- nil
+		*written = nil
+		if pending != nil {
+			pending.steerAck = nil
+		}
+	}
+	return returned
+}
+
 type (
 	settlement struct {
 		generation, turn uint64
@@ -376,6 +481,26 @@ func (s *session) loop() {
 	var cancelPrepared bool
 	var pendingTools map[string]struct{}
 	var pending *pendingStep
+	// ONE DISPOSITION PER MESSAGE (nocx-a62cl.6.3). A message the actor has not
+	// written is its own to hand back at any point. A message it HAS written
+	// belongs to the agent until the agent answers it: acknowledged, it is the
+	// agent's (delivered, or named later by the cancel's queue answer); and a
+	// written message the queue answer does not name was delivered. So the
+	// actor keeps three things: the messages waiting to be written, the written
+	// one, and the messages the agent has acknowledged — the last so a queue
+	// answer can say which of them the cancel threw away.
+	var steers []queuedSteer
+	var writtenSteer *queuedSteer
+	var acknowledged map[string]int
+	// queueRecovered records that the agent answered the command that clears
+	// its queue: from then on a missing message means delivered, not unknown.
+	var queueRecovered bool
+	// recovering holds a turn's terminal back while the agent is asked what
+	// became of the messages it was given: a turn that ends with a message whose
+	// delivery is unknown must not publish "asked next" over an agent that may
+	// have used it. recoverDeadline bounds that wait by the turn's own bound.
+	var recovering bool
+	var recoverDeadline time.Time
 	var frame []byte
 	var frameWritten int
 	var frameStep Step
@@ -485,6 +610,44 @@ func (s *session) loop() {
 		if current == nil || terminal != nil {
 			return
 		}
+		// The turn is ending: settle every message it holds, ONCE each.
+		//
+		// A message the actor never WROTE was never the agent's to lose, so it
+		// is handed back now. A message it WROTE is settled by the agent's own
+		// queue answer wherever the agent can still give one — at a cancel that
+		// is the cancel sequence's clear_queue, and at a turn that ends on its
+		// own the actor ASKS for it before publishing anything. Only when no
+		// answer is possible (the process is gone, the bound passed) is the
+		// missing acknowledgement read as "not taken".
+		for _, steer := range steers {
+			steer.ack <- ErrSteerNotTaken
+		}
+		steers = nil
+		if writtenSteer != nil || len(acknowledged) > 0 {
+			_, canRecover := codec.(SteerRecovery)
+			switch {
+			case recovering:
+				// Already asking; the answer (or the bound) settles it.
+			case !cancelling && canRecover && process != nil && !retiring && !queueRecovered:
+				// THE TURN ENDED WITH A MESSAGE WHOSE DELIVERY IS UNKNOWN. Ask
+				// the agent what it still holds, and do not publish the terminal
+				// until it answers or the turn's bound passes: a message the
+				// agent used must not be asked again, and one it kept must not be
+				// left in its queue for the next turn.
+				recovering = true
+				recoverDeadline = time.Now().Add(bound)
+				observe("steer-recovering", nil)
+			default:
+				if writtenSteer != nil {
+					writtenSteer.ack <- ErrSteerNotTaken
+					writtenSteer = nil
+					if pending != nil && pending.steerAck != nil {
+						pending = nil
+					}
+				}
+				acknowledged = nil
+			}
+		}
 		if ev.Outcome == nil {
 			snapshot := outcome
 			ev.Outcome = &snapshot
@@ -495,6 +658,10 @@ func (s *session) loop() {
 		}
 		terminal = &ev
 		plan = nil
+		// The recovery asks the agent's own queue, and THAT answer is the
+		// authority for a message whose acceptance never came: the message's
+		// caller is still held by writtenSteer, so the outstanding match for its
+		// command is dropped here rather than waited for.
 		pending = nil
 		// A selected terminal prevents new work. A partially written work frame
 		// cannot be reused by any later command.
@@ -546,6 +713,9 @@ func (s *session) loop() {
 		}
 		current = t
 		pendingTools = make(map[string]struct{})
+		acknowledged = make(map[string]int)
+		queueRecovered = false
+		recovering = false
 		cancelling = false
 		promptWritten = false
 		barrierPassed = false
@@ -572,6 +742,32 @@ func (s *session) loop() {
 			fail("agent turn plan has no admission barrier")
 		}
 	}
+	// admitSteer takes a person's message for the running turn. It is QUEUED
+	// and written after the prompt, one command at a time; the caller is
+	// answered when the agent accepts it, and handed the message back if the
+	// turn ends first (ADR-4khgzeyp decision 3). The command cannot be built
+	// yet while the agent is still starting — its codec belongs to the process
+	// incarnation — so the text waits and is encoded when its turn comes.
+	admitSteer := func(r request) error {
+		if r.turn != current || terminal != nil || cancelling || retiring || !exitBy.IsZero() {
+			return ErrTurnNotRunning
+		}
+		if codec == nil && !starting {
+			return ErrTurnNotRunning
+		}
+		if codec != nil {
+			// The connector states whether its agent steers at all; a message
+			// for one that does not is refused here, before anything is
+			// queued (Facts().Steering is how the core learns the same fact
+			// without asking).
+			if _, ok := codec.SteerCommand(r.steer); !ok {
+				return ErrNotSteerable
+			}
+		}
+		steers = append(steers, queuedSteer{text: r.steer, ack: r.reply, deadline: time.Now().Add(bound)})
+		observe("steer-queued", []byte(r.steer))
+		return nil
+	}
 	for {
 		// Endpoint settlement confirms response delivery, not that the agent has
 		// consumed it. Wait for its tool-finished events before abandoning waiters.
@@ -580,7 +776,7 @@ func (s *session) loop() {
 			cancelCommands = codec.CancelSequence()
 		}
 		// Publication is the only point at which Wait and Events become terminal.
-		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 {
+		if current != nil && terminal != nil && settlementDone && !retiring && len(delivery) == 0 && !recovering {
 			observe("terminal", nil)
 			publish(current, *terminal)
 			current = nil
@@ -589,6 +785,9 @@ func (s *session) loop() {
 			plan = nil
 			pending = nil
 			frame = nil
+			recovering = false
+			acknowledged = nil
+			queueRecovered = false
 			idleAt = time.Now().Add(idle)
 		}
 		if closing && current == nil && (process != nil || starting) && !retiring {
@@ -650,12 +849,30 @@ func (s *session) loop() {
 				fail("agent response envelope also carried turn events")
 				return
 			}
+			// A cancelling agent answers the command that clears its queue with
+			// the messages it removed: those are exactly the ones this turn
+			// never used, and they are handed back to the caller to be asked
+			// next (ADR-4khgzeyp decision 3). The connector decodes them,
+			// because its own queue is the authority on what was left.
+			if response := decoded.Response; response != nil && cancelling {
+				if recovery, ok := codec.(SteerRecovery); ok {
+					if texts, ok := recovery.DroppedSteers(response.Payload); ok {
+						queueRecovered = true
+						recovered := resolveDroppedSteers(texts, acknowledged, &writtenSteer, pending)
+						if len(recovered) > 0 {
+							current.dropped = append(current.dropped, recovered...)
+							observe("steer-dropped", []byte(strings.Join(recovered, "\n")))
+						}
+					}
+				}
+			}
 			if response := decoded.Response; response != nil {
 				if pending == nil || pending.id != response.ID || pending.generation != generation || current == nil || pending.turn != current.number {
 					return
 				}
 				if pending != nil && pending.id == response.ID && pending.generation == generation && current != nil && pending.turn == current.number {
 					step := pending.step
+					steerAck := pending.steerAck
 					pending = nil
 					if response.Error != "" {
 						fail(response.Error)
@@ -680,6 +897,35 @@ func (s *session) loop() {
 								}
 							}
 							pinnedModel = model
+						}
+					}
+					if steerAck != nil {
+						// The agent has taken the person's message: this is the
+						// acceptance their call waits for, and the point after
+						// which the agent owns it. It is remembered so a later
+						// queue answer can say whether the cancel threw it away.
+						steerAck <- nil
+						if writtenSteer != nil {
+							acknowledged[writtenSteer.text]++
+						}
+						writtenSteer = nil
+					}
+					// THE RECOVERY'S ANSWER, and the one place a written message's
+					// fate is decided when the turn ends without one: named by the
+					// agent's queue → never used (handed back once); missing →
+					// delivered. The same function serves the cancel.
+					if recovering {
+						if recovery, ok := codec.(SteerRecovery); ok {
+							if texts, dropped := recovery.DroppedSteers(response.Payload); dropped {
+								queueRecovered = true
+								returned := resolveDroppedSteers(texts, acknowledged, &writtenSteer, nil)
+								if len(returned) > 0 {
+									current.dropped = append(current.dropped, returned...)
+									observe("steer-dropped", []byte(strings.Join(returned, "\n")))
+								}
+								recovering = false
+								observe("steer-recovered", nil)
+							}
 						}
 					}
 					if step.Barrier {
@@ -734,7 +980,7 @@ func (s *session) loop() {
 					retire(false)
 				}
 			}
-			if r.turn != nil && !r.cancel {
+			if r.turn != nil && !r.cancel && !r.steering {
 				if closing {
 					publish(r.turn, failure("cancelled"))
 				} else {
@@ -744,6 +990,11 @@ func (s *session) loop() {
 					if s.base.Observe != nil {
 						s.base.Observe(Transition{Kind: "turn-queued", Generation: generation, Turn: r.turn.number})
 					}
+				}
+			}
+			if r.steering {
+				if err := admitSteer(r); err != nil {
+					r.reply <- err
 				}
 			}
 			if r.cancel {
@@ -874,6 +1125,52 @@ func (s *session) loop() {
 			settle()
 			exitBy = time.Now().Add(bound)
 		case now := <-tick.C:
+			// A message the actor never WROTE within the turn's bound is handed
+			// back to be asked next, and the turn goes on untouched
+			// (nocx-a62cl.6.3). A message it DID write is not on a timer: the
+			// agent may hold it, and asking the same words again would run them
+			// twice. Its fate is settled by the agent (acknowledged) or by the
+			// cancel's queue answer.
+			for len(steers) > 0 && !now.Before(steers[0].deadline) {
+				steers[0].ack <- ErrSteerNotTaken
+				steers = steers[1:]
+			}
+			// RECOVERY: a turn that ended with a message the agent has not
+			// settled asks the agent what it still holds, once, and the answer
+			// decides. The wait is the turn's own bound; an agent that cannot or
+			// will not answer hands the message back (it is the person's, and a
+			// duplicate is the lesser harm — ADR-4khgzeyp decision 3).
+			if recovering {
+				if !now.Before(recoverDeadline) {
+					if writtenSteer != nil {
+						writtenSteer.ack <- ErrSteerNotTaken
+						writtenSteer = nil
+						if pending != nil && pending.steerAck != nil {
+							pending = nil
+						}
+					}
+					acknowledged = nil
+					recovering = false
+					observe("steer-recovery-expired", nil)
+				} else if pending == nil && len(frame) == 0 && codec != nil && process != nil && !retiring && !queueRecovered {
+					if recovery, ok := codec.(SteerRecovery); ok && current != nil {
+						serial++
+						id := strconv.FormatUint(generation, 10) + "/" + strconv.FormatUint(current.number, 10) + "/" + strconv.FormatUint(serial, 10)
+						command := recovery.QueueClear()
+						encoded, err := codec.Encode(id, command)
+						if err != nil {
+							fail(fmt.Sprint(err))
+						} else {
+							ask := Step{Command: command}
+							frame = encoded
+							frameWritten = 0
+							frameStep = ask
+							pending = &pendingStep{id: id, generation: generation, turn: current.number, step: ask}
+							observe("steer-asked", nil)
+						}
+					}
+				}
+			}
 			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
 				choose(failure("cancelled"))
 				retire(false)
@@ -903,6 +1200,9 @@ func (s *session) loop() {
 					}
 					current = t
 					pendingTools = make(map[string]struct{})
+					acknowledged = make(map[string]int)
+					queueRecovered = false
+					recovering = false
 					cancelling = false
 					promptWritten = false
 					settling = false
@@ -957,11 +1257,14 @@ func (s *session) loop() {
 			}
 			// A dead agent's turn is already ending; its stdin is not a place to
 			// learn that, and a broken pipe would replace the exit as its cause.
-			if process == nil || current == nil || terminal != nil || !exitBy.IsZero() {
+			// A turn in RECOVERY is past its terminal and still writing: the one
+			// command it asks the agent is the queue answer above.
+			if process == nil || current == nil || (terminal != nil && !recovering) || !exitBy.IsZero() {
 				continue
 			}
 			if len(frame) == 0 {
 				var step Step
+				var steering *queuedSteer
 				if cancelling {
 					if len(cancelCommands) == 0 {
 						continue
@@ -969,10 +1272,28 @@ func (s *session) loop() {
 					step = Step{Command: cancelCommands[0]}
 					cancelCommands = cancelCommands[1:]
 				} else {
-					if pending != nil || len(plan) == 0 {
+					if pending != nil {
 						continue
 					}
-					step = plan[0]
+					if len(plan) > 0 {
+						step = plan[0]
+					} else {
+						// The turn's own plan is done — the prompt was answered
+						// — so a person's message is what comes next, in the
+						// order the person sent them.
+						if len(steers) == 0 || !promptWritten {
+							continue
+						}
+						command, ok := codec.SteerCommand(steers[0].text)
+						if !ok {
+							steers[0].ack <- ErrNotSteerable
+							steers = steers[1:]
+							continue
+						}
+						step = Step{Command: command}
+						steering = &steers[0]
+						steers = steers[1:]
+					}
 				}
 				serial++
 				id := strconv.FormatUint(generation, 10) + "/" + strconv.FormatUint(current.number, 10) + "/" + strconv.FormatUint(serial, 10)
@@ -986,6 +1307,10 @@ func (s *session) loop() {
 				frameStep = step
 				if !cancelling {
 					pending = &pendingStep{id: id, generation: generation, turn: current.number, step: step}
+					if steering != nil {
+						pending.steerAck = steering.ack
+						writtenSteer = steering
+					}
 				}
 			}
 			if len(frame) > 0 {

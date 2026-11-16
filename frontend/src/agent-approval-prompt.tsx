@@ -824,6 +824,13 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       onClose={() => props.onDecide(false, 'once')}
       ariaLabel={titleFor(ask().reason)}
       placement="top-sheet"
+      // THE PERSON MAY ANSWER IN WORDS INSTEAD (nocx-a62cl.6.2, ADR-anntnxdj
+      // decision 4): typing a message into the composer declines this call
+      // with their text as the reason and reaches the agent as a steer. A
+      // modal scrim would make that impossible — it eats the click on the
+      // composer and the focus guard takes the keyboard back — so this
+      // question owns its panel and nothing else.
+      modal={false}
       title={titleFor(ask().reason)}
       density="compact"
       actionsLayout={ask().reason === 'egress' ? 'row' : 'stacked'}

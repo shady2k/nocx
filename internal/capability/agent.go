@@ -51,6 +51,14 @@ type AgentService interface {
 	// every agent.runDelta notification. Passing it makes a retried delta a
 	// no-op rather than a duplicated paragraph in the answer (nocx-2f0f).
 	AppendRunDelta(ctx context.Context, artifactID string, seq int, body []byte) error
+	// SubmitSteer writes one person's message into the turn's order: a `text`
+	// child with `source` set to the person and its words as that child's body
+	// (nocx-a62cl.6.4). The words are complete, so the body is born sealed.
+	SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (content.ProseBlock, error)
+	// SteerTarget answers what a message naming runID can still reach: the
+	// session its turn belongs to, and whether the run has closed
+	// (nocx-a62cl.6.1).
+	SteerTarget(ctx context.Context, runID int64) (content.SteerTarget, error)
 	// FrameText returns the referenced frame's durable text (its artifact
 	// body) — the context assembly for the ask (question + referenced
 	// frames, design §4.2).
@@ -134,6 +142,20 @@ func (s *agentService) SealProse(ctx context.Context, entryID string) error {
 		return err
 	}
 	return s.ledger.SealProse(ctx, entryID)
+}
+
+func (s *agentService) SteerTarget(ctx context.Context, runID int64) (content.SteerTarget, error) {
+	if err := s.guard.check(); err != nil {
+		return content.SteerTarget{}, err
+	}
+	return s.ledger.SteerTarget(ctx, runID)
+}
+
+func (s *agentService) SubmitSteer(ctx context.Context, turnID string, runID int64, text string) (content.ProseBlock, error) {
+	if err := s.guard.check(); err != nil {
+		return content.ProseBlock{}, err
+	}
+	return s.ledger.SubmitSteer(ctx, turnID, runID, text)
 }
 
 func (s *agentService) AppendRunDelta(ctx context.Context, artifactID string, seq int, body []byte) error {

@@ -160,7 +160,7 @@ import {
   type BlockRowsMetadata,
   type BlockRowsRead,
 } from './restore-client'
-import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { restoredBlock, restoredPersonMessage, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
   loadedRowRanges,
@@ -3818,6 +3818,8 @@ export class TerminalContent extends BasePaneContent {
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
         cancel: (runId) => agentClient.cancel(runId),
+        steer: (runId, text) => agentClient.steer(runId, text),
+        consumeGrants: () => this.clearGrants(),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
         // The ask's payload is the whole-block grants plus the renderer-owned
@@ -7408,6 +7410,12 @@ export class TerminalContent extends BasePaneContent {
             // body — or, when retention took it, as an empty block: the
             // run's notice is the turn's, said once (proseEvicted above).
             if (cause.kind === 'text') {
+              // THE PERSON'S OWN WORDS: a text child whose source is the person
+              // is the message they sent into the turn, drawn as the same kit
+              // line the live block drew (nocx-a62cl.6.4).
+              if (cause.source === 'user') {
+                return restoredPersonMessage(cause, childBody.get(cause.entryId) ?? null).root
+              }
               return restoredBlock(
                 {
                   ...factsOf(b),
@@ -10978,9 +10986,11 @@ export class TerminalContent extends BasePaneContent {
       // The target surfaces its own refusal (onRefusal → the
       // toast); the rethrow is for programmatic callers, so the
       // fire-and-forget path swallows it.
+      // The target takes the marks its own submission carried (a question)
+      // and leaves them when it carried none (a message into the running
+      // turn), so this path never clears a choice the submit did not use.
       void active
         .submit(doc, { targetId: active.id })
-        .then(() => this.clearGrants())
         .catch(() => {})
         .finally(() => onDelivered?.())
       return

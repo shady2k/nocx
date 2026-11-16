@@ -21,10 +21,14 @@ import (
 type Scenario string
 
 const (
-	ModelPin     Scenario = "model-pin"
-	History      Scenario = "history"
-	Ordered      Scenario = "ordered"
-	Tool         Scenario = "tool"
+	ModelPin Scenario = "model-pin"
+	History  Scenario = "history"
+	Ordered  Scenario = "ordered"
+	Tool     Scenario = "tool"
+	// Steering asks what the connector does with a person's message sent while
+	// a turn runs: the fact it states must be one of the two, and the answer it
+	// gives must be that fact (ADR-anntnxdj decision 4).
+	Steering     Scenario = "steering"
 	CancelStream Scenario = "cancel-stream"
 	CancelTool   Scenario = "cancel-tool"
 	Failure      Scenario = "failure"
@@ -32,6 +36,33 @@ const (
 	ParentStream Scenario = "parent-stream"
 	ParentTool   Scenario = "parent-tool"
 )
+
+// assertSteeringStatement holds the connector to the fact it states: a
+// connector that queues the message cannot take one, and one that steers does
+// not refuse it as impossible. Either answer is honest — what is not is a
+// connector whose statement and behaviour disagree, because the block draws the
+// message from the statement (ADR-anntnxdj decision 4).
+func assertSteeringStatement(t *testing.T, f Fixture, turn harness.Turn) {
+	t.Helper()
+	facts := f.Harness.Facts()
+	steerer, ok := turn.(harness.Steerer)
+	if !ok {
+		t.Fatal("a connector's turn has no Steer: the contract's optional capability is how a message reaches it")
+	}
+	err := steerer.Steer(t.Context(), "a message sent while the turn runs")
+	switch facts.Steering {
+	case harness.QueuesNextQuestion:
+		if !errors.Is(err, harness.ErrNotSteerable) {
+			t.Fatalf("a connector that queues the message answered %v, want ErrNotSteerable", err)
+		}
+	case harness.Steers:
+		if errors.Is(err, harness.ErrNotSteerable) {
+			t.Fatal("a connector that states it steers refused the message as impossible")
+		}
+	default:
+		t.Fatalf("connector states no steering fact: %q", facts.Steering)
+	}
+}
 
 // Driver translates semantic scenarios into an agent's native test interface.
 // Observations are returned to the suite; contract assertions live here.
@@ -105,7 +136,7 @@ func Run(t *testing.T, driver Driver) {
 	agent := build(t, bin, "fakeagent", fakeAgentPackage)
 	server := build(t, bin, "mcpserver", mcpServerPackage)
 	caller := t.Name()
-	for _, scenario := range []Scenario{Ordered, Tool, CancelStream, CancelTool, Failure} {
+	for _, scenario := range []Scenario{Ordered, Tool, Steering, CancelStream, CancelTool, Failure} {
 		t.Run(string(scenario), func(t *testing.T) {
 			target, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
@@ -128,7 +159,7 @@ func Run(t *testing.T, driver Driver) {
 			}
 			turn := sharedStart(t, f, setup)
 			var events []harness.Event
-			if scenario == Ordered || scenario == CancelStream {
+			if scenario == Ordered || scenario == CancelStream || scenario == Steering {
 				first := nextEvent(t, turn.Events(), 10*time.Second)
 				if first.Kind != harness.EventAnswerDelta || first.Text != "Hel" {
 					t.Fatalf("first streamed delta = %+v", first)
@@ -136,6 +167,10 @@ func Run(t *testing.T, driver Driver) {
 				events = append(events, first)
 			}
 			if scenario == Ordered {
+				f.Release()
+			}
+			if scenario == Steering {
+				assertSteeringStatement(t, f, turn)
 				f.Release()
 			}
 			if scenario == CancelStream || scenario == CancelTool {

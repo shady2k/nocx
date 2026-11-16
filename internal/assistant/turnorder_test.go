@@ -12,16 +12,31 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // holdingQuestioner is a person who takes the first question and holds it until
 // the test answers: the state two concurrent calls are tested against.
+// waitForQueued waits until the turn has accepted this many calls. It is the
+// observable a person's answer is about when it declines one.
+func waitForQueued(t *testing.T, order *TurnOrder, n uint64) {
+	t.Helper()
+	waittest.WaitFor(t, fmt.Sprintf("the turn to hold %d call(s)", n), func() bool {
+		order.mu.Lock()
+		defer order.mu.Unlock()
+		return order.arrivals >= n
+	})
+}
+
 type holdingQuestioner struct {
 	asked   chan *ApprovalRequest
 	answers chan Answer
 
 	mu   sync.Mutex
 	asks int
+	// cutoff is where the answer settles, as the real approver stamps it.
+	cutoff func() uint64
 }
 
 func newHoldingQuestioner() *holdingQuestioner {
@@ -41,7 +56,12 @@ func (q *holdingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answer 
 		// the outcome.
 		return Unanswered{Err: errors.New("a second question was asked: the turn's order is gone")}
 	}
-	return <-q.answers
+	answer := <-q.answers
+	if declined, ok := answer.(Declined); ok && declined.Through == 0 && q.cutoff != nil {
+		declined.Through = q.cutoff()
+		answer = declined
+	}
+	return answer
 }
 
 func (q *holdingQuestioner) AskEgress(_ context.Context, req *EgressRequest) Answer {
@@ -64,6 +84,9 @@ func TestTwoCallsOfOneTurnRunOneAtATimeInOrder(t *testing.T) {
 	q := newHoldingQuestioner()
 	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it, as the transport's wait
+	// stamps it: the calls queued by then are the ones it covers.
+	q.cutoff = k.order.ArrivalCutoff
 
 	type outcome struct {
 		out string
@@ -85,6 +108,12 @@ func TestTwoCallsOfOneTurnRunOneAtATimeInOrder(t *testing.T) {
 		out, err := k.Invoke(context.Background(), "files.read", "call-2", argsB)
 		secondDone <- outcome{out, err}
 	}()
+	// THE SECOND CALL IS QUEUED, and that is a fact this test must establish
+	// before it answers: a decline covers the calls that are already waiting
+	// for their turn, and one that arrives afterwards is a new question
+	// (ADR-anntnxdj decision 4). Answering first would leave the test deciding
+	// at a random point which of the two the person's no is about.
+	waitForQueued(t, k.order, 2)
 
 	// The person says no to the first. The second call is queued behind it,
 	// so it is refused with that same reason instead of being asked.
@@ -127,6 +156,9 @@ func TestACallQueuedBehindOneIsStoppedByTheTurnsCancellation(t *testing.T) {
 	q := newHoldingQuestioner()
 	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
+	// The answer settles where the person gave it, as the transport's wait
+	// stamps it: the calls queued by then are the ones it covers.
+	q.cutoff = k.order.ArrivalCutoff
 
 	go func() {
 		_, _ = k.Invoke(context.Background(), "files.read", "call-1", argsA)

@@ -28,6 +28,9 @@ type Script struct {
 	ChildPIDFile string `json:"childPidFile,omitempty"`
 	// ResultFile, when set, receives the text one StepTool's call returned.
 	ResultFile string `json:"resultFile,omitempty"`
+	// SteerFile receives the text of every steer the agent is given, one per
+	// line, so a test can see what reached the agent.
+	SteerFile string `json:"steerFile,omitempty"`
 	// IgnoreStdinEOF makes the agent deaf to its stdin closing. It is how a
 	// check proves Cancel stops the group rather than merely closing the
 	// polite pipe: this agent leaves only on a signal.
@@ -140,4 +143,10 @@ type Command struct {
 	Name    string   `json:"name"`
 	Prompt  *Prompt  `json:"prompt,omitempty"`
 	Session *Session `json:"session,omitempty"`
+	Steer   *Steer   `json:"steer,omitempty"`
+}
+
+// Steer is a person's message delivered into the turn already running.
+type Steer struct {
+	Text string `json:"text,omitempty"`
 }

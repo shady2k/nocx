@@ -224,6 +224,43 @@ func (*codec) CancelSequence() []harness.Command {
 	return []harness.Command{{Name: "clear_queue"}, {Name: "abort"}}
 }
 
+// QueueClear is pi's own: it removes the steering and follow-up messages still
+// queued and answers with their text, so a message the turn never used comes
+// back here instead of waiting for the next turn.
+func (*codec) QueueClear() harness.Command { return harness.Command{Name: "clear_queue"} }
+
+// DroppedSteers reads what pi's clear_queue removed: its answer lists the
+// steering AND follow-up texts it dropped, and only the steering ones are a
+// person's message to this turn. The queue's own answer is the authority on
+// what was never delivered — no timing is inferred from it.
+func (*codec) DroppedSteers(payload any) ([]string, bool) {
+	data, ok := payload.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	raw, present := data["steering"]
+	if !present {
+		return nil, false
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	texts := make([]string, 0, len(list))
+	for _, entry := range list {
+		if text, ok := entry.(string); ok {
+			texts = append(texts, text)
+		}
+	}
+	return texts, true
+}
+
+// SteerCommand is pi's own steer: it answers "queued" and is delivered before
+// the next model call, after the running tool and the streamed text.
+func (*codec) SteerCommand(text string) (harness.Command, bool) {
+	return harness.Command{Name: "steer", Payload: map[string]any{"message": text}}, true
+}
+
 func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
 	if command.Name == "prompt" {
 		if err := os.WriteFile(c.promptPath, []byte(c.prompt), 0o600); err != nil {

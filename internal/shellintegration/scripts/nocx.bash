@@ -270,19 +270,31 @@ __nocx_lc_probe_readable() {
 
 # Wait for the transport to become readable, bounded by the handshake
 # timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
-# binary length prefix must be read by dd|od instead. The sleep loop is the
-# bound, and a closed channel fails on the first probe instead of waiting it
-# out (fail-open, decision 3).
+# binary length prefix must be read by dd|od instead. A closed channel fails on
+# the first probe instead of waiting it out (fail-open, decision 3).
+#
+# THE BOUND IS ELAPSED TIME, AND THE POLL IS A SLICE, because the answer here
+# is what the pane's whole startup waits on. It used to be ten rounds of
+# `sleep 1`, which is a bound in FORKS rather than seconds: `sleep` is not a
+# builtin, so a loaded machine makes a round cost more than the second it
+# asks for (the same defect __nocx_prompt_command's snapshot grace was fixed
+# for), a round whose `sleep` cannot fork burns the whole budget in
+# microseconds, and the pane cannot notice its accept before the next
+# round — measured here: an accept written 1.5 s after hello was picked up
+# at 2.03 s, so half a second of the startup was spent asleep with the frame
+# already waiting. The slice is 50 ms where a live kernel answers (the first
+# second of the wait) and 250 ms after that, so a late frame is noticed within
+# a quarter second and a dead channel still costs a few dozen forks and not two
+# hundred (nocx-a62cl.6.5).
 __nocx_lc_wait_readable() {
     # $1 = timeout in seconds (defaults to the handshake timeout). The
     # refresh poll passes a short bound: the prompt is the user's critical
     # path, and a partial or stalled frame must never hold it.
-    #
-    # The loop probes at the TOP of every round, so it runs once more AFTER
-    # the last sleep: a frame that arrived during the sleep is seen, and a
-    # 1-second bound is one sleep plus the probes around it — not a probe,
-    # a sleep, and a premature give-up.
-    local __t="${1:-$__nocx_lc_timeout_s}" __round=0 __probe_rc
+    local __t="${1:-$__nocx_lc_timeout_s}" __deadline __fine __probe_rc __slice=0.05
+    # $SECONDS is bash's own integer counter — no fork to read the clock, and
+    # present in every bash this script parses on (3.2 included).
+    __deadline=$(( SECONDS + __t ))
+    __fine=$(( SECONDS + 1 ))
     while :; do
         __probe_rc=0
         __nocx_lc_probe_readable || __probe_rc=$?
@@ -292,10 +304,10 @@ __nocx_lc_wait_readable() {
         # A probe interrupted by the interrupt reports 130 too: the window's
         # second witness, recorded before any sleep is even started.
         __nocx_agent_note_int "$__probe_rc"
-        (( __round >= __t )) && return 1 # the bound expired: fail open
-        sleep 1
+        (( SECONDS < __deadline )) || return 1 # the bound expired: fail open
+        (( SECONDS < __fine )) || __slice=0.25
+        sleep "$__slice"
         __nocx_agent_note_int $?
-        __round=$(( __round + 1 ))
     done
 }
 
@@ -306,7 +318,15 @@ __nocx_lc_wait_readable() {
 __nocx_lc_read_frame() {
     local __hdr __len LC_ALL=C __t="${1:-}"
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
-    __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1 | tr -d ' \n')"
+    # `dd bs=1 count=4` and not `od -N4`: od reads its input through stdio,
+    # so on a socket it takes a whole buffer — the frame's body with its
+    # header — and -N only limits what it prints. The body is then gone and
+    # the read below finds nothing (macOS ci-mac, a nested bash child under
+    # fish: hello sent, prompt_ready never). dd with a one-byte block reads
+    # exactly the four bytes and leaves the body on the channel
+    # (nocx-a62cl.6.5).
+    __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1)"
+    __hdr="${__hdr//[[:space:]]/}"
     [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hdr ))
     (( __len > 0 && __len <= __nocx_lc_max_frame )) || return 1

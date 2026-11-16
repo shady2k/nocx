@@ -14,6 +14,20 @@ export interface PromptProps {
   title?: string
   ariaLabel: string
   placement?: 'floating' | 'top-sheet'
+  /**
+   * Whether this question OWNS the surface under it. Default true: a scrim, a
+   * click that stops at the panel, the keyboard, and Escape — which is what a
+   * vault unlock or a password has always been.
+   *
+   * `false` is the question a person may also answer IN WORDS: the agent
+   * approval's, whose composer is the other half of its answer (ADR-anntnxdj
+   * decision 4 — otherwise they write "no, do it differently" and the agent
+   * sits waiting on a button, which is the defect the scrim and the focus
+   * guard made unavoidable). Nothing is dimmed, a press outside reaches what
+   * is under it, the keyboard stays with whoever the person gives it to, and
+   * Escape belongs to that surface — the panel answers its own Escape.
+   */
+  modal?: boolean
   /** Compact rhythm for dense decision panels; the default keeps modal spacing. */
   density?: 'default' | 'compact'
   onClose: () => void
@@ -134,12 +148,17 @@ export function Prompt(props: PromptProps) {
         },
         undefined,
         element,
+        // A prompt that does not own the surface leaves Escape to whatever the
+        // person is in; its own panel answers Escape from inside (onKeyDown).
+        { escape: props.modal !== false },
       )
-      // Prompt is the keyboard owner while open. Pane activation can finish
-      // the same turn that raised this prompt and focus the composer after
-      // the initial focus below; reclaim that attempt before it reaches the
-      // editor's focus listener.
-      if (element) {
+      // Prompt is the keyboard owner while open, unless it is not modal at all
+      // (see PromptProps.modal): then it must not take the keyboard from the
+      // composer it is asking about. Pane activation can finish the same turn
+      // that raised this prompt and focus the composer after the initial focus
+      // below; reclaim that attempt before it reaches the editor's focus
+      // listener.
+      if (element && props.modal !== false) {
         const keepFocus = (e: FocusEvent) => {
           if (topOverlay() !== entry || element?.contains(e.target as Node)) return
           e.stopPropagation()
@@ -219,6 +238,14 @@ export function Prompt(props: PromptProps) {
    * mid-composition — an IME uses Enter to accept a candidate.
    */
   const onKeyDown = (e: KeyboardEvent) => {
+    // A prompt that does not own the surface takes Escape only from INSIDE
+    // itself: out in the composer it belongs to the composer (the overlay
+    // stack's document handler skips this prompt entirely).
+    if (e.key === 'Escape' && props.modal === false) {
+      e.preventDefault()
+      props.onClose()
+      return
+    }
     if (!props.onSubmit) return
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
     const target = e.target as HTMLElement | null
@@ -233,6 +260,7 @@ export function Prompt(props: PromptProps) {
       ref={element}
       class="ui-prompt-overlay"
       data-placement={props.placement ?? 'floating'}
+      data-modal={props.modal === false ? 'false' : undefined}
       /*
        * Which prompt this is, on the element that swallows the click.
        *
@@ -258,6 +286,11 @@ export function Prompt(props: PromptProps) {
        */
       data-prompt={props.ariaLabel || undefined}
       onMouseDown={(event) => {
+        // A press round the panel is a refusal only while this prompt OWNS the
+        // surface: otherwise the person is reaching past it for the composer,
+        // and answering a question they did not mean to touch would be the
+        // scrim deciding something nobody said.
+        if (props.modal === false) return
         if (event.target === event.currentTarget) props.onClose()
       }}
     >
@@ -266,7 +299,7 @@ export function Prompt(props: PromptProps) {
         data-placement={props.placement ?? 'floating'}
         data-density={props.density === 'compact' ? 'compact' : undefined}
         role="dialog"
-        aria-modal="true"
+        aria-modal={props.modal === false ? 'false' : 'true'}
         aria-label={props.ariaLabel}
         onKeyDown={onKeyDown}
         onMouseDown={(event) => event.stopPropagation()}

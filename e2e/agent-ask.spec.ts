@@ -17,7 +17,7 @@ import {
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
-import { configurePiHome } from './pi-home'
+import { configurePiHome, readScreenTool } from './pi-home'
 import { FakeOpenAI } from './fake-openai'
 import { attachedItemID, terminalContext, toolResults } from './ask-gesture'
 
@@ -410,7 +410,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(answerBody).not.toContainText('command not found')
   })
 
-  test('a second ask waits for the first to end and both answers land in order', async ({
+  test('a message typed while the first answer streams steers it, in the same block', async ({
     page,
   }) => {
     await openApp(page)
@@ -426,20 +426,17 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const { block: blockA } = await runCommand(page, cmdA, markerA)
     const { block: blockB } = await runCommand(page, cmdB, markerB)
 
-    // Request 1 stays open until released. Request 2 must wait behind it.
-    const answerA = `Answer one: ${markerA}`
     const answerB = `Answer two: ${markerB}`
+    const answerC = `Answer three: ${markerB}`
     // The fake's request ids accumulate across the file's tests; every index
     // and release below is relative to this test's first request.
     const base = fake.requests().length
-    let secondStartedAfterFirstFinished = false
-    fake.setScript({ chunks: ['Answer one: ', markerA], holdAfter: 1 })
-    fake.setScript({
-      chunks: () => {
-        secondStartedAfterFirstFinished = fake.requests()[base]?.state === 'done'
-        return ['Answer two: ', markerB]
-      },
-    })
+    // The first turn is held mid-answer and goes on to propose the screen
+    // read, so the model is called a SECOND time once it is released — which is
+    // the call a person's message must reach (nocx-a62cl.6.1).
+    fake.setScript({ chunks: ['Answer one: ', markerA], holdAfter: 1, toolCalls: readScreenTool })
+    fake.setScript({ chunks: [answerB] })
+    fake.setScript({ chunks: [answerC] })
 
     // Ask about A; the stream opens and is held.
     // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
@@ -458,71 +455,68 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       timeout: 15_000,
     })
 
-    // WHILE the first answer is still streaming, point at B: A's mark was
-    // CONSUMED by the question that carried it, so exactly one block is
-    // marked now and it is B. (Under the shipped gesture a question can
-    // carry several blocks at once — that is the point of a count — but each
-    // question takes the ones it rode with it.)
+    // WHILE the first answer is still streaming, the person types again.
+    // (Under the shipped gesture a question can carry several blocks at
+    // once — that is the point of a count — but each question takes the ones
+    // it rode with it, which is why B is pointed at after A's mark was
+    // consumed.)
     await pointAt(blockB)
     await expectGranted(page, [cmdB])
     const q2 = 'Question two about the second block?'
     // The editor is still up: a question is not a handoff, so the agent
     // path never hides it and the next one can be typed straight away
-    // (nocx-wmy4). This used to be the file's known defect — the first
-    // submit hid the editor and nothing on the agent path re-showed it,
-    // making the acceptance's own scenario unreachable through the shipped
-    // surface. It is asserted here rather than assumed, because that is the
-    // half a unit test with an explicit show() cannot see.
+    // (nocx-wmy4).
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
     await askFromPrompt(page, q2)
 
-    // The second question has been accepted into the pane, but cannot reach
-    // the model while the first turn is open. No steering is requested here.
-    const blockQ2 = answerBlockOf(page, q2)
-    await expect(blockQ2).toHaveCount(1)
-    await expect(page.locator(INPUT)).toHaveText('')
+    // THE MESSAGE IS A STEER, NOT A QUEUED QUESTION (nocx-a62cl.6.1): it is
+    // drawn inside the turn that is still being written, it opens no block of
+    // its own, and the model has not been called again yet.
+    const said = blockQ1.locator(':scope > .cmd-children > .ui-person-message')
+    await expect(said).toHaveCount(1)
+    await expect(said.locator('.ui-person-message__text')).toHaveText(q2)
+    await expect(blockQ1).not.toHaveAttribute('data-outcome', 'success')
     expect(fake.requests()[base]?.state).toBe('streaming')
     expect(fake.requests()).toHaveLength(base + 1)
-    await expect(blockQ1).not.toHaveAttribute('data-outcome', 'success')
-    await expect(blockQ2.locator('.cmd-output[data-answer-body]')).toHaveCount(0)
+    // Exactly one block mentions the second message, and it is the first
+    // turn's — the message did not become a turn of its own.
+    await expect(answerBlockOf(page, q2)).toHaveCount(1)
 
-    // Ending the first turn releases the queued question. Each new user
-    // message carries only its own attachment; the conversation may still
-    // include the earlier question and answer as history.
+    // Ending the first model call releases it: pi proposes the screen read,
+    // runs it, and calls the model again — carrying the person's message.
     fake.release(req1.id)
-    await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
     const reqs2 = await fake.waitForRequests(base + 2)
     const req2 = reqs2[base + 1]
-    expect(terminalContext(req1.body)).toContain(markerA)
-    expect(terminalContext(req1.body)).not.toContain(markerB)
+    expect(terminalContext(req1.body)).not.toContain(q2)
     expect(terminalContext(req2.body)).toContain(q2)
-    expect(terminalContext(req2.body)).toContain(markerB)
-    expect(terminalContext(req2.body)).not.toContain(markerA)
-    await expect.poll(() => fake.requests()[base]?.state).toBe('done')
-    await expect.poll(() => fake.requests()[base + 1]?.state).toBe('done')
-    expect(
-      secondStartedAfterFirstFinished,
-      'the second model call started before the first ended',
-    ).toBe(true)
-
-    // The deltas landed on the RIGHT entries: two distinct answer blocks,
-    // each holding its own answer and not the other's.
-    await expect(blockQ1).toHaveCount(1)
-    await expect(blockQ2).toHaveCount(1)
-    const body1 = blockQ1.locator('.cmd-output[data-answer-body]')
-    const body2 = blockQ2.locator('.cmd-output[data-answer-body]')
-    await expect(body1).toContainText(answerA, { timeout: 15_000 })
-    await expect(body2).toContainText(answerB, { timeout: 15_000 })
-    await expect(body1).not.toContainText(answerB)
-    await expect(body2).not.toContainText(answerA)
     await expect(blockQ1).toHaveAttribute('data-outcome', 'success')
-    await expect(blockQ2).toHaveAttribute('data-outcome', 'success')
+    // The first answer went on being written BELOW the person's message — its
+    // words are no longer one run of prose, so they are asserted as the pieces
+    // the flow now holds rather than as one string.
+    await expect(blockQ1).toContainText('Answer one: ')
+    await expect(blockQ1).toContainText(markerA)
+    await expect(blockQ1).toContainText(answerB)
+    // No second turn opened for the message: one question block, one answer.
     const questions = page
       .locator('.pane.active .cmd-block')
       .filter({ hasText: /Question (one|two) about/ })
-    await expect(questions).toHaveCount(2)
-    await expect(questions.nth(0)).toContainText(q1)
-    await expect(questions.nth(1)).toContainText(q2)
+    await expect(questions).toHaveCount(1)
+
+    // A QUESTION ASKED AFTER THE TURN ENDED is a new turn again, and it
+    // carries only its own attachment — the conversation may still include the
+    // earlier question and answer as history.
+    const q3 = 'Question three about the second block?'
+    await askFromPrompt(page, q3)
+    const reqs3 = await fake.waitForRequests(base + 3)
+    const req3 = reqs3[base + 2]
+    expect(terminalContext(req3.body)).toContain(q3)
+    expect(terminalContext(req3.body)).toContain(markerB)
+    expect(terminalContext(req3.body)).not.toContain(markerA)
+    const blockQ3 = answerBlockOf(page, q3)
+    await expect(blockQ3).toHaveCount(1)
+    await expect(blockQ3).toHaveAttribute('data-outcome', 'success', { timeout: 15_000 })
+    await expect(blockQ3.locator('.cmd-output[data-answer-body]')).toContainText(answerC)
+    await expect(blockQ1).not.toContainText(answerC)
   })
 })
 

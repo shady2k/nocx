@@ -56,6 +56,11 @@ func (r *RunTools) UseAgentCallIDs() {
 	r.identityMu.Unlock()
 }
 
+// TurnArrivalCutoff is how many calls this turn has accepted so far: the
+// boundary a person's answer covers, read at the moment it settles
+// (ADR-anntnxdj §2).
+func (r *RunTools) TurnArrivalCutoff() uint64 { return r.kernel.order.ArrivalCutoff() }
+
 // StartToolCall binds the next endpoint invocation to an agent's tool-start event.
 // It never waits for endpoint admission or execution.
 func (r *RunTools) StartToolCall(id string) {

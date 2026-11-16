@@ -45,7 +45,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // remoteShellSetupTimeout is a deliberate spawn-to-first-PTY-output budget,
@@ -107,7 +106,8 @@ type hostedSpawn struct {
 	cursors lifecycleCursorStore
 	// stopping is the coordinator's stopping signal. Nil never stops.
 	stopping *atomic.Bool
-	log      *slog.Logger
+
+	log *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -115,9 +115,10 @@ type hostedSpawn struct {
 // transport.HostedSessionOpen from these plus what only it knows — the host,
 // the account, the generation, the route back.
 type hostedSpawnResult struct {
-	Session       session.Session
-	Entry         helperclient.SessionEntry
-	LifecycleLane lifecycle.LaneID
+	BindingGeneration uint64
+	Session           session.Session
+	Entry             helperclient.SessionEntry
+	LifecycleLane     lifecycle.LaneID
 	// LifecycleTransport names the transport the lane rides, which is what a
 	// nested sudo/su's grant is composed against (nocx-u7uh.11). Carried
 	// beside the lane rather than derived from it because only the adapter
@@ -135,6 +136,10 @@ type hostedSpawnResult struct {
 	// this is the departure.
 	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
+	// ConnectionID names the SSH connection this remote pane's shell rides
+	// (design §5.6), so the adoption can be addressed to the connection it
+	// belongs to. Empty for every local pane: it rides no connection.
+	ConnectionID string
 	// PublishFailure is why this pane's integration bundle did not reach the
 	// host, when it did not (nocx-1kejz.4). EMPTY for a pane nothing was
 	// published for and for one whose copy landed.
@@ -339,23 +344,6 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// pass between attachment and the adapter's transition to hello time.
 	if lifecycleAdapter != nil && cfg.Kind == session.KindRemote {
 		attached.OnFirstOutput(lifecycleAdapter.ObserveShellOutput)
-	}
-
-	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
-	// pane has no far end to probe (cfg.Host is empty, by the same rule
-	// readopt's own comment states — a local carrier reports no destination),
-	// so the wire notification never arrives for one and this is a no-op
-	// registration rather than a local/remote branch to keep in step by
-	// hand. ObserveHost is the one function that decides what a reachability
-	// finding means, and this is now its only producer: the coordinator's own
-	// dials, which fed it in-process, are gone (nocx-oalo1.3.2).
-	if cfg.Host != "" {
-		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
-			h.registry.ObserveHost(cfg.Host, ssh.Reachability{
-				Responsive: responsive,
-				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
-			})
-		})
 	}
 
 	// THE SCREEN DRAIN'S PUBLISH (nocx-zg3k3.2.2): every full snapshot the

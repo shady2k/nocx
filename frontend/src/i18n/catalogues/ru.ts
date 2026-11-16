@@ -75,7 +75,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'settings.tab.placement.option.vertical': 'Вертикально',
   'settings.ssh.reconnect.label': 'При потере SSH-соединения',
   'settings.ssh.reconnect.description':
-    '„Спросить“ — кнопка на вкладке. „Автоматически“ — новая оболочка на той же конечной точке сама, а когда попытки исчерпаны — снова кнопка. Вкладка никогда не остаётся одна: в любом случае она открыта со всем выводом, а вернувшаяся оболочка — НОВАЯ: запущенное старой может ещё работать на сервере.',
+    '„Автоматически“ — новая оболочка на той же конечной точке сама, с повторами и паузой до пятнадцати секунд. „Спросить“ — кнопка на вкладке. „Никогда“ — вкладка остаётся одна с кнопкой. В любом случае кнопка на месте, вкладка открыта со всем выводом, а вернувшаяся оболочка — НОВАЯ: запущенное старой может ещё работать на сервере.',
   'settings.ssh.reconnect.option.ask': 'Спросить',
   'settings.ssh.reconnect.option.auto': 'Автоматически',
   'settings.ssh.reconnect.option.never': 'Никогда',
@@ -256,6 +256,27 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'scrollback.duration.days': '{days} д {hours} ч',
 
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
+  'connection.retryShell': 'Повторить оболочку',
+  'connection.retryShellTitle': 'Открыть новую оболочку на этом соединении',
+  'connection.shellFailed': 'Оболочка не запустилась',
+  'connection.lost': 'Соединение потеряно',
+  'connection.notAnswering': 'Хост не отвечает',
+  'connection.endsShells': 'завершит оболочек: {n}',
+  'connection.connecting': 'Подключение',
+  'connection.waiting': 'Ждём вас',
+  'connection.connected': 'Подключено',
+  'connection.answersNew': 'сервер отвечает на новые подключения',
+  'connection.noAnswer': 'Нет ответа уже',
+  'connection.waitingServer': 'Ждём сервер',
+  'connection.attempt': 'попытка {n}',
+  'connection.failed': 'Не удалось',
+  'connection.ended': 'Соединение завершено',
+  'connection.busy': 'Подключение',
+  'connection.reconnect': 'Переподключить',
+  'connection.reconnectTitle': 'Переподключить это соединение',
+  'connection.reconnectEnds': 'Переподключение завершит оболочек: {n}',
+  'connection.typedNotSent':
+    'Соединение завершилось раньше, чем удалось отправить нажатия. Ничего не доставлено.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
   'connections.password.bindingFailedHead':
@@ -371,7 +392,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.fieldPort': 'Порт',
   'connections.group.fieldJumpServer': 'Jump-сервер',
   'connections.group.fieldKeepaliveInterval': 'Интервал keepalive (мс)',
-  'connections.group.fieldKeepaliveCountMax': 'Максимум keepalive-проверок',
   'connections.group.fieldReadyTimeout': 'Тайм-аут готовности (мс)',
   'connections.group.fieldAgentForward': 'Проброс агента',
   'connections.group.fieldPortDiscovery': 'Определение порта',
@@ -415,7 +435,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.impact.fieldAuth': 'режим аутентификации',
   'connections.impact.fieldJumpServer': 'jump-сервер',
   'connections.impact.fieldKeepaliveInterval': 'интервал keepalive',
-  'connections.impact.fieldKeepaliveCountMax': 'максимум keepalive-проверок',
   'connections.impact.fieldReadyTimeout': 'тайм-аут готовности',
   'connections.impact.fieldAgentForwarding': 'проброс агента',
   'connections.impact.fieldPortDiscovery': 'определение порта',
@@ -446,12 +465,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.portRequired': 'Укажите порт',
   'connections.editor.keepaliveInvalid':
     'Интервал keepalive должен быть неотрицательным целым числом',
-  'connections.editor.keepaliveCountInvalid':
-    'Максимум keepalive-проверок должен быть неотрицательным целым числом',
   'connections.editor.readyTimeoutInvalid':
     'Тайм-аут готовности должен быть неотрицательным целым числом',
   'connections.editor.fieldKeepaliveInterval': 'Интервал keepalive (мс)',
-  'connections.editor.fieldKeepaliveCountMax': 'Максимум keepalive-проверок',
   'connections.editor.fieldReadyTimeout': 'Тайм-аут готовности (мс)',
   'connections.editor.fieldJumpServer': 'Jump-сервер',
   'connections.editor.none': '&mdash; Нет &mdash;',

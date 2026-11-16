@@ -1,7 +1,7 @@
 // Negative fixture for nocx/no-connection-subscription (ADR-ba6xet1b,
-// nocx-oalo1.3.5). Both subscriptions name a connection answer, and one of
-// them does it through a const — a rule that reads literals at the call site
-// cannot see it.
+// nocx-oalo1.3.5; narrowed to pane.connection by stage 5). Both subscriptions
+// name the connection answer, and one of them does it through a const — a rule
+// that reads literals at the call site cannot see it.
 //
 // The call is made on the REAL dispatcher: the rule identifies it by the
 // signature it resolves to, so a fixture with its own `subscribe` interface
@@ -12,9 +12,9 @@
 
 import { Dispatcher } from './dispatcher'
 
-const CONNECTION_EVENT = 'exit'
+const CONNECTION_EVENT = 'pane.connection'
 
 export function watch(dispatcher: Dispatcher): void {
   dispatcher.subscribe(CONNECTION_EVENT, () => {})
-  dispatcher.subscribe('session.liveness', () => {})
+  dispatcher.subscribe('pane.connection', () => {})
 }

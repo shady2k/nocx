@@ -4060,12 +4060,14 @@ describe('a worker participant tab leaves when its worker is closed (nocx-xn63t.
         expect(workerSession.onExit.mock.calls.length).toBe(1)
       })
 
-      // The worker's turn ends and its session is lost, which is the state the
-      // person was looking at: the tab stayed, with the card over its pane.
+      // The worker's turn ends and its session is lost, which is the state
+      // the person was looking at: the tab stays, and the connection's own
+      // head (not a renderer card) is where a loss is drawn.
       fireLostSession(workerSession)
       await vi.waitFor(() => {
-        expect(document.querySelector('.nocx-reconnect-offer')).not.toBeNull()
+        expect(stripPaneIDs(bar).length).toBe(before + 1)
       })
+      expect(document.querySelector('.nocx-reconnect-offer')).toBeNull()
 
       // THE CLOSE ITSELF: workers.close wrote the tab out of the content store
       // and told this window — the frame the backend sends, on the socket this

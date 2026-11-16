@@ -10,12 +10,15 @@ package transport
 // that was produced while it was not there.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -247,11 +250,9 @@ func TestReclaim_AFreshClientListsTheLiveSessionsAndTakesOneBack(t *testing.T) {
 // not hold that session. A client that cannot tell them apart cannot tell a
 // restart from a mistake.
 //
-// The instance is judged FIRST and without a lookup, which is the rule
-// internal/session/lineage.go already applies to the parent edge: it is the
-// component whose failure means the claim could never be true here, rather
-// than merely is not true now. So a stale instance is refused as a stale
-// instance even when the session id it names is unknown too.
+// A live session keeps the foreign-instance verdict: restarting the backend
+// does not prove a helper-owned shell ended. Only an absent id receives the
+// terminal session-ended-after-restart verdict below.
 func TestReclaim_AClaimFromAnotherInstanceIsRefusedDistinguishably(t *testing.T) {
 	ws, _ := newReclaimWS(t)
 
@@ -432,8 +433,8 @@ func TestReclaim_AnAssociationDoesNotSurviveTheInstanceItWasMintedBy(t *testing.
 		"sessionEpoch": 1,
 		"offset":       0,
 	})
-	if got := refusalReason(t, rpcErr); got != reasonForeignInstance {
-		t.Errorf("a claim carried across a coordinator restart was refused with %q, want %q", got, reasonForeignInstance)
+	if got := refusalReason(t, rpcErr); got != "session-ended-after-restart" {
+		t.Errorf("absent session after restart reason = %q, want session-ended-after-restart", got)
 	}
 }
 
@@ -893,5 +894,28 @@ func TestReclaim_ReplayFromIsTheOldestByteTheRingStillHolds(t *testing.T) {
 	after, _ := liveSessions(t, conn, tap, 3)
 	if got := entryFor(t, after, opened.SessionID).ReplayFrom; got != written {
 		t.Fatalf("replayFrom = %d after acking %d bytes, want %d — the ring no longer holds anything before it", got, written, written)
+	}
+}
+
+// An unanswered inventory read is uncertainty, never proof of session loss.
+type refusedRestartInventory struct{}
+
+func (refusedRestartInventory) Disposition() capability.Disposition {
+	return capability.Adapted("terminal.attach", "test inventory refusal")
+}
+
+func (refusedRestartInventory) Run(context.Context, func(context.Context, capability.SessionService) error) error {
+	return errors.New("inventory unavailable")
+}
+
+func TestReclaim_InventoryRefusalDoesNotProveRestartExit(t *testing.T) {
+	r := &captureResponder{}
+	h := sessionOpsHandlers{instance: session.InstanceID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), live: refusedRestartInventory{}}
+	h.handleAttach(t.Context(), nil, r, newConnState(), jsonrpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"ffffffffffffffffffffffffffffffff","sessionEpoch":1}`)})
+	if r.err == nil {
+		t.Fatal("inventory refusal was not returned")
+	}
+	if data, ok := r.err.Data.(claimRefusalData); ok && data.Reason == reasonSessionEndedAfterRestart {
+		t.Fatal("failed inventory read declared the session ended")
 	}
 }

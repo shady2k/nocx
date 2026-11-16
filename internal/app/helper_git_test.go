@@ -809,9 +809,6 @@ func (s *fakeRemoteSession) Parent() (session.Ref, bool) {
 	return session.Ref{}, false
 }
 
-func (s *fakeRemoteSession) Liveness() session.LivenessState {
-	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
-}
 func (s *fakeRemoteSession) PaneID() string { return "" }
 
 func (s *fakeRemoteSession) OpenBootstrapWindow() (session.BootstrapWindow, error) {

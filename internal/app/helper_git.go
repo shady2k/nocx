@@ -1692,9 +1692,11 @@ func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
 	return h
 }
 
-func (r *helperRegistry) forget(f *sessionFactory) {
+func (r *helperRegistry) forget(h *hostHelper) {
 	r.mu.Lock()
-	delete(r.hosts, f.sid)
+	if r.hosts[h.f.sid] == h {
+		delete(r.hosts, h.f.sid)
+	}
 	r.mu.Unlock()
 }
 
@@ -2288,7 +2290,7 @@ func (h *hostHelper) closeLocked() {
 	h.client = nil
 	h.factory = nil
 	h.dead = true
-	h.f.reg.forget(h.f)
+	h.f.reg.forget(h)
 }
 
 // refRepo wraps a helper-backed repo so the composition root can count the

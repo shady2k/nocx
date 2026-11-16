@@ -195,6 +195,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/pane.connection.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/panes.move.ts",
       "symbol": ""
     },

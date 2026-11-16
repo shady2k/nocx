@@ -407,3 +407,12 @@ func TestOpen_IdentityCrossesTheWire(t *testing.T) {
 	// rule-5 check, on the bytes the server sent, not a re-marshal.
 	validateJSON(t, loadSchema(t, "open.schema.json"), envelope.Result, "open result (real socket)")
 }
+
+func TestExit_BackendRestartedDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "exit.schema.json")
+	raw, err := json.Marshal(exitNotificationParams{SessionID: "0123456789abcdef0123456789abcdef", InstanceID: aForeignInstance, SessionEpoch: 1, Cause: "backend-restarted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, schema, raw, "backend restart exit")
+}

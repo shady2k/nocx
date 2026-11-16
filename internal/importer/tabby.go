@@ -38,7 +38,6 @@ type TabbySSHOptions struct {
 	Password          string   `yaml:"password"`
 	PrivateKeys       []string `yaml:"privateKeys"`
 	KeepaliveInterval int      `yaml:"keepaliveInterval"`
-	KeepaliveCountMax int      `yaml:"keepaliveCountMax"`
 	ReadyTimeout      int      `yaml:"readyTimeout"`
 	JumpHost          string   `yaml:"jumpHost"`
 	AgentForward      bool     `yaml:"agentForward"`
@@ -166,10 +165,6 @@ func ConvertProfile(tp TabbyProfile) profile.SSHProfile {
 	if tp.Options.KeepaliveInterval != 0 {
 		v := tp.Options.KeepaliveInterval
 		opts.KeepaliveInterval = &v
-	}
-	if tp.Options.KeepaliveCountMax != 0 {
-		v := tp.Options.KeepaliveCountMax
-		opts.KeepaliveCountMax = &v
 	}
 	if tp.Options.ReadyTimeout != 0 {
 		v := tp.Options.ReadyTimeout

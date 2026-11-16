@@ -51,8 +51,16 @@
       "type": "string",
       "const": ""
     },
-    "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
-    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "cols": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
     "xpixel": {
       "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in DEVICE pixels (cols × the renderer's integer device cell — the unit where the metric is exact, css = device / dpr; review round 1). 0 means the client has not measured itself yet. It reaches the helper's runtime geometry — what the published frames carry — and not the far pty, whose window-change carries no pixel fields at all.",
       "type": "integer",
@@ -98,17 +106,36 @@
       "additionalProperties": false,
       "required": ["lane", "domain", "epoch", "capability", "recovery"],
       "properties": {
-        "lane": { "type": "string", "minLength": 1 },
-        "domain": { "type": "string", "minLength": 1 },
-        "epoch": { "type": "integer", "minimum": 1 },
-        "capability": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "recovery": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "lane": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "capability": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "recovery": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "idempotencyKey": {
       "description": "The caller's name for the SPAWN, on exactly the terms `spawn` states: a repeat answers with the session the first one made rather than forking a second remote shell, which is what lets a pane's durable claim be written before the first irreversible effect.",
       "type": "string",
       "maxLength": 128
+    },
+    "reconnect": {
+      "description": "Ask the helper to CLOSE this destination's existing connection before it opens the shell (design 5.3: \"Reconnect closes the socket first\", nocx-oalo1.5.4). A stalled connection is still pooled, so without this the new shell would join it and park behind the dead flow instead of dialing; with it the acquire that follows dials afresh. It is a fact about THIS REQUEST and not about the destination — the same destination opened normally must join whatever connection exists, and only a pane being reconnected is entitled to end the one that is there, including the shells other panes hold on it. Omitted means false, which is every open that is not a reconnect.",
+      "type": "boolean"
     }
   }
 }

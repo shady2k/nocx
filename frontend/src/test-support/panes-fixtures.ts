@@ -7,7 +7,16 @@
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
 import type { PaneIdentity } from '../terminal-content'
-import type { OpenAnchor, SessionIntentKind, SessionAttachment, WSClient } from '../ipc'
+import type {
+  OpenAnchor,
+  OpenWatch,
+  SessionAttachment,
+  SessionHandle,
+  SessionIntentKind,
+  WSClient,
+} from '../ipc'
+import type { PaneConnection } from '../generated/pane.connection'
+import type { LiveSession } from '../generated/sessions.live'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
 import type { SessionEffect } from '../generated/session.effect'
@@ -32,7 +41,6 @@ import type { ClipboardBanner } from '../banner'
 import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
-import type { SessionLiveness } from '../generated/session.liveness'
 import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
 import type { DriverState } from '../pane-observation'
@@ -276,9 +284,6 @@ export interface SessionFake {
   fireRecoveryChanged(recovery: SessionRecovery): void
   onProtocolError: ReturnType<typeof vi.fn>
   onInputStalled: ReturnType<typeof vi.fn>
-  /** The reachability axis (nocx-iarf9): the backend's revised belief about
-   *  reaching this session. */
-  onLiveness: ReturnType<typeof vi.fn>
   /** What an enrolled pane's driver says its screen is inviting
    *  (nocx-szb40.3). */
   onObservation: ReturnType<typeof vi.fn>
@@ -304,13 +309,6 @@ export interface SessionFake {
    *  is the grid the BACKEND says the session runs at — the one the recovered
    *  bytes were wrapped at (nocx-eidfb.3). Mirrors SessionHandle exactly. */
   recovered: SessionRecovery | null
-  /** Fire the registered liveness callback with one observation. */
-  fireLiveness(liveness: 'alive' | 'unknown', livenessEpoch?: number): void
-  /** Fire a liveness observation whose round trip the BACKEND graded slow.
-   *  Separate from fireLiveness because the grade is a different fact from
-   *  the value, and a test asking for one should not have to state the
-   *  other. */
-  fireSlowLiveness(livenessEpoch?: number): void
   /** Fire the registered pane-observation callback with one classification. */
   fireObservation(state: DriverState, agent?: string): void
 }
@@ -331,7 +329,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let outputGapCb: ((gap: SessionOutputGap) => void) | null = null
   let integrationCb: ((fact: SessionIntegrationChanged) => void) | null = null
   let integrationFact: SessionIntegrationChanged | null = null
-  let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
   let recoveryChangedCb: (() => void) | null = null
@@ -397,9 +394,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
       protocolErrorCb = cb
     }),
     onInputStalled: vi.fn(),
-    onLiveness: vi.fn((cb: (l: SessionLiveness) => void) => {
-      livenessCb = cb
-    }),
     onObservation: vi.fn((cb: (o: SessionObservationChanged) => void) => {
       observationCb = cb
     }),
@@ -443,29 +437,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     fireScreenFrame: (frame: SessionFrame) => {
       screenCb?.(frame)
     },
-    fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {
-      livenessCb?.({
-        sessionId,
-        instanceId: 'fedcba9876543210fedcba9876543210',
-        sessionEpoch: 1,
-        liveness,
-        livenessEpoch,
-        observedAt: '2026-08-17T10:00:00Z',
-        roundTripMs: 12,
-      })
-    },
-    fireSlowLiveness: (livenessEpoch = 2) => {
-      livenessCb?.({
-        sessionId,
-        instanceId: 'fedcba9876543210fedcba9876543210',
-        sessionEpoch: 1,
-        liveness: 'alive',
-        livenessEpoch,
-        observedAt: '2026-08-17T10:00:00Z',
-        slow: true,
-        roundTripMs: 900,
-      })
-    },
     ...overrides,
   }
   return handle
@@ -508,8 +479,33 @@ interface DispatcherFake {
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: Mock<(size: SessionSize, anchor?: OpenAnchor) => Promise<SessionFake>>
-  openSSHSession: ReturnType<typeof vi.fn>
-  openSSHSessionByHost: ReturnType<typeof vi.fn>
+  openSSHSession: Mock<
+    (
+      size: unknown,
+      profileId: string,
+      anchor?: OpenAnchor,
+      watch?: OpenWatch,
+    ) => Promise<SessionFake>
+  >
+  openSSHSessionByHost: Mock<
+    (
+      size: unknown,
+      host: string,
+      user?: string,
+      anchor?: OpenAnchor,
+      desiredMode?: string,
+      watch?: OpenWatch,
+    ) => Promise<SessionFake>
+  >
+  /** The connection owner's reconnect (pane.reconnect), as the FIXTURE's own
+   *  answer: a new session. The real backend answers with the same open result
+   *  an open does, and the fake client hands whatever the mock resolves back
+   *  through adoptOpen. */
+  _reconnectPane: Mock<(paneId: string) => Promise<SessionFake>>
+  /** Takes an open/reconnect ack into the client and answers the handle, as
+   *  WSClient.adoptOpen does. In the fake the ack IS the handle its own open
+   *  mock resolved, so this is the identity. */
+  adoptOpen: (result: unknown) => SessionHandle
   close: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
@@ -577,7 +573,7 @@ export interface ClientFake {
    *  drawn (design D5). Answers an empty list by default, which is a cold
    *  backend and the ordinary case; a restore test that means to RECLAIM a
    *  pane overrides it with an entry naming that pane. */
-  listLiveSessions: ReturnType<typeof vi.fn>
+  listLiveSessions: Mock<() => Promise<LiveSession[]>>
   /** Helper-owned inventory returned to the overview reader. */
   listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
@@ -589,6 +585,19 @@ export interface ClientFake {
    *  subscribe(method, handler) returns the unsubscribe, and tests capture
    *  the handler to deliver published facts (lifecycle.changed). */
   dispatcher: DispatcherFake
+  /** Deliver one unsolicited notification the way the socket does. */
+  _fireNotification: (method: string, params: unknown) => void
+  /** Deliver one pane.connection observation to every subscriber — the
+   *  connection store is the real one, so a pane test drives the real fold. */
+  _firePaneConnection: (observation: PaneConnection) => void
+  /** Register a live session the fixture's backend is holding, as the
+   *  production `sessions.live` would list it. */
+  _addLiveSession: (entry: LiveSession) => void
+  /** The backend identity the client currently knows, as WSClient reports it. */
+  backendInstanceId: () => string | null
+  /** Move the client to another backend instance, as a socket replacement
+   *  followed by a new ack does. */
+  _setBackendInstance: (id: string | null) => void
 }
 /** The handler a surface registered for one server-initiated method, so a
  *  test can deliver a published fact through the REAL subscription seam
@@ -702,6 +711,10 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
   const workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
   const blockOutputStartHandlers = new Set<(anchor: BlockOutputStart) => void>()
+  const notificationHandlers = new Map<string, Set<(params: unknown) => void>>()
+  let backendInstance: string | null = null
+  const connectionEpochs = new Map<string, number>()
+  const liveEntries: LiveSession[] = []
   const operationRowHandlers = new Set<
     (row: { callID: number; title: string; done: number; total: number; machine: string }) => void
   >()
@@ -717,10 +730,18 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     ),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
-    listLiveSessions: vi.fn(() => Promise.resolve([])),
+    listLiveSessions: vi.fn(() => Promise.resolve([...liveEntries])),
     reclaimSession: vi.fn<
       (entry: Parameters<WSClient['reclaimSession']>[0]) => Promise<SessionFake>
-    >(() => Promise.resolve(newSession())),
+    >((entry) => {
+      // THE PRODUCTION CLAIM PATH, in the fixture: the entry names a session
+      // the fake already holds; a claim answers that one, not a new shell.
+      const known = client._sessions.find((candidate) => candidate.sessionId === entry.sessionId)
+      if (known !== undefined) return Promise.resolve(known)
+      const created = newSession()
+      created.sessionId = entry.sessionId
+      return Promise.resolve(created)
+    }),
     listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
@@ -778,34 +799,119 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     _fireWorkerTabClosed: (fact: WorkersTabClosed) => {
       for (const cb of [...workerTabClosedHandlers]) cb(fact)
     },
+    // The old renderer reconnect was an `open` for the same pane; the fake
+    // keeps that shape so a test that stated what its replacement open must
+    // answer still states it. A test that wants a different answer overrides
+    // this mock.
+    _reconnectPane: vi.fn(async () => {
+      const created = await client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+      return created
+    }),
+    // The fake's own open mock resolves the handle itself; the ack and the
+    // handle are one object here, which is the identity this asserts.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    adoptOpen: (result) => result as unknown as SessionHandle,
+    _addLiveSession: (entry) => {
+      liveEntries.push(entry)
+    },
+    backendInstanceId: () => backendInstance,
+    _setBackendInstance: (id) => {
+      backendInstance = id
+    },
+    _fireNotification: (method, params) => {
+      for (const handler of [...(notificationHandlers.get(method) ?? [])]) handler(params)
+    },
+    _firePaneConnection: (observation) => {
+      const last = connectionEpochs.get(observation.paneId) ?? 0
+      if (observation.connectionEpoch > last) {
+        connectionEpochs.set(observation.paneId, observation.connectionEpoch)
+      }
+      for (const handler of [...(notificationHandlers.get('pane.connection') ?? [])]) {
+        handler(observation)
+      }
+    },
     dispatcher: {
-      subscribe: vi.fn(() => () => undefined),
-      // A live prompt opens the attempt before the pty write; the default
-      // resolves so the write always proceeds (fail-open).
-      call: vi.fn<WSClient['call']>().mockImplementation((method) =>
-        Promise.resolve(
-          method === 'agent.status'
-            ? {
-                message: null,
-                answering: {
-                  ready: true,
-                  reason: null,
-                  agentId: 'fixture-agent',
-                  model: 'fixture-model',
-                },
-              }
-            : {
-                id: 'att-0',
-                domain: 'd1',
-                state: 'open',
-                command: '',
-                cwd: '',
-                host: '',
-                origin: 'app',
-                startedAt: '2026-08-08T12:00:00Z',
-              },
-        ),
-      ),
+      subscribe: vi.fn((method: string, handler: (params: unknown) => void) => {
+        const set = notificationHandlers.get(method) ?? new Set()
+        set.add(handler)
+        notificationHandlers.set(method, set)
+        return () => {
+          set.delete(handler)
+        }
+      }),
+      // TWO CALLS COME FROM THE CONNECTION OWNER (task 5.5), not from a
+      // surface: its `open` and its `pane.reconnect`. They are routed to the
+      // fixture's own mocks so a test keeps asserting the arguments the old
+      // client methods took — the seam moved, the request did not. Everything
+      // else is the attempt-open the live prompt sends, which resolves so the
+      // write always proceeds (fail-open).
+      call: vi.fn<WSClient['call']>(async (method, params, _signal, options) => {
+        const record = (params ?? {}) as Record<string, unknown>
+        const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+        const watch =
+          options !== null && typeof options === 'object' && 'announced' in options
+            ? (options as { announced?: OpenWatch }).announced
+            : undefined
+        if (method === 'open' && record.kind === 'ssh') {
+          const anchor = text(record.paneId) === '' ? {} : { paneId: text(record.paneId) }
+          return (
+            text(record.profileId) !== ''
+              ? await client.openSSHSession(record, text(record.profileId), anchor, watch)
+              : await client.openSSHSessionByHost(
+                  record,
+                  text(record.host),
+                  typeof record.user === 'string' ? record.user : undefined,
+                  anchor,
+                  typeof record.desiredMode === 'string' ? record.desiredMode : undefined,
+                  watch,
+                )
+          ) as never
+        }
+        if (method === 'pane.reconnect') {
+          // Reconnect acknowledges the request and answers the open separately.
+          const paneId = text(record.paneId)
+          const replacement = await client._reconnectPane(paneId)
+          const epoch = (connectionEpochs.get(paneId) ?? 0) + 1
+          client._firePaneConnection({
+            paneId,
+            connectionId: 'conn-1',
+            connectionEpoch: epoch,
+            generation: 1,
+            instanceId: backendInstance ?? 'test-instance',
+            sessionId: replacement.sessionId,
+            transport: { state: 'connected', stateMs: 0, plainShells: 1 },
+            attempt: { shown: 'none', candidate: 'none', reason: '' },
+            observedAt: new Date().toISOString(),
+          })
+          client._fireNotification('pane.opened', {
+            paneId,
+            generation: epoch,
+            open: { ...replacement, instanceId: backendInstance ?? 'test-instance' },
+          })
+          return { paneId, registered: true } as never
+        }
+        if (method === 'agent.status') {
+          return {
+            message: null,
+            answering: {
+              ready: true,
+              reason: null,
+              agentId: 'fixture-agent',
+              model: 'fixture-model',
+            },
+          } as never
+        }
+        return {
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        } as never
+      }),
     },
     // What the backend answers when no content store is wired: a JSON-RPC
     // -32601, not a transport failure — a reader that tells "the store

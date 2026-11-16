@@ -76,9 +76,10 @@
  *       An object literal minting `cause: 'interrupted'` (including through a
  *       const whose type is that literal) — the renderer declaring a session
  *       lost. `interrupted` is the one exit cause that means a loss, and it is
- *       the connection manager's verdict, not the renderer's: ipc.ts invents it
- *       twice today, once from an exit whose cause was not a shell exit and
- *       once from a failed attach.
+ *       the connection manager's verdict, not the renderer's. Stage 5 removed
+ *       the last two places ipc.ts minted it (a malformed exit and a failed
+ *       attach); the backend sends `interrupted` itself when that is what
+ *       happened.
  *
  * Scope: every .ts and .tsx under frontend/src. Tests (`*.test.ts(x)`,
  * `*.spec.ts(x)`), `src/test-support/`, `*-fixtures.ts` and `src/generated/`
@@ -161,9 +162,11 @@ export const BASELINE_PATH = resolve(__dirname, 'connection-owners-baseline.json
 /** The one directory allowed to decide a connection fact in the renderer. */
 export const CONNECTION_DIR = 'frontend/src/connection/'
 
-/** The module whose classes are the ipc client surface. A member is an owner
- *  entry when its DECLARING symbol lives here, whatever it is called on the
- *  receiving end. */
+/** The modules whose classes carry a connection entry. A member is an owner
+ *  entry when its DECLARING symbol lives in one of them, whatever it is called
+ *  on the receiving end. `ipc.ts` is the socket client; stage 5 moved the open
+ *  and reconnect to `connection/connection-client.ts`, so the rule follows the
+ *  entry rather than keeping a list of names nothing declares. */
 export const IPC_MODULE = resolve(FRONTEND_DIR, 'src/ipc.ts')
 
 /** The module that declares the dispatcher whose `subscribe` carries every
@@ -183,14 +186,25 @@ export const RULES = {
 /**
  * The notifications that ARE the connection's answer. A renderer that handles
  * one is deciding a connection fact, and there is one place for that.
+ *
+ * ONLY pane.connection IS LEFT, and the two removals are decisions rather
+ * than loosening (nocx-oalo1.5.5):
+ *
+ *   - session.liveness is retired with its producer (design §5.6, "clean
+ *     only"). The same measurement now rides pane.connection.quality, so a
+ *     rule that kept naming the old notification would protect nothing and
+ *     would still fail a tree that no longer sends it.
+ *   - exit is NOT a connection fact. Design §5.6 keeps it as "this session
+ *     ended", the backend's own event, which the client must route to its
+ *     handle whether or not an SSH connection was ever involved. The rule
+ *     exists to stop a surface deriving a connection state from an end; once
+ *     ipc.ts stops minting a loss from it (task 5.5), the router is not a
+ *     second owner, and refusing it would refuse the wire itself.
  */
 export const CONNECTION_NOTIFICATIONS = {
-  'session.liveness':
-    'the backend measurement of REACHING a host — slow, unreachable, unknown. Folding it into a ' +
-    'pane condition outside the owner is a second derivation of one fact (ADR-ba6xet1b)',
-  exit:
-    "a session's end, from which ipc.ts mints an `interrupted` exit when the cause is not a shell " +
-    "exit. Loss is the connection manager's answer, not a second reading of the same event",
+  'pane.connection':
+    "the backend's answer to what a pane's SSH connection is doing — state, stage, quality " +
+    'and the reconnect offer. The one subscriber draws it (ADR-ba6xet1b)',
 }
 
 /**
@@ -198,6 +212,14 @@ export const CONNECTION_NOTIFICATIONS = {
  * seven); until stage 7 makes that true, the names are what exists.
  */
 export const CONNECTION_ENTRIES = {
+  // The connection owner's entries (stage 5). Declared in
+  // connection/connection-client.ts, and only callable from there.
+  openProfile: 'opens an SSH session by saved profile',
+  openByHost: 'opens an SSH session by host or alias',
+  reconnectPane: 'reconnects the backend connection a pane rides',
+  // The ipc client's old entries. They no longer resolve to a declaration,
+  // so nothing can be reported for them; they stay named because a tree that
+  // reintroduces one under the old name must not be invisible.
   openSSHSession: 'opens an SSH session by saved profile',
   openSSHSessionByHost: 'opens an SSH session by host or alias',
   retrySessionAttach: "claims the same session again — the client's own retry",
@@ -375,7 +397,8 @@ function declaredOnIpcType(checker, symbol) {
     ) {
       continue
     }
-    if (resolve(decl.getSourceFile().fileName) === IPC_MODULE) return true
+    const file = resolve(decl.getSourceFile().fileName)
+    if (file === IPC_MODULE) return true
   }
   return false
 }
@@ -840,7 +863,7 @@ function errorTextMatchRule() {
     },
     create(context) {
       const rel = repoPathOf(context.filename)
-      if (!isScopedFile(rel)) return {}
+      if (!isScopedFile(rel) || isConnectionFile(rel)) return {}
       const sourceCode = context.sourceCode
       // This rule also works without a program (its shapes are syntactic); the
       // checker is used where it exists, to resolve a computed key's type.

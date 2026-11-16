@@ -29,8 +29,10 @@ package ssh
 // repository's coordinator path calls it: the consumers reach FSConn,
 // TunnelConn and their siblings, and each of those is being re-pointed at the
 // helper's proxied channels rather than at this (epic nocx-50w7p, plan §3).
-// This is the pool the helper's `ssh` service acquires from, which is why the
-// key derivation below mirrors poolKeyFor and NOT a new one.
+// This is the pool the helper's `ssh` service acquires from, and the identity a
+// connection is shared under is derived in ONE place below (PooledSpec.Key and
+// RouteKeys), used by the pool's own table and passed to the connection
+// supervisor unchanged (nocx-oalo1.4.4).
 
 import (
 	"context"
@@ -40,8 +42,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/connkey"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -71,6 +75,8 @@ type PooledSpec struct {
 	// that can answer the handshake's two questions (the helper asks the
 	// coordinator over the reverse channel and builds this from the answers).
 	Config *gossh.ClientConfig
+	// Prepare rebuilds request-bound callbacks for each supervisor-owned attempt.
+	Prepare func(context.Context) (*gossh.ClientConfig, []PooledHop, error)
 	// Route is the hosts this destination is reached THROUGH, in dial order:
 	// Route[0] is dialed from this machine, each next hop through the one
 	// before it, and this spec's own destination through the last. Empty for a
@@ -82,21 +88,45 @@ type PooledSpec struct {
 	// coordinator's answers, one hop at a time, exactly as they are for the
 	// destination.
 	Route []PooledHop
-	// KeepaliveInterval and KeepaliveCountMax arm the same prober the
-	// coordinator's own connections carry, so a pooled connection that has
-	// gone quiet is noticed on this side of the wire too. Zero disables it.
-	KeepaliveInterval time.Duration
-	KeepaliveCountMax int
-	// Liveness receives what the prober armed by KeepaliveInterval learns,
-	// exactly as ConnectConfig.Liveness does for the coordinator's own
-	// non-pooled dials (nocx-y6fh7 item 6: sshsvc's shell channel is the
-	// first pooled caller to actually want one — every other caller of
-	// AcquirePooled still passes nil, unchanged). Read only on a cache MISS,
-	// along with the interval and the count: a caller that joins an
-	// already-dialed pooled connection joins whatever prober (or none) the
-	// first caller armed, because there is one connection and therefore one
-	// prober, not one per reference.
-	Liveness LivenessObserver
+	// ProbeInterval is how often the connection should be asked to answer, or
+	// zero for the connection manager's default (15 s). It is a request for
+	// the one prober's cadence, not an arming: a zero never means "do not
+	// probe" (design §5.3, nocx-oalo1.4.3).
+	ProbeInterval time.Duration
+	// HoldsPlainShell is what this acquire declares: the connection carries
+	// the person's terminal, so silence may never end it (design §5.3). Every
+	// other holder — sftp, a lane, a forward, a lease — declares false, and the
+	// supervisor counts what it is told.
+	HoldsPlainShell bool
+	// WrapConn, when non-nil, wraps the DESTINATION's network connection after
+	// the TCP dial and before the SSH version exchange. It is the seam a caller
+	// observes the handshake's stages through (design §5.3): x/crypto has no
+	// stage callback, and the connection's first bytes are the first boundary
+	// it offers — the server's version line. Nothing is read here beyond "a
+	// read happened": the wrapper forwards every byte untouched, and no part of
+	// this package inspects what it carries (AD-6).
+	WrapConn func(net.Conn) net.Conn
+	// HopAcquire, when set, dials ONE hop of Route and answers a borrowed
+	// reference to it. The connection manager supplies it, so a hop is a
+	// SUPERVISED connection like any other — its own link, watcher, prober and
+	// wake probe — instead of a bare pool entry nothing owns (design §5.1.1's
+	// second trap; review finding 4). It receives the route BEFORE the hop, in
+	// dial order, because a hop is itself reached through the ones above it.
+	//
+	// Nil keeps this package's own pooling of hops, which is what a probe's
+	// unpooled dial and the tests use.
+	HopAcquire func(ctx context.Context, hop PooledHop, prefix []PooledHop) (*PooledConn, error)
+	// Barrier, when set, asks the connection manager for evidence that the far
+	// side is answering, bounded by the context: the release barrier's wait
+	// between the two attempts newSession makes. It is a function value
+	// because the pool may not import the connection manager, and the answer —
+	// one probe, reused if one is already parked — belongs to the party that
+	// owns the connection's one prober.
+	//
+	// Nil means this connection has no prober to ask (a direct dial, a test
+	// fake), and the barrier then fails the channel's open rather than sending
+	// a second keepalive.
+	Barrier func(ctx context.Context) error
 }
 
 // PooledHop is one intermediate host a connection is dialed through. It is the
@@ -121,6 +151,10 @@ type routeHop struct {
 	user     string
 	identity string
 	config   *gossh.ClientConfig
+	// wrap is set on the DESTINATION only: a hop's version exchange is not a
+	// stage a person is shown, and reporting one would move the stage path
+	// backwards.
+	wrap func(net.Conn) net.Conn
 }
 
 func (h PooledHop) routeHop() routeHop {
@@ -129,6 +163,49 @@ func (h PooledHop) routeHop() routeHop {
 
 // addr is the dial address of one endpoint.
 func (h routeHop) addr() string { return net.JoinHostPort(h.host, strconv.Itoa(h.port)) }
+
+// Key answers the identity this spec's connection is shared under — THE one
+// derivation (nocx-oalo1.4.4). The pool keys its table by it, the supervisor
+// keys its state by it, and the carrier passes it across without reassembling
+// it, so "which connections are one" has exactly one answer.
+//
+// The components are the documented rule of poolKey's field list: the resolved
+// endpoint, the account, the credential principal and the rendered route. Two
+// connections differing in any of them are two connections.
+func (s PooledSpec) Key() connkey.Key {
+	return connkey.Key{
+		Host:     s.Host,
+		Port:     s.Port,
+		User:     s.User,
+		Identity: s.Identity,
+		Route:    routeKeyOf(s.Route),
+	}
+}
+
+// RouteKeys answers the identity of every hop of a route, in dial order: each
+// hop's own endpoint plus the route before it, which is exactly the key
+// acquireHop has always pooled a hop under. It is the same derivation as Key's,
+// applied to each hop.
+func RouteKeys(route []PooledHop) []connkey.Key {
+	keys := make([]connkey.Key, 0, len(route))
+	for i, hop := range route {
+		keys = append(keys, connkey.Key{
+			Host:     hop.Host,
+			Port:     hop.Port,
+			User:     hop.User,
+			Identity: hop.Identity,
+			Route:    routeKeyOf(route[:i]),
+		})
+	}
+	return keys
+}
+
+// poolKeyOf is the pool's table key for a derived identity. It is a field
+// mapping and carries no rule: the rules — which components, how a route is
+// rendered — are PooledSpec.Key's and RouteKeys'.
+func poolKeyOf(k connkey.Key) poolKey {
+	return poolKey{host: k.Host, port: k.Port, user: k.User, identity: k.Identity, jumpRoute: k.Route}
+}
 
 // routeKeyOf renders an ordered route into the pool key's route component.
 //
@@ -143,11 +220,21 @@ func routeKeyOf(route []PooledHop) string {
 	}
 	parts := make([]string, 0, len(route))
 	for _, hop := range route {
-		parts = append(parts, poolKey{
-			host: hop.Host, port: hop.Port, user: hop.User, identity: hop.Identity,
-		}.jumpRouteKey())
+		parts = append(parts, routeComponent(hop.Host, hop.Port, hop.User, hop.Identity))
 	}
 	return strings.Join(parts, ">")
+}
+
+// Borrow answers a borrowed reference over an existing client, whose Close runs
+// release instead of a pool release.
+//
+// It is how a hop's reference is handed to the dialler that rides it: the hop's
+// pooled reference belongs to its own supervisor (the connection manager owns
+// the hop as a connection), and what the dialler releases when it closes is its
+// lease. A nil client is refused by the same callers that refuse a nil
+// connection anywhere else.
+func Borrow(client *gossh.Client, release func()) *PooledConn {
+	return &PooledConn{client: client, release: release}
 }
 
 // PooledConn is a borrowed reference to a pooled connection: the caller may
@@ -174,30 +261,17 @@ type PooledConn struct {
 	// mechanism exists for.
 	taint       func()
 	taintReason func() string
-	// arm is armKeepalive on the pooledSSHConn this handle shares (nil for a
-	// connection dialed outside the pool, DialAuth): ANY holder may call
-	// ArmKeepalive, cache hit or miss, and the connection's own Once decides
-	// whose settings win (nocx-y6fh7 item 6).
-	arm func(interval time.Duration, countMax int, observe LivenessObserver)
+	// dead and tainted are the transport's own facts, read synchronously:
+	// whether the library has closed the socket, and whether the pool has
+	// retired this connection from new admission.
+	dead    func() bool
+	tainted func() bool
 	// newSession is newSession on the pooledSSHConn this handle borrows: the
 	// session-open act with the far side's release of the previous session
 	// awaited first. Nil for a connection dialed outside the pool (DialAuth),
 	// which is exclusive to its one caller and holds no second caller's
 	// session history — see PooledConn.NewSession.
 	newSession func() (*gossh.Session, error)
-}
-
-// ArmKeepalive starts this connection's prober if nothing has already,
-// exactly as a fresh dial's own KeepaliveInterval would have — but callable
-// by ANY holder of a reference, at any time, not only the one that happened
-// to dial (see armKeepalive's own comment on why dial order is not caller
-// intent under AD-4 sharing). interval <= 0 is a no-op: a caller with
-// nothing configured must never claim the one arming slot a connection has.
-func (p *PooledConn) ArmKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
-	if p == nil || p.arm == nil {
-		return
-	}
-	p.arm(interval, countMax, observe)
 }
 
 // Taint marks this borrowed connection so the pool hands it to no new
@@ -242,6 +316,26 @@ func (p *PooledConn) Fingerprint() string {
 
 // Client is the underlying connection.
 func (p *PooledConn) Client() *gossh.Client { return p.client }
+
+// Dead reports whether the transport has ended. It is answered synchronously
+// from the marker the library's own close sets, not from a watcher: admission
+// must refuse a connection that has ended even in the window before any
+// goroutine runs (review finding 5).
+func (p *PooledConn) Dead() bool {
+	if p == nil || p.dead == nil {
+		return false
+	}
+	return p.dead()
+}
+
+// Tainted reports whether the pool has retired this connection from new
+// admission (a detached writer's cap, a credential rotation).
+func (p *PooledConn) Tainted() bool {
+	if p == nil || p.tainted == nil {
+		return false
+	}
+	return p.tainted()
+}
 
 // NewSession opens a session channel on this connection, re-asking once when
 // the far side refuses the request because it is still holding the session this
@@ -306,13 +400,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		return nil, err
 	}
 
-	key := poolKey{
-		host:      spec.Host,
-		port:      spec.Port,
-		user:      spec.User,
-		identity:  spec.Identity,
-		jumpRoute: routeKeyOf(spec.Route),
-	}
+	key := poolKeyOf(spec.Key())
 
 	dial := func(poolKey) (sshClientConn, error) {
 		// The TARGET host's fingerprint is captured here, at the one place a
@@ -339,16 +427,13 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		}
 		conn, err := rc.dialRoute(ctx, spec.Route, routeHop{
 			host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
-		})
+			wrap: spec.WrapConn,
+		}, spec.HopAcquire)
 		if err != nil {
 			return nil, err
 		}
 		conn.fingerprint = fingerprint
-		// NOT armed here (nocx-y6fh7 item 6): the dial closure only runs on a
-		// cache MISS, and the caller that happens to be first to dial a
-		// destination is not necessarily the caller that wants a prober —
-		// see armKeepalive's own comment. Arming happens below, for every
-		// caller, cache hit or miss alike.
+		conn.barrier = spec.Barrier
 		return conn, nil
 	}
 
@@ -356,17 +441,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 	if err != nil {
 		return nil, err
 	}
-	pc, err := rc.borrowPooled(handle)
-	if err != nil {
-		return nil, err
-	}
-	// ARMED HERE, for every caller — cache hit or the miss that just dialed
-	// (nocx-y6fh7 item 6). A caller with nothing configured (KeepaliveInterval
-	// <= 0) is a no-op through ArmKeepalive's own guard, which is what lets a
-	// probe or a publish leasing this destination first leave the one arming
-	// slot open for whichever caller's interval is actually non-zero.
-	pc.ArmKeepalive(spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.Liveness)
-	return pc, nil
+	return rc.borrowPooled(handle)
 }
 
 // DialAuth dials a resolved spec ONCE and hands back the connection, without
@@ -397,6 +472,7 @@ func (rc *RealClient) DialAuth(ctx context.Context, spec PooledSpec) (*PooledCon
 	}
 	client, release, err := rc.dialRouteOnce(ctx, spec.Route, routeHop{
 		host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
+		wrap: spec.WrapConn,
 	})
 	if err != nil {
 		return nil, err
@@ -448,11 +524,15 @@ func validateEndpoint(host string, port int, user string, cfg *gossh.ClientConfi
 // the same bastion finds it already there. The reference the destination holds
 // releases the hop's, which releases the one before it — the same ownership
 // chain the coordinator's own jump dial keeps, one caller out.
-func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last routeHop) (*pooledSSHConn, error) {
+func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last routeHop, hopAcquire func(context.Context, PooledHop, []PooledHop) (*PooledConn, error)) (*pooledSSHConn, error) {
 	var upstream *PooledConn
 	if len(route) > 0 {
 		var err error
-		upstream, err = rc.acquireHop(ctx, route)
+		if hopAcquire != nil {
+			upstream, err = hopAcquire(ctx, route[len(route)-1], route[:len(route)-1])
+		} else {
+			upstream, err = rc.acquireHop(ctx, route)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -461,7 +541,7 @@ func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last rou
 	if upstream != nil {
 		upClient = upstream.Client()
 	}
-	client, err := rc.dialEndpoint(ctx, upClient, last)
+	client, ended, err := rc.dialEndpoint(ctx, upClient, last)
 	if err != nil {
 		if upstream != nil {
 			_ = upstream.Close()
@@ -472,22 +552,18 @@ func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last rou
 	if upstream != nil {
 		release = func() { _ = upstream.Close() }
 	}
-	return &pooledSSHConn{client: client, release: release}, nil
+	return &pooledSSHConn{client: client, release: release, ended: ended}, nil
 }
 
 // acquireHop answers a pooled reference to the LAST hop of route.
 func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*PooledConn, error) {
 	hop := route[len(route)-1]
 	hopEndpoint := hop.routeHop()
-	key := poolKey{
-		host:      hop.Host,
-		port:      hop.Port,
-		user:      hop.User,
-		identity:  hop.Identity,
-		jumpRoute: routeKeyOf(route[:len(route)-1]),
-	}
+	key := poolKeyOf(RouteKeys(route)[len(route)-1])
 	dial := func(poolKey) (sshClientConn, error) {
-		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint)
+		// A hop's own prefix is pooled, not supervised: this is the path a
+		// caller that did not supply HopAcquire takes (a probe, a test).
+		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint, nil)
 	}
 	handle, err := rc.dial.pool.AcquireDial(ctx, key, dial)
 	if err != nil {
@@ -500,7 +576,7 @@ func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*Poole
 // answers a client whose release closes the destination and every hop under it.
 func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last routeHop) (*gossh.Client, func(), error) {
 	if len(route) == 0 {
-		client, err := rc.dialEndpoint(ctx, nil, last)
+		client, _, err := rc.dialEndpoint(ctx, nil, last)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -510,7 +586,7 @@ func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := rc.dialEndpoint(ctx, upClient, last)
+	client, _, err := rc.dialEndpoint(ctx, upClient, last)
 	if err != nil {
 		closeUpstream()
 		return nil, nil, err
@@ -524,26 +600,55 @@ func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last
 // dialEndpoint performs the TCP dial and the handshake for ONE endpoint: to the
 // address directly when there is no upstream, and through the network of the
 // connection before it when there is.
-func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, error) {
+//
+// It answers the connection's own END MARKER with the client: every network
+// connection the library will close is wrapped so that the close sets the
+// marker at the instant it happens — inside x/crypto's teardown, before its
+// Wait returns — which is what lets admission refuse a transport that has ended
+// without waiting for any goroutine (nocx-oalo1.4.6, review finding 5).
+func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, *atomic.Bool, error) {
+	ended := &atomic.Bool{}
 	d := &dialer{client: rc}
 	if upstream == nil {
-		return d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user)
+		client, err := d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user, ep.wrap, ended)
+		return client, ended, err
 	}
 	conn, err := upstream.DialContext(ctx, "tcp", ep.addr())
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
+		return nil, nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
 	}
+	if ep.wrap != nil {
+		conn = ep.wrap(conn)
+	}
+	conn = &endMarked{Conn: conn, ended: ended}
 	client, err := d.handshakeOver(ctx, conn, ep.addr(), ep.config)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("ssh client conn through a hop: %w", err)
+		return nil, nil, fmt.Errorf("ssh client conn through a hop: %w", err)
 	}
-	return client, nil
+	return client, ended, nil
+}
+
+// endMarked is the network connection the library closes, with the pool's
+// dead mark attached to that close. It reads nothing and changes nothing on the
+// wire; it is the moment the transport ends, made observable synchronously.
+type endMarked struct {
+	net.Conn
+	ended *atomic.Bool
+}
+
+func (c *endMarked) Close() error {
+	// THE MARK GOES FIRST (review verification, finding 5): between the
+	// physical close and the store, admission would otherwise see a socket
+	// that is closed but a connection that is not. Marking first means the
+	// honest answer is never later than the true one.
+	c.ended.Store(true)
+	return c.Conn.Close()
 }
 
 // borrowPooled wraps a pool handle as the borrowed reference callers hold. A
@@ -570,18 +675,11 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		// both could apply; either is a name for "this connection died for
 		// a reason a sibling's own Wait() cannot see", and there is exactly
 		// one at a time in practice (nocx-y6fh7 item 6, round 3).
-		taintReason: func() string {
-			if reason := handle.closeReason(); reason != "" {
-				return reason
-			}
-			if client.KeepaliveLost() {
-				return ReasonKeepaliveLost
-			}
-			return ""
-		},
-		arm: client.armKeepalive,
+		taintReason: handle.closeReason,
 		// The session-open act, so every caller that opens one goes through
 		// the connection's own record of what it has already carried.
 		newSession: client.newSession,
+		dead:       client.isDead,
+		tainted:    client.Tainted,
 	}, nil
 }

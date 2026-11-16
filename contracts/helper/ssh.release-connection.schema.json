@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.release-connection.schema.json",
+  "title": "HelperSSHReleaseConnectionResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["released"],
+  "properties": {
+    "released": {
+      "type": "boolean"
+    }
+  }
+}

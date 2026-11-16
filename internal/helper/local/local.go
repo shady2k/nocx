@@ -175,6 +175,12 @@ type Config struct {
 	// carried here because the local carrier is where the coordinator's own
 	// connection is built, and a helper that dials has nobody else to ask.
 	Reverse *client.ReverseRegistry
+	// OnConnectionEvent receives an ssh connection's observations from the
+	// helper (client.Config.OnConnectionEvent), stamped with the helper
+	// instance that produced them. It is carried here for the same reason
+	// Reverse is: this is where the coordinator's own connection is built, and
+	// a connection's state has no other route back.
+	OnConnectionEvent func(sourceInstance string, ev proto.ConnectionStateEvent)
 }
 
 // Open reaches the helper for one generation on this machine: it dials the
@@ -309,10 +315,11 @@ func openOnce(ctx context.Context, cfg Config) (*client.Client, error) {
 		// command names which binary, while this socket is already being
 		// served and the generation was decided by which socket was dialled.
 		// The carrier refuses a command outright rather than ignoring one.
-		ExpectHash:  string(cfg.Generation),
-		SentinelTTL: cfg.SentinelTTL,
-		Log:         cfg.Log,
-		Reverse:     cfg.Reverse,
+		ExpectHash:        string(cfg.Generation),
+		SentinelTTL:       cfg.SentinelTTL,
+		Log:               cfg.Log,
+		Reverse:           cfg.Reverse,
+		OnConnectionEvent: cfg.OnConnectionEvent,
 	})
 	if err != nil {
 		_ = carrier.Close()

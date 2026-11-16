@@ -44,7 +44,10 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -165,9 +168,13 @@ type fixture struct {
 	kbdPrompts  []string
 	// the forward plane (nocx-50w7p.8): the policy the server applies, the
 	// listeners it bound, and the direct-tcpip targets it was asked to reach.
-	allowForward  bool
-	permitListen  func(host string, port int) bool
-	forwards      map[string]net.Listener
+	allowForward bool
+	permitListen func(host string, port int) bool
+	forwards     map[string]net.Listener
+	// forwardOwner names the connection each listener was granted on, so a
+	// connection ending frees its own listeners and no others (what a real
+	// sshd does).
+	forwardOwner  map[string]*gossh.ServerConn
 	forwardBinds  []forwardBind
 	directTargets []string
 	// the exec plane (nocx-50w7p.9 and nocx-50w7p.10): the commands this host
@@ -207,6 +214,23 @@ type fixture struct {
 	// POOLED connection, so the number is what says whether a lease kept one or
 	// whether every probe paid for its own handshake.
 	dials int
+	// peerPorts is the source port each accepted connection arrived from, in
+	// order. A fresh dial gets a fresh one, which is what makes "the next pane
+	// dialled again" visible as the thing the owner saw missing: the same
+	// local port in every failed attempt (nocx-oalo1.4.6).
+	peerPorts []int
+	// keepaliveProbes and keepaliveNudges count the keepalive requests this host
+	// saw, split by whether a reply was wanted: a probe wants one and a nudge
+	// does not (design §5.3). The pair is how a test says "one probe in
+	// flight" and "one nudge after the look" from the far end's own record.
+	keepaliveProbes int
+	keepaliveNudges int
+	// closeOnForward closes the connection instead of answering a
+	// `tcpip-forward` request: a host that dies exactly when it is asked for a
+	// listener. It is the transport-error counterpart of allowForward's
+	// `false`, and the two are the pair this package's lost-versus-refused
+	// assertions are built on.
+	closeOnForward bool
 }
 
 // observed is every event this host saw, in order.
@@ -230,6 +254,21 @@ func (f *fixture) note(event string) {
 // reports.
 func (f *fixture) noteLocked(event string) {
 	f.events = append(f.events, event)
+}
+
+// keepalivesSeen reports the keepalive requests this host answered, split into
+// probes (a reply wanted) and nudges (none).
+func (f *fixture) keepalivesSeen() (probes, nudges int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.keepaliveProbes, f.keepaliveNudges
+}
+
+// connectionPorts is the source port of each accepted connection, in order.
+func (f *fixture) connectionPorts() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.peerPorts...)
 }
 
 // connections is how many times this host was dialed.
@@ -386,13 +425,32 @@ func newFixtureAccepting(t *testing.T, password string, acceptedKey gossh.Signer
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	f.mu.Lock()
 	f.dials++
+	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		f.peerPorts = append(f.peerPorts, tcp.Port)
+	}
 	f.mu.Unlock()
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
 	if err != nil {
 		return
 	}
-	defer func() { _ = sconn.Close() }()
+	defer func() {
+		// A connection ending frees the remote listeners it created: a real
+		// sshd does, and a pane that released its transport (socket-first
+		// teardown) must not be reported as having left one behind.
+		f.mu.Lock()
+		for key, owner := range f.forwardOwner {
+			if owner == sconn {
+				if ln := f.forwards[key]; ln != nil {
+					_ = ln.Close()
+				}
+				delete(f.forwards, key)
+				delete(f.forwardOwner, key)
+			}
+		}
+		f.mu.Unlock()
+		_ = sconn.Close()
+	}()
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
 		f.mu.Lock()
@@ -419,7 +477,10 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 			continue
 		}
 		if newChan.ChannelType() == "direct-tcpip" {
-			f.serveDirectTCPIP(newChan, newChan.ExtraData())
+			// CONCURRENTLY, as sshd serves a channel: this handler relays for
+			// the channel's whole life, and a serve loop that waited for it
+			// would never read the next channel on the same connection.
+			go f.serveDirectTCPIP(newChan, newChan.ExtraData())
 			continue
 		}
 		ch, chReqs, aerr := newChan.Accept()
@@ -442,6 +503,25 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 func (f *fixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
 		f.note("global:" + req.Type)
+		if req.Type == "keepalive@openssh.com" {
+			f.mu.Lock()
+			if req.WantReply {
+				f.keepaliveProbes++
+			} else {
+				f.keepaliveNudges++
+			}
+			f.mu.Unlock()
+		}
+		f.mu.Lock()
+		closeOnForward := f.closeOnForward
+		f.mu.Unlock()
+		if closeOnForward && (req.Type == "tcpip-forward" || req.Type == "streamlocal-forward@openssh.com") {
+			// No reply at all: the connection is gone, which is what a client
+			// sees when the far side dies mid-request (and what the owner met
+			// as a stored read error afterwards).
+			_ = sconn.Close()
+			return
+		}
 		switch req.Type {
 		case "tcpip-forward":
 			f.handleForward(sconn, req)
@@ -503,7 +583,12 @@ func (f *fixture) handleForward(sconn *gossh.ServerConn, req *gossh.Request) {
 	if f.forwards == nil {
 		f.forwards = map[string]net.Listener{}
 	}
-	f.forwards[net.JoinHostPort(addr, strconv.Itoa(tcpAddr.Port))] = ln
+	bound := net.JoinHostPort(addr, strconv.Itoa(tcpAddr.Port))
+	f.forwards[bound] = ln
+	if f.forwardOwner == nil {
+		f.forwardOwner = map[string]*gossh.ServerConn{}
+	}
+	f.forwardOwner[bound] = sconn
 	f.forwardBinds = append(f.forwardBinds, forwardBind{requestedHost: addr, requestedPort: int(rport), allocatedPort: tcpAddr.Port})
 	f.mu.Unlock()
 
@@ -660,7 +745,30 @@ func (p *forwardPayloadReader) u32() (uint32, bool) {
 // wrong subsystem fails where it asked instead of hanging.
 func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	for req := range reqs {
-		// The lane's request comes FIRST, before the subsystem guard below: an
+		// A PANE'S TERMINAL. A real host answers a pty request and then starts
+		// the shell or the command; this fixture answers in the same order and
+		// has no process behind the shell, so the channel stays open and echoes
+		// — which is all a test of the CONNECTION's policy needs of a shell,
+		// and the only way to hold a plain-shell reference through the shipped
+		// service path (design §5.3, nocx-oalo1.4.3).
+		switch req.Type {
+		case "pty-req", "env", "signal", "window-change":
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			continue
+		case "shell":
+			f.note("shell")
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			go func() {
+				_, _ = io.Copy(ch, ch)
+				_ = ch.Close()
+			}()
+			continue
+		}
+		// The lane's request comes NEXT, before the subsystem guard below: an
 		// exec is not a subsystem, so a fixture that reached that guard first
 		// would refuse every lane with "not a subsystem" — which is how this
 		// branch was written the first time.
@@ -1089,14 +1197,30 @@ func (c *coordinator) trusted() []proto.TrustHostKeyParams {
 // stand is one helper connection: a host with the ssh service on it, a client
 // with a scripted coordinator behind it, and the bytes each side sent.
 type stand struct {
-	client    *client.Client
-	helper    *host.Host
-	service   *sshsvc.Service
-	toHelper  *recorder
-	toCoord   *recorder
-	cancel    context.CancelFunc
-	served    chan struct{}
-	closeOnce sync.Once
+	client  *client.Client
+	helper  *host.Host
+	service *sshsvc.Service
+	// carrier is the one transport this stand's service dials through, which
+	// is also what a test asks for a connection's state: production has one
+	// carrier per helper (cmd/nocx-helper), and a test that built a second one
+	// beside the service would be measuring a supervisor nobody uses.
+	carrier *sshconn.Carrier
+	// wake is the stand's wake source: the machine's suspend is the test's to
+	// report (design §10, nocx-oalo1.4.5), because no CI machine can sleep.
+	wake *hostconntest.WakeSource
+	// connEvents is what the helper told this coordinator about a connection,
+	// in the order it said it (design §5.6). It is buffered and the producer
+	// never blocks: a test reads the observations it is about, and the ones it
+	// is not about are dropped rather than stalling a dial.
+	connEvents chan proto.ConnectionStateEvent
+	// peerInstance is the helper instance this client handshook with; every
+	// observation it delivers is stamped with that value.
+	peerInstance string
+	toHelper     *recorder
+	toCoord      *recorder
+	cancel       context.CancelFunc
+	served       chan struct{}
+	closeOnce    sync.Once
 }
 
 func newStand(t *testing.T, c *coordinator) *stand {
@@ -1110,12 +1234,21 @@ func newStand(t *testing.T, c *coordinator) *stand {
 // algorithm lines nocx-1ebrs.18 asks for are written there.
 func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 	t.Helper()
+	return newStandOnClock(t, c, logger, nil)
+}
+
+// newStandOnClock is newStandLogging on an injected clock: the closing policy's
+// "within 30 s" and "after ten minutes" are asserted by advancing time, not by
+// waiting for it (design §10, nocx-oalo1.4.3). A nil clock is the process's.
+func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock hostconn.Clock) *stand {
+	t.Helper()
 
 	helperEnd, coordEnd := net.Pipe()
 	s := &stand{
-		toHelper: &recorder{Conn: helperEnd},
-		toCoord:  &recorder{Conn: coordEnd},
-		served:   make(chan struct{}),
+		connEvents: make(chan proto.ConnectionStateEvent, 256),
+		toHelper:   &recorder{Conn: helperEnd},
+		toCoord:    &recorder{Conn: coordEnd},
+		served:     make(chan struct{}),
 	}
 	// The dialer is the REAL one: DialAuth is the seam the daemon's client
 	// offers, and a probe tested against a fake dialer would be a probe tested
@@ -1126,7 +1259,15 @@ func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	s.service = sshsvc.New(realClient, logger)
+	if clock == nil {
+		clock = hostconn.RealClock{}
+	}
+	s.wake = hostconntest.NewWakeSource(clock)
+	s.carrier = sshconn.NewWithOptions(realClient, log.NewSlogAdapter(logger), sshconn.Options{
+		Clock: clock,
+		Wake:  s.wake,
+	})
+	s.service = sshsvc.New(s.carrier, logger)
 	s.helper = host.New(s.toHelper, s.toHelper, testHash, "instance-1", discardLogger())
 	s.helper.Register(s.service)
 
@@ -1143,11 +1284,21 @@ func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 		SentinelTTL: 5 * time.Second,
 		Reverse:     c.registry(),
 		Log:         discardLogger(),
+		// Every connection observation the helper sends lands here, including
+		// the ones that arrive while a dial is still running: the frame and
+		// its routing are the shipped path, which is the point of this stand.
+		OnConnectionEvent: func(_ string, ev proto.ConnectionStateEvent) {
+			select {
+			case s.connEvents <- ev:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("client.Dial: %v", err)
 	}
 	s.client = c2
+	s.peerInstance = c2.InstanceID()
 	t.Cleanup(s.stop)
 	return s
 }

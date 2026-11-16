@@ -36,9 +36,6 @@ func (s factorySession) Parent() (session.Ref, bool) {
 	return session.Ref{}, false
 }
 
-func (s factorySession) Liveness() session.LivenessState {
-	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
-}
 func (s factorySession) WorkspaceID() workspace.ID { return workspace.Default }
 
 // OpenedAt answers the zero time for the same reason every method above it

@@ -1153,12 +1153,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (value === '' || value === undefined || value === null) {
       typed = undefined // unset — let the empty delete below handle it
     } else {
-      const numericFields = new Set([
-        'port',
-        'keepaliveInterval',
-        'keepaliveCountMax',
-        'readyTimeout',
-      ])
+      const numericFields = new Set(['port', 'keepaliveInterval', 'readyTimeout'])
       if (numericFields.has(key)) {
         const n = Number(value)
         typed = isNaN(n) ? undefined : n
@@ -1191,10 +1186,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       key: 'keepaliveInterval',
       label: t('connections.group.fieldKeepaliveInterval', 'Keepalive interval (ms)'),
     },
-    {
-      key: 'keepaliveCountMax',
-      label: t('connections.group.fieldKeepaliveCountMax', 'Keepalive count max'),
-    },
     { key: 'readyTimeout', label: t('connections.group.fieldReadyTimeout', 'Ready timeout (ms)') },
     { key: 'agentForward', label: t('connections.group.fieldAgentForward', 'Agent forward') },
     { key: 'portDiscovery', label: t('connections.group.fieldPortDiscovery', 'Port discovery') },
@@ -1209,7 +1200,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       auth: t('connections.impact.fieldAuth', 'auth mode'),
       jumpHost: t('connections.impact.fieldJumpServer', 'jump server'),
       keepaliveInterval: t('connections.impact.fieldKeepaliveInterval', 'keepalive interval'),
-      keepaliveCountMax: t('connections.impact.fieldKeepaliveCountMax', 'keepalive count max'),
       readyTimeout: t('connections.impact.fieldReadyTimeout', 'ready timeout'),
       agentForward: t('connections.impact.fieldAgentForwarding', 'agent forwarding'),
       portDiscovery: t('connections.impact.fieldPortDiscovery', 'port discovery'),
@@ -1911,7 +1901,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     host: 'profile-host',
     port: 'profile-port',
     keepaliveInterval: 'profile-keepalive-interval',
-    keepaliveCountMax: 'profile-keepalive-count',
     readyTimeout: 'profile-ready-timeout',
     forwards: undefined,
   }
@@ -1921,7 +1910,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     port: 'general',
     key: 'auth',
     keepaliveInterval: 'advanced',
-    keepaliveCountMax: 'advanced',
     readyTimeout: 'advanced',
     forwards: 'forwards',
   }
@@ -1967,14 +1955,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         /^\d+$/.test(String(formProfile()?.options.keepaliveInterval ?? '').trim())
           ? undefined
           : t('connections.editor.keepaliveInvalid', 'Keepalive interval must be a whole number'),
-      keepaliveCountMax: () =>
-        String(formProfile()?.options.keepaliveCountMax ?? '').trim() === '' ||
-        /^\d+$/.test(String(formProfile()?.options.keepaliveCountMax ?? '').trim())
-          ? undefined
-          : t(
-              'connections.editor.keepaliveCountInvalid',
-              'Keepalive count max must be a whole number',
-            ),
       readyTimeout: () =>
         String(formProfile()?.options.readyTimeout ?? '').trim() === '' ||
         /^\d+$/.test(String(formProfile()?.options.readyTimeout ?? '').trim())
@@ -2798,23 +2778,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         profileValidation.answer('keepaliveInterval', v)
                       }}
                       onBlur={() => profileValidation.touch('keepaliveInterval')}
-                    />,
-                  )}
-                  {fieldRow(
-                    'keepaliveCountMax',
-                    <TextField
-                      id="profile-keepalive-count"
-                      label={t('connections.editor.fieldKeepaliveCountMax', 'Keepalive count max')}
-                      value={fvNum('keepaliveCountMax')}
-                      type="number"
-                      min={0}
-                      error={profileValidation.error('keepaliveCountMax')}
-                      onInput={(v) => {
-                        const n = parseInt(v, 10)
-                        setOption('keepaliveCountMax', isNaN(n) ? 0 : n)
-                        profileValidation.answer('keepaliveCountMax', v)
-                      }}
-                      onBlur={() => profileValidation.touch('keepaliveCountMax')}
                     />,
                   )}
                   {fieldRow(

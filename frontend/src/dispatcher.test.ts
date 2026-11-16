@@ -206,6 +206,27 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('pane reconnect registration', () => {
+  it('answers registration without a session-open result', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const pending = d.call('pane.reconnect', { paneId: 'pane-1', connectionEpoch: 7 })
+    const request = socket()
+      .requests()
+      .find((r) => r.method === 'pane.reconnect')
+    expect(request).toBeDefined()
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: request?.id,
+      result: { paneId: 'pane-1', registered: true },
+    })
+    const result = await pending
+    expect(result.registered).toBe(true)
+    expect(result.paneId).toBe('pane-1')
+    expect(result).not.toHaveProperty('sessionId')
+  })
+})
+
 describe('the invocation origin on the wire', () => {
   // ADR-8eej3e66 §2: origin travels with the call, and the backend reads it
   // to decide the bulkhead class. Absent, the backend treats a call as

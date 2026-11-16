@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.connection-state.schema.json",
+  "title": "HelperSSHConnectionStateEvent",
+  "description": "One observation of an ssh connection, sent to the coordinator that opened the pane riding it (nocx-oalo1.5.3, repaired by nocx-oalo1.5.3's review finding 6). It is a NOTIFICATION because a connection's state is revised for as long as the connection exists, in both directions, and there is no request to answer. `seq` orders observations of one connection WITHIN one helper instance; the coordinator fences it on the hello-ok instance id, because a connection id is a destination digest and outlives a helper replacement while sequences restart at 1. The shape is a oneOf per state, like the renderer's own pane.connection: each branch requires the fields its state makes true (a stage while opening, a person while waiting, a cause when failed, ended or reconnecting, an attempt while reconnecting) and forbids every field that state cannot own. A flat shape would admit `connected` with a stage and let a helper payload that satisfies this contract produce a renderer payload its stricter contract forbids. `plainShells` and the measurement (roundTripMs/slow) are optional on every state, because they are counts and measurements the supervisor carries beside the state.",
+  "oneOf": [
+    {
+      "description": "A dial in progress, at one of its stages.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs", "stage"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "opening"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "stage": {
+          "description": "Where an opening is: resolve, tcp, ssh-version, key-exchange, sign-in, shell. REQUIRED while opening and forbidden on every other state — a stage on a connected connection is a fact that cannot exist.",
+          "type": "string",
+          "enum": ["resolve", "tcp", "ssh-version", "key-exchange", "sign-in", "shell"]
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "A step that cannot continue without a person, and the no-progress clock stops here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs", "person"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "waiting_person"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "person": {
+          "description": "What a waiting_person state waits for. REQUIRED while waiting and forbidden on every other state. key-signature is an unanswered agent sign call, which cannot be told from a slow agent.",
+          "type": "string",
+          "enum": [
+            "host-key",
+            "helper-consent",
+            "vault-unlock",
+            "passphrase",
+            "password",
+            "second-factor",
+            "key-signature"
+          ]
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "A usable connection, signed in and answering.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "connected"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "A connection that has not answered and has not been shown to be gone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "stalled"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "lookAnsweredAt": {
+          "description": "When a look-only dial was answered during the current stall, RFC3339 in UTC. Only a stalled state may carry it: a look is evidence about the outage in progress.",
+          "type": "string"
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "A connection whose transport ended while somebody still held it. The cause decides whether the backend retries by itself.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs", "attempt", "cause"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "reconnecting"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempt": {
+          "description": "How many attempts a reconnecting connection has made since it last worked. REQUIRED while reconnecting and forbidden elsewhere.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "cause": {
+          "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
+          "type": "string",
+          "enum": ["lost-link", "silence"]
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "The far side refused in a way no retry changes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs", "cause"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "failed"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cause": {
+          "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
+          "type": "string",
+          "enum": ["host-key-changed", "auth-rejected", "no-auth-method"]
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "description": "The rest state: nobody holds the connection, or the policy ended it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectionId", "seq", "state", "stateMs", "cause"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "const": "ended"
+        },
+        "connectionId": {
+          "description": "The supervisor's connection, the same value the `connection` op answered for the destination. A destination digest: it survives a helper replacement, which is why the sequence below is fenced by the source instance the coordinator stamps on delivery.",
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "description": "Monotonic per connection for the life of ONE helper instance's supervisor. A receiver drops anything not greater than the last sequence it applied, and resets that sequence when the helper instance changes; that pair is how a late observation of an older moment is refused without refusing a replacement's first one.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "stateMs": {
+          "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cause": {
+          "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
+          "type": "string",
+          "enum": ["lost-link", "released", "silence", "tainted"]
+        },
+        "plainShells": {
+          "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "roundTripMs": {
+          "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "slow": {
+          "description": "Whether the backend GRADES that measurement slow. Sent rather than left to a reader to threshold, because the grade has hysteresis.",
+          "type": "boolean"
+        }
+      }
+    }
+  ]
+}

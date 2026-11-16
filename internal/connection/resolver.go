@@ -98,7 +98,7 @@ func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, secre
 //   - SecretStore + the bound secret references wired for late-bound
 //     password/key/passphrase resolution (ADR-0017 §1)
 //   - Jump host fields resolved recursively (with cycle detection)
-//   - KeepaliveInterval/KeepaliveCountMax/ReadyTimeout/AgentForward from the
+//   - KeepaliveInterval/ReadyTimeout/AgentForward from the
 //     effective profile
 //   - AuthorizedEndpoint from the profile's Host, resolved through
 //     ~/.ssh/config to the canonical hostname (not the alias). The secret is
@@ -134,14 +134,13 @@ func (r *Resolver) findProfile(id string) (profile.SSHProfile, error) {
 	return profile.SSHProfile{}, fmt.Errorf("profile %s: %w", id, ErrProfileNotFound)
 }
 
-// Keepalive defaults applied when a profile names none. Thirty seconds is
-// quiet enough to be invisible on a healthy link; three consecutive misses
-// before closing keeps a single dropped probe on a congested network from
-// tearing down a working session.
-const (
-	defaultKeepaliveInterval = 30 * time.Second
-	defaultKeepaliveCountMax = 3
-)
+// There is no keepalive default HERE, and that is deliberate (design §5.3).
+// The cadence belongs to the connection's one prober, which lives in the
+// helper's supervisor, and its default is that policy's (15 s). A profile that
+// names no interval leaves ConnectConfig.KeepaliveInterval zero — "no
+// opinion" — and the prober answers with its own default; substituting a
+// number here would be a second default, and the helper cannot tell a
+// substituted one from a person's.
 
 // buildConfig constructs a ConnectConfig from a profile, handling credential
 // resolution, effective profile inheritance, and jump host recursion.
@@ -170,17 +169,12 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// the NAT or firewall that drops packets and sends no RST. Nothing else
 	// in the stack can: a write into that connection simply never returns,
 	// and the session's write queue can only report that it is stuck, not
-	// end it. So a profile that asks for no keepalive gets one anyway
-	// (nocx-o2le); leaving it off is choosing a tab that hangs forever.
+	// end it. So a profile that names no interval still gets probed: ZERO
+	// here means "no opinion", and the connection manager's own default
+	// applies (nocx-o2le's promise, now kept by the party that holds the
+	// prober — design §5.3, "a zero never means do not probe").
 	if eff.ResolvedOptions.KeepaliveInterval > 0 {
 		cfg.KeepaliveInterval = time.Duration(eff.ResolvedOptions.KeepaliveInterval) * time.Millisecond
-	} else {
-		cfg.KeepaliveInterval = defaultKeepaliveInterval
-	}
-	if eff.ResolvedOptions.KeepaliveCountMax > 0 {
-		cfg.KeepaliveCountMax = eff.ResolvedOptions.KeepaliveCountMax
-	} else {
-		cfg.KeepaliveCountMax = defaultKeepaliveCountMax
 	}
 	if eff.ResolvedOptions.ReadyTimeout > 0 {
 		cfg.ReadyTimeout = time.Duration(eff.ResolvedOptions.ReadyTimeout) * time.Millisecond

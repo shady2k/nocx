@@ -1,0 +1,94 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/pane.opened.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * An owned replacement open answer. Queued before any session frames.
+ */
+export interface PaneOpened {
+  paneId: string
+  generation: number
+  open: Open
+}
+/**
+ * Result of the open JSON-RPC method: a session is created and acknowledged (AD-7 — the server assigns the authoritative session id, so the id is minted by the backend, never the renderer). cwd is the session's starting directory, the tab's name until a program sets a title. instanceId + sessionEpoch (nocx-3oupk) name the session's incarnation: the renderer learns them here and compares every later observation of this session against them, so a record or message from a previous backend instance is told from this one. shellIntegrationReason is deliberately NOT here (nocx-dvql): it could only answer at open time, and the two integration failures that matter most arrive later — a handshake that expires ten seconds in, and a channel lost mid-session. That question is answered by the session.integrationChanged notification, as a state the backend keeps revising, and keeping a second answer in this ack is the defect AD-8 names.
+ */
+export interface Open {
+  /**
+   * Backend-assigned session id (AD-7).
+   */
+  sessionId: string
+  /**
+   * The backend instance that minted this session (AD-7 — server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. Together with sessionEpoch it names this session's incarnation — a restored record or a late message naming the same sessionId from another instance (or an earlier epoch of this one) is a different incarnation and must not be applied to this session.
+   */
+  instanceId: string
+  /**
+   * This session's epoch within its backend instance: minted by the backend per session, monotonic and never reused (the rule internal/lifecycle states for its own epochs, decision 8). Distinguishes a later session that reuses a sessionId from the incarnation a record names, even within one instance. Named sessionEpoch to stand apart from the lifecycle domain epoch the renderer already sees on lifecycle.changed.
+   */
+  sessionEpoch: number
+  /**
+   * The workspace this session belongs to (nocx-fraus). NEVER empty and never absent: a tab is always in exactly one workspace, and there is no null (.internal/specs/2026-08-15-workspaces-ux-design.md §4.2). The open REQUEST may omit a workspace — the renderer has no name for the default because the default never renders — and the backend registry then supplies it, which is why this result field is required while the request field is not. It CARRIES NO BEHAVIOUR: nothing reads authority, addressability or reachability from it, the fence that later consults membership is a separate epic (§5), and §5.5 forbids any surface before that epic from describing a workspace as safe, isolated or contained.
+   */
+  workspaceId: string
+  /**
+   * Starting working directory of the session's shell, with the home directory abbreviated to ~.
+   */
+  cwd: string
+  /**
+   * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. auto (the default — ADR-0033) means the user has not answered: it wraps and installs the scripts exactly as script does (N3), and additionally permits the helper to be OFFERED where a surface reaches for it (D8). script is that same answer given explicitly, and is never upgraded. raw alone adds nothing. helper is the explicit choice of the deployed binary, and integrates as well — the tiers are additive, so allowing the binary never withholds the scripts (§5.2). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.
+   */
+  desiredMode: 'auto' | 'raw' | 'script' | 'helper'
+  /**
+   * The geometry the BACKEND decided this session runs at (nocx-eidfb.1). The open params carry {cols, rows, xpixel, ypixel} as the client's MEASUREMENT — only a webview knows its own font metrics and pane geometry — and this carries what was done with it, so a renderer learns the size its session took rather than assuming its own report was adopted. NEVER absent and never zero: a session with no client attached holds a named default (80x24), which is the state this field exists to make expressible — before it, a session whose window had gone away had no size at all. The channel is created at this size and never spawned-then-resized (AD-1's resize contract is unchanged; what moved is who chose the number). Which client's measurement it took is decided in one place: the client that attached LAST is the active one and the shared channel follows it (nocx-eidfb.2), so a session handed from one window to another runs at the geometry of the window someone is actually looking at, and returns to the default when the last of them detaches. It is the SESSION's size, not the window's: rendering at it rather than at the window's own geometry is deliberately not implied here (nocx-eidfb.3).
+   */
+  effectiveSize: {
+    /**
+     * Columns in the session's grid. At least 1 — a session never runs at zero columns, because the no-client case is the named default rather than the absence of a size.
+     */
+    cols: number
+    /**
+     * Rows in the session's grid. At least 1, for the same reason as cols.
+     */
+    rows: number
+    /**
+     * Width of the grid in pixels, or 0 when the client reported no pixel geometry. Zero is meaningful here and is not the absence of a size: the cell grid is what a channel is created at, and every client in this repo sends 0 for both pixel fields today.
+     */
+    xpixel: number
+    /**
+     * Height of the grid in pixels, or 0 — see xpixel.
+     */
+    ypixel: number
+  }
+  /**
+   * The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make "this session has no parent" indistinguishable from "this backend does not say". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says "A created B" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).
+   */
+  parent: {
+    /**
+     * The opener's session id.
+     */
+    sessionId: string
+    /**
+     * The backend instance that minted the opener. Equal to this session's own instanceId for every edge the backend will admit — a claim naming another instance is refused, because a record out of a previous backend can never resolve to a session here.
+     */
+    instanceId: string
+    /**
+     * The opener's epoch within that instance: which incarnation of that session id created this one. A later session reusing the id is a different incarnation and is not this parent.
+     */
+    sessionEpoch: number
+  } | null
+  /**
+   * The epoch this pane's controller must present with its intents (nocx-zg3k3.3.1), read from the helper that holds the pane before this ack is built. It is what makes ordinary input possible at all: session.intent refuses an intent presented under any other epoch, and refuses one presented under none, writing zero bytes either way. It rides the ack that creates the session rather than a notification, because a notification would arrive after the person's first key. Absent when nothing could answer — no helper holds the pane, or none reports an epoch — which is a state the wire admits rather than a number to invent: the renderer then presents none, is refused with the epoch in force, and the refusal names what to present next (contracts/session.intent.schema.json's accessEpoch).
+   */
+  accessEpoch?: number
+  /**
+   * Whether this open has just entered the session into the integration axis in the `starting` state, which guarantees a session.integrationChanged notification follows this ack (nocx-ui8q6.6). This is NOT the answer nocx-dvql removed from this ack: it never carries integrated, conventional or a reason — only whether a fact is coming at all — and it cannot go stale the way that field could, because whether a session enters the axis at `starting` is decided once, synchronously, before this ack is built, and is never revised afterward (a later transition is what the notification is for, not this field). False covers two different sessions on purpose: one that never asked for integration (registerOpenedIntegration never ran for it, and nothing is ever coming — absence is conventional by design) and one already resolved to conventional at open (a fact IS coming, moments after this ack, but nothing needs to wait for it — a renderer's grid is held only for `starting`, never for an outcome already known). Before this field, the interval between this ack and the first session.integrationChanged notification had no fact distinguishing 'not yet answered' from 'never will be': both read as the same absence, and a pane could show a live terminal grid for the one frame in which a `starting` session's shell had not yet proved itself either way.
+   */
+  awaitsIntegration: boolean
+}

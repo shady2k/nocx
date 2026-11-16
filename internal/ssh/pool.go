@@ -28,37 +28,23 @@ type sshClientConn interface {
 // is idempotent (sync.Once) so a target whose session errors and is then
 // released by tab-close cannot double-release the bastion.
 type pooledSSHConn struct {
-	client    sshClientConn
+	client sshClientConn
+	// barrier is the connection manager's answer to "has the far side
+	// answered one request", for the release barrier (PooledSpec.Barrier).
+	barrier   func(ctx context.Context) error
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
 
-	// mu guards stopKeepalive, which is written after construction (see
-	// setKeepaliveStop) and read by Close from another goroutine.
-	mu sync.Mutex
-	// stopKeepalive cancels the keepalive goroutine when non-nil. Set by
-	// the dial factory when KeepaliveInterval > 0; called from Close before
-	// closing the transport so the ticker stops before the connection goes
-	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
-	// disabled or this is a test fake.
-	stopKeepalive func()
-	// keepaliveArmOnce guards armKeepalive (nocx-y6fh7 item 6): AD-4 shares
-	// one connection across every caller for the same destination+identity,
-	// and dial order among them is NOT the caller that wants a prober — a
-	// pane's own shell channel and an unrelated lease (a probe, an sftp
-	// publish) race for the same pool entry, and measurement found the
-	// publish consistently winning the race for an INTEGRATED pane (it runs
-	// before the spawn by design, nocx-50w7p.21), silently discarding
-	// keepalive settings that were only ever captured at dial time. Arming
-	// is therefore a SEPARATE act any holder may request, idempotent via
-	// this guard, so whichever caller actually wants a prober gets to start
-	// it — a caller that never asks (interval zero) never fires it at all,
-	// which is what lets the one that does win regardless of who dialed.
-	keepaliveArmOnce sync.Once
-	// keepaliveLost records that THIS connection's own prober is the party
-	// closing it, set BEFORE the close so a sibling reading it back through
-	// PooledConn.TaintReason (ReasonKeepaliveLost) never observes the close
-	// without the reason (nocx-y6fh7 item 6, round 3).
-	keepaliveLost atomic.Bool
+	// ended is set by the dial's own connection marker the instant the library
+	// closes the socket — inside x/crypto's teardown, before Wait returns. It
+	// is what makes "this transport has ended" answerable synchronously, so
+	// admission cannot hand a dead connection out in the window before any
+	// watcher goroutine runs (nocx-oalo1.4.6, review finding 5).
+	ended *atomic.Bool
+	// tainted records that the pool has retired this connection from new
+	// admission (Taint). The supervisor honours it: a connection the pool will
+	// not hand out is not one it hands out either.
+	tainted atomic.Bool
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -85,12 +71,6 @@ func (c *pooledSSHConn) Close() error {
 		// transport that still reads as live for the length of its own
 		// teardown is exactly the window a new tab falls into.
 		c.dead.Store(true)
-		c.mu.Lock()
-		stop := c.stopKeepalive
-		c.mu.Unlock()
-		if stop != nil {
-			stop()
-		}
 		err = c.client.Close()
 		if c.release != nil {
 			c.release()
@@ -218,78 +198,53 @@ func sessionRefused(err error) bool {
 // closed an ordered fact rather than a race — the wait between the two attempts
 // newSession makes (see it for the measurement and why this rather than a
 // delay).
+//
+// THE CONNECTION'S ONE PROBER ANSWERS IT (design §5.3; review finding 1). This
+// call used to send its own reply-wanting keepalive, which made the barrier a
+// second prober: it queued behind the supervisor's parked probe on the mux's
+// send lock, accumulated one parked request per refusal, and closed the whole
+// connection after its own ten seconds — without the supervisor's look grace or
+// its silence budget. Now it asks the connection manager, which reuses the
+// probe already parked (it is the evidence) or starts one, and answers with the
+// far side's own ordering. A barrier that gets no answer fails THIS channel's
+// open and leaves the connection alone: whether silence ends a connection is
+// the one closing policy's decision, never this call's.
 func (c *pooledSSHConn) awaitSessionRelease(gclient *gossh.Client) error {
-	// ANY answer counts, including the SSH_MSG_REQUEST_FAILURE an OpenSSH
-	// server sends for a request type it does not implement: the verdict is
-	// that the server ANSWERED, which is a completed pass of its loop, not the
-	// payload it carried.
-	finished, err := sendProbe(gclient, sessionReleaseBudget)
+	_ = gclient
+	if c.barrier == nil {
+		// A connection dialled outside the helper's manager (a test fake, a
+		// direct dial): there is no prober to ask, and the one thing this call
+		// must not do is invent one.
+		return errNoBarrier
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionReleaseBudget)
+	defer cancel()
+	err := c.barrier(ctx)
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, errProbeSilent) {
-		return err
-	}
-	// A peer that answered NOTHING inside the budget is not one to ask for a
-	// session: gossh.Client.NewSession takes no context and no deadline, so the
-	// request would park with nothing left to end it. The answer is the one the
-	// keepalive prober already gives this state, for the same measured reason —
-	// closing the transport is the only thing that unparks the call — and the
-	// wait that follows is bounded by that close rather than by the budget
-	// (sendProbe's own comment: the probe stays parked until the connection
-	// goes away, and a caller that returns without closing leaks the goroutine
-	// instead).
-	_ = c.Close()
-	<-finished
 	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
 }
 
-// armKeepalive starts this connection's prober at most once, with whichever
-// caller's (interval, countMax, observe) reaches here first — see
-// keepaliveArmOnce's own comment for why "first" is a caller that actually
-// asks, not a caller that happened to dial. Interval <= 0 is a caller that
-// wants no prober and must not consume the one slot a connection has: it is
-// checked BEFORE the Once fires, so a probe or a publish leasing the same
-// destination ahead of a pane's own shell channel leaves the slot open for
-// whichever caller's interval is the first non-zero one.
-func (c *pooledSSHConn) armKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
-	if interval <= 0 {
-		return
-	}
-	c.keepaliveArmOnce.Do(func() {
-		stop, _ := startKeepalive(c, interval, countMax, observe)
-		c.setKeepaliveStop(stop)
-	})
-}
+// errNoBarrier is what a connection with no prober to ask answers the release
+// barrier with: it fails the channel's open rather than sending a second
+// keepalive, which is the behaviour the one-prober rule requires.
+var errNoBarrier = errors.New("ssh: this connection has no prober to ask")
 
-// markKeepaliveLost records that this connection's own prober is the one
-// closing it, before it does — the same "reason before close" order
-// CloseTainted keeps for its own cap. It is unexported because only the
-// prober started against this connection may set it: nothing else may claim
-// a connection died on that authority.
-func (c *pooledSSHConn) markKeepaliveLost() { c.keepaliveLost.Store(true) }
-
-// KeepaliveLost reports whether this connection's own keepalive prober is
-// the one that closed it (nocx-y6fh7 item 6, round 3), read back by
-// PooledConn.TaintReason.
-func (c *pooledSSHConn) KeepaliveLost() bool { return c.keepaliveLost.Load() }
-
-// setKeepaliveStop arms the prober's cancel after the connection exists. The
-// prober is started with this connection as the thing it closes when it gives
-// up, so the two are constructed in that order and the field is written after
-// the goroutine is already running — under the mutex, because Close reads it
-// from whichever goroutine gets there first.
-func (c *pooledSSHConn) setKeepaliveStop(stop func()) {
-	c.mu.Lock()
-	c.stopKeepalive = stop
-	c.mu.Unlock()
-}
+// Tainted reports whether the pool has retired this connection from new
+// admission (a detached writer's cap, a credential rotation).
+func (c *pooledSSHConn) Tainted() bool { return c.tainted.Load() }
 
 // isDead reports whether this connection has been closed. It is a MARK, never
 // a probe: asking the far end would put a network round trip under the pool's
 // mutex, which is the shape of defect the keepalive prober was just cured of
 // (ssh_keepalive.go).
-func (c *pooledSSHConn) isDead() bool { return c.dead.Load() }
+func (c *pooledSSHConn) isDead() bool {
+	if c.dead.Load() {
+		return true
+	}
+	return c.ended != nil && c.ended.Load()
+}
 
 // deadConn is the part of a pooled connection the pool consults before
 // handing it to a second caller. Only *pooledSSHConn implements it; a test
@@ -339,21 +294,25 @@ type poolKey struct {
 	port      int
 	user      string
 	identity  string // SecretID, public-key SHA256 fingerprint, or empty for agent/prompt auth
-	jumpRoute string // resolved jump identity (see jumpRouteKey), "" for direct
+	jumpRoute string // the rendered route (see routeComponent), "" for direct
 }
 
-// jumpRouteKey renders the jump route into a string component of poolKey.
-// It mirrors poolKey's own identity fields for the bastion hop, so a target
-// reached through two bastions (or the same bastion with two jump
-// credentials) gets two entries. A hop is itself pooled under its own
-// poolKey (ssh_pooled.go's acquireHop), so this string is the deduplication
-// that keeps a target-through-a-route entry separate from the same target
-// dialed directly or through a different route.
-func (k poolKey) jumpRouteKey() string {
-	if k.host == "" {
+// routeComponent renders ONE hop into the route component of a connection key:
+// its own identity, the same sentence a key's String uses with the route left
+// out. It is the one spelling — a route's component is these joined by ">"
+// (ssh_pooled.go's routeKeyOf), and a hop's own key uses it too — so the
+// rendering is never rewritten wherever a hop is named.
+//
+// The values are the hop's own identity fields, so a target reached through two
+// bastions (or the same bastion with two jump credentials) gets two keys. A hop
+// is itself pooled under its own key (ssh_pooled.go's acquireHop), so this
+// string is the deduplication that keeps a target-through-a-route entry
+// separate from the same target dialled directly or through a different route.
+func routeComponent(host string, port int, user, identity string) string {
+	if host == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s@%s:%d/%s", k.user, k.host, k.port, k.identity)
+	return fmt.Sprintf("%s@%s:%d/%s", user, host, port, identity)
 }
 
 // refCount tracks how many tabs (channels) reference a pooled connection.
@@ -440,16 +399,6 @@ const maxDetachedWriters = 8
 // sshsvc.ShellChannel via *PooledConn) use, so there is exactly one spelling
 // of this cause (AGENTS.md, "Look for the existing answer").
 const ReasonDetachedWriterCap = "detached_writer_cap"
-
-// ReasonKeepaliveLost is why a sibling channel's session ends when this
-// connection's OWN keepalive prober gave up and closed it (nocx-y6fh7 item
-// 6, round 3) — a connection loss the prober itself declared, read back the
-// same way ReasonDetachedWriterCap is, through PooledConn.TaintReason, so
-// every session sharing the connection reports the SAME cause: the prober
-// watches the connection, not any one session's channel, and no single
-// channel's own Wait() could otherwise learn why the transport under it
-// went away.
-const ReasonKeepaliveLost = "keepalive_lost"
 
 // poolEntry holds a connection and its ref count.
 type poolEntry struct {
@@ -650,6 +599,9 @@ func (p *ConnPool) Release(h *poolHandle) {
 func (p *ConnPool) Taint(h *poolHandle) {
 	if h == nil || h.pool != p {
 		return
+	}
+	if conn, ok := h.conn.(*pooledSSHConn); ok {
+		conn.tainted.Store(true)
 	}
 	p.mu.Lock()
 	h.ref.detachCount++

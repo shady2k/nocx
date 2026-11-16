@@ -689,11 +689,18 @@ type SSHSpawnParams struct {
 	// ssh-reconnect.spec.ts's silent-death and slow-host journeys had nothing
 	// left probing at all.
 	KeepaliveIntervalMS int64 `json:"keepaliveIntervalMs,omitempty"`
-	// KeepaliveCountMax is the number of consecutive keepalive failures this
-	// helper tolerates before it gives up on the channel, on the same terms
-	// ssh.ConnectConfig.KeepaliveCountMax already states for the coordinator's
-	// own (non-helper) dials. Meaningless when KeepaliveIntervalMS is zero.
-	KeepaliveCountMax int `json:"keepaliveCountMax,omitempty"`
+	// Reconnect asks this helper to CLOSE the destination's existing connection
+	// before it opens the shell (design §5.3: "Reconnect closes the socket
+	// first"). A stalled connection is still pooled, so without this the new
+	// shell would join it and park behind the dead flow; with it the acquire
+	// that follows dials afresh.
+	//
+	// It is a fact about THIS REQUEST and not about the destination: the same
+	// destination opened normally must join whatever connection exists, and
+	// only a pane being reconnected is entitled to end the one that is there —
+	// including the shells other panes hold on it, which is why the pane's own
+	// offer says how many end before a person presses it.
+	Reconnect bool `json:"reconnect,omitempty"`
 	// ScrollbackLines is the session's scrollback budget in physical lines,
 	// on exactly the terms SpawnParams states (nocx-zg3k3.10.1): a pointer
 	// because zero is a value — a session that keeps no history — and nil
@@ -1131,23 +1138,30 @@ type WindowSpan struct {
 // completion or that closed with no cause this helper can name.
 //
 // It exists because "Code == -1, Signal == 0" is one shape with two
-// different meanings (nocx-y6fh7 item 6, round 3): the far side hanging up
-// mid-session with no status to report (TestAChannelLostMidSessionEndsThe
-// SessionWithAStatus, which stays exactly as it is), and THIS helper's own
-// keepalive prober giving up and closing the connection itself. Both leave
-// no process status to collect, so only the helper — the party running the
-// prober since ADR-0057 — can tell them apart, and it does so by naming the
-// cause rather than by the coordinator guessing from a code that is
-// identical either way.
+// different meanings: the far side hanging up mid-session with no status to
+// report (TestAChannelLostMidSessionEndsTheSessionWithAStatus, which stays
+// exactly as it is), and a CONNECTION that ended under the session it
+// carried. Both leave no process status to collect, so only the helper — the
+// party holding the connection since ADR-0057 — can tell them apart, and it
+// does so by naming the cause rather than by the coordinator guessing from a
+// code that is identical either way.
 type SessionExitCause string
 
 const (
-	// ExitCauseKeepaliveLost is a connection this helper's OWN prober gave
-	// up on: it stopped believing the far end was there and closed the
-	// transport itself. This is CONNECTION LOSS, not a clean process exit —
-	// the coordinator's ExitOutcome maps it to Interrupted so the pane is
-	// offered the way back, the same offer any other channel loss gets.
-	ExitCauseKeepaliveLost SessionExitCause = "keepalive-lost"
+	// ExitCauseLinkLost is a session whose stream ended because the
+	// CONNECTION under it ended — a transport error, or the closing policy
+	// giving up on it. This is CONNECTION LOSS, not a clean process exit: the
+	// far command may well be running still, and a code of -1 is not a status
+	// the host ever said. The coordinator's ExitOutcome maps it to
+	// Interrupted, which is what keeps the tab, its scrollback and the offer
+	// to open a new shell.
+	//
+	// IT USED TO BE ExitCauseKeepaliveLost: the verdict belonged to a
+	// keepalive prober this helper armed for each shell. Since stage 2 the
+	// prober belongs to the connection's supervisor (design §5.3), so the
+	// cause is named for the fact the policy decides — the link is gone — and
+	// not for the mechanism that noticed (nocx-oalo1.4.3).
+	ExitCauseLinkLost SessionExitCause = "link-lost"
 )
 
 // SessionExitStatus is how a session's process ended.
@@ -1178,11 +1192,12 @@ type SessionExit struct {
 // It names the session rather than the destination the way SessionExit does,
 // for the same reason: this is a fact about a PROCESS this generation is
 // answerable for, not about a host in the abstract. A helper that shares one
-// pooled connection across several sessions (AD-4) reports against whichever
-// session's own spawn armed the prober; nothing here claims the fact for
-// every session on that connection, which is the coordinator's own concern
-// to fan out if it chooses to (session.Reg.ObserveHost already does, keyed
-// by host, for the sessions it is told about).
+// pooled connection across several sessions (AD-4) reports against each
+// session that rides it — since nocx-oalo1.4.3 every ssh shell registers its
+// own observer on the connection, so a finding reaches every pane on that
+// connection and, deliberately, no other: the coordinator applies it to the
+// session it names (session.Reg.ObserveSession), never fanning out by host
+// string (nocx-oalo1.4.4).
 type SessionLiveness struct {
 	Session HostSessionID `json:"session"`
 	// Responsive is this round's verdict: the far end answered a keepalive

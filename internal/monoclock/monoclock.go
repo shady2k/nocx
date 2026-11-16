@@ -32,3 +32,20 @@ type Nanos int64
 // mach_continuous_time domain, per-platform in monoclock_linux.go and
 // monoclock_darwin.go). It never calls time.Now() — see the package doc.
 func Now() Nanos { return nowRaw() }
+
+// Readings is one pair of readings from the two kernel clocks a sleep detector
+// needs: Awake stops while the machine is suspended, Continuous does not. The
+// difference between their deltas IS the time the machine spent asleep, which
+// is the one thing a process frozen with the rest of userspace can still learn
+// about a suspend (wakesource, nocx-oalo1.4.5).
+//
+// Both readings come from the same kernel, per-platform in readings_linux.go
+// and readings_darwin.go. They are comparable only to another pair from the
+// same machine, and only as deltas — the same restriction Now's readings carry.
+type Readings struct {
+	Awake      Nanos
+	Continuous Nanos
+}
+
+// Read answers the pair on this platform.
+func Read() Readings { return readClocks() }

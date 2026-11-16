@@ -56,7 +56,6 @@ export interface SSHProfileOptions {
   // exclusive.
   keyPath?: string
   keepaliveInterval?: number
-  keepaliveCountMax?: number
   readyTimeout?: number
   jumpHost?: string // Profile name or ID of the jump server
   jumpPort?: number // Jump server port

@@ -380,8 +380,8 @@ test.describe('connection overlay survives backend loss', () => {
     // IS gone must still be offered Reconnect. What holds this pane's shell is
     // the helper daemon under this home — it is detached by design (D1) and
     // outlives the coordinator — so stopping it ends the session for real:
-    // the coordinator that then starts has nothing to re-adopt, the page's
-    // re-claim finds no live entry, and only then is the pane marked lost.
+    // the coordinator that then starts has nothing to re-adopt and answers
+    // authoritatively that the old session ended before offering a new open.
     // (The same offer, for a host loss rather than a local one, is what
     // e2e/ssh-reconnect.spec.ts asserts and clicks.)
     await endHelperDaemonsUnder(backend.isolatedHome)
@@ -392,7 +392,34 @@ test.describe('connection overlay survives backend loss', () => {
     armed = true
     await overlay(page).getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(overlay(page)).toHaveAttribute('data-state', 'online')
-    await expect(page.getByRole('button', { name: 'Reconnect', exact: true })).toBeVisible()
+    const reconnect = page.getByRole('button', { name: 'Reconnect', exact: true })
+    await expect(reconnect).toBeVisible()
+
+    // This backend has no binding to reconnect: the offer must open a fresh
+    // shell for the same pane, not try to revive the session that ended.
+    await reconnect.click()
+    await expect(reconnect).toHaveCount(0)
+    await expect
+      .poll(async () => {
+        const { sessions } = await controlCall<{ sessions: LiveSession[] }>(
+          current,
+          'sessions.live',
+          {},
+        )
+        return sessions.map((live) => ({
+          paneId: live.paneId,
+          fresh: live.sessionId !== sessionId,
+        }))
+      })
+      .toEqual([{ paneId, fresh: true }])
+    await readyForInput(page)
+    await page.keyboard.type("printf 'NOCX_RESTART_'$(printf OPENED)'\\n'")
+    await page.keyboard.press('Enter')
+    const reopenedCommand = page
+      .locator('.pane.active .cmd-block[data-block-kind="command"]')
+      .filter({ hasText: 'NOCX_RESTART_' })
+      .last()
+    await expect(reopenedCommand.locator('.cmd-output')).toContainText('NOCX_RESTART_OPENED')
 
     await expect(page.locator('#sidebar > .ui-sidebar-view')).toHaveCount(1)
     await expect(page.locator('dialog[open]')).toHaveCount(0)

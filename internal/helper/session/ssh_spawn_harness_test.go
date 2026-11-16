@@ -47,6 +47,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -121,14 +122,6 @@ type sshFixture struct {
 	// dropExit makes the next command's end close the channel with no
 	// exit-status request at all: the far side going away mid-session.
 	dropExit bool
-	// dropKeepalive makes serveGlobalRequests answer NOTHING to
-	// keepalive@openssh.com — true silence, rather than the default case's
-	// ordinary fast, explicit "false" (which x/crypto/ssh's SendRequest
-	// reports as a SUCCESSFUL round trip regardless of the reply's own
-	// boolean: sendProbe only inspects err, never the "ok" x/crypto/ssh
-	// itself hands back — nocx-y6fh7 item 6's own finding, needed to build a
-	// server this prober actually grades unresponsive at all).
-	dropKeepalive bool
 	// neverReadShellNum, when non-zero, names WHICH shell request (the Nth,
 	// counted from 1 against f.shells) this fixture never calls ch.Read for
 	// — a per-session selector, not a fixture-wide one, so a test can leave
@@ -157,6 +150,9 @@ type sshFixture struct {
 	// incoming connection to the request that created it.
 	tcpForwards  map[string]net.Listener
 	unixForwards map[string]net.Listener
+	// forwardOwner names the connection each listener was granted on, so a
+	// connection ending frees its own listeners and no others.
+	forwardOwner map[string]*gossh.ServerConn
 	// forwardGranted and forwardClosed wake on a listener the far host grants
 	// and withdraws, and grantedPorts carries the ports, so a test waits on the
 	// far host's own events rather than polling them.
@@ -252,7 +248,14 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	if err != nil {
 		return
 	}
-	defer func() { _ = sconn.Close() }()
+	defer func() {
+		// A CONNECTION ENDING FREES THE LISTENERS IT GREW. A real sshd drops a
+		// remote forward when the connection that asked for it goes away, and a
+		// pane that releases its transport (socket-first teardown) must not be
+		// reported as having left a listener on somebody else's machine.
+		f.closeForwardsOf(sconn)
+		_ = sconn.Close()
+	}()
 	f.mu.Lock()
 	f.conns++
 	f.mu.Unlock()
@@ -343,18 +346,6 @@ func (f *sshFixture) directTargetsSeen() []string {
 // wants to be the far side's process dials the port this grants.
 func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
-		if req.Type == "keepalive@openssh.com" {
-			f.mu.Lock()
-			silent := f.dropKeepalive
-			f.mu.Unlock()
-			if silent {
-				// Dropped, on purpose: no Reply at all. An explicit false
-				// (the default case below, for every OTHER unrecognised
-				// type) is still a completed round trip to sendProbe, which
-				// reads only err — this is the one way to make it time out.
-				continue
-			}
-		}
 		switch req.Type {
 		case "tcpip-forward":
 			var p struct {
@@ -372,7 +363,12 @@ func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *g
 			}
 			port := f.boundPort(ln)
 			f.mu.Lock()
-			f.tcpForwards[net.JoinHostPort(p.Addr, strconv.Itoa(port))] = ln
+			name := net.JoinHostPort(p.Addr, strconv.Itoa(port))
+			f.tcpForwards[name] = ln
+			if f.forwardOwner == nil {
+				f.forwardOwner = map[string]*gossh.ServerConn{}
+			}
+			f.forwardOwner[name] = sconn
 			f.mu.Unlock()
 			var reply []byte
 			if p.Port == 0 {
@@ -413,6 +409,10 @@ func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *g
 			}
 			f.mu.Lock()
 			f.unixForwards[p.SocketPath] = ln
+			if f.forwardOwner == nil {
+				f.forwardOwner = map[string]*gossh.ServerConn{}
+			}
+			f.forwardOwner[p.SocketPath] = sconn
 			f.mu.Unlock()
 			_ = req.Reply(true, nil)
 			go f.acceptForwardedUnix(sconn, ln, p.SocketPath)
@@ -460,6 +460,21 @@ func (f *sshFixture) closeAllForwards() {
 	}
 	for name := range f.unixForwards {
 		names = append(names, name)
+	}
+	f.mu.Unlock()
+	for _, name := range names {
+		f.closeForward(name)
+	}
+}
+
+// closeForwardsOf frees every listener the given connection was granted.
+func (f *sshFixture) closeForwardsOf(sconn *gossh.ServerConn) {
+	f.mu.Lock()
+	var names []string
+	for name, owner := range f.forwardOwner {
+		if owner == sconn {
+			names = append(names, name)
+		}
 	}
 	f.mu.Unlock()
 	for _, name := range names {
@@ -968,16 +983,6 @@ func (f *sshFixture) armsSilentEnd() {
 	f.mu.Unlock()
 }
 
-// silenceKeepalive makes this fixture answer NOTHING to
-// keepalive@openssh.com, so the prober's own budget times out
-// (errProbeSilent) instead of receiving the ordinary fast, explicit "false"
-// every other unrecognised global request gets (nocx-y6fh7 item 6).
-func (f *sshFixture) silenceKeepalive() {
-	f.mu.Lock()
-	f.dropKeepalive = true
-	f.mu.Unlock()
-}
-
 // shellsSeen and execsSeen are the two commands this fixture was asked to run,
 // in order: what the helper actually sent to the far host.
 func (f *sshFixture) shellsSeen() int {
@@ -1179,30 +1184,6 @@ func (w *exitWatcher) SendNotification(n proto.Notification) error {
 	return nil
 }
 
-// waitLiveness waits for the helper to report SOME liveness observation for
-// session and answers the first one seen — nocx-y6fh7 item 6's own proof
-// that the prober's finding actually crosses the wire, on the same idiom
-// waitExit already uses for the terminal half of the same fact.
-func (w *exitWatcher) waitLiveness(t *testing.T, session proto.HostSessionID) proto.SessionLiveness {
-	t.Helper()
-	deadline := time.After(paneWait)
-	for {
-		w.mu.Lock()
-		for _, l := range w.liveness {
-			if l.Session == session {
-				w.mu.Unlock()
-				return l
-			}
-		}
-		w.mu.Unlock()
-		select {
-		case <-w.livenessW:
-		case <-deadline:
-			t.Fatalf("the helper never reported liveness for session %s", session.Session)
-		}
-	}
-}
-
 // waitExit waits for the helper to report a session ending and answers the
 // status it reported.
 func (w *exitWatcher) waitExit(t *testing.T, session proto.HostSessionID) proto.SessionExit {
@@ -1351,7 +1332,7 @@ func newSSHStandFull(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSH
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	s.sshsvc = sshsvc.New(realClient, standLog())
+	s.sshsvc = sshsvc.New(sshconn.New(realClient, log.NewSlogAdapter(standLog())), standLog())
 	var sshSpawner session.SSHSpawner
 	if withSSHSpawner {
 		sshSpawner = session.NewSSHSpawner(s.sshsvc, standLog())

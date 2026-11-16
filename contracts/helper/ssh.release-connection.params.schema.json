@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.release-connection.params.schema.json",
+  "title": "HelperSSHReleaseConnectionParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId"],
+  "properties": {
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

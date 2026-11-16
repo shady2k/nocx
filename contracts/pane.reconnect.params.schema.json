@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/pane.reconnect.params.schema.json",
+  "title": "PaneReconnectParams",
+  "description": "Press Reconnect on one pane (design §5.3, §5.6; nocx-oalo1.5.4). It is ONE backend call because whether and how a pane may reconnect is a connection fact, and ADR-ba6xet1b gives those one owner. The epoch is the one that carried the offer: a press about any other observation is about a connection state the person is no longer looking at, and the backend refuses it rather than opening a shell for a state that has moved on. The backend also refuses when no offer stands — a healthy connection has no button, and a button that was withdrawn cannot be pressed by a stale frame.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "connectionEpoch"],
+  "properties": {
+    "paneId": {
+      "description": "The pane whose connection is reconnected. It is the renderer's own durable id, the same one pane.connection is keyed by, and it must be a pane this connection opened: a pane somebody else opened has no offer this caller could be pressing.",
+      "type": "string",
+      "minLength": 1
+    },
+    "connectionEpoch": {
+      "description": "The epoch from the pane.connection observation that offered the button. Monotonic per pane and minted at observation; a press carrying an older one is refused as stale.",
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

@@ -60,8 +60,9 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
-	"github.com/shady2k/nocx/internal/ssh"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // lifecycleBindHost is the far-side address the lifecycle listener is bound
@@ -121,8 +122,9 @@ type PaneSpec struct {
 // set before OpenPaneListeners returns except what the far side produces
 // later.
 type PaneListeners struct {
-	pool *ssh.PooledConn
+	pool *pooledConn
 	log  *slog.Logger
+	ctx  context.Context
 
 	lifecycleLn net.Listener
 	port        int
@@ -161,9 +163,10 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 	}
 
 	p := &PaneListeners{
+		ctx: context.WithoutCancel(ctx),
 		log: s.log,
 	}
-	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, false, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -183,15 +186,14 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 
 // openLifecycle asks the far side for the loopback listener and starts
 // accepting on it.
-func (p *PaneListeners) openLifecycle(pool *ssh.PooledConn) error {
+func (p *PaneListeners) openLifecycle(pool *pooledConn) error {
 	ln, err := sshdial.ListenRemoteTCP(pool.Client(), net.JoinHostPort(lifecycleBindHost, "0"))
 	if err != nil {
-		// The far side refused a listener, and there is no lifecycle channel
-		// without one. It is NOT degraded to a conventional session: the
-		// caller asked for an authenticated channel, and a launch carrying a
-		// port nobody listens on is a shell that blocks until its hello
-		// budget runs out.
-		return fmt.Errorf("the far side refused the lifecycle listener: %w", classifyChannelError(err))
+		// There is no lifecycle channel without a listener. It is NOT degraded
+		// to a conventional session: the caller asked for an authenticated
+		// channel, and a launch carrying a port nobody listens on is a shell
+		// that blocks until its hello budget runs out.
+		return lifecycleListenFailure(pool, err)
 	}
 	port, err := listenerPort(ln)
 	if err != nil {
@@ -206,6 +208,39 @@ func (p *PaneListeners) openLifecycle(pool *ssh.PooledConn) error {
 	p.lifecycleLn, p.port, p.carrier, p.sink = ln, port, carrier, sink
 	go p.acceptLifecycle()
 	return nil
+}
+
+// lifecycleListenFailure is what a pane is told when the far side would not give
+// it a listener, and the sentence it is told in is the fact the owner met on
+// 2026-11-13: "the far side refused the lifecycle listener: read tcp <local> ->
+// <host>:22: read: operation timed out" on every attempt on a saved host.
+//
+// Nothing refused anything. The connection the helper was holding had ENDED —
+// its transport's read failed once, and x/crypto answers every later request
+// with that stored error — and calling that a refusal sends a person to look at
+// a host that is healthy. So a refusal is decided by EVIDENCE a refusal leaves:
+// the `false` answer sshdial types, or a channel open the server rejected.
+// A transport failure is none of those, whatever its text, and the supervisor's
+// fact is used only to name the cause when it is already known — never to
+// decide that the far side refused.
+func lifecycleListenFailure(held *pooledConn, err error) error {
+	// THE ONLY REFUSAL is the far side answering `false`, which sshdial types
+	// (ErrForwardRefused). Everything else — a transport that ended, a write
+	// that failed on a socket somebody closed — is this side's connection
+	// failing, and the sentence says that instead.
+	if errors.Is(err, sshdial.ErrForwardRefused) {
+		return fmt.Errorf("the far side refused the lifecycle listener: %w", classifyChannelError(err))
+	}
+	classified := classifyChannelError(err)
+	if held.Lost() {
+		// The supervisor has already read the transport's end. It is a second
+		// signal and never the discriminator: x/crypto unparks a parked
+		// request a moment before its Wait returns, so a lost link can reach
+		// here with Lost() still false — and the sentence above is right in
+		// that case too. This branch only names the cause when it is known.
+		return fmt.Errorf("%w: %w", hostconn.ErrLinkLost, classified)
+	}
+	return fmt.Errorf("the lifecycle listener could not be opened: %w", classified)
 }
 
 // acceptLifecycle gives the first connection the far shell makes to the
@@ -259,14 +294,34 @@ func (p *PaneListeners) bridge(conn net.Conn) {
 			_ = p.sink.Close()
 		})
 	}
-	go func() {
-		_, _ = io.Copy(p.sink, conn)
+	copyDirection := func(dst io.Writer, src io.Reader, direction string) {
+		observed := &lifecycleCopyWriter{ctx: p.ctx, dst: dst, port: p.port, direction: direction}
+		n, err := io.Copy(observed, src)
+		nocxlog.From(p.ctx).Debug("lifecycle: ssh pane bridge copy ended",
+			"lifecycle_port", p.port, "direction", direction, "bytes_total", n, "error", err)
 		closeBoth()
-	}()
-	go func() {
-		_, _ = io.Copy(conn, p.sink)
-		closeBoth()
-	}()
+	}
+	go copyDirection(p.sink, conn, "shell_to_carrier")
+	go copyDirection(conn, p.sink, "carrier_to_shell")
+}
+
+// lifecycleCopyWriter counts completed downstream writes, not upstream reads.
+// That distinction keeps a parked write from looking like shell delivery.
+type lifecycleCopyWriter struct {
+	ctx       context.Context
+	dst       io.Writer
+	port      int
+	direction string
+	total     int64
+}
+
+func (w *lifecycleCopyWriter) Write(b []byte) (int, error) {
+	n, err := w.dst.Write(b)
+	w.total += int64(n)
+	nocxlog.From(w.ctx).Debug("lifecycle: ssh pane bridge write completed",
+		"lifecycle_port", w.port, "direction", w.direction,
+		"bytes", n, "bytes_total", w.total, "error", err)
+	return n, err
 }
 
 // Lifecycle is the session's end of the lifecycle stream, or nil when this
@@ -290,19 +345,36 @@ func (p *PaneListeners) LifecyclePort() int { return p.port }
 // teardown, which is where it is called from.
 func (p *PaneListeners) Close() error {
 	p.closeOne.Do(func() {
-		if p.lifecycleLn != nil {
-			_ = p.lifecycleLn.Close()
-		}
+		// THE LOCAL ENDS FIRST: the session's carrier and its far end are what
+		// the session service reads, and ending them is what tells a reader no
+		// more bytes will arrive.
 		if p.carrier != nil {
 			_ = p.carrier.Close()
 		}
 		if p.sink != nil {
 			_ = p.sink.Close()
 		}
-		// THE POOL IS LAST: it is the pane's own reference, and it is released
-		// once, after everything riding it has been closed.
+		// THE POOL REFERENCE GOES FIRST, AND THE REMOTE CANCEL NEVER BLOCKS
+		// THIS CALLER (design §5.3, socket-first teardown; review findings 2
+		// and the verification's "Askable is a snapshot"). Closing the remote
+		// listener sends cancel-tcpip-forward with a reply wanted, and on a
+		// connection whose probe is parked or has not yet reached its deadline
+		// that request waits on the mux's send lock indefinitely. So the
+		// release happens first — closing the socket outright when this was the
+		// last holder — and a cancel is only started for a transport that
+		// outlives this pane, OFF this caller's path: it ends when that
+		// transport does, and a pane's close returns whatever the connection is
+		// doing.
+		ln := p.lifecycleLn
 		if p.pool != nil {
 			_ = p.pool.Close()
+			if ln != nil && !p.pool.Lost() {
+				go func() { _ = ln.Close() }()
+			}
+			return
+		}
+		if ln != nil {
+			go func() { _ = ln.Close() }()
 		}
 	})
 	return nil

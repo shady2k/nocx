@@ -369,6 +369,44 @@ func (h *heldAnswers) awaitWithdrawal(t *testing.T) {
 	}
 }
 
+// soakSSHService answers the SSH service's CONNECTION ops. The soak helper is
+// an in-process daemon, and the production daemon is the thing that registers
+// internal/helper/sshsvc (cmd/nocx-helper); this fixture never did, so an SSH
+// pane's BindConnection answered unknown_service. The shell itself comes from
+// the soak spawner below, so only the ops that name and release the pane's
+// logical hold are needed here.
+type soakSSHService struct{}
+
+func (soakSSHService) Name() string { return proto.ServiceSSH }
+
+func (soakSSHService) Ops() []string {
+	return []string{proto.OpConnection, proto.OpReconnect, proto.OpReleaseConnection}
+}
+
+func (soakSSHService) ParamsSchema(op string) *host.Schema {
+	switch op {
+	case proto.OpConnection:
+		return host.SchemaFor(proto.ConnectionParams{})
+	case proto.OpReconnect:
+		return host.SchemaFor(proto.ReconnectParams{})
+	case proto.OpReleaseConnection:
+		return host.SchemaFor(proto.ReleaseConnectionParams{})
+	}
+	return nil
+}
+
+func (soakSSHService) Call(_ context.Context, op string, _ json.RawMessage) (any, error) {
+	switch op {
+	case proto.OpConnection:
+		return proto.ConnectionResult{ConnectionID: "soak-connection"}, nil
+	case proto.OpReconnect:
+		return proto.ReconnectResult{Registered: true}, nil
+	case proto.OpReleaseConnection:
+		return proto.ReleaseConnectionResult{Released: true}, nil
+	}
+	return nil, fmt.Errorf("soak ssh: unknown op %q", op)
+}
+
 func startSoakHelper(t *testing.T, dir, generation string, spawner *soakSpawner) *soakHelper {
 	t.Helper()
 	ln, err := endpoint.Listen(dir, proto.GenerationID(generation))
@@ -393,6 +431,7 @@ func startSoakHelper(t *testing.T, dir, generation string, spawner *soakSpawner)
 		_ = endpoint.Serve(ctx, ln, func(conn net.Conn) {
 			h := host.New(conn, conn, generation, "instance-1", discardLogger(t))
 			h.Register(hostsvc.New(localgit.NewFactory()))
+			h.Register(soakSSHService{})
 			// The wrapper, not the service: it forwards everything and can hold
 			// one spawn's answer. It promotes the service's ResponseWritten, so
 			// the answer's fate still reaches the party that acts on it.

@@ -31,6 +31,17 @@ type Config struct {
 	// request with unknown_service, which is what a helper built against a
 	// newer generation needs to hear rather than wait forever for.
 	Reverse *ReverseRegistry
+	// OnConnectionEvent receives an `ssh` connection's observations: the
+	// states a pane is told, and the measurements they carry (design §5.6).
+	// The SOURCE is the helper instance that produced them (its hello-ok
+	// instance id): a connection id is a destination digest and survives a
+	// helper replacement, while the sequence in each observation belongs to
+	// one supervisor's lifetime. A consumer that keeps sequences must fence on
+	// the source or a replacement's first observations look stale.
+	//
+	// Nil is ordinary for a caller that opens no ssh pane and prefers no
+	// parsing cost; the frame is decoded only when the callback exists.
+	OnConnectionEvent func(sourceInstance string, ev proto.ConnectionStateEvent)
 }
 
 // DefaultSentinelTTL is the handshake budget when Config leaves SentinelTTL

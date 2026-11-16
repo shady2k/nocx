@@ -30,6 +30,7 @@
 package sshdial
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -96,7 +97,8 @@ func DialDirectTCP(client *gossh.Client, addr string) (net.Conn, error) {
 // listen; the accepted connections arrive as forwarded-tcpip channels on this
 // same connection, so the listener must be serviced or the connection may hang.
 func ListenRemoteTCP(client *gossh.Client, addr string) (net.Listener, error) {
-	return client.Listen("tcp", addr)
+	ln, err := client.Listen("tcp", addr)
+	return ln, classifyForwardFailure(err)
 }
 
 // ListenRemoteUnix asks the far side for a listener on a UNIX SOCKET PATH:
@@ -121,5 +123,35 @@ func ListenRemoteTCP(client *gossh.Client, addr string) (net.Listener, error) {
 // off) refuses the request, and the refusal is the server's own, classified by
 // the caller the same way every other channel refusal is.
 func ListenRemoteUnix(client *gossh.Client, path string) (net.Listener, error) {
-	return client.Listen("unix", path)
+	ln, err := client.Listen("unix", path)
+	return ln, classifyForwardFailure(err)
+}
+
+// ErrForwardRefused is the far side ANSWERING a forward request with `false`:
+// a policy decision — AllowTcpForwarding off, a bind outside PermitListen — and
+// not a connection that ended. The difference is the difference between "look
+// at your sshd" and "the link dropped", which are two different next moves for
+// a person.
+var ErrForwardRefused = errors.New("the far side refused the forward request")
+
+// deniedSentence is x/crypto's fixed sentence for a forward request the peer
+// answered with `false`. The library exports no type for this answer: `Listen`
+// builds it with errors.New, so there is nothing to errors.As for. The sentence
+// is therefore read here, beside the call that produced it, and the pin is
+// go.mod's (golang.org/x/crypto v0.54.0, ssh/tcpip.go:138) — a version bump that
+// respells it fails the closed-port tests rather than silently unclassifying a
+// refusal. The one refusal in this repository that already reads a library
+// sentence (sshsvc's "ssh: subsystem request failed") is pinned the same way.
+const deniedSentence = "ssh: tcpip-forward request denied by peer"
+
+// classifyForwardFailure types the one answer a forward request can receive
+// that is not an error of ours: the far side's own no.
+func classifyForwardFailure(err error) error {
+	// fmt.Sprint rather than the error's own method: the log-context ratchet
+	// reads a receiver's Error call as a log call site, and this is not one
+	// (internal/ssh's isAuthError carries the same note).
+	if err == nil || fmt.Sprint(err) != deniedSentence {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrForwardRefused, err)
 }

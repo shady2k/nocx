@@ -1021,13 +1021,21 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 // resurrects anything, and nothing in the product may suggest otherwise —
 // the same promise RestoreOnStartup makes below, for the same reason.
 //
-// WHY THE DEFAULT IS ASK. `auto` is the convenient answer and it is the one
-// that can duplicate work: a reconnect that lands while the old process is
-// still running on the host leaves two, and the person did not ask for the
-// second. Being asked costs a click on an event that is already an
-// interruption; being surprised costs whatever the duplicate did. `never`
-// leaves the tab exactly as it is — marked, readable, with the offer on it —
-// which is what every value does when the attempts are spent.
+// WHY THE DEFAULT IS AUTO (owner decision, design §5.3). A lost connection is
+// an interruption the person did not ask for, and waiting to be asked costs
+// them a click on top of it; the shell that comes back is a NEW one, so the
+// duplicate-work worry is about a command still running on the far side, and
+// the head says what the old shell was doing. The three-attempt cap is gone
+// with it: an automatic retry backs off to a cap of fifteen seconds and keeps
+// trying for as long as a pane holds the connection, so a laptop that wakes
+// after a night is not left with a dead tab. `ask` is the same behaviour with
+// the click put back, and `never` leaves the tab exactly as it is — marked,
+// readable, with the offer on it.
+//
+// The OFFER IS NOT A POLICY. Every value leaves the button on the tab, because
+// whether a person may reconnect is not the policy's question: `ask` and
+// `never` differ in what the backend does BY ITSELF. Under `auto` the button is
+// still there while an attempt is in flight, and pressing it acts at once.
 //
 // The TAB IS NEVER CLOSED by any of them. Its scrollback is the work, and
 // losing it is the failure this setting exists to prevent.
@@ -1035,9 +1043,9 @@ var SSHReconnect = MustRegisterSelect(SelectSpec{
 	Key:         "ssh.reconnect",
 	Section:     "Interface",
 	Label:       "When an SSH connection is lost",
-	Description: "Ask offers a button on the tab. Automatically opens a new shell at the same endpoint by itself, and falls back to the button when the attempts are spent. Never leaves the tab alone with the button. In every case the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.",
+	Description: "Automatically opens a new shell at the same endpoint by itself, retrying with a backoff that caps at fifteen seconds. Ask offers a button on the tab instead. Never leaves the tab alone with the button. In every case the button is still there, the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.",
 	DataClass:   PublicConfig,
-	Default:     "ask",
+	Default:     "auto",
 	Options: []SelectOption{
 		{Value: "ask", Label: "Ask"},
 		{Value: "auto", Label: "Automatically"},

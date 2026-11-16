@@ -80,9 +80,9 @@ func (e *ExitStatus) Error() string {
 func (e *ExitStatus) ExitCode() int { return e.Code }
 
 // ExitCause exposes Cause through the same optional-interface seam
-// session.ExitOutcome already probes ExitCode() through, so a keepalive-lost
-// connection reads as Interrupted rather than an anonymous Exited (nocx-y6fh7
-// item 6, round 3).
+// session.ExitOutcome already probes ExitCode() through, so a connection that
+// ended under its shell reads as Interrupted rather than an anonymous Exited
+// (design §5.3, nocx-oalo1.4.3).
 func (e *ExitStatus) ExitCause() string { return e.Cause }
 
 // RemoteLaunch is the SSH branch of the wire's launch union

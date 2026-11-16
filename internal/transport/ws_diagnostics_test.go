@@ -23,7 +23,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 type stubDiagnosticsProvider struct{}
@@ -160,9 +159,11 @@ func TestAppDiagnostics_AnswersWhileWorkIsBlockedAndNamesTheHolders(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("dialog adapter never invoked")
 	}
-	waittest.WaitFor(t, "the open to be in flight", func() bool {
-		return len(rec.Snapshot().Live) == 1
-	})
+	select {
+	case <-blocker.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("open never reached the blocked helper dial")
+	}
 
 	// The diagnostics method itself, while the open holds the config and
 	// session plans: it is answered on the read loop and takes no credit, so

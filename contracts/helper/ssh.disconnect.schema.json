@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.disconnect.schema.json",
+  "title": "HelperSSHDisconnectResult",
+  "description": "What the close found (nocx-oalo1.5.4). The connectionId is the same derived identity `connection` answers, echoed so the caller can correlate without a second question. closed is false when there was no live connection to close — a normal answer, not an error: the ordinary caller is a pane whose transport already ended and asked to be sure it is gone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["connectionId", "closed"],
+  "properties": {
+    "connectionId": {
+      "description": "The connection's derived public identity, as `connection` answers it. Empty only if the destination could not name one, which the op refuses instead.",
+      "type": "string",
+      "minLength": 1
+    },
+    "closed": {
+      "description": "Whether a live connection was closed. false is idempotence, not failure.",
+      "type": "boolean"
+    }
+  }
+}

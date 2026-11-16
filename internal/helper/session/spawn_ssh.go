@@ -142,15 +142,15 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		// and the tool socket path, and neither exists until the far side has
 		// been asked for a listener. A command built before them would name a
 		// port nobody listens on and a path nobody answers.
-		listeners, err := p.openPaneListeners(ctx, req)
-		if err != nil {
+		listeners, lerr := p.openPaneListeners(ctx, req)
+		if lerr != nil {
 			// Refused, never degraded: the caller asked for an authenticated
 			// channel, and a launch that carries a port or a path nothing
 			// answers is a shell that blocks until its hello budget runs out
 			// (or an agent that fails for a reason that is not about it). A
 			// caller that wants the pane without the channel opens it without
 			// asking for one.
-			return nil, err
+			return nil, lerr
 		}
 		pane = listeners
 
@@ -243,8 +243,7 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		Command:            command,
 		Cols:               req.Cols,
 		Rows:               req.Rows,
-		KeepaliveInterval:  req.KeepaliveInterval,
-		KeepaliveCountMax:  req.KeepaliveCountMax,
+		ProbeInterval:      req.KeepaliveInterval,
 		OnLiveness:         onLiveness,
 	})
 	if err != nil {
@@ -263,6 +262,7 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		bootstrapDone: make(chan struct{}),
 		log:           p.log.With("session", req.SessionID),
 	}
+
 	// The stream is TAKEN OVER here and read from exactly one place from now
 	// on: the feed the bootstrap and, afterwards, the session's pump both read
 	// from. Starting it before the bootstrap is what makes a deadline able to

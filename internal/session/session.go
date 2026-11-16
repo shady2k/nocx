@@ -228,13 +228,6 @@ type Session interface {
 	// deciding an authority question from this value is the defect ADR-0020 §5
 	// names; the revocable delegation that does answer it is a later epic.
 	Parent() (Ref, bool)
-	// Liveness returns what the backend currently believes about this
-	// session: {liveness, livenessEpoch, observedAt} over alive | dead |
-	// unknown | interrupted (nocx-iarf9). See liveness.go — in particular
-	// that a terminal value is derived from this session's own end and can
-	// be asserted by nobody, and that `unknown` is what a session on an
-	// unreachable host reads as, because both other renderings would lie.
-	Liveness() LivenessState
 	// PaneID returns the pane this session is the pipe of, or empty when it
 	// is attached to none (nocx-rtg0.28). Immutable: a session is the pipe
 	// of one pane for its whole life, and the pane outlives it (D5) rather
@@ -500,11 +493,6 @@ type Reg struct {
 	// every session it opens. A record from a previous backend instance
 	// carries a different one, which is what the refusal compares.
 	instanceID InstanceID
-	// livenessObserver is told (by Ref) when a session's liveness value
-	// changes, so the transport can publish it (nocx-iarf9). Set at the
-	// composition root after the transport exists; nil until then, and nil
-	// forever in any build that does not publish it. Guarded by mu.
-	livenessObserver func(Ref)
 	// epochCounter mints the per-session epoch: atomic because Open is
 	// called concurrently (one per tab) and the counter has no other lock
 	// of its own — the sessions-map insert takes r.mu, but the mint must be
@@ -1080,7 +1068,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	// added to ConnectConfig and not to this list now fails a test rather
 	// than waiting to be noticed.
 	if cfg.KeepaliveInterval > 0 {
-		opts = append(opts, ssh.WithKeepalive(cfg.KeepaliveInterval, cfg.KeepaliveCountMax))
+		opts = append(opts, ssh.WithKeepalive(cfg.KeepaliveInterval))
 	}
 	if cfg.ReadyTimeout > 0 {
 		opts = append(opts, ssh.WithTimeout(cfg.ReadyTimeout))
@@ -1158,16 +1146,6 @@ type realSession struct {
 	// a handler swap or a write.
 	sizeMu sync.Mutex
 	size   Size
-
-	// The liveness projection (nocx-iarf9). livenessMu guards the record;
-	// livenessEpochs is this session's own monotonic source of observation
-	// epochs, so any two observations of THIS session are ordered without a
-	// shared clock (an observation of another incarnation is refused by
-	// identity, never by number). The zero record means "not observed yet",
-	// which livenessLocked resolves on the first read.
-	livenessMu     sync.Mutex
-	liveness       LivenessState
-	livenessEpochs atomic.Uint64
 
 	// writeCh feeds a single write goroutine that serialises every write in
 	// arrival order. The readLoop hands frames over without waiting, so
@@ -1540,15 +1518,19 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 	// termination keeps the existing -1 status semantics.
 	var helperStatus interface{ ExitCode() int }
 	if errors.As(waitErr, &helperStatus) {
-		// A keepalive giving up is connection loss, not an authoritative
-		// exit (nocx-y6fh7 item 6, round 3): the helper names the cause on
-		// its ExitStatus DTO, read here through the SAME kind of optional
-		// interface probe as ExitCode itself, so this mapping stays free of
-		// any dependency on the helper's own wire types. Anything else —
-		// including the far side hanging up with no status at all, which
-		// carries no cause — is unchanged: an authoritative exit.
+		// A CONNECTION THAT ENDED UNDER THE SHELL is connection loss, not an
+		// authoritative exit: the helper names the cause on its ExitStatus
+		// DTO, read here through the SAME kind of optional interface probe as
+		// ExitCode itself, so this mapping stays free of any dependency on the
+		// helper's own wire types. The cause used to be a shell's own
+		// keepalive prober giving up; since stage 2 it is the connection's
+		// supervisor (design §5.3, nocx-oalo1.4.3), and the fact named is the
+		// same one either way — the link is gone and the far command may still
+		// be running. Anything else — including the far side hanging up with
+		// no status at all, which carries no cause — is unchanged: an
+		// authoritative exit.
 		var causer interface{ ExitCause() string }
-		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseKeepaliveLost) {
+		if errors.As(waitErr, &causer) && causer.ExitCause() == string(proto.ExitCauseLinkLost) {
 			return ExitInterrupted, helperStatus.ExitCode()
 		}
 		return ExitExited, helperStatus.ExitCode()

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.connection.schema.json",
+  "title": "HelperSSHConnectionResult",
+  "description": "The identity of the one connection a destination's shell will ride (nocx-oalo1.5.3). It is DERIVED and not minted: the same endpoint, account, credential principal and route the pool and the supervisor key a connection by, rendered as a digest. Two coordinators asking about one destination therefore get one answer, and the answer survives a restart of either process. The coordinator uses it only as a correlation key; what a person reads is the state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["connectionId"],
+  "properties": {
+    "connectionId": {
+      "description": "A stable digest of the connection's identity, safe to publish: it names the account, the credential principal and the route without spelling any of them. Empty is not an answer, and a coordinator refuses it rather than binding a pane to nothing.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

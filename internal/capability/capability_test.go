@@ -505,10 +505,6 @@ func (f *fakeSession) Parent() (session.Ref, bool) {
 	return f.parent, !f.parent.Zero()
 }
 
-func (f *fakeSession) Liveness() session.LivenessState {
-	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
-}
-
 // WorkspaceID reports the default: this fake stands in for a session in
 // tests that are about capability, and membership carries no behaviour
 // (nocx-fraus), so there is nothing here for a workspace to change.

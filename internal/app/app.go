@@ -59,6 +59,7 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/peerpin"
@@ -1113,6 +1114,22 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
+	// THE PANE'S CONNECTION MAP (design §5.6, §5.3): built once the settings
+	// it consults exist, because ssh.reconnect is read per decision — a person
+	// who changes it must change what happens to the NEXT dropped pane. The
+	// publisher and the action are bound later, when the transport exists, the
+	// same late-binding the opener's other transport halves get; until then
+	// nothing is attached to hear an observation and nothing reconnects by
+	// itself.
+	paneConns := panedriver.New(string(sess.InstanceID()), log.NewSlogAdapter(slogger))
+	localOpener.reconnectPolicy = func() string {
+		value, readErr := settingsRegistry.GetSelect(settings.SSHReconnect)
+		if readErr != nil {
+			return "never"
+		}
+		return value
+	}
+	localOpener.paneConns = paneConns
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -2115,6 +2132,10 @@ func New(opts ...Option) (*App, error) {
 		// enroller closes the same interval by lane on the shell's own
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
+	// The policy owner's in-flight notice (design §5.1.1: transport declares the
+	// seam it calls, the root adapts). It is how a person's press tells the
+	// automatic retry not to start beside it.
+	tpOpts = append(tpOpts, transport.WithPaneConnectionPolicy(paneConnectionOwner{Driver: paneConns, opener: localOpener}))
 	tpOpts = append(tpOpts, transport.WithDiagnostics(diag, appDiagnosticsProvider{
 		opener: localOpener, logPath: logFilePath,
 	}))
@@ -2126,6 +2147,20 @@ func New(opts ...Option) (*App, error) {
 	helperReg.publishScreen = tp.PublishScreenFrame
 	localOpener.publishEffect = tp.PublishSessionEffect
 	localOpener.blockRows = tp
+	// THE LAST MILE OF pane.connection (design §5.6): the driver decides what a
+	// pane is told, and the transport addresses that pane's own renderer and
+	// refuses an epoch it has already moved past.
+	paneConns.SetPublisher(func(snapshot panedriver.Snapshot) {
+		tp.PublishPaneConnection(paneConnectionWire(snapshot))
+	})
+	// THE OTHER DIRECTION, and the reason the policy has one owner: under
+	// `auto` the driver decides a pane should come back and asks the transport
+	// to do it, through the SAME path a person's press takes. The context is
+	// the server's, not the request's: an automatic reconnect must outlive the
+	// frame that caused it.
+	paneConns.SetAction(func(ctx context.Context, paneID string, binding uint64) error {
+		return tp.ReconnectPane(ctx, paneID, binding)
+	})
 	helperReg.publishEffect = tp.PublishSessionEffect
 	helperReg.blockRows = tp
 	// The two row buffers are the person's settings (nocx-2v80t.3.36): the
@@ -2195,7 +2230,6 @@ func New(opts ...Option) (*App, error) {
 	// transport decides who is told; without this line the ssh prober's
 	// knowledge that a host stopped answering would stop at the record, and
 	// the tab would go on looking alive until the connection finally died.
-	sess.SetLivenessObserver(tp.PublishLiveness)
 
 	// The vault's prompt carrier, bound post-construction for the same
 	// reason as the emitter above: the server is built here. The vault
@@ -3071,7 +3105,7 @@ func (a endpointAttestation) canonical() string {
 
 // appendRouteHops walks the jump chain in connection order — the first
 // bastion first, the target last — the same route the ssh package's dial
-// follows (jumpRouteKey walks the same chain for the pool key). Each hop
+// follows (routeComponent walks the same chain for the pool key). Each hop
 // carries the configured user and port: the recursive JumpConfig when the
 // resolver populated it, the flat Jump* fields otherwise (ssh.ConnectConfig
 // documents both as populated for compatibility).

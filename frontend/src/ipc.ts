@@ -1,3 +1,4 @@
+import { t } from './i18n/locale-model'
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
 import { Dispatcher, RpcError, type CallOptions, type PendingCallView } from './dispatcher'
@@ -28,7 +29,6 @@ import type { SessionRecoveryChanged } from './generated/session.recoveryChanged
 const UNRECORDED = 'unrecorded'
 
 import type { SessionDisplaced } from './generated/session.displaced'
-import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
 import type { SessionEffect } from './generated/session.effect'
 import { isValidCommandSnapshotNames } from './command-snapshot'
@@ -39,6 +39,7 @@ import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import { log } from './log'
+import { isEndedAfterRestart, isForeignBinding } from './connection/session-claim'
 
 /** Refusals whose answer cannot change for this incarnation of the session: a
  *  second attempt costs a round trip and is refused for the same reason. Every
@@ -94,7 +95,7 @@ const maxRememberedOutputGaps = 128
  *  channel lost mid-session. The session.integrationChanged notification
  *  answers it as a state instead; two answers would be the defect AD-8
  *  names. */
-type OpenResult = {
+export type OpenResult = {
   sessionId?: string
   instanceId?: string
   sessionEpoch?: number
@@ -147,37 +148,6 @@ function intentPayload(text: string): string {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
   return btoa(binary)
-}
-
-/** The claim refusals that mean the BINDING is wrong rather than the session
- *  being gone (nocx-xn63t.6.33). One vocabulary, declared by the backend
- *  (refuseClaim, internal/transport/ws_reclaim.go) and read here by the
- *  `data.reason` discriminator it exists for — never by matching the message,
- *  which is prose and may be reworded. "unknown-session" is deliberately NOT
- *  here: that one says this backend holds no such session, and there is no
- *  other incarnation of it to claim. */
-const FOREIGN_BINDING_REFUSALS = new Set(['foreign-instance', 'foreign-incarnation'])
-
-/** Only a typed claim verdict establishes absence; transport and replay
- * failures say nothing about whether the helper's shell still exists. */
-function claimRefusalReason(err: unknown): string | undefined {
-  if (!(err instanceof RpcError) || err.code !== -32602) return undefined
-  const data = err.data
-  if (typeof data !== 'object' || data === null || !('reason' in data)) return undefined
-  return typeof data.reason === 'string' ? data.reason : undefined
-}
-
-/** Whether a failed claim is the backend's authoritative answer that it holds
- *  no such session (nocx-3an1s.1.5). This is the ONE reading of that verdict:
- *  the reconnect pass, the reclaim of a live entry and the pane's recovery all
- *  ask here rather than deciding for themselves.
- *
- *  Everything else — a saturated control plane, a dropped socket, a refused
- *  replay — is a question that was not answered. It is uncertainty, and a
- *  caller that reads uncertainty as absence opens a second shell over a
- *  process that is still running. */
-export function isProvenSessionAbsence(err: unknown): boolean {
-  return claimRefusalReason(err) === 'unknown-session'
 }
 
 /** The kinds of input a person produces, as the wire spells them
@@ -386,22 +356,10 @@ interface SessionState {
   // state the number the reclaim happened to catch.
   recoveryChangedCallback: ((revision: SessionRecoveryChanged) => void) | null
   recoveryRevision: SessionRecoveryChanged | null
-  // Fires when the backend revises what it believes about REACHING this
-  // session: alive, or unknown when the host has stopped answering and
-  // nothing has ended (contracts/session.liveness.schema.json). The
-  // terminal half of that vocabulary never arrives here — a session that
-  // ended is the exit notification's news.
-  livenessCallback: ((liveness: SessionLiveness) => void) | null
   // What an ENROLLED agent pane's screen is currently inviting, as the
   // agent's driver classified it in the backend (nocx-szb40.3). Null for
   // every pane nobody enrolled, which is almost all of them.
   observationCallback: ((observation: SessionObservationChanged) => void) | null
-
-  // The livenessEpoch of the last observation applied to this session. An
-  // observation whose epoch is not GREATER describes an older moment,
-  // whatever order it arrived in, and is dropped — the receiving half of
-  // the rule the backend's record keeps (nocx-iarf9).
-  livenessEpoch: number
 }
 
 // Per-session ack throttle state, tracked outside SessionState so the timer
@@ -573,11 +531,6 @@ export class SessionHandle {
     this.client.onSessionAttachment(this.sessionId, cb)
   }
 
-  /** Explicitly retry the existing session, never open a replacement shell. */
-  retryAttach(): Promise<boolean> {
-    return this.client.retrySessionAttach(this.sessionId)
-  }
-
   onExit(cb: (exit: Exit) => void): void {
     this.client.onSessionExit(this.sessionId, cb)
   }
@@ -664,10 +617,6 @@ export class SessionHandle {
    *  every call as news. */
   onObservation(cb: (observation: SessionObservationChanged) => void): void {
     this.client.onSessionObservation(this.sessionId, cb)
-  }
-
-  onLiveness(cb: (liveness: SessionLiveness) => void): void {
-    this.client.onSessionLiveness(this.sessionId, cb)
   }
 
   /** Registers a callback for the session's screen plane: one parsed
@@ -874,6 +823,11 @@ export class SessionHandle {
 
 export class WSClient {
   private sessions = new Map<string, SessionState>()
+  /** The backend instance this client currently knows, learned from the
+   *  session acks it has taken and cleared when the socket is replaced. It is
+   *  the identity pane.connection observations are compared against; nothing
+   *  is pinned from an observation itself. */
+  private backendInstance: string | null = null
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
   // Reattach-outcome subscribers (nocx-gbhwh): the notice consumes the
@@ -970,6 +924,12 @@ export class WSClient {
       for (const state of this.sessions.values()) {
         this._setAttachment(state, { kind: 'attaching' })
       }
+    })
+    this.dispatcher.onConnectionStateChange((state) => {
+      // A REPLACED BACKEND MAY HAVE A NEW INSTANCE. Until an ack names it,
+      // the client knows none, and the connection store accepts the first
+      // observation instead of refusing it against the old instance's id.
+      if (state.kind !== 'online') this.backendInstance = null
     })
 
     // Handle server-initiated exit notifications. The cause is the closed
@@ -1099,22 +1059,31 @@ export class WSClient {
       if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
         return
       }
-      const isExited = raw.cause === 'exited' && Number.isInteger(raw.status)
-      // A loss never carries a status; an exited event missing its status is
-      // malformed and reads as a loss too (the schema's exited branch
-      // requires it).
-      const exit: Exit = isExited
-        ? {
-            sessionId: sid,
-            cause: 'exited',
-            status: raw.status as number,
-            instanceId,
-            sessionEpoch,
-          }
-        : { sessionId: sid, cause: 'interrupted', instanceId, sessionEpoch }
+      // THE CAUSE IS THE BACKEND'S WORD, DELIVERED AS IT ARRIVED (design
+      // §5.6: "exit keeps ownership of 'this session ended'"). The renderer
+      // used to MINT `interrupted` for every cause it did not recognise —
+      // which made a malformed notification a loss nobody observed and made
+      // the renderer a second owner of a connection fact (ADR-ba6xet1b). A
+      // shape the contract does not admit is dropped here instead.
+      const cause = raw.cause
+      const wellFormed =
+        cause === 'exited'
+          ? Number.isInteger(raw.status)
+          : (cause === 'interrupted' || cause === 'backend-restarted') && !('status' in raw)
+      if (!wellFormed) return
+      const exit = { ...raw, sessionId: sid, instanceId, sessionEpoch } as unknown as Exit
       this._flushAck(sid)
+      if (cause === 'interrupted' && state) {
+        // A lost helper channel does not prove the shell ended. Retain its
+        // identity for the next backend claim, but never its input access.
+        state.protocolBlocked = true
+        this._setAttachment(state, {
+          kind: 'unavailable',
+          message: t('connection.sessionInterrupted', 'The session connection was interrupted.'),
+        })
+      }
       state?.exitCallback?.(exit)
-      this.sessions.delete(sid)
+      if (cause !== 'interrupted') this.sessions.delete(sid)
     })
 
     // The backend revised what it believes about reaching a session
@@ -1292,49 +1261,6 @@ export class WSClient {
       state.integrationChangedCallback?.(fact)
     })
 
-    this.dispatcher.subscribe('session.liveness', (params: unknown) => {
-      if (!params || typeof params !== 'object') return
-      const raw = params as Record<string, unknown>
-      const sid = raw.sessionId
-      if (typeof sid !== 'string') return
-      const state = this.sessions.get(sid)
-      if (!state) return
-      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
-      const epoch = raw.livenessEpoch
-      if (typeof epoch !== 'number' || epoch <= state.livenessEpoch) return
-      const value = raw.liveness
-      if (value !== 'alive' && value !== 'unknown') return
-      const observedAt = raw.observedAt
-      if (typeof observedAt !== 'string') return
-      // The MEASUREMENT travels with the belief, and both halves of it.
-      //
-      // This rebuilds the fact rather than passing the payload on — the
-      // identity fields are taken from the session's own record, not from the
-      // wire — and that is exactly how these two came to be dropped: they are
-      // the only fields with no local counterpart to copy from, so a
-      // reconstruction written field by field simply never named them. The
-      // renderer then saw slow === undefined for every host and drew nothing,
-      // however slow the link got (nocx-y3i0s).
-      //
-      // Absent stays absent. The contract says absent and zero are one
-      // statement — "nothing was measured" — so a host that never answered
-      // must not arrive looking like one that answered instantly, and a
-      // default of 0 or false here would be exactly that lie.
-      const roundTripMs = typeof raw.roundTripMs === 'number' ? raw.roundTripMs : undefined
-      const slow = typeof raw.slow === 'boolean' ? raw.slow : undefined
-      state.livenessEpoch = epoch
-      state.livenessCallback?.({
-        sessionId: sid,
-        instanceId: state.instanceId,
-        sessionEpoch: state.sessionEpoch,
-        liveness: value,
-        livenessEpoch: epoch,
-        observedAt,
-        ...(roundTripMs !== undefined ? { roundTripMs } : {}),
-        ...(slow !== undefined ? { slow } : {}),
-      })
-    })
-
     // Another client took a session this one was holding (D8). The take has
     // already happened on the backend — no output is coming and no input will
     // be accepted — so this is not a request to give it up, it is the news
@@ -1469,6 +1395,7 @@ export class WSClient {
   // document is handed over as parsed, refusals and all.
   private _routeScreenFrame(frame: DecodedFrame): void {
     const state = this.sessions.get(frame.sessionId)
+    if (state?.protocolBlocked) return
     if (!state) {
       log.debug('nocx: screen frame dropped: unknown session', {
         sessionId: frame.sessionId,
@@ -1574,60 +1501,25 @@ export class WSClient {
       .then((result) => this._registerHandle(result, size))
   }
 
-  // openSSHSession opens an SSH session via a profile ID. The backend
-  // resolves host, auth and jump host from the profile store.
-  // Passwords are never sent over the wire.
-  openSSHSession(
-    size: SessionSize,
-    profileId: string,
-    anchor: OpenAnchor = {},
-    watch?: OpenWatch,
-  ): Promise<SessionHandle> {
-    return this.dispatcher
-      .call<OpenResult>(
-        'open',
-        {
-          ...size,
-          kind: 'ssh',
-          profileId,
-          ...paneParam(anchor),
-        },
-        undefined,
-        { announced: watch },
-      )
-      .then((result) => this._registerHandle(result, size))
+  /**
+   * Take an `open` result or `pane.opened` notification into this client and answer the
+   * handle for its session.
+   *
+   * IT IS NOT AN OPEN. The connection owner (`frontend/src/connection/`) makes
+   * the call and hands the ack here; this method only mints the client-side
+   * record every session has and returns the handle that record is reached
+   * through. Opening lives there because ADR-ba6xet1b makes the renderer's
+   * connection module the one place that may ask for a shell.
+   */
+  adoptOpen(result: OpenResult, reported: SessionSize): SessionHandle {
+    return this._registerHandle(result, reported)
   }
 
-  // openSSHSessionByHost opens a direct SSH session by hostname/alias,
-  // resolved through ~/.ssh/config on the backend. No saved profile needed.
-  //
-  // desiredMode is the connect-time ask's one-shot answer for THIS session
-  // (ADR-0069): a hand-typed connection has no saved profile to write the
-  // choice onto, so a retry after the ask carries it here instead. Absent on
-  // an ordinary open.
-  openSSHSessionByHost(
-    size: SessionSize,
-    host: string,
-    user?: string,
-    anchor: OpenAnchor = {},
-    desiredMode?: string,
-    watch?: OpenWatch,
-  ): Promise<SessionHandle> {
-    return this.dispatcher
-      .call<OpenResult>(
-        'open',
-        {
-          ...size,
-          kind: 'ssh',
-          host,
-          user,
-          ...(desiredMode ? { desiredMode } : {}),
-          ...paneParam(anchor),
-        },
-        undefined,
-        { announced: watch },
-      )
-      .then((result) => this._registerHandle(result, size))
+  /** The backend instance this client currently knows, or null before an ack
+   *  names one (and after a socket replacement). The connection store compares
+   *  pane.connection against this. */
+  backendInstanceId(): string | null {
+    return this.backendInstance
   }
 
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
@@ -1670,6 +1562,21 @@ export class WSClient {
     offset: number,
     reported: SessionSize | null = null,
   ): void {
+    this.backendInstance = identity.instanceId
+    // Re-registration updates identity in place without discarding callbacks
+    // or facts already received by this incarnation.
+    const existing = this.sessions.get(sessionId)
+    if (existing) {
+      if (existing.sessionEpoch !== identity.sessionEpoch) {
+        existing.integrationFact = null
+        existing.recoveryRevision = null
+      }
+      existing.instanceId = identity.instanceId
+      existing.sessionEpoch = identity.sessionEpoch
+      existing.offset = offset
+      existing.reported = reported
+      return
+    }
     this.sessions.set(sessionId, {
       offset,
       reported,
@@ -1695,9 +1602,7 @@ export class WSClient {
       integrationFact: null,
       recoveryChangedCallback: null,
       recoveryRevision: null,
-      livenessCallback: null,
       observationCallback: null,
-      livenessEpoch: 0,
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
     })
@@ -1710,20 +1615,6 @@ export class WSClient {
     if (!state) return
     state.attachmentCallback = cb
     cb(state.attachment)
-  }
-
-  async retrySessionAttach(sessionId: string): Promise<boolean> {
-    const state = this.sessions.get(sessionId)
-    if (!state) return false
-    if (state.attachment.kind === 'attached') return true
-    if (state.attachAttempt) return (await state.attachAttempt) === 'resumed'
-    const outcome = await this._reattachSession(sessionId, state)
-    // The same consumers refresh durable history/readiness after either an
-    // explicit same-session retry or a socket-driven attach pass.
-    for (const handler of this.reconnectResultHandlers) {
-      handler({ resumed: outcome === 'resumed' ? 1 : 0, lost: outcome === 'lost' ? 1 : 0 })
-    }
-    return outcome === 'resumed'
   }
 
   private _setAttachment(state: SessionState, attachment: SessionAttachment): void {
@@ -1744,11 +1635,22 @@ export class WSClient {
         return 'resumed'
       })
       .catch((err: unknown) => {
-        const reason = claimRefusalReason(err)
-        if (reason && FOREIGN_BINDING_REFUSALS.has(reason)) {
-          return this._reclaimReAdopted(sessionId, state)
+        // A foreign binding is not a loss: the same session can be claimed
+        // again under the live incarnation (nocx-xn63t.6.33). The verdict is
+        // the connection owner's reading (src/connection/session-claim.ts),
+        // never a message match here.
+        if (isEndedAfterRestart(err)) {
+          state.exitCallback?.({
+            sessionId,
+            instanceId: state.instanceId,
+            sessionEpoch: state.sessionEpoch,
+            cause: 'backend-restarted',
+          })
+          this.sessions.delete(sessionId)
+          return 'lost'
         }
-        return this._attachFailed(sessionId, state, err)
+        if (isForeignBinding(err)) return this._reclaimReAdopted(sessionId, state)
+        return this._attachUnavailable(sessionId, state, err)
       })
       .then((outcome) => {
         state.attachAttempt = null
@@ -1757,27 +1659,6 @@ export class WSClient {
       })
     state.attachAttempt = attempt
     return attempt
-  }
-
-  /** An authoritative absence keeps the pane's history, but ends this binding. */
-  private _loseSession(sessionId: string, state: SessionState): 'lost' {
-    state.exitCallback?.({
-      sessionId,
-      cause: 'interrupted',
-      instanceId: state.instanceId,
-      sessionEpoch: state.sessionEpoch,
-    })
-    this.sessions.delete(sessionId)
-    return 'lost'
-  }
-
-  private _attachFailed(
-    sessionId: string,
-    state: SessionState,
-    err: unknown,
-  ): 'lost' | 'unavailable' {
-    if (isProvenSessionAbsence(err)) return this._loseSession(sessionId, state)
-    return this._attachUnavailable(sessionId, state, err)
   }
 
   private _attachUnavailable(sessionId: string, state: SessionState, err: unknown): 'unavailable' {
@@ -1811,7 +1692,17 @@ export class WSClient {
     } catch (err) {
       return this._attachUnavailable(sessionId, state, err)
     }
-    if (!entry) return this._loseSession(sessionId, state)
+    if (!entry) {
+      // The live list is authoritative that this session is not running.
+      // The EXIT is still the connection manager's to report (design §5.6),
+      // so nothing is minted here; the binding stays unavailable and the pane
+      // draws whatever pane.connection says.
+      return this._attachUnavailable(
+        sessionId,
+        state,
+        new Error('the backend lists no session under this id'),
+      )
+    }
     const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
     try {
       const result = await this._sendAttach(sessionId, entry.replayFrom, identity, state.reported)
@@ -1822,7 +1713,7 @@ export class WSClient {
       if (result.reset) state.resetCallback?.()
       return 'resumed'
     } catch (err) {
-      return this._attachFailed(sessionId, state, err)
+      return this._attachUnavailable(sessionId, state, err)
     }
   }
 
@@ -2014,7 +1905,8 @@ export class WSClient {
   sendToSession(sessionId: string, data: string): void {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    if (!this.sessions.has(sessionId)) return
+    const state = this.sessions.get(sessionId)
+    if (!state || state.protocolBlocked) return
     const error = this._sessionInputError(sessionId)
     if (error) throw error
     const payload = new TextEncoder().encode(data)
@@ -2060,7 +1952,8 @@ export class WSClient {
     const closed = (): boolean =>
       this.dispatcher.socket !== ws ||
       ws.readyState !== WebSocket.OPEN ||
-      this.sessions.get(sessionId) !== state
+      this.sessions.get(sessionId) !== state ||
+      state.protocolBlocked
     state.reported = { ...size }
     const report: ResizeReport = {
       socket: ws,
@@ -2272,13 +2165,6 @@ export class WSClient {
   ): void {
     const state = this.sessions.get(sessionId)
     if (state) state.observationCallback = cb
-  }
-
-  onSessionLiveness(sessionId: string, cb: (liveness: SessionLiveness) => void): void {
-    const state = this.sessions.get(sessionId)
-    if (state) {
-      state.livenessCallback = cb
-    }
   }
 
   /** Observe the work the backend reports INSIDE a person's call

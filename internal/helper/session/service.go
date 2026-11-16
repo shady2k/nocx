@@ -1210,6 +1210,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
 		SessionID:          proto.SessionHex(raw),
 		Destination:        p.Destination,
+		Reconnect:          p.Reconnect,
 		AcceptOnTrust:      p.AcceptOnTrust,
 		HostKeyFingerprint: p.HostKeyFingerprint,
 		Shell:              p.Shell,
@@ -1237,7 +1238,6 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// carries it from there. This sink is for the non-terminal half —
 		// the far end answering late or not yet — which has no exit to ride.
 		KeepaliveInterval: time.Duration(p.KeepaliveIntervalMS) * time.Millisecond,
-		KeepaliveCountMax: p.KeepaliveCountMax,
 		OnLiveness: func(responsive bool, roundTrip time.Duration) {
 			s.notifyLiveness(hostID, responsive, roundTrip)
 		},
@@ -2152,6 +2152,27 @@ func (s *Service) notifyExit(e proto.SessionExit) {
 	}
 }
 
+// roundTripMillis states an answered probe's round trip in the unit the wire
+// carries, and NEVER as the zero that means "nothing measured one".
+//
+// proto.SessionLiveness.RoundTripMS is whole milliseconds and reads zero as
+// "unresponsive, or a first round with nothing yet to measure", and the
+// coordinator's session.applyObservation keeps the PREVIOUS measurement when
+// it reads zero — an unanswered probe says nothing about how fast the host
+// answers, so a slow grade must outlive it. Both are right, and together they
+// make a truncated measurement poisonous: a loopback probe answers in a few
+// hundred microseconds, truncates to zero, and the 800 ms that once made the
+// host slow stands for as long as the host answers quickly. The grade then
+// never leaves slow (measured: e2e/ssh-reconnect.spec.ts:312 watched a link
+// answer again for a minute and stay marked slow). An answer shorter than the
+// wire's unit is reported as that unit rather than as no answer.
+func roundTripMillis(d time.Duration) int64 {
+	if ms := d.Milliseconds(); ms > 0 {
+		return ms
+	}
+	return 1
+}
+
 // notifyLiveness tells every bound connection what an ssh session's own
 // keepalive prober just learned about the far end (nocx-y6fh7 item 6). It is
 // notifyExit's sibling and shares its whole argument: a coordinator watching
@@ -2168,7 +2189,7 @@ func (s *Service) notifyLiveness(id proto.HostSessionID, responsive bool, roundT
 	s.mu.Unlock()
 	live := proto.SessionLiveness{Session: id, Responsive: responsive}
 	if responsive && roundTrip > 0 {
-		live.RoundTripMS = roundTrip.Milliseconds()
+		live.RoundTripMS = roundTripMillis(roundTrip)
 	}
 	for _, sink := range sinks {
 		if err := sink.SendNotification(proto.Notification{
@@ -2214,7 +2235,7 @@ func (s *Service) LifecycleData(ctx context.Context, f proto.SessionFrame) {
 		return
 	}
 	sink, _ := host.ConnectionFrom(ctx).(Sink)
-	if err := hs.writeLifecycle(sink, f); err != nil {
+	if err := hs.writeLifecycle(ctx, sink, f); err != nil {
 		s.log.Warn("lifecycle write refused", "session", hex, "subscriber", proto.SessionHex(f.Subscriber),
 			"bytes", len(f.Payload), "err", err)
 	}

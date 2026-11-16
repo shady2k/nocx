@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.connection.params.schema.json",
+  "title": "HelperSSHConnectionParams",
+  "description": "Names a destination’s connection and installs its observation stream. When paneId is present, the request also retains a logical pane hold with the supplied reconnect policy before dialing. Destination-only queries do not retain a pane hold.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination"],
+  "properties": {
+    "destination": {
+      "description": "The resolved destination whose connection is asked about. Resolved by the coordinator, which reads ~/.ssh/config and holds the credential binding; the helper only turns it into the identity the pool keys a connection by.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reconnectPolicy": {
+      "type": "string",
+      "enum": ["auto", "ask", "never"]
+    }
+  }
+}

@@ -137,6 +137,11 @@ type SSHSpawnRequest struct {
 	// which key the caller expects. See proto.SSHSpawnParams.
 	AcceptOnTrust      bool
 	HostKeyFingerprint string
+	// Reconnect asks the spawner to close the destination's existing
+	// connection before it opens the shell (design §5.3: "Reconnect closes the
+	// socket first"). A stalled connection is still pooled, so without this the
+	// shell joins it and parks behind the dead flow.
+	Reconnect bool
 	// Shell is the far shell the launcher is built for.
 	Shell proto.SSHShellKind
 	// Mode is the caller's integration intent, carried through UNINTERPRETED.
@@ -178,13 +183,15 @@ type SSHSpawnRequest struct {
 	// refused by name, or answered with a session whose lifecycle window does
 	// not exist and whose `adopt-lifecycle` is therefore null.
 	Lifecycle *proto.LifecycleLaunch
-	// KeepaliveInterval and KeepaliveCountMax arm this session's own prober,
-	// on exactly the terms ssh.ConnectConfig's fields already state for the
-	// coordinator's non-helper dials — zero disables it. They travel per
-	// request because the helper now holds the connection (ADR-0057) and has
-	// no profile of its own to read an interval from (nocx-y6fh7 item 6).
+	// KeepaliveInterval is how often the connection this session rides should
+	// be probed, on exactly the terms ssh.ConnectConfig's field already states
+	// for the coordinator's non-helper dials — zero means the connection
+	// manager's own default, never "no probing": since nocx-oalo1.4.3 the
+	// connection's ONE prober is the supervisor's, and a profile's silence has
+	// no say in whether a connection is watched. It travels per request
+	// because the helper holds the connection (ADR-0057) and has no profile of
+	// its own to read an interval from (nocx-y6fh7 item 6).
 	KeepaliveInterval time.Duration
-	KeepaliveCountMax int
 	// OnLiveness is called every time this session's prober learns something
 	// about the far end's reachability, for as long as the channel is open:
 	// whether it answered this round, and the round trip when it did (zero
@@ -619,14 +626,14 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 			status.Signal = sig.Signal()
 		}
 		// WHY this process ended, when code/signal alone read identically for
-		// two different facts (nocx-y6fh7 item 6, round 3): a keepalive
-		// prober giving up on an ssh session's own connection wraps its
-		// WaitErr in a type naming the cause (sshsvc.keepaliveLostError),
-		// probed here the SAME optional-interface way as ExitCode/Signal —
-		// this file has no build tag and must never import the ssh-tagged
-		// package that defines it. Everything else, including a local
-		// process's ordinary end and the far side hanging up with no
-		// status at all, answers no cause and Cause stays empty.
+		// two different facts: a shell whose streaming channel ended because
+		// the CONNECTION under it ended wraps its WaitErr in a type naming the
+		// cause (sshsvc.linkLostError), probed here the SAME
+		// optional-interface way as ExitCode/Signal — this file has no build
+		// tag and must never import the ssh-tagged package that defines it.
+		// Everything else, including a local process's ordinary end and the
+		// far side hanging up with no status at all, answers no cause and
+		// Cause stays empty.
 		var causer interface{ ExitCause() string }
 		if errors.As(err, &causer) {
 			status.Cause = proto.SessionExitCause(causer.ExitCause())
@@ -1344,7 +1351,7 @@ func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	return res.Err
 }
 
-func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
+func (s *hostSession) writeLifecycle(ctx context.Context, sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub, ok := s.subs[proto.SubscriberID(proto.SessionHex(f.Subscriber))]
@@ -1359,7 +1366,10 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 	if carrier == nil {
 		return ErrNotAttached
 	}
-	_, err := carrier.Write(f.Payload)
+	n, err := carrier.Write(f.Payload)
+	nocxlog.From(ctx).Debug("lifecycle: helper carrier write completed",
+		"session", s.id.Session, "subscriber", sub.id,
+		"bytes", n, "requested_bytes", len(f.Payload), "error", err)
 	return err
 }
 

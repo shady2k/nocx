@@ -416,10 +416,11 @@ func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool
 }
 
 type WSServer struct {
-	log      log.Logger
-	registry session.Registry
-	server   *http.Server
-	port     int
+	lifetimeCtx context.Context
+	log         log.Logger
+	registry    session.Registry
+	server      *http.Server
+	port        int
 	// heartbeatReadWindow bounds how long a half-open connection may hold its
 	// session before an inbound frame proves the peer is still present.
 	heartbeatReadWindow time.Duration
@@ -1068,6 +1069,19 @@ type WSServer struct {
 	tunnelMu     sync.Mutex
 	tunnels      map[string]*tunnel.Tunnel
 	ownerTunnels map[*wsConn]map[string]struct{}
+	// paneMu guards the pane half of the connection map: which renderer a
+	// pane's notifications go to, and the newest epoch sent for it
+	// (ws_pane_connection.go). It is separate from connsMu because a
+	// notification is written per observation, while connsMu is taken at
+	// accept and teardown.
+	paneMu      sync.Mutex
+	paneRecords map[string]*paneRecord
+	paneEpochs  map[string]uint64
+	// paneConnectionPolicy is the connection policy's notice that a reconnect
+	// is being carried out and that a pane is gone (ws_pane_reconnect.go). Nil
+	// is a server with no connection policy wired; no offer exists then.
+	paneConnectionPolicy PaneConnectionPolicy
+
 	// connsMu protects conns and connsRegistered. One entry per active
 	// WebSocket connection.
 	connsMu sync.Mutex
@@ -2265,6 +2279,7 @@ func (s *WSServer) domainGates() domainGates {
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
+	s.lifetimeCtx = ctx
 	// Fail closed: no entropy → no token → no connections.
 	if err := s.mintToken(); err != nil {
 		return err
@@ -3551,6 +3566,10 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	state.mu.Unlock()
+	// A pane's state notification has no reader once its window is gone; the
+	// binding would otherwise keep a dead connection alive for the life of
+	// the process (ws_pane_connection.go).
+	s.unbindPanesFor(wconn)
 
 	// Back to the named default, one session at a time. NoClient is the report
 	// rather than a size, because that is what is true: nobody is measuring
@@ -4911,21 +4930,20 @@ func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
 	if len(paneIDs) == 0 {
 		return
 	}
-	for _, sess := range s.registry.List() {
-		pane := sess.PaneID()
-		if pane == "" {
-			continue
-		}
-		if _, ok := paneIDs[pane]; !ok {
-			continue
-		}
-		sid := sess.ID()
-		s.closeLane(sid)
-		s.markCloseRequested(sid)
-		if err := s.registry.EndSession(sid); err != nil {
-			s.log.Warn("closing a session whose pane left the layout", "session_id", string(sid), "error", err)
-		}
-		s.closeSession(sid, sess)
+	// ONE CLOSER FOR BOTH CALLERS: a pane leaving the layout and a pane being
+	// reconnected must tear their session down the same way, or one of them
+	// grows a difference nobody meant.
+	panes := make(map[string]struct{}, len(paneIDs))
+	for pane := range paneIDs {
+		panes[pane] = struct{}{}
+	}
+	for pane := range panes {
+		// THE PANE IS GONE, so its binding goes too. A shared connection
+		// outlives one pane, and without this every later observation of it
+		// would still be produced and published for a pane that no longer
+		// exists — in the transport's maps and in the policy owner's.
+		s.unbindPane(pane)
+		s.closePaneSessions(pane)
 	}
 }
 

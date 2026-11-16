@@ -53,3 +53,21 @@ export type Exit =
        */
       cause: 'interrupted'
     }
+  | {
+      /**
+       * The server-authoritative session that ended (AD-7). One WebSocket carries several terminal tabs, so the renderer must route this notification by session id before any tab may act on it.
+       */
+      sessionId: string
+      /**
+       * The backend instance that minted the session that ended (AD-7 — server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. The renderer compares it against the pair the open ack carried, so a late exit for this sessionId out of a previous backend instance is refused instead of marking the current tab.
+       */
+      instanceId: string
+      /**
+       * The session's epoch within its backend instance, as minted at open: distinguishes a later session that reuses a sessionId from the incarnation this notification ends. Same vocabulary as the open ack's sessionEpoch.
+       */
+      sessionEpoch: number
+      /**
+       * The backend restarted and authoritatively confirmed that the claimed session did not survive. No shell exit status is known.
+       */
+      cause: 'backend-restarted'
+    }

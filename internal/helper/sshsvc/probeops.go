@@ -47,8 +47,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/remoteprobe"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // errBadLeaseParams is a probe this helper will not run: a request that names
@@ -65,7 +65,7 @@ var errBadLeaseParams = errors.New("probe lease params are incomplete")
 // auxiliary session is the only thing that stops a remote exec.
 type probeLease struct {
 	id          proto.LeaseID
-	pool        *ssh.PooledConn
+	pool        *pooledConn
 	fingerprint string
 
 	mu       sync.Mutex
@@ -142,7 +142,7 @@ func (s *Service) lease(ctx context.Context, p proto.LeaseParams) (proto.LeaseRe
 	if err := validateDestinationAddress(p.Destination); err != nil {
 		return proto.LeaseResult{}, err
 	}
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
 	if err != nil {
 		// THE DIAL'S OWN ANSWER, typed (nocx-1ebrs.18). A lease that failed
 		// because the server refused the credential used to leave here as a
@@ -392,13 +392,15 @@ func (s *Service) runProbeOn(ctx context.Context, lease *probeLease, command str
 	}
 	// The exit status is an ANSWER, not a failure: 127 means the tool is
 	// missing, 1 from lsof means nothing matched, and a policy wrapper may exit
-	// anything at all. Only a failure to run AT ALL is a refusal.
-	var exitErr *gossh.ExitError
+	// anything at all. Only a failure to run AT ALL is a refusal. "Did the peer
+	// report a status" is the carrier's question (sshconn.Exit), asked once for
+	// the whole helper.
+	status, exited := sshconn.Exit(runErr)
 	switch {
 	case runErr == nil:
 		return result, nil
-	case errors.As(runErr, &exitErr):
-		result.ExitStatus = exitErr.ExitStatus()
+	case exited:
+		result.ExitStatus = status
 		return result, nil
 	case errors.Is(runErr, errProbeOutputCapped), capFired:
 		// We stopped it ourselves, so whatever Run reports afterwards is a

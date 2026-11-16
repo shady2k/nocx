@@ -316,9 +316,6 @@ func TestParentIncarnationGone_IsNeverAReasonToEndTheChild(t *testing.T) {
 			t.Errorf("%s is gone from the registry: %v", c.what, err)
 			continue
 		}
-		if state := c.sess.Liveness(); state.Liveness.Terminal() {
-			t.Errorf("%s reads as %q: an unresolvable parent is not an end", c.what, state.Liveness)
-		}
 		got, has := c.sess.Parent()
 		if !has || got != c.want {
 			t.Errorf("%s edge = %+v (has=%v), want %+v: the record outlives its subject", c.what, got, has, c.want)

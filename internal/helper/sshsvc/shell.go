@@ -39,11 +39,14 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -99,16 +102,16 @@ type ShellSpec struct {
 	// session service's own default has already been applied by the caller.
 	Cols uint16
 	Rows uint16
-	// KeepaliveInterval and KeepaliveCountMax arm this channel's own pooled
-	// connection prober (nocx-y6fh7 item 6), on the terms
-	// ssh.PooledSpec's own fields already state. Zero disables it — the
-	// caller's honest default, never this package's.
-	KeepaliveInterval time.Duration
-	KeepaliveCountMax int
-	// OnLiveness receives every reachability change the prober reports for
-	// as long as the pooled connection this channel opened (or joined) is
-	// this channel's own — see acquirePooled's own note on what that means
-	// under AD-4 sharing. Nil is ordinary.
+	// ProbeInterval is how often the connection this channel rides should be
+	// probed, or zero for the connection manager's default (15 s). It is a
+	// REQUEST, not an arming: the connection has one prober and it belongs to
+	// the supervisor, so a zero never means "do not probe" (design §5.3).
+	ProbeInterval time.Duration
+	// OnLiveness receives what the connection's probe finds while this
+	// channel holds it: whether the far side answered, and how long it took.
+	// There is ONE prober per connection and it is the supervisor's (design
+	// §5.3, nocx-oalo1.4.3); this channel is told what it learns rather than
+	// arming a second one. Nil is ordinary.
 	OnLiveness ssh.LivenessObserver
 }
 
@@ -121,7 +124,7 @@ type ShellSpec struct {
 // nobody closed keeps the transport alive, which is the caller's business and
 // not a leak for this object to collect.
 type ShellChannel struct {
-	pool   *ssh.PooledConn
+	pool   *pooledConn
 	sess   *gossh.Session
 	stdin  io.WriteCloser
 	stdout io.Reader
@@ -137,6 +140,11 @@ type ShellChannel struct {
 	exitSet  bool
 	done     chan struct{}
 	closeOne sync.Once
+	// closedByUs records that THIS side ended the channel (a pane closing, a
+	// stop), which is what tells a deliberate end from a connection that died
+	// under it: the pool marks a connection dead whoever closed it, so
+	// "the transport has ended" alone cannot answer which of the two happened.
+	closedByUs atomic.Bool
 }
 
 // ErrDetachedWriterCap is why a sibling channel's session ended when the
@@ -149,35 +157,6 @@ type ShellChannel struct {
 // sentinel so a caller can tell this apart from an ordinary transport
 // failure.
 var ErrDetachedWriterCap = errors.New("sshsvc: detached_writer_cap")
-
-// keepaliveLostError names a channel's end as connection loss from this
-// connection's own keepalive prober giving up, rather than an anonymous
-// closed transport (nocx-y6fh7 item 6, round 3).
-//
-// It implements ExitCause() string rather than being checked with
-// errors.Is, because the reader that needs the cause —
-// internal/helper/session's exit-status mapping — is compiled into EVERY
-// helper build, including the untagged one that must never link this
-// package (internal/helper/deploy's dependency test). An optional-interface
-// probe is the same idiom that reader already uses for ExitCode() and
-// Signal(), and it costs no import at all.
-type keepaliveLostError struct{ err error }
-
-func (e *keepaliveLostError) Error() string {
-	if e.err == nil {
-		return "sshsvc: the connection's own keepalive prober gave up and closed it"
-	}
-	return fmt.Sprintf("sshsvc: the connection's own keepalive prober gave up and closed it: %v", e.err)
-}
-
-// Unwrap keeps the original wait error reachable — a caller that checks for
-// a specific exit shape (a *gossh.ExitError, say) still finds one if the
-// mux teardown happened to produce it, exactly as ErrDetachedWriterCap's
-// wrapping does.
-func (e *keepaliveLostError) Unwrap() error { return e.err }
-
-// ExitCause names this as the wire's keepalive-lost cause.
-func (e *keepaliveLostError) ExitCause() string { return string(proto.ExitCauseKeepaliveLost) }
 
 // ErrShellClosed is what a read or write on a channel that has ended returns.
 // It is not ErrChannelClosed (that is the proxied plane's own sentinel, and
@@ -211,10 +190,19 @@ func (s *Service) OpenShell(ctx context.Context, spec ShellSpec) (*ShellChannel,
 		return nil, err
 	}
 
-	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint,
-		spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.OnLiveness)
+	// THE PANE'S TERMINAL DECLARES A PLAIN SHELL: losing it loses the person's
+	// work, whatever runs on it, so silence may never end this connection
+	// (design §5.3). Reattaching an integrated pane is stage 5's work; until
+	// then every shell is the person's.
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, true, spec.ProbeInterval)
 	if err != nil {
 		return nil, err
+	}
+	if spec.OnLiveness != nil {
+		observer := spec.OnLiveness
+		pool.observe(func(o hostconn.Observation) {
+			observer(ssh.Reachability{Responsive: o.Answered, RoundTrip: o.RoundTrip})
+		})
 	}
 
 	sess, err := pool.NewSession()
@@ -465,15 +453,22 @@ func (c *ShellChannel) wait() {
 		} else {
 			err = fmt.Errorf("%w: the connection closed clean but under the cap", ErrDetachedWriterCap)
 		}
-	case ssh.ReasonKeepaliveLost:
-		// This connection's OWN prober gave up and closed it — connection
-		// loss, not a process exit (nocx-y6fh7 item 6, round 3). Wrapped
-		// rather than left as whatever the mux teardown produced, so
-		// internal/helper/session's exit mapping can name the cause on the
-		// wire through the SAME optional-interface probe it already uses
-		// for ExitCode()/Signal(), without importing this ssh-tagged
-		// package — which the untagged deployed helper must never link.
-		err = &keepaliveLostError{err: err}
+	}
+	// A CHANNEL THAT ENDED BECAUSE ITS CONNECTION ENDED IS A LOSS, NOT AN EXIT
+	// (design §5.3; nocx-oalo1.4.3). The far command may be running still, and
+	// a code of -1 is not a status the host said — the coordinator's
+	// ExitOutcome reads a named cause as Interrupted, which is what keeps the
+	// tab, its scrollback and the offer to open a new shell. Without the name
+	// the same end reads as an authoritative `exited -1` and the pane closes
+	// the tab as though the shell had finished.
+	//
+	// THE VERDICT USED TO BE THE SHELL'S OWN KEEPALIVE PROBER'S. The prober
+	// belongs to the connection's supervisor now, so the cause is named here —
+	// this layer holds the pooled reference the shell rides, and it is the
+	// only place that knows both that the channel ended and that this side did
+	// not end it.
+	if err != nil && !c.closedByUs.Load() && c.pool.Lost() {
+		err = &linkLostError{err: err}
 	}
 	c.exitMu.Lock()
 	c.exitErr = shellExit(err)
@@ -489,11 +484,35 @@ func (c *ShellChannel) wait() {
 func (c *ShellChannel) Close() error {
 	var err error
 	c.closeOne.Do(func() {
+		// BEFORE the channel closes: the wait this releases reads the flag to
+		// tell a pane's own close from a connection that died under it.
+		c.closedByUs.Store(true)
 		err = c.sess.Close()
 		_ = c.pool.Close()
 	})
 	return err
 }
+
+// linkLostError names a channel's end as CONNECTION LOSS rather than as the
+// process's own end: the stream stopped because the transport under it
+// stopped, and the far command may be running still.
+//
+// It carries no status of its own — ExitCode is the shell's, and stays -1 —
+// and names the cause through the SAME optional-interface probe the helper's
+// exit mapping already uses for ExitCode and Signal, so that untagged package
+// never links this ssh-tagged one (internal/helper/session's watchExit).
+type linkLostError struct{ err error }
+
+func (e *linkLostError) Error() string {
+	if e.err == nil {
+		return "ssh: the connection this shell rode ended"
+	}
+	return "ssh: the connection this shell rode ended: " + e.err.Error()
+}
+
+func (e *linkLostError) Unwrap() error { return e.err }
+
+func (e *linkLostError) ExitCause() string { return string(proto.ExitCauseLinkLost) }
 
 // ShellExit is what a shell channel's wait returned, in the vocabulary the
 // session layer already consumes: an error carrying an exit CODE.
@@ -501,17 +520,17 @@ func (c *ShellChannel) Close() error {
 // It exists because x/crypto/ssh spells its status differently —
 // *gossh.ExitError answers ExitStatus() and Signal() (a NAME), while every
 // consumer in this repository reads ExitCode() int, which is os/exec's
-// spelling and the one client.ExitStatus mirrors — and translating it here
-// keeps x/crypto's types inside the two packages allowed to see them.
+// spelling and the one client.ExitStatus mirrors — and the carrier translates
+// it (sshconn.Exit) so that the library's exit type is read in one package.
 //
 // A channel that ended without a status (the connection died, the server
 // closed it, we closed it) is code -1, which is the same value
 // SessionExitStatus documents for "killed by a signal or no status could be
 // collected". The distinction that matters to a reader — did the far command
-// say how it ended, or did the stream simply stop — is carried by the error
-// being a *gossh.ExitError or not, and the signal NAME is dropped rather than
-// translated into a number: a name-to-number table would be this package
-// inventing a far kernel's numbering.
+// say how it ended, or did the stream simply stop — is whether the carrier
+// answered a status, and the signal NAME is dropped rather than translated into
+// a number: a name-to-number table would be this package inventing a far
+// kernel's numbering.
 type ShellExit struct {
 	// Err is what the wait returned, nil for a clean zero exit.
 	Err error
@@ -529,14 +548,11 @@ func (e *ShellExit) Error() string {
 func (e *ShellExit) Unwrap() error { return e.Err }
 
 // ExitCode is the far command's status, or -1 when the stream ended without
-// one.
+// one. The translation is the carrier's (sshconn.Exit), so this package reads no
+// x/crypto exit type at all.
 func (e *ShellExit) ExitCode() int {
-	var exit *gossh.ExitError
-	if errors.As(e.Err, &exit) {
-		return exit.ExitStatus()
-	}
-	if e.Err == nil {
-		return 0
+	if status, ok := sshconn.Exit(e.Err); ok {
+		return status
 	}
 	return -1
 }

@@ -311,6 +311,7 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'session.historyPage',
       'session.recoveryStatus',
       'open',
+      'pane.reconnect',
       'attach',
       'detach',
       'close',

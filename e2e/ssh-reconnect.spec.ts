@@ -1,49 +1,72 @@
 /**
- * e2e: a person whose ssh connection dies SILENTLY gets a shell back, and the
- * work the dead session printed is still there (nocx-rtzo4.1, the epic
- * nocx-rtzo4's first success criterion).
+ * e2e: what a person sees when an ssh connection dies — silently, and loudly
+ * (nocx-oalo1.4.3, the design's §5.3).
  *
- * The epic shipped in PR #139 proven entirely on fakes: reconnect-setting
- * covers the ask/auto/never policy, terminal-content rebinds against a fake
- * session, and internal/ssh's netfault table stages the transport faults
- * backend-side. Nothing watched a person do it end to end, which is the
- * nocx-rtg0 shape AGENTS.md rule 2 was bought by — every unit correct, the
- * user's journey unproven.
+ * ## The silent death no longer ends the session, and that is a decision
  *
- * ## Why the loss has to be silent
+ * Until stage 2 a silent death was the ONE loss only the product could notice:
+ * the keepalive prober missed twice, reported the host unreachable, closed the
+ * transport, and the session ended — which is what put the reconnect card on
+ * the tab. The design reversed the closing and kept the reporting:
  *
- * A killed connection is the LOUD loss, and the product already handled it:
- * the channel EOFs, the session ends, the tab is marked. The whole defect this
- * epic fixed was the quiet one — a suspended laptop, a NAT that dropped the
- * flow — where the socket stays open, writes succeed and nothing ever comes
- * back. Only the keepalive prober can notice that, so only a silent death
- * exercises what was built. `e2e/fault-proxy.ts` stages it, and its header
- * says why it is a second implementation of internal/ssh/netfault_test.go
- * rather than a reuse of it.
+ * > Silence never ends a shell that would die with the connection. That is the
+ * > person's choice (owner, 2026-11-06 …). An unanswered probe closes nothing
+ * > by itself. … A connection carrying any plain shell has no such budget: it
+ * > stays `stalled` until it answers, the transport errors, or a person
+ * > presses Reconnect.
+ * >
+ * > — .internal/specs/2026-11-06-ssh-foundation-design.md §5.3
  *
- * ## Why the second test says `slow` and not `unreachable`
+ * So the journey this file used to assert for a silent death — the session
+ * ends, the pane offers a way back, the reconnect keeps the scrollback — is no
+ * longer the journey the product takes for THAT fault. Asserting it against a
+ * blackhole now asserts the old product (it failed for 60 s on the branch that
+ * brought stage 2, e2e/ssh-reconnect.spec.ts:215, on 2026-11-14). The first
+ * test below asserts what replaced it, and it is a stronger statement about a
+ * person's work: the shell is not thrown away, the pane is still told the host
+ * stopped answering, and the tab is marked — not closed.
  *
- * The bead asks for a case proving no reconnect is offered for a host that has
- * merely stopped answering — a session that may still be alive on the far side
- * must not be replaced. That promise is real and it is asserted here, but
- * through `slow` rather than `unreachable`, because a DURABLE `unreachable` is
- * not reachable through the prober at all:
+ * ## The way back is still a promise, so it is still tested — with a cut
  *
- * internal/ssh/ssh_keepalive.go's silent-probe branch reports
- * `Reachability{Responsive: false}` — which becomes `unknown`, which the
- * renderer draws as `unreachable` — and then closes the transport on the very
- * next statement, because a parked SendRequest can only be freed by closing
- * the connection. So `unreachable` is the session's last word before it ends,
- * separated from `lost` by microseconds on the backend and by one WebSocket
- * frame at the renderer. A Playwright assertion cannot sit inside that window,
- * and a test that tried would be timing-dependent — which AGENTS.md forbids
- * outright, and rightly: it would pass on a slow machine and fail on a fast
- * one, which is the failure this suite has already paid for twice.
+ * A transport that ENDS is the loud death, and nothing about it is a guess:
+ * the session's channel is gone, the pane says so, and the reconnect opens a
+ * new shell while the old one's scrollback stays readable behind a divider.
+ * That is the second test, and it is the same assertion the silent test used to
+ * make, driven by the fault that still reaches it. Each fault now asserts what
+ * the product promises for THAT fault instead of one fault standing in for
+ * both; neither can pass by the other's behaviour.
  *
- * What IS durable, and is the same promise, is `slow`: a host answering late
- * is answering, nothing has ended, and no reconnect may be offered. The
- * unreachable-specific half stays covered where it can be — unit level, with a
- * clock the test owns.
+ * ## Why the silent test does not wait for the connection to come back
+ *
+ * It cannot, honestly: `blackhole` READS the bytes and drops them, so the
+ * kernel of the proxy acknowledges what the far side never saw, and the
+ * keepalive already sent stays parked on the mux's send lock with nothing left
+ * to retransmit (design §5.3: "A flow lost in a firewall or NAT stays silent
+ * and asks"). The recovery the design describes for that case — the head
+ * saying the server answers new connections and offering Reconnect, which ends
+ * that shell — is `pane.connection` and the head, which is stage 3's
+ * (design §5.6, §5.8, §11). Waiting for it here would be asserting a surface
+ * that does not exist yet; the test states the part that does: the finding
+ * reaches the pane and nothing else happens.
+ *
+ * ## Why the third test says `slow` and not `unreachable`
+ *
+ * A host answering late is a host that ANSWERS: nothing has ended, nothing may
+ * be replaced, and the pane says so with the measurement behind it. `slow` is
+ * the durable half of that statement — a `unreachable` that arrives as the
+ * session's last word is separated from the loss by one WebSocket frame, and a
+ * Playwright assertion cannot sit inside that window without depending on
+ * timing.
+ *
+ * ## The probe's cadence
+ *
+ * The profile below states it, and the ONE prober obeys it whichever holder
+ * dialled the connection first — the shell-integration publish does, in this
+ * open order, and it states nothing (design §5.3, and the supervisor's rule
+ * that the smallest STATED interval wins). A soft deadline equals the cadence
+ * when the cadence is under the design's 15 s, so silence is reported two
+ * cadences after the last answer. That is what the polls support, and none of
+ * them derives a wait from the numbers: they wait on states.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -55,22 +78,25 @@ import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
-const OFFER = '.pane.active .nocx-reconnect-offer'
+const HEAD = '.pane.active [data-testid="connection-head"]'
+const RECONNECT = `${HEAD} .ui-button`
 const INDICATOR = '.pane.active .ui-connection-indicator'
 const BOUNDARY = '[data-reconnect-boundary="true"]'
 const RECONNECT_SETTING = '.ui-settings-row[data-key="ssh.reconnect"] select'
 
 /**
- * A probe every second, and a silent one given two seconds to come back.
+ * The connection's probe cadence, as a person's profile states it — and it is
+ * the cadence this spec gets, whichever holder dialled first (§5.3: "a
+ * profile's keepalive settings still apply and map onto these").
  *
- * internal/connection/resolver.go defaults these to 30s and 3, which is right
- * for a product and would make this spec wait a minute and a half. They are
- * profile options precisely so the cadence can be stated per connection
- * (contracts/profiles.create.params.schema.json), so the spec states it rather
- * than sleeping. Detection lands at interval + interval*countMax ≈ 3s.
+ * TWO SECONDS, not one: a probe's soft deadline equals the cadence whenever
+ * the cadence is under the design's 15 s, so a one-second cadence would give
+ * this spec's own slow fault (400 ms each way, about 800 ms of round trip)
+ * only 200 ms of head room before a late answer read as silence. Two seconds
+ * keeps the fault comfortably inside its deadline and still detects silence in
+ * four, against the fifteen-second default this used to be stuck with.
  */
-const KEEPALIVE_INTERVAL_MS = 1000
-const KEEPALIVE_COUNT_MAX = 2
+const KEEPALIVE_INTERVAL_MS = 2000
 
 /** Rewrite the fixture's known_hosts line onto the port the client will
  *  actually dial. The line is keyed by host:port and the client reaches the
@@ -141,17 +167,16 @@ async function openConnection(page: Page, profileName: string): Promise<void> {
   await expect(page.locator(EDITOR)).toBeVisible({ timeout: 30_000 })
 }
 
-/** Run one command through the nocx editor and wait for its block. */
-async function runCommand(page: Page, command: string): Promise<void> {
+/** Wait for the shell's result, not the app-created submission block. */
+async function runCommand(page: Page, command: string, output: string): Promise<void> {
   const editor = page.locator(EDITOR)
   await editor.click()
   await editor.pressSequentially(command)
   await editor.press('Enter')
-  await expect(
-    page
-      .locator('.pane.active .cmd-block', { hasText: command.split(' ').at(-1) ?? command })
-      .first(),
-  ).toBeVisible({ timeout: 30_000 })
+  const block = page.locator('.pane.active .cmd-block', { hasText: command }).first()
+  await expect(block).toHaveAttribute('data-outcome', 'success', { timeout: 30_000 })
+  await expect(block).not.toHaveClass(/cmd-block-running/)
+  await expect(block.locator(':scope > .cmd-output')).toContainText(output)
 }
 
 interface Wired {
@@ -191,7 +216,6 @@ async function wire(page: Page, home: string): Promise<Wired> {
       user: 'e2e',
       keyPath: fixture.userKey,
       keepaliveInterval: KEEPALIVE_INTERVAL_MS,
-      keepaliveCountMax: KEEPALIVE_COUNT_MAX,
       desiredMode: 'script',
     },
   })
@@ -212,12 +236,119 @@ async function unwire(page: Page, w: Wired | null): Promise<void> {
   w.fixture.proc.kill('SIGKILL')
 }
 
-test('a silently dead ssh connection is offered a way back, and the reconnect keeps the scrollback', async ({
+test('a silently dead connection is reported to the pane, and the shell is not thrown away', async ({
   page,
 }, testInfo) => {
   test.setTimeout(150_000)
   const home = testInfo.outputPath('remote-home')
   mkdirSync(home, { recursive: true })
+  let w: Wired | null = null
+
+  try {
+    w = await wire(page, home)
+    await setReconnectPolicy(page, 'ask')
+    await openConnection(page, w.profileName)
+
+    // Work the dead connection will have done. Its output is what must stay
+    // readable: the design keeps the shell, so nothing may take it away.
+    await runCommand(page, 'echo before-the-loss', 'before-the-loss')
+    // runCommand observed the shell's completion and stored output before
+    // the whole SSH connection is blackholed. Visibility alone can still
+    // describe the pre-submission editor.
+    await expect(page.locator(EDITOR)).toBeVisible()
+
+    const tabsBeforeLoss = await page.locator(TAB).count()
+
+    // The laptop closes. Sockets stay open, writes keep succeeding, and
+    // nothing comes back — the loss only the connection's own prober can
+    // notice, and the one the design says may not end a plain shell.
+    w.proxy.blackhole()
+
+    // Nothing claims the session is gone while nothing has ended: the head is
+    // still a head, and no divider has been drawn.
+    await expect(page.locator(BOUNDARY)).toHaveCount(0)
+    await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
+
+    // Then the prober gives up and the pane says so — the mark, the tab's own
+    // word for the same fact, and the head stating the silence with the
+    // backend's offer to end it. One wait on the whole statement rather than
+    // the badge alone, so a red run says which part the pane failed to make.
+    // The poll's budget is the design's worst case (30 s) with room, and it is
+    // a state arrived at, never a duration waited out.
+    await expect
+      .poll(
+        async () => ({
+          condition: await page
+            .locator(INDICATOR)
+            .first()
+            .getAttribute('data-condition')
+            .catch(() => null),
+          tabWarnings: await page.locator('.nocx-tab-warning').count(),
+          headState: await page
+            .locator(HEAD)
+            .getAttribute('data-state')
+            .catch(() => null),
+          reconnect: await page.locator(RECONNECT).count(),
+          boundaries: await page.locator(BOUNDARY).count(),
+        }),
+        { timeout: 60_000 },
+      )
+      .toEqual({
+        condition: 'unreachable',
+        tabWarnings: 1,
+        headState: 'stalled',
+        reconnect: 1,
+        boundaries: 0,
+      })
+    await expect(page.locator(`${TAB}[aria-selected="true"] .nocx-tab-warning`)).toHaveAttribute(
+      'aria-label',
+      'Host not answering',
+    )
+
+    // THE PROMISE THIS TEST EXISTS FOR: silence ended nothing. The tab is
+    // still there with its shell, the shell's output is still readable, and
+    // the pane never claimed the session was gone.
+    await expect(page.locator(TAB)).toHaveCount(tabsBeforeLoss)
+    await expect(page.locator(EDITOR)).toBeVisible()
+    await expect(
+      page.locator('.pane.active .cmd-block', { hasText: 'before-the-loss' }).first(),
+    ).toBeVisible()
+    await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
+    await expect(page.locator(HEAD)).toContainText('No answer')
+  } finally {
+    await unwire(page, w)
+  }
+})
+
+test('a connection that is cut is offered a way back, and the reconnect keeps the scrollback', async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(150_000)
+  const home = testInfo.outputPath('cut-home')
+  mkdirSync(home, { recursive: true })
+  const opened: Array<{
+    paneId: string
+    generation: number
+    open: {
+      sessionId: string
+      desiredMode: string
+      awaitsIntegration: boolean
+      cwd: string
+      workspaceId: string
+    }
+  }> = []
+  const sent: Array<{ method?: string }> = []
+  page.on('websocket', (socket) => {
+    if (!socket.url().includes('/session')) return
+    socket.on('framereceived', ({ payload }) => {
+      if (typeof payload !== 'string') return
+      const message = JSON.parse(payload) as { method?: string; params: (typeof opened)[number] }
+      if (message.method === 'pane.opened') opened.push(message.params)
+    })
+    socket.on('framesent', ({ payload }) => {
+      if (typeof payload === 'string') sent.push(JSON.parse(payload) as { method?: string })
+    })
+  })
   let w: Wired | null = null
 
   try {
@@ -228,39 +359,40 @@ test('a silently dead ssh connection is offered a way back, and the reconnect ke
     await openConnection(page, w.profileName)
 
     // Work the dead session will have done. Its output is what must survive.
-    await runCommand(page, 'echo before-the-loss')
+    await runCommand(page, 'echo before-the-loss', 'before-the-loss')
 
     const tabsBeforeLoss = await page.locator(TAB).count()
 
-    // The laptop closes. Sockets stay open, writes keep succeeding, and
-    // nothing comes back — the only loss the keepalive prober can notice, and
-    // the one nothing noticed before this epic.
-    w.proxy.blackhole()
+    // The loud death: every socket is destroyed, so the transport ends, the
+    // session's channel ends with it, and nothing here is an inference the
+    // prober has to make.
+    w.proxy.cut()
 
-    // Nothing is offered while nothing has ended. The offer is the pane's
-    // statement that this session is GONE, and a session on a host that has
-    // merely gone quiet may still be alive on the far side — replacing it
-    // would abandon whatever it is running.
-    await expect(page.locator(OFFER)).toHaveCount(0)
-
-    // Then the prober gives up and the pane says so. One wait on the whole
-    // statement rather than on the badge alone: the mark, the card and the
-    // divider are one claim, and a red run should say which part of it the
-    // pane failed to make.
+    // The pane says this session is GONE and offers the one action that can
+    // act — the mark, the head and the divider are one claim, so a red run
+    // says which part of it the pane failed to make. The tab's own word for it
+    // is the loss, not the reachability mark.
     await expect
       .poll(
-        async () => ({
-          condition: await page
-            .locator(INDICATOR)
-            .first()
-            .getAttribute('data-condition')
-            .catch(() => null),
-          offers: await page.locator(OFFER).count(),
-          boundaries: await page.locator(BOUNDARY).count(),
-        }),
+        async () => {
+          const state = await page
+            .locator(HEAD)
+            .getAttribute('data-state')
+            .catch(() => null)
+          return {
+            condition: await page
+              .locator(INDICATOR)
+              .first()
+              .getAttribute('data-condition')
+              .catch(() => null),
+            gone: state === 'failed' || state === 'ended' || state === 'reconnecting',
+            reconnect: await page.locator(RECONNECT).count(),
+            boundaries: await page.locator(BOUNDARY).count(),
+          }
+        },
         { timeout: 60_000 },
       )
-      .toEqual({ condition: 'lost', offers: 1, boundaries: 0 })
+      .toEqual({ condition: 'lost', gone: true, reconnect: 1, boundaries: 0 })
 
     // The tab is marked and NOT closed — a lost session is still a place the
     // person was working, and closing it would throw away the scrollback this
@@ -276,22 +408,30 @@ test('a silently dead ssh connection is offered a way back, and the reconnect ke
       'Connection lost',
     )
 
-    // The card says what a reconnect actually is. This is the product's
+    // The head says what a reconnect actually is. This is the product's
     // promise and it is deliberately not a resurrection: a NEW shell, and
     // whatever the old one was running may still be going on the host.
-    await expect(page.locator(`${OFFER} .ui-status-card[data-tone="danger"]`)).toBeVisible()
-    await expect(page.locator(`${OFFER} .ui-status-card__title`)).toContainText('is gone')
+    await expect(page.locator(HEAD)).toContainText(/Waiting for the server|Failed|Connection ended/)
 
-    // The network comes back — the lid opens. Without this the reconnect would
-    // dial a deaf relay, which is a different test.
+    // The network is whole again — the relay is still listening, and only the
+    // sockets it carried were destroyed. Without a working relay the reconnect
+    // would dial a deaf proxy, which is a different test.
     w.proxy.pass()
+    const sentBeforeReconnect = sent.length
 
     await page.getByRole('button', { name: 'Reconnect', exact: true }).click()
+    await expect.poll(() => opened.length).toBeGreaterThan(0)
+    const replacement = opened.at(-1)!
+    expect(replacement.generation).toBeGreaterThan(0)
+    expect(replacement.open.desiredMode).toBe('script')
+    expect(replacement.open.awaitsIntegration).toBe(true)
+    expect(replacement.open.cwd).not.toBe('')
+    expect(replacement.open.workspaceId).not.toBe('')
 
     // A working shell at the same endpoint: the prompt returns and a command
     // runs on it.
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 60_000 })
-    await runCommand(page, 'echo after-the-reconnect')
+    await runCommand(page, 'echo after-the-reconnect', 'after-the-reconnect')
 
     // And the whole point of doing it this way: the dead session's work is
     // still readable, with a divider saying where it ended.
@@ -301,9 +441,17 @@ test('a silently dead ssh connection is offered a way back, and the reconnect ke
     await expect(
       page.locator('.pane.active .cmd-block', { hasText: 'before-the-loss' }).first(),
     ).toBeVisible()
-    // The mark is gone: the pane has a session again.
-    await expect(page.locator(OFFER)).toHaveCount(0)
+    // The head says connected and the mark is gone: the pane has a session
+    // again.
+    await expect(page.locator(HEAD)).toHaveAttribute('data-state', 'connected')
     await expect(page.locator(INDICATOR)).toHaveCount(0)
+    // Replacement opens are delivered, not discovered or claimed. A command
+    // completed above, so its socket traffic has passed the adoption boundary.
+    expect(
+      sent
+        .slice(sentBeforeReconnect)
+        .filter(({ method }) => method === 'sessions.live' || method === 'attach'),
+    ).toEqual([])
   } finally {
     await unwire(page, w)
   }
@@ -324,9 +472,9 @@ test('a host that is merely answering late is marked slow and offered nothing', 
 
     // 400ms each way puts the probe's round trip around 800ms — past the
     // 500ms the backend grades as slow (internal/session/liveness.go), and
-    // well inside the 2s a silent probe is given, so the host is answering.
-    // Nothing here is a duration the assertions wait on: the poll below waits
-    // on the grade the backend published.
+    // well inside the 15s a probe is given before it reads as silence, so the
+    // host is answering. Nothing here is a duration the assertions wait on:
+    // the poll below waits on the grade the backend published.
     w.proxy.slow(400)
 
     await expect(page.locator(`${INDICATOR}[data-condition="slow"]`)).toBeVisible({
@@ -336,16 +484,24 @@ test('a host that is merely answering late is marked slow and offered nothing', 
     // The promise this test exists for. The host is struggling, the session is
     // alive, and the product must not offer to replace it — nor mark the tab
     // as lost.
-    await expect(page.locator(OFFER)).toHaveCount(0)
+    await expect(page.locator(RECONNECT)).toHaveCount(0)
     await expect(page.locator(BOUNDARY)).toHaveCount(0)
     await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
 
     // And it is still a shell, which is what makes "slow, not gone" a
     // statement about the product rather than about the indicator.
-    await runCommand(page, 'echo still-working')
+    await runCommand(page, 'echo still-working', 'still-working')
 
     // Recovery clears it: the grade leaves at a lower threshold than it
     // enters, so a link that improves stops being described as struggling.
+    //
+    // A MEASUREMENT THAT DOES NOT SURVIVE THE WIRE CANNOT CLEAR IT, and this
+    // is where that was measured (2026-11-14): a loopback answer is a few
+    // hundred microseconds, the wire carries whole milliseconds, and zero on
+    // that field means "nothing measured" — so the 800 ms that made the host
+    // slow stood for as long as the link answered quickly. The fix is the
+    // helper's (internal/helper/session: roundTripMillis), and this assertion
+    // is the one that watches a person's mark go away.
     w.proxy.pass()
     await expect(page.locator(`${INDICATOR}[data-condition="slow"]`)).toHaveCount(0, {
       timeout: 60_000,

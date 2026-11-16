@@ -108,6 +108,7 @@ type sessionMachine interface {
 // dial: rings, the output pump, the exit monitor, stored-forward replay and
 // the discovery hooks. Same narrow-surface rule as sessionMachine.
 type openMachine interface {
+	closeSession(sid session.ID, sess session.Session)
 	getOrCreateRx(sid session.ID) *sessionRx
 	removeRx(sid session.ID) *sessionRx
 	pumpToRing(ctx context.Context, sess session.Session, ring *outputRing)
@@ -137,6 +138,12 @@ type openMachine interface {
 	recordPublishFailure(sid session.ID, reason shellintegration.PublishFailureReason)
 	// resendScreen is sessionMachine's, for the same install on this path.
 	resendScreen(ctx context.Context, sid session.ID)
+	// bindPane points a pane's connection notifications at the renderer that
+	// opened it (ws_pane_connection.go). Called BEFORE the open's own work:
+	// the first observation can arrive while the dial is still opening, and a
+	// binding installed after the ack would miss the stage the pane exists
+	// for.
+	bindPane(paneID string, wconn *wsConn, state *connState, params openParams)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -311,7 +318,16 @@ func isLineageRefusal(err error) bool {
 // are the same answer to the caller, which asked for a terminal and did not
 // get one — so the mapping lives in one place rather than being written
 // twice and drifting once.
+// errOpenShuttingDown is the open path's own refusal when the server began
+// stopping between the dial and the ring: the session exists and cannot be
+// given to a subscriber, so it is closed and named.
+var errOpenShuttingDown = errors.New("server shutting down")
+
 func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req jsonrpcRequest, err error) {
+	if errors.Is(err, errOpenShuttingDown) {
+		_ = respond(r, newJSONRPCError(req.ID, -32603, "Internal error: server shutting down"))
+		return
+	}
 	// A refusal the open path produced itself carries the sentence a person
 	// reads, and it is answered FIRST so nothing below can flatten it. The
 	// ssh taxonomy two paragraphs down would turn "SSH sessions not
@@ -418,6 +434,8 @@ func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req js
 // request id serves as the correlation-id — we do NOT add a second
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
+// handleOpen answers the `open` method: parse, run the one open path, and answer
+// with its result or its refusal.
 func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
@@ -442,6 +460,23 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		defer reporter.End()
 	}
 
+	_, err := h.openInto(ctx, wconn, state, params, func(result openResult) {
+		resultJSON, _ := json.Marshal(result)
+		_ = respond(r, newJSONRPCResult(req.ID, resultJSON))
+	})
+	if err != nil {
+		h.answerOpenFailure(ctx, r, req, err)
+	}
+}
+
+// openInto is THE ONE OPEN PATH: a session is created for a pane and every fact
+// that hangs off it is wired, with the acknowledgement at the point the wire
+// requires it (AD-7: before any session-scoped notification). `open` answers
+// its ack through ack; `pane.reconnect` does the same work for a pane whose
+// shell died, which is why this is one function and not a second beside it.
+//
+// The supervisor has already restored the connection when a return callback opens a new shell.
+func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, ack func(openResult)) (openResult, error) {
 	spec := OpenSpec{
 		PaneID: params.PaneID,
 		Kind:   params.Kind,
@@ -467,14 +502,92 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 	}
 
+	// THE PANE'S ROUTE IS BOUND BEFORE ANYTHING DIALS (design §5.5, §5.6).
+	// The connection's first observation is opening, and it is the pane's
+	// first news; binding after the open returned would deliver it to nobody.
+	// A pane with no id has no renderer to address and is not bound.
+	if err := ctx.Err(); err != nil {
+		return openResult{}, err
+	}
+	var paneRecord *paneRecord
+	var openingGeneration uint64
+	var bindingGeneration uint64
+	if machine, ok := h.sess.(*WSServer); ok && params.PaneID != "" && wconn != nil {
+		var bindErr error
+		paneRecord, bindErr = machine.bindPaneForOpen(ctx, params.PaneID, wconn, state, params)
+		if bindErr != nil {
+			return openResult{}, bindErr
+		}
+	} else {
+		h.sess.bindPane(params.PaneID, wconn, state, params)
+	}
+
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		// FIRST FRAME BEFORE THE OPENER IS ASKED ANYTHING (Q1). The owner's
+		// opening notice is the pane's own attempt at `resolve`; the real
+		// bind replaces it, with the helper's connection id, before a dial.
+		// A local pane has no connection to be opening.
+		if params.Kind == "ssh" && ctx.Value(paneReconnectOpenKey{}) == nil {
+			openingGeneration = machine.notePaneOpening(params.PaneID)
+		}
+		bindCtx := ctx
+		bindingObserver, _ := ctx.Value(paneBindingKey{}).(func(uint64))
+		ctx = context.WithValue(ctx, paneBindingKey{}, func(generation uint64) {
+			bindingGeneration = generation
+			if bindingObserver != nil {
+				bindingObserver(generation)
+			}
+			machine.paneMu.Lock()
+			defer machine.paneMu.Unlock()
+			if machine.paneRecords[params.PaneID] == paneRecord && bindCtx.Err() == nil {
+				paneRecord.bindingGeneration = generation
+			}
+		})
+	}
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
-		h.answerOpenFailure(ctx, r, req, err)
-		return
+		// THE PROVISIONAL OPENING IS SETTLED BY WHOEVER PUBLISHED IT. A real
+		// bind replaces it before the spawn; every failure before that leaves
+		// only this one, so the pane must be told the attempt ended instead of
+		// counting "Connecting" beside a startup error.
+		if machine, ok := h.sess.(*WSServer); ok && params.Kind == "ssh" &&
+			ctx.Value(paneReconnectOpenKey{}) == nil {
+			machine.settlePaneOpening(params.PaneID, openingGeneration)
+		}
+		return openResult{}, err
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
+	cleanupCtx := ctx
+	if machine, ok := h.sess.(*WSServer); ok {
+		cleanupCtx = machine.lifetimeCtx
+	}
+	if err := ctx.Err(); err != nil {
+		h.opener.close(cleanupCtx, sess.ID())
+		return openResult{}, err
+	}
 
-	state.add(sess)
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		machine.paneMu.Lock()
+		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || ctx.Err() != nil {
+			machine.paneMu.Unlock()
+			h.opener.close(cleanupCtx, sess.ID())
+			return openResult{}, context.Canceled
+		}
+		state.add(sess)
+		machine.paneMu.Unlock()
+	} else {
+		state.add(sess)
+	}
+	rx := h.sess.getOrCreateRx(sess.ID())
+	if rx == nil {
+		if hosted != nil && hosted.AbortLifecycle != nil {
+			hosted.AbortLifecycle()
+		}
+		state.remove(sess.ID())
+		h.opener.close(ctx, sess.ID())
+		return openResult{}, errOpenShuttingDown
+	}
+
 	if hosted != nil && hosted.LifecycleLane != "" {
 		if registrar, ok := h.sess.(interface {
 			RegisterLifecycleLane(lifecycle.LaneID, session.ID)
@@ -483,17 +596,20 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 	}
 
-	rx := h.sess.getOrCreateRx(sess.ID())
-	if rx == nil {
+	// Until the exit monitor takes ownership, every failed open must tear
+	// down the transport state it registered, even if delivery cancels ctx.
+	monitored := false
+	defer func() {
+		if monitored {
+			return
+		}
 		if hosted != nil && hosted.AbortLifecycle != nil {
 			hosted.AbortLifecycle()
 		}
 		state.remove(sess.ID())
-		h.opener.close(ctx, sess.ID())
-		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = respond(r, resp)
-		return
-	}
+		h.opener.close(cleanupCtx, sess.ID())
+		h.sess.closeSession(sess.ID(), sess)
+	}()
 
 	// Port discovery (nocx-wzc4.2): only now, once the session's ring
 	// exists, is the target "up" — a session that failed its ring setup
@@ -565,13 +681,20 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		AwaitsIntegration: awaitsIntegration,
 		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
 	}
-	resultJSON, _ := json.Marshal(result)
-	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = respond(r, resp)
-	if hosted != nil && hosted.StartLifecycle != nil {
-		hosted.StartLifecycle()
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil && ctx.Value(paneReconnectOpenKey{}) == nil {
+		machine.paneMu.Lock()
+		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
+			machine.paneMu.Unlock()
+			return openResult{}, context.Canceled
+		}
+		ack(result)
+		machine.paneMu.Unlock()
+	} else {
+		ack(result)
 	}
-
+	if err := ctx.Err(); err != nil {
+		return openResult{}, err
+	}
 	// Every session-scoped notification must follow the open result (AD-7).
 	// Install the subscriber only now: lifecycle can authenticate during the
 	// dial above, and publishing it to this shared WebSocket before the
@@ -582,20 +705,39 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// ago, so the displaced pair is discarded here rather than announced: the
 	// slot is empty by construction on this path, and a displacement that
 	// cannot happen must not be dressed up as one that did.
-	_, _ = rx.setSubscriber(wconn, state)
-	h.sess.replayLifecycleFacts(sess.ID())
-	// The axis was already entered above, before the ack — only the
-	// NOTIFICATION waits for AD-7. This is the first fact this session's
-	// subscriber can hear, so it runs once the subscriber above is attached.
-	h.sess.emitIntegration(sess.ID())
-	// The retained tool-surface state is replayed here too (nocx-2v80t.3.45),
-	// for the reason the lifecycle replay above is: a fact published after
-	// the session existed and before this subscriber was installed found
-	// nobody to tell and was only retained, and the attach path's replay
-	// never runs for the connection that opened the session. Measured: a
-	// broadcast right after the open result was lost 4 runs in 300 under
-	// -race.
-	h.sess.replayToolSurface(sess.ID())
+	if wconn != nil {
+		if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+			machine.paneMu.Lock()
+			if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
+				machine.paneMu.Unlock()
+				return openResult{}, context.Canceled
+			}
+			_, _ = rx.setSubscriber(wconn, state)
+			machine.paneMu.Unlock()
+		} else {
+			_, _ = rx.setSubscriber(wconn, state)
+		}
+		if hosted != nil && hosted.StartLifecycle != nil {
+			hosted.StartLifecycle()
+		}
+		h.sess.replayLifecycleFacts(sess.ID())
+		// The axis was already entered above, before the ack — only the
+		// NOTIFICATION waits for AD-7. This is the first fact this session's
+		// subscriber can hear, so it runs once the subscriber above is
+		// attached.
+		h.sess.emitIntegration(sess.ID())
+		// The retained tool-surface state is replayed here too (nocx-2v80t.3.45),
+		// for the reason the lifecycle replay above is: a fact published after
+		// the session existed and before this subscriber was installed found
+		// nobody to tell and was only retained, and the attach path's replay
+		// never runs for the connection that opened the session. Measured: a
+		// broadcast right after the open result was lost 4 runs in 300 under
+		// -race.
+		h.sess.replayToolSurface(sess.ID())
+	}
+	if wconn == nil && hosted != nil && hosted.StartLifecycle != nil {
+		hosted.StartLifecycle()
+	}
 	// The publish's own outcome, from the opener that attempted it
 	// (nocx-1kejz.4). After the ack and after the subscriber above, like every
 	// other session-scoped fact (AD-7); retained, so a renderer that attaches
@@ -642,6 +784,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	rx.monitorOnce.Do(func() {
 		go h.sess.monitorExit(rx, sess)
 	})
+	monitored = true
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
 	// The pump is session/connection-owned, not request-owned: the request
@@ -652,7 +795,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	if conn, ok := connectionContext(ctx); ok {
 		pumpCtx = conn
 	}
-	go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
+	if wconn != nil {
+		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
+	}
 
 	// The screen, for the window the lifecycle replay above covers
 	// (nocx-zg3k3.2.15): whatever the shell drew between the spawn and the
@@ -662,15 +807,19 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// replay — the runtime holds the latest one — so the frame this
 	// subscriber is owed is asked for. Last, so its round trip delays no
 	// PTY byte.
-	h.sess.resendScreen(ctx, sess.ID())
+	if wconn != nil {
+		h.sess.resendScreen(ctx, sess.ID())
+	}
+	return result, nil
 }
 
 // sessionOpsHandlers answers resize, close and attach: the per-session
 // operations (SessionOperation via ForSession) plus the transport lanes. It
 // needs the connection's connState (session ownership checks) per call.
 type sessionOpsHandlers struct {
-	ops *capability.SessionOperations // nil → session store not wired
-	r   Responder
+	ops  *capability.SessionOperations // nil → session store not wired
+	live capability.SessionOperation
+	r    Responder
 	// instance is THIS backend's identity, read from the registry at
 	// construction and held as a value: a claim is judged against it, and the
 	// judgement must be possible when the registry holds nothing. A value
@@ -898,13 +1047,25 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 
 	sid := session.ID(params.SessionID)
 
-	// The instance is judged before the session is looked up at all, so a
-	// claim carried across a coordinator restart is answered "that is a
-	// different backend" rather than "no such session" — see judgeClaim.
-	// ForSession's own failure is indistinguishable from an unknown session,
-	// so it is answered in the claim's vocabulary too.
+	// A foreign claim first asks the authoritative inventory whether its
+	// shell survived. A live shell needs re-adoption; only confirmed absence
+	// means the old session ended when the backend restarted.
 	if foreignInstance(h.instance, params.InstanceID) {
-		_ = r.TryError(req.ID, foreignInstanceRefusal())
+		// Inventory is read under the same gate as sessions.live. A stale
+		// identity alone says nothing about whether its helper shell survived.
+		err := h.live.Run(ctx, func(_ context.Context, svc capability.SessionService) error {
+			for _, sess := range svc.List() {
+				if sess.ID() == sid {
+					_ = r.TryError(req.ID, foreignInstanceRefusal())
+					return nil
+				}
+			}
+			_ = r.TryError(req.ID, refuseClaim(reasonSessionEndedAfterRestart, "The backend restarted and no longer holds this session"))
+			return nil
+		})
+		if err != nil {
+			answerOperationRefusal(r, req, err)
+		}
 		return
 	}
 
@@ -1291,6 +1452,13 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
+		// THE ONE ACTION A PERSON TAKES ON A CONNECTION (design §5.3, §5.6;
+		// nocx-oalo1.5.4). It runs on the same submission as `open`, because it
+		// IS an open: the one open path, with the old connection closed first.
+		reg(openSub, catalog.OpPaneReconnect, params(validatePaneReconnectRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := paneReconnectHandlers{machine: s, r: r, w: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		keyedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
@@ -1308,7 +1476,7 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
 		keyedBySession(reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
+			h := sessionOpsHandlers{ops: sessionOps, live: liveOp, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		})),
 		// Recovery metadata shares the session operation queue with attach and
@@ -1358,6 +1526,29 @@ const maxShellPinRunes = 32
 // a target. profileId and host are optional (a local open carries neither);
 // when present they are held to the same bounds the seam methods apply, and
 // host/user reach the ssh subprocess, so control characters are refused.
+// validatePaneReconnectRaw is `pane.reconnect`'s shape: the pane and the epoch
+// the offer carried, and nothing else. Both are required — a press with no
+// epoch is a press about a state nobody named — and neither may be null.
+func validatePaneReconnectRaw(raw json.RawMessage) string {
+	var p paneReconnectParams
+	if msg := decodeObject(raw, &p, "paneId", "connectionEpoch"); msg != "" {
+		return msg
+	}
+	if msg := requireFields(raw, "paneId", "connectionEpoch"); msg != "" {
+		return msg
+	}
+	if p.PaneID == "" {
+		return "paneId is required"
+	}
+	if msg := validateStringBound("paneId", p.PaneID, maxIDRunes); msg != "" {
+		return msg
+	}
+	if p.ConnectionEpoch < 1 {
+		return "connectionEpoch must be at least 1"
+	}
+	return ""
+}
+
 func validateOpenRaw(raw json.RawMessage) string {
 	var p openParams
 	if msg := decodeObject(raw, &p, "cols", "rows"); msg != "" {

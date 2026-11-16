@@ -19,13 +19,16 @@ import (
 	"github.com/gorilla/websocket"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -76,7 +79,7 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sshdial.New: %v", err)
 	}
-	sshService := sshsvc.New(dialer, logger)
+	sshService := sshsvc.New(sshconn.New(dialer, log.NewSlogAdapter(logger)), logger)
 	sessions := helpersession.New(helpersession.Options{
 		Generation: filesFixtureGenera,
 		Spawner:    &scriptedSpawner{},
@@ -102,8 +105,12 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 			t.Error("helper did not stop")
 		}
 	})
+	driver := panedriver.New("cwd-wire-instance", sshLog)
+	observations := make(chan panedriver.Snapshot, 128)
+	driver.SetPublisher(func(s panedriver.Snapshot) { observations <- s })
 	peer, err := helperclient.Dial(helperCtx, helperclient.Config{
-		Exec: helperclient.NewSocketConn(coordEnd), ExpectHash: filesFixtureGenera,
+		OnConnectionEvent: func(source string, ev proto.ConnectionStateEvent) { driver.ApplyFrom(source, ev) },
+		Exec:              helperclient.NewSocketConn(coordEnd), ExpectHash: filesFixtureGenera,
 		SentinelTTL: 5 * time.Second,
 		Reverse:     helperReverseHandlers(rc, key, &helperPrompt{log: logger}, nil, logger),
 		Log:         logger,
@@ -115,7 +122,8 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 
 	registry := session.New(sshLog, nil)
 	opener := &localHelperOpener{
-		log: logger, registry: registry, client: peer, sshTargets: rc,
+		paneConns: driver,
+		log:       logger, registry: registry, client: peer, sshTargets: rc,
 		dir: t.TempDir(), installed: helperInstalledStub(),
 	}
 	lifePub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
@@ -149,13 +157,32 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ws.Stop(context.Background()) })
 
-	opened, err := ws.OpenSession(context.Background(), transport.OpenSpec{
-		Kind: "ssh", ProfileID: "live-sshd-cwd", Cols: 100, Rows: 30,
+	// A consent-required attempt settles the provisional binding before the
+	// renderer retries the same pane after the person answers.
+	generation := driver.Bind("far-helper-pane", "pending:far-helper-pane")
+	driver.FailOpening("far-helper-pane", generation)
+	for len(observations) > 0 {
+		<-observations
+	}
+	// An open retried after local-helper replacement must not reuse the
+	// retiring client's binding, even when the destination has not changed.
+	openCtx := context.WithValue(context.Background(), sshPaneBindingKey{}, sshPaneBinding{
+		client: &helperclient.Client{}, connectionID: "retired-connection", generation: generation,
+	})
+	opened, err := ws.OpenSession(openCtx, transport.OpenSpec{
+		Kind: "ssh", ProfileID: "live-sshd-cwd", PaneID: "far-helper-pane", Cols: 100, Rows: 30,
 	})
 	if err != nil {
 		t.Fatalf("open helper-hosted SSH session: %v", err)
 	}
 	sid := opened.Session.ID()
+	var adopted panedriver.Snapshot
+	for len(observations) > 0 {
+		adopted = <-observations
+	}
+	if adopted.Transport.State != "connected" || adopted.SessionID != string(sid) || adopted.Generation <= generation {
+		t.Fatalf("far helper pane observation = %+v, want connected with session %s", adopted, sid)
+	}
 	conn := dialTestWSServer(t, ws)
 	attachAndAckRenderer(t, conn, string(sid))
 	readyCtx, readyCancel := context.WithTimeout(context.Background(), 20*time.Second)

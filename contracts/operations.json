@@ -7480,6 +7480,75 @@
       "preempts": []
     },
     {
+      "id": "internal.ssh.attempt",
+      "kind": "internal",
+      "owner": "binding",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "ssh",
+            "network",
+            "config",
+            "vault"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the supervisor serializes attempts per connection"
+      },
+      "max": {
+        "millis": 600000,
+        "basis": "read",
+        "note": "design §5.5: each progressing handshake or sign-in stage may wait ten minutes; person waits are separately bounded and pause the stage budget"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Connecting to the host",
+      "row": "past-wait",
+      "expired": "outcome-unknown",
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "ssh",
+        "network",
+        "config",
+        "vault"
+      ],
+      "preempts": []
+    },
+    {
       "id": "internal.ssh.dial",
       "kind": "internal",
       "owner": "server",
@@ -7537,34 +7606,40 @@
       "preempts": []
     },
     {
-      "id": "internal.ssh.keepalive",
+      "id": "internal.ssh.release",
       "kind": "internal",
-      "owner": "server",
+      "owner": "binding",
       "phases": [
         {
           "name": "run",
-          "resources": [],
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
           "dependencies": [
             "ssh",
-            "network"
+            "helper"
           ]
         }
       ],
       "turn": {
         "millis": 1000,
         "basis": "read",
-        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+        "note": "a pane close releases its logical connection hold"
       },
       "max": {
-        "millis": 30000,
-        "basis": "read",
-        "note": "read: one keepalive round trip; no explicit bound today"
-      },
-      "silence": {
-        "kind": "deadline",
         "millis": 10000,
         "basis": "read",
-        "note": "declared keepalive interval progress bound"
+        "note": "bounded helper registration cleanup, not shell teardown"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
       },
       "answer": {
         "kind": "none",
@@ -7579,13 +7654,19 @@
         "note": ""
       },
       "merge": "none",
-      "waiting": "Keeping the connection alive",
+      "waiting": "Releasing the pane connection",
       "row": "never",
       "expired": "outcome-unknown",
-      "resources": [],
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
       "dependencies": [
         "ssh",
-        "network"
+        "helper"
       ],
       "preempts": []
     },
@@ -9458,6 +9539,77 @@
       "resources": [],
       "dependencies": [
         "server"
+      ],
+      "preempts": []
+    },
+    {
+      "id": "pane.reconnect",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "session",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "session",
+            "helper",
+            "ssh",
+            "config",
+            "vault"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 10000,
+        "basis": "read",
+        "note": "read: validates and registers the reconnect; supervisor attempts and pane adoption continue on pane.connection after the RPC answers"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "deadline",
+        "millis": 10000,
+        "basis": "read",
+        "note": "read: a reconnect that produced no shell must release the session it retired, like the open's own rollback"
+      },
+      "merge": "none",
+      "waiting": "Reconnecting your pane",
+      "row": "past-wait",
+      "expired": "outcome-unknown",
+      "resources": [
+        {
+          "kind": "session",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "session",
+        "helper",
+        "ssh",
+        "config",
+        "vault"
       ],
       "preempts": []
     },

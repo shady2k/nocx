@@ -584,17 +584,14 @@ type ConnectConfig struct {
 	// passphrase in the SecretStore.
 	JumpPassphraseSecretID credential.SecretID
 
-	// KeepaliveInterval controls how often the SSH keepalive probe
-	// ("keepalive@openssh.com") is sent on the connection. Zero disables
-	// keepalive. The profile stores this value in milliseconds; callers
-	// convert to a time.Duration before setting this field.
+	// KeepaliveInterval is the cadence the profile asks the connection's ONE
+	// prober to use, as milliseconds the profile stored and a Duration here.
+	// Zero means "no opinion", never "do not probe": the prober belongs to the
+	// helper's connection supervisor, and zero selects its own default
+	// (design §5.3 — a zero never means do not probe). The helper reads it to
+	// build spawn-ssh's keepaliveIntervalMs; no coordinator-side dial uses it,
+	// because a prober here would be a second one.
 	KeepaliveInterval time.Duration
-
-	// KeepaliveCountMax is the number of consecutive keepalive failures
-	// before the connection is considered dead and closed. Only meaningful
-	// when KeepaliveInterval > 0. Zero or negative means a single failure
-	// closes the connection.
-	KeepaliveCountMax int
 
 	// ReadyTimeout is the maximum time to wait for the SSH TCP dial and
 	// handshake to complete. Zero means use the default of 30 seconds.
@@ -630,14 +627,12 @@ func WithAgent() ConnectOption {
 	return func(c *ConnectConfig) { c.UseAgent = true }
 }
 
-// WithKeepalive sets the keepalive interval and consecutive-failure limit.
-// A zero interval disables keepalive. Negative countMax means a single
-// failure closes the connection.
-func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
-	return func(c *ConnectConfig) {
-		c.KeepaliveInterval = interval
-		c.KeepaliveCountMax = countMax
-	}
+// WithKeepalive carries the profile's cadence onto the config, where the
+// helper reads it for the connection's one prober (KeepaliveInterval's own
+// note). A zero means no opinion and is carried as such rather than skipped:
+// the prober's default is the policy's to apply, not this option's.
+func WithKeepalive(interval time.Duration) ConnectOption {
+	return func(c *ConnectConfig) { c.KeepaliveInterval = interval }
 }
 
 // WithTimeout sets the connect timeout for the TCP dial and SSH handshake.

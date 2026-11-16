@@ -21,7 +21,8 @@
 // position, pinned, layout, workspace_id, seen-mark, and no "active".
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { isProvenSessionAbsence, type SessionHandle, type WSClient } from './ipc'
+import { type SessionHandle, type WSClient } from './ipc'
+import { isProvenSessionAbsence } from './connection/session-claim'
 import type { SessionEntry } from './generated/sessions.inventory'
 import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
@@ -33,7 +34,7 @@ import {
   type DriverState,
   type PaneChild,
 } from './pane-observation'
-import type { ConnectionCondition } from './connection-condition'
+import { connectionObserves, type ConnectionCondition } from './connection-condition'
 import { startWakeReporter, type WakeObservation } from './wake-report'
 import { WorkFinishedWatch } from './pane-work-finished'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
@@ -310,20 +311,19 @@ export class Pane implements PaneHost {
    *  work-finished watcher's edge is a claim about the title and must stay
    *  one (its trust class is `heuristic` for that reason). */
   get agentStatus(): PaneActivity | null {
-    return paneIndicator(this._observation, this._agentStatus, this.hostObserved)?.activity ?? null
-  }
-
-  /** Whether observations about this pane are still ARRIVING. A slow host is
-   *  observed — its bytes are late, not absent — so only the two conditions
-   *  that stop the stream count. */
-  private get hostObserved(): boolean {
-    return this._connection !== 'unreachable' && this._connection !== 'lost'
+    return (
+      paneIndicator(this._observation, this._agentStatus, connectionObserves(this._connection))
+        ?.activity ?? null
+    )
   }
 
   /** How strong the evidence behind agentStatus is. `title` is the weaker row
    *  of the provenance table: it may light an indicator and decides nothing. */
   get agentSource(): PaneActivitySource | null {
-    return paneIndicator(this._observation, this._agentStatus, this.hostObserved)?.source ?? null
+    return (
+      paneIndicator(this._observation, this._agentStatus, connectionObserves(this._connection))
+        ?.source ?? null
+    )
   }
 
   get tooltip(): string {

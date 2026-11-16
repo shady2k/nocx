@@ -493,8 +493,52 @@ test('the committed baseline is counted, reasoned, and only shrinks', () => {
   }
 })
 
-test('the transport packages are the only ones exempt, and there are three', () => {
-  assert.deepEqual(ALLOWED_DIRS, ['internal/ssh/', 'internal/helper/sshsvc/', 'internal/sshtest/'])
+// ─── the allowlist narrows: the carrier is exempt, the supervisor is not ──
+//
+// Design §5.1.1 gives the supervisor `monoclock` and `log` and forbids it
+// `internal/ssh` and `x/crypto`: it is carrier-neutral, and a transport type in
+// the state machine is the beginning of a second owner of every connection.
+// Stage 2 added `internal/hostconn/` to ALLOWED_DIRS, which is the widening the
+// review refused (finding 13): this fixture is the check that it stays out.
+
+test('an x/crypto import in the carrier-neutral supervisor is refused', () => {
+  const rows = analyseOne({
+    'internal/hostconn/supervisor.go': `package hostconn
+
+import gossh "golang.org/x/crypto/ssh"
+
+var _ *gossh.Client
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['xcrypto-ssh-import'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.Client')
+})
+
+test('the same import in the carrier is the carrier doing its job', () => {
+  const rows = analyseOne({
+    'internal/helper/sshconn/link.go': `package sshconn
+
+import gossh "golang.org/x/crypto/ssh"
+
+var _ *gossh.Client
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+test('the transport packages are the only ones exempt, and the supervisor is not one of them', () => {
+  // Four: the library's home, the carrier that implements the seam, the service
+  // that serves the carrier over the helper protocol, and the fault proxy that
+  // speaks SSH because a proxy must. `internal/hostconn` left the list in
+  // nocx-oalo1.4's review round 2 (finding 13) — design §5.1.1's "may never
+  // import x/crypto" is a rule about the supervisor, and an ALLOWED_DIRS entry
+  // was the licence that made it unenforced.
+  assert.deepEqual(ALLOWED_DIRS, [
+    'internal/ssh/',
+    'internal/helper/sshsvc/',
+    'internal/helper/sshconn/',
+    'internal/sshtest/',
+  ])
 })
 
 // ─── the toolchain the analysis runs under ───────────────────────────────

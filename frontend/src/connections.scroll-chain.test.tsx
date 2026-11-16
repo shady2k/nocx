@@ -142,7 +142,6 @@ const ONE_PROFILE: SSHProfile[] = [
       port: 22,
       user: 'deploy',
       keepaliveInterval: 0,
-      keepaliveCountMax: 0,
       readyTimeout: 0,
       agentForward: false,
       canBeJumpServer: false,

@@ -35,8 +35,14 @@ export interface CommandBlockFrameSlots {
 }
 
 export interface CommandBlockFrameOptions {
-  /** ADR-3kqrem7v: the same one-line header in primary and alternate seats. */
-  variant?: 'running'
+  /** ADR-3kqrem7v: the same one-line header in primary and alternate seats.
+   *
+   *  `connection` is the pane's head strip (design §5.8, nocx-oalo1.5.5): the
+   *  same frame identity, laid out as one line of status with its one action,
+   *  and it is a TYPED VARIANCE of this component rather than a surface that
+   *  repaints it. The variant says which anatomy; the stylesheet for the frame
+   *  owns both, so the strip cannot drift from the block heads it stands above. */
+  variant?: 'running' | 'connection'
 }
 
 /** Remove the running variance on settle to restore the frozen two-line layout. */

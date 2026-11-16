@@ -10,6 +10,7 @@ import type {
   EndpointResult,
 } from './endpoint'
 import type { TransportPingResult } from './generated/transport.ping'
+import type { PaneReconnect } from './generated/pane.reconnect'
 import type { OperationExpired } from './generated/operation.expired'
 import { callOperationDeclaration } from './generated/operations'
 import type { TransportCreditResult } from './generated/transport.credit'
@@ -695,6 +696,18 @@ export class Dispatcher {
     }
   }
 
+  call(
+    method: 'pane.reconnect',
+    params: unknown,
+    signal?: AbortSignal,
+    options?: CallOptions,
+  ): Promise<PaneReconnect>
+  call<T = unknown>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    options?: CallOptions,
+  ): Promise<T>
   call<T = unknown>(
     method: string,
     params: unknown,

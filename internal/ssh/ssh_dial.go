@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
@@ -38,7 +39,7 @@ type dialer struct {
 // unblocks the handshake. The goroutine is drain-safe because the buffered
 // channel (size 1) ensures the send always succeeds. The caller sees
 // ctx.Err(), not an incidental "use of closed network connection" error.
-func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string) (*gossh.Client, error) {
+func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string, wrap func(net.Conn) net.Conn, ended *atomic.Bool) (*gossh.Client, error) {
 	d.client.log.Info("Dialing directly", "addr", addr, "user", cfg.User)
 
 	netConn, err := d.dialWithCtx(ctx, "tcp", addr, cfg.Timeout)
@@ -48,6 +49,14 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 		}
 		return nil, err
 	}
+	// The wrapper goes on HERE and not earlier: it reports that the TCP dial
+	// succeeded, which is the first thing it knows that the caller does not.
+	if wrap != nil {
+		netConn = wrap(netConn)
+	}
+	// The end marker goes on LAST, so the library's close — on any path, the
+	// handshake's failure included — is the instant it is set.
+	netConn = &endMarked{Conn: netConn, ended: ended}
 
 	type hsResult struct {
 		conn  gossh.Conn
@@ -82,7 +91,14 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 func (d *dialer) dialWithCtx(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalSshDial)
 	defer scope.Complete()
-	netDialer := &net.Dialer{Timeout: timeout}
+	// KeepAlive is OFF, and that is the one closing policy's requirement
+	// (design §5.3). Go's default is 15 s idle + 15 s between probes + 9
+	// unanswered, about 150 s and then the socket errors — which would end a
+	// plain shell at two and a half minutes on a link where only the path is
+	// down, while the design says it waits until the person chooses. The
+	// supervisor's prober already covers detection, and the kernel's own
+	// keepalive would be a second prober with a second policy.
+	netDialer := &net.Dialer{Timeout: timeout, KeepAlive: -1}
 	return netDialer.DialContext(ctx, network, addr)
 }
 

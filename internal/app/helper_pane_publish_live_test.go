@@ -45,7 +45,9 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
@@ -82,7 +84,7 @@ func startPaneJourney(t *testing.T, srv *pwSSHServer) *paneJourney {
 // pane whose credential is a KEY needs, because the coordinator's reverse
 // handlers are the party that signs for material the helper never holds
 // (nocx-1ebrs.17).
-func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credential.Resolver) *paneJourney {
+func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credential.Resolver, events ...func(string, proto.ConnectionStateEvent)) *paneJourney {
 	t.Helper()
 	logger := discardLogger(t)
 	sshLog := log.NewSlogAdapter(logger)
@@ -104,7 +106,7 @@ func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credent
 	if err != nil {
 		t.Fatalf("sshdial.New: %v", err)
 	}
-	svc := sshsvc.New(sshdialClient, logger)
+	svc := sshsvc.New(sshconn.New(sshdialClient, log.NewSlogAdapter(logger)), logger)
 	sessions := helpersession.New(helpersession.Options{
 		Generation: filesFixtureGenera,
 		Spawner:    &scriptedSpawner{},
@@ -147,12 +149,17 @@ func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credent
 	// openSSHInteractive is what calls .set() on it, for the destination that
 	// does.
 	prompts := &helperPrompt{log: logger}
+	var onEvent func(string, proto.ConnectionStateEvent)
+	if len(events) > 0 {
+		onEvent = events[0]
+	}
 	peer, err := helperclient.Dial(ctx, helperclient.Config{
-		Exec:        helperclient.NewSocketConn(coordEnd),
-		ExpectHash:  filesFixtureGenera,
-		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, secrets, prompts, nil, logger),
-		Log:         logger,
+		OnConnectionEvent: onEvent,
+		Exec:              helperclient.NewSocketConn(coordEnd),
+		ExpectHash:        filesFixtureGenera,
+		SentinelTTL:       5 * time.Second,
+		Reverse:           helperReverseHandlers(rc, secrets, prompts, nil, logger),
+		Log:               logger,
 	})
 	if err != nil {
 		t.Fatalf("helperclient.Dial: %v", err)

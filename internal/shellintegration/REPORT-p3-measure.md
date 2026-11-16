@@ -158,3 +158,16 @@ killed by SIGINT is 130, recorded by `__nocx_agent_note_int` after every
 helper, its three call sites and the flag that scopes them; `nocx.zsh` did not
 (its wait polls with the `zselect` builtin and starts no child whose death could
 be read), `nocx.posix` has no launch window, and the worst path is unchanged.
+
+The 2026-11-16 measurement on branch `fix/nocx-a62cl-6-5`, on the tree above, is
+**121 bytes above** that 93,830-byte figure, at **93,951**, and keeps the
+**63**-call maximum. The growth is the lifecycle handshake's wait in
+`nocx.bash` (nocx-a62cl.6.5): its bound is now elapsed seconds from bash's own
+`$SECONDS` counter rather than ten rounds of a forked `sleep`, and it polls in
+50 ms slices for the first second and 250 ms after that, so a frame written late
+is noticed as soon as it arrives; the length prefix of an incoming frame is read
+by a single `od -An -tx1 -N4` instead of a `dd | od | tr` pipeline, which removes
+two forks, and their silence, from the path between `hello` and `prompt_ready`.
+The zsh tier polls with `zselect` and starts no child; `nocx.posix` has no
+launch window. The worst path remains replacement plus sweep with the launch
+carrier absent, at fault `remove#4`.

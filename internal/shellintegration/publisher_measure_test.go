@@ -318,9 +318,17 @@ import (
 // call sites and the flag that scopes them, in `nocx.bash` only — the zsh tier
 // polls with the `zselect` builtin and starts no child to read a death from,
 // and `nocx.posix` has no launch window at all.
+//
+// 2026-11-16, fourteenth move (nocx-a62cl.6.5): 93,830 -> 93,951, **+121**, and
+// `nocx.bash` again — the handshake wait is bounded by elapsed seconds instead
+// of ten rounds of a forked `sleep`, and the length prefix of an incoming
+// frame is read by one helper (`od -N4`) instead of a `dd | od | tr` pipeline.
+// The zsh and posix tiers still read a frame the way they did: neither is the
+// local pane's tier, and neither starts a child to poll. The 63-call maximum is
+// unchanged.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 93830
+	measuredMaxPublishBytes = 93951
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -410,7 +410,7 @@ func TestHostMode_OverTheWireConformsToContract(t *testing.T) {
 		if len(envelope.Result) == 0 {
 			t.Fatalf("%s answered no result: %s", call.method, raw)
 		}
-		var schema = readSchema
+		schema := readSchema
 		if call.schema == "connections.setHostMode.schema.json" {
 			schema = writeSchema
 		}

@@ -1073,7 +1073,7 @@ describe('password binding persists at the mint', () => {
     await vi.waitFor(() => {
       expect(
         toasts().some(
-          (t) => t.level === 'warning' && t.message.includes('stored but this connection'),
+          (t) => t.level === 'warning' && t.message.includes('created in the vault but not bound'),
         ),
       ).toBe(true)
     })
@@ -3359,7 +3359,7 @@ describe('the host integration method', () => {
         (toast) =>
           toast.level === 'warning' &&
           toast.message ===
-            'The connection was saved, but the integration method for web.example.com was not: settings store is read-only. Open "prod-web" and Save Connection to retry.',
+            'Integration method "Helper — deploy the nocx binary" for "prod-web" (web.example.com) was not saved: settings store is read-only. Open "prod-web", choose "Helper — deploy the nocx binary" again in Advanced → Integration method and press Save Connection.',
       ),
       'the toast names what was saved and what was not, and how to retry',
     ).toBe(true)
@@ -3521,6 +3521,11 @@ describe('submitted operation outcome matrix', () => {
     [9, 'password mint failure'],
     [10, 'password binding failure'],
     [11, 'delete success'],
+    [12, 'method-only success'],
+    [13, 'method recovery'],
+    [14, 'key failure'],
+    [15, 'password binding success'],
+    [16, 'delete failure'],
   ] as const
 
   it.each(rows)('row %i: %s reports A and preserves B', async (row) => {
@@ -3530,24 +3535,34 @@ describe('submitted operation outcome matrix', () => {
       release = resolve
       reject = refuse
     })
+    let releaseMint!: () => void
+    const mintGate = new Promise<void>((resolve) => {
+      releaseMint = resolve
+    })
     const isCreate = row <= 2
     let records = [...MOCK_PROFILES.slice(0, 2)]
     const vaultPermission = vi.fn()
+    const secretRows: InventoryEntry[] = []
+    const inventory = vi.fn(() => Promise.resolve({ entries: [...secretRows] }))
+    let storedMethod = 'raw' as 'raw' | 'script'
     const vault = {
       status: () => null,
       showUnlock: () => false,
       saveSecretWithVault: (run: () => Promise<void>, reason?: string) => {
         vaultPermission(reason)
-        return row === 8 && reason === 'save this key' ? deferred.then(run) : run()
+        return [8, 14].includes(row) && reason === 'save this key' ? deferred.then(run) : run()
       },
     } as unknown as VaultController
     const { container, client, hostMode, setHostMode } = mount({
       profiles: records,
       vaultController: vault,
+      vaultClient: { inventory } as unknown as VaultClient,
     })
-    vi.spyOn(client, 'listProfiles').mockImplementation(() => Promise.resolve(records))
+    const listProfiles = vi
+      .spyOn(client, 'listProfiles')
+      .mockImplementation(() => Promise.resolve(records))
     hostMode.mockImplementation((profileId) =>
-      Promise.resolve({ profileId, mode: 'raw', hostKnown: true }),
+      Promise.resolve({ profileId, mode: storedMethod, hostKnown: true }),
     )
     const create = vi.spyOn(client, 'createProfile').mockImplementation(async (profile) => {
       await deferred
@@ -3556,16 +3571,33 @@ describe('submitted operation outcome matrix', () => {
       return saved
     })
     const update = vi.spyOn(client, 'updateProfile').mockImplementation(async (profile) => {
-      if (row === 4) await deferred
+      if ([3, 4].includes(row)) await deferred
       records = records.map((p) => (p.id === profile.id ? profile : p))
       return profile
     })
     const patch = vi.spyOn(client, 'patchProfile').mockImplementation(async (params) => {
-      if (params.id === 'ssh:p1' && [5, 6, 10].includes(row)) await deferred
+      if (params.id === 'ssh:p1' && [5, 6, 10, 15].includes(row)) await deferred
+      records = records.map((profile) =>
+        profile.id === params.id && params.set?.['options.passwordSecret']
+          ? {
+              ...profile,
+              options: {
+                ...profile.options,
+                passwordSecret: params.set['options.passwordSecret'] as string,
+              },
+            }
+          : profile,
+      )
       return { id: params.id, fields: {} }
     })
     const mint = vi.spyOn(client, 'savePassword').mockImplementation(async () => {
-      if ([3, 9].includes(row)) await deferred
+      if (row === 10) await mintGate
+      if ([3, 9, 15].includes(row)) await deferred
+      secretRows.push({
+        ...MOCK_SECRET_ROWS[1],
+        id: 'secrow:A',
+        name: 'Password for deploy@web.example.com',
+      })
       return { row: 'secrow:A' }
     })
     const key = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
@@ -3579,7 +3611,8 @@ describe('submitted operation outcome matrix', () => {
       return true
     })
     setHostMode.mockImplementation(async (profileId, mode) => {
-      if (row === 7) await deferred
+      if ([7, 12, 13].includes(row) && profileId === 'ssh:p1') await deferred
+      if (profileId === 'ssh:p1') storedMethod = mode as 'raw' | 'script'
       return { profileId, mode }
     })
     await waitForProfiles(container, 2)
@@ -3597,14 +3630,13 @@ describe('submitted operation outcome matrix', () => {
     } else {
       await openProfileEditor(container, 'prod-web')
     }
-    if ([3, 9, 10].includes(row)) {
+    if ([3, 9, 10, 15].includes(row)) {
       selectProfileSection(container, 'Authentication')
       clickSegmentedOption(container, 'Password')
       await storePassword(container, 'A password')
       await vi.waitFor(() => expect(mint).toHaveBeenCalled())
-      if (row === 10) await vi.waitFor(() => expect(patch).toHaveBeenCalled())
     }
-    if (row === 8) {
+    if ([8, 14].includes(row)) {
       selectProfileSection(container, 'Authentication')
       clickSegmentedOption(container, 'Public Key')
       clickSegmentedOption(container, 'Paste key')
@@ -3621,12 +3653,12 @@ describe('submitted operation outcome matrix', () => {
         target: { value: '5000' },
       })
     }
-    if (row === 7) {
+    if ([7, 12, 13].includes(row)) {
       selectProfileSection(container, 'Advanced')
       await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
       fireEvent.change(methodField(container).select, { target: { value: 'script' } })
     }
-    if (row === 11) {
+    if ([11, 16].includes(row)) {
       clickButtonByText(container, 'Delete Connection')
       const confirm = await vi.waitFor(() => {
         const dialog = Array.from(document.body.querySelectorAll('dialog'))
@@ -3645,13 +3677,13 @@ describe('submitted operation outcome matrix', () => {
         .querySelectorAll<HTMLButtonElement>('.ui-button')
       buttons[1].click()
       await vi.waitFor(() => expect(deletion).toHaveBeenCalled())
-    } else if (![9, 10].includes(row)) {
+    } else if (![9, 10, 15].includes(row)) {
       clickButtonByText(container, isCreate ? 'Create Connection' : 'Save Connection')
       if (isCreate) await vi.waitFor(() => expect(create).toHaveBeenCalled())
       if (row === 4) await vi.waitFor(() => expect(update).toHaveBeenCalled())
       if ([5, 6].includes(row)) await vi.waitFor(() => expect(patch).toHaveBeenCalled())
-      if (row === 7) await vi.waitFor(() => expect(setHostMode).toHaveBeenCalled())
-      if (row === 8)
+      if ([7, 12, 13].includes(row)) await vi.waitFor(() => expect(setHostMode).toHaveBeenCalled())
+      if ([8, 14].includes(row))
         await vi.waitFor(() => expect(vaultPermission).toHaveBeenCalledWith('save this key'))
     }
     clickButtonByText(container, 'Cancel')
@@ -3675,12 +3707,27 @@ describe('submitted operation outcome matrix', () => {
     const focus = container.querySelector<HTMLInputElement>('#profile-name')!
     focus.focus()
     const editor = findDialogByTitleContaining(container, 'prod-db')!
-    if ([2, 4, 6, 7, 9, 10].includes(row)) reject(new RpcError('A operation refused', -32603))
+    const refreshesBeforeOutcome = listProfiles.mock.calls.length
+    if (row === 10) {
+      const inventoriesBeforeMint = inventory.mock.calls.length
+      releaseMint()
+      await vi.waitFor(() =>
+        expect(patch).toHaveBeenCalledWith(expect.objectContaining({ id: 'ssh:p1' })),
+      )
+      await vi.waitFor(() =>
+        expect(inventory.mock.calls.length).toBeGreaterThan(inventoriesBeforeMint),
+      )
+    }
+    if ([2, 4, 6, 7, 9, 10, 13, 14, 16].includes(row))
+      reject(new RpcError('A operation refused', -32603))
     else release()
 
     const aName = isCreate ? 'A created' : [3, 4].includes(row) ? 'A updated' : 'prod-web'
     await vi.waitFor(() => {
-      if (row === 8) {
+      if (row === 15) {
+        expect(records[0].options.passwordSecret).toBe('secrow:A')
+        expect(secretRows.map((secret) => secret.id)).toContain('secrow:A')
+      } else if (row === 8) {
         expect(key).toHaveBeenCalledWith(
           '-----BEGIN PRIVATE KEY-----\nA key\n-----END PRIVATE KEY-----',
           'Key for deploy@web.example.com',
@@ -3695,9 +3742,9 @@ describe('submitted operation outcome matrix', () => {
         ).toBe(true)
       } else {
         const outcome = toasts().find((toast) => {
-          if (row === 7)
+          if ([7, 13].includes(row))
             return toast.message.includes('web.example.com') && toast.message.includes('was not')
-          if ([2, 4, 6, 9, 10].includes(row))
+          if ([2, 4, 6, 9, 10, 14, 16].includes(row))
             return toast.message.includes(aName) && toast.message.includes('A operation refused')
           return (
             toast.message.includes(row === 11 ? 'Deleted' : 'Saved') &&
@@ -3706,14 +3753,24 @@ describe('submitted operation outcome matrix', () => {
         })
         expect(outcome, 'submitted A has a human-visible outcome').toBeTruthy()
         expect(outcome!.level).toBe(
-          [2, 4, 6, 9].includes(row) ? 'danger' : [7, 10].includes(row) ? 'warning' : 'success',
+          [2, 4, 6, 9, 14, 16].includes(row)
+            ? 'danger'
+            : [7, 10, 13].includes(row)
+              ? 'warning'
+              : 'success',
         )
         if (row === 10) {
-          expect(outcome!.message).toContain('password was stored')
-          expect(outcome!.message).toContain('not updated')
+          expect(outcome!.message).toContain('Password for deploy@web.example.com')
+          expect(outcome!.message).toContain('choose')
+          expect(outcome!.message).toContain('password field')
+          expect(outcome!.message).toContain('Save')
         }
       }
     })
+    if (row === 12) {
+      expect(storedMethod).toBe('script')
+      expect(listProfiles.mock.calls.length).toBeGreaterThan(refreshesBeforeOutcome)
+    }
     if (row === 1) expect(container.querySelector('[aria-label="Edit A created"]')).toBeTruthy()
     if (row === 3) {
       expect(update).toHaveBeenCalledWith(
@@ -3754,6 +3811,41 @@ describe('submitted operation outcome matrix', () => {
         }),
       ),
     )
+    if ([10, 13].includes(row)) {
+      await vi.waitFor(() => expect(findDialogByTitleContaining(container, 'prod-db')).toBeNull())
+      patch.mockResolvedValue({ id: 'ssh:p1', fields: {} })
+      setHostMode.mockImplementation((profileId, mode) => Promise.resolve({ profileId, mode }))
+      await openProfileEditor(container, 'prod-web')
+      if (row === 10) {
+        selectProfileSection(container, 'Authentication')
+        clickSegmentedOption(container, 'Password')
+        expect(passwordField(container).value).not.toContain('secrow:A')
+        pressLock(passwordField(container))
+        await takePanelRow('Password for deploy@web.example.com')
+        await vi.waitFor(() => expect(passwordField(container).value).toBe('{{secret:secrow:A}}'))
+      } else {
+        const warning = toasts().find((toast) => toast.message.includes('was not'))!
+        expect(warning.message).toContain('Script — scripts only, never the helper')
+        expect(warning.message).toContain('choose')
+        selectProfileSection(container, 'Advanced')
+        await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+        fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+      }
+      clickButtonByText(container, 'Save Connection')
+      await vi.waitFor(() => {
+        if (row === 10)
+          expect(patch).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              id: 'ssh:p1',
+              set: expect.objectContaining({ 'options.passwordSecret': 'secrow:A' }) as Record<
+                string,
+                unknown
+              >,
+            }),
+          )
+        else expect(setHostMode).toHaveBeenLastCalledWith('ssh:p1', 'script')
+      })
+    }
   })
 })
 

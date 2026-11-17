@@ -500,7 +500,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.password.bindingFailedHead':
     'The password was stored but this connection was not updated to use it:',
   'connections.password.bindingFailedTail': '. Save Connection to retry.',
-  'connections.password.retryOpening': '. Open "{name}" and Save Connection to retry.',
+  'connections.password.bindingRecovery':
+    'Password "{password}" was created in the vault but not bound to "{name}": {reason}. Open "{name}", choose "{password}" in the password field and press Save Connection.',
+  'connections.toasts.methodRecovery':
+    'Integration method "{method}" for "{name}" ({host}) was not saved: {reason}. Open "{name}", choose "{method}" again in Advanced → Integration method and press Save Connection.',
   'connections.password.cancelled': 'Password was not saved — the vault prompt was cancelled.',
   'connections.password.saveFailedHead': 'Could not save the password:',
   'connections.import.chooseFile': 'Choose a file to import',

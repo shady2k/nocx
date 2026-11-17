@@ -282,8 +282,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.password.bindingFailedHead':
     'Пароль был сохранён, но это подключение не обновлено для его использования:',
   'connections.password.bindingFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
-  'connections.password.retryOpening':
-    '. Откройте «{name}» и нажмите «Сохранить подключение», чтобы повторить.',
+  'connections.password.bindingRecovery':
+    'Пароль «{password}» создан в хранилище, но не привязан к «{name}»: {reason}. Откройте «{name}», выберите «{password}» в поле пароля и нажмите «Сохранить подключение».',
+  'connections.toasts.methodRecovery':
+    'Метод интеграции «{method}» для «{name}» ({host}) не сохранён: {reason}. Откройте «{name}», снова выберите «{method}» в разделе «Дополнительно» → «Метод интеграции» и нажмите «Сохранить подключение».',
   'connections.password.cancelled': 'Пароль не сохранён — запрос хранилища был отменён.',
   'connections.password.saveFailedHead': 'Не удалось сохранить пароль:',
   'connections.import.chooseFile': 'Выберите файл для импорта',

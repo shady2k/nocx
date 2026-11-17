@@ -497,7 +497,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'The connection ended before your keys could be sent. Nothing was delivered.',
   'connections.load.failedHead': 'Could not load connections:',
   'connections.load.failedTail': '. The list may be out of date',
-  'connections.password.bindingFailedTail': '. Save Connection to retry.',
   'connections.password.bindingRecovery':
     'Password "{password}" was created in the vault but not bound to "{name}": {reason}. Open "{name}", choose "{password}" in the password field and press Save Connection.',
   'connections.toasts.methodRecovery':
@@ -526,11 +525,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.parseFailedTail': 'try "user@host:port" or "ssh://user@host:port"',
   'connections.toasts.saved': 'Saved',
   'connections.toasts.saveFailedHead': 'Could not save the connection:',
-  // Save's two stores can split (mockup frame 4): the connection is written,
-  // the host's method is not. The surface composes head + host + mid + reason
-  // + tail, because the host and the reason are values and the sentence has to
-  // stay grammatical in a language whose word order is not English's.
-  'connections.toasts.methodSaveFailedTail': '. Save Connection to retry.',
   'connections.toasts.deleted': 'Deleted',
   'connections.toasts.deleteFailedHead': 'Could not delete',
   'connections.actions.edit': 'Edit',

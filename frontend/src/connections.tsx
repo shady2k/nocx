@@ -2279,7 +2279,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           })
           return target
         },
-        revealAll: () => whileOpen(owner, () => profileValidation.revealAll()),
       },
       {
         reveal: (field) => whileOpen(owner, () => setProfileSection(PROFILE_SECTION[field])),

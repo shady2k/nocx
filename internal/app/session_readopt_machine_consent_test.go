@@ -136,7 +136,7 @@ func TestTB1cADeniedMachineStopsReadoptionWhateverTheHostsMethodSays(t *testing.
 // T-B1d: a machine nobody has answered is still not a grant, and the sentence
 // must send the person to the ask ("reconnect … to be asked") rather than blame
 // a Raw method for a decision the machine never made.
-func TestTB1dAnUnansweredMachineIsAskedToReconnectThoughTheHostsSavedMethodIsRaw(t *testing.T) {
+func TestTB1dAnUnansweredMachineIsNotReadoptedThoughTheHostsSavedMethodIsRaw(t *testing.T) {
 	svc := sharedHelperService(t)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)

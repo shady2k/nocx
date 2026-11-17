@@ -184,10 +184,17 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
  * The SHA256 fingerprint of a host key, from its known_hosts line, in the form
  * every nocx surface uses (`SHA256:` + base64, no padding) — the identity a
  * host record is keyed by (ADR-727g63tr decision 1).
+ *
+ * The line's format is `hosts keytype blob` — the shape `knownhosts.Line`
+ * writes (`[127.0.0.1]:2222 ssh-ed25519 AAAAC3Nza…`), where `hosts` may be
+ * several comma-separated names and `keytype` is the algorithm's name
+ * (`ssh-ed25519`), not key material. The fingerprint is the hash of the blob
+ * alone, so it is the THIRD field; hashing the second hashes the eleven ASCII
+ * characters of the algorithm's name, which no host's key ever hashes to.
  */
 export function hostKeyFingerprint(knownHostsLine: string): string {
   const fields = knownHostsLine.trim().split(/\s+/)
-  const blob = Buffer.from(fields[1] ?? '', 'base64')
+  const blob = Buffer.from(fields[2] ?? '', 'base64')
   return 'SHA256:' + createHash('sha256').update(blob).digest('base64').replace(/=+$/, '')
 }
 

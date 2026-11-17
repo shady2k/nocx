@@ -282,6 +282,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.password.bindingFailedHead':
     'Пароль был сохранён, но это подключение не обновлено для его использования:',
   'connections.password.bindingFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
+  'connections.password.retryOpening':
+    '. Откройте «{name}» и нажмите «Сохранить подключение», чтобы повторить.',
   'connections.password.cancelled': 'Пароль не сохранён — запрос хранилища был отменён.',
   'connections.password.saveFailedHead': 'Не удалось сохранить пароль:',
   'connections.import.chooseFile': 'Выберите файл для импорта',

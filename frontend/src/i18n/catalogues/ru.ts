@@ -279,8 +279,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     'Соединение завершилось раньше, чем удалось отправить нажатия. Ничего не доставлено.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
-  'connections.password.bindingFailedHead':
-    'Пароль был сохранён, но это подключение не обновлено для его использования:',
   'connections.password.bindingFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
   'connections.password.bindingRecovery':
     'Пароль «{password}» создан в хранилище, но не привязан к «{name}»: {reason}. Откройте «{name}», выберите «{password}» в поле пароля и нажмите «Сохранить подключение».',
@@ -311,8 +309,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     'попробуйте формат "user@host:port" или "ssh://user@host:port"',
   'connections.toasts.saved': 'Сохранено:',
   'connections.toasts.saveFailedHead': 'Не удалось сохранить подключение:',
-  'connections.toasts.methodSaveFailedHead': 'Подключение сохранено, но метод интеграции для',
-  'connections.toasts.methodSaveFailedMid': ' не сохранён: ',
   'connections.toasts.methodSaveFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
   'connections.helperAsk.lead':
     'Выберите, как nocx интегрируется с этой машиной. Метод сохраняется для машины — так открываются все вкладки к ней, из любого сохранённого подключения и из набранного ssh, — и разрешение на развёртывание хелпера nocx здесь запоминается вместе с ним, поэтому вопрос задаётся один раз.',

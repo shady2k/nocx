@@ -2913,9 +2913,21 @@ it('T6: deleting A never closes B; A is deleted and its outcome is still shown',
   await openProfileEditor(container, 'prod-web')
   const dialog = findDialogByTitleContaining(container, 'prod-web')!
   clickButtonByText(container, 'Delete Connection', dialog)
-  await vi.waitFor(() => expect(Array.from(document.body.querySelectorAll('dialog')).some((node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?')).toBe(true))
-  const confirm = Array.from(document.body.querySelectorAll('dialog')).filter((node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?').slice(-1)[0]
-  const confirmButtons = Array.from(confirm.closest('.nocx-dialog')!.querySelectorAll<HTMLButtonElement>('.ui-button'))
+  await vi.waitFor(() =>
+    expect(
+      Array.from(document.body.querySelectorAll('dialog')).some(
+        (node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?',
+      ),
+    ).toBe(true),
+  )
+  const confirm = Array.from(document.body.querySelectorAll('dialog'))
+    .filter(
+      (node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?',
+    )
+    .slice(-1)[0]
+  const confirmButtons = Array.from(
+    confirm.closest('.nocx-dialog')!.querySelectorAll<HTMLButtonElement>('.ui-button'),
+  )
   expect(confirmButtons[1].disabled).toBe(false)
   confirmButtons[1].click()
   await vi.waitFor(() => expect(deletion).toHaveBeenCalledWith('ssh:p1'))
@@ -2935,13 +2947,34 @@ it('T6: deleting A never closes B; A is deleted and its outcome is still shown',
   )
   expect(findDialogByTitleContaining(container, 'B draft')).toBeTruthy()
 })
+/** Delay vault permission, not the RPC result: releasing a mint must visibly
+ * reach savePassword before a test checks another opening's state. */
+function delayedPasswordVault() {
+  const pending: (() => void)[] = []
+  const controller = {
+    status: () => null,
+    showUnlock: () => false,
+    saveSecretWithVault: (run: () => Promise<void>, reason?: string) => {
+      if (reason !== 'save this password') return run()
+      return new Promise<void>((resolve) => {
+        pending.push(resolve)
+      }).then(run)
+    },
+  } as unknown as VaultController
+  return { controller, pending }
+}
+
 it('T8: A’s late mint cannot clear B’s Save barrier', async () => {
-  const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-  const pending: ((v: { row: string }) => void)[] = []
-  vi.spyOn(client, 'savePassword').mockImplementation(
-    () => new Promise((resolve) => pending.push(resolve)),
-  )
-  const patch = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+  const { controller, pending } = delayedPasswordVault()
+  const { container, client } = mount({
+    profiles: MOCK_PROFILES.slice(0, 2),
+    vaultController: controller,
+  })
+  const savePassword = vi.spyOn(client, 'savePassword').mockImplementation((password) => {
+    if (password === 'B password') expect(update).not.toHaveBeenCalled()
+    return Promise.resolve({ row: password === 'A password' ? 'secrow:A' : 'secrow:B' })
+  })
+  vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
   const update = vi.spyOn(client, 'updateProfile').mockResolvedValue(MOCK_PROFILES[1])
   await waitForProfiles(container, 2)
   const mint = async (profile: string, value: string) => {
@@ -2955,24 +2988,37 @@ it('T8: A’s late mint cannot clear B’s Save barrier', async () => {
   clickButtonByText(container, 'Cancel')
   await mint('prod-db', 'B password')
   await vi.waitFor(() => expect(pending).toHaveLength(2))
-  pending[0]({ row: 'secrow:A' })
-  const dialog = findDialogByTitleContaining(container, 'prod-db')!
-  clickButtonByText(container, 'Save Connection', dialog)
-  await vi.waitFor(() => expect(update).not.toHaveBeenCalled())
-  pending[1]({ row: 'secrow:B' })
+  selectProfileSection(container, 'General')
+  fireEvent.input(container.querySelector('#profile-name')!, { target: { value: 'B draft' } })
+  pending[0]()
   await vi.waitFor(() =>
-    expect(
-      patch.mock.calls.some((call) => call[0].set?.['options.passwordSecret'] === 'secrow:B'),
-    ).toBe(true),
+    expect(savePassword).toHaveBeenCalledWith('A password', expect.any(String)),
+  )
+  clickButtonByText(container, 'Save Connection')
+  await vi.waitFor(() => expect(update).not.toHaveBeenCalled())
+  pending[1]()
+  await vi.waitFor(() =>
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'ssh:p2',
+        name: 'B draft',
+        options: expect.objectContaining({ passwordSecret: 'secrow:B' }) as SSHProfile['options'],
+      }),
+    ),
   )
 })
 
 it('T7: a generator continuation from A cannot close or settle B’s generator', async () => {
-  const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-  const pending: ((v: { row: string }) => void)[] = []
-  vi.spyOn(client, 'savePassword').mockImplementation(
-    () => new Promise((resolve) => pending.push(resolve)),
-  )
+  const { controller, pending } = delayedPasswordVault()
+  const { container, client } = mount({
+    profiles: MOCK_PROFILES.slice(0, 2),
+    vaultController: controller,
+  })
+  const savePassword = vi
+    .spyOn(client, 'savePassword')
+    .mockImplementation((password) =>
+      Promise.resolve({ row: password === 'A password' ? 'secrow:A' : 'secrow:B' }),
+    )
   vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
   await waitForProfiles(container, 2)
   await openProfileEditor(container, 'prod-web')
@@ -2992,12 +3038,15 @@ it('T7: a generator continuation from A cannot close or settle B’s generator',
   await takePanelRow('Add a secret…')
   await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
   fireEvent.input(container.querySelector('#password-value')!, { target: { value: 'B password' } })
+  pending[0]()
+  await vi.waitFor(() =>
+    expect(savePassword).toHaveBeenCalledWith('A password', expect.any(String)),
+  )
+  expect(container.querySelector('#password-value')).toBeTruthy()
+  expect(passwordField(container).value).not.toBe('{{secret:secrow:A}}')
   clickButtonByText(container, 'OK')
   await vi.waitFor(() => expect(pending).toHaveLength(2))
-  expect(container.querySelector('#password-value')).toBeFalsy()
-  pending[0]({ row: 'secrow:A' })
-  await vi.waitFor(() => expect(passwordField(container).value).not.toBe('{{secret:secrow:A}}'))
-  pending[1]({ row: 'secrow:B' })
+  pending[1]()
   await vi.waitFor(() => expect(passwordField(container).value).toBe('{{secret:secrow:B}}'))
 })
 

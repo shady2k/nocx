@@ -369,24 +369,28 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [hostModeState, setHostModeState] = createSignal<HostModeState>({ kind: 'draft' })
   const [hostModeChoice, setHostModeChoice] = createSignal<HostMode>('auto')
   const [hostModeWriteError, setHostModeWriteError] = createSignal<string | undefined>(undefined)
+  /** Every asynchronous editor continuation belongs to the opening that started
+   * it and may change editor state only while that opening is live. Human
+   * outcomes of submitted operations may outlive the opening and name their
+   * submitted host or profile; list updates remain keyed by profile id. */
   interface EditorOpening {
-    controller: AbortController
+    signal: AbortSignal
     pendingMints: Set<Promise<void>>
     settlePasswordAsk?: (entry: SecretEntry | undefined) => void
     hostModeRequest: number
   }
-  // Every asynchronous editor continuation is owned by its opening; only outcomes that must reach the person after it closes may outlive it, and list updates remain keyed by profile id.
   let opening: EditorOpening | null = null
+  let abortOpening: (() => void) | undefined
   const beginOpening = (): EditorOpening => {
-    if (opening) {
-      opening.controller.abort()
-      opening.settlePasswordAsk?.(undefined)
-    }
-    opening = { controller: new AbortController(), pendingMints: new Set(), hostModeRequest: 0 }
+    abortOpening?.()
+    opening?.settlePasswordAsk?.(undefined)
+    const controller = new AbortController()
+    abortOpening = () => controller.abort()
+    opening = { signal: controller.signal, pendingMints: new Set(), hostModeRequest: 0 }
     return opening
   }
   const openingIsLive = (owner: EditorOpening): boolean =>
-    opening === owner && !owner.controller.signal.aborted
+    opening === owner && !owner.signal.aborted
   const hostModeAnswerIsCurrent = (request: number, owner: EditorOpening): boolean =>
     openingIsLive(owner) && request === owner.hostModeRequest
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
@@ -562,7 +566,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  and retries on success; cancelling leaves the rows empty. */
   async function loadSecretRows(): Promise<void> {
     // Clear first: a re-opened editor must not briefly offer rows from a
-    // previous load while this request awaits (possibly an unlock dialog).
+    // previous load while this request is pending (possibly an unlock dialog).
     setSecretRows([])
     let rows: InventoryEntry[] = []
     try {
@@ -611,7 +615,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     owner: EditorOpening,
     password: string,
   ): Promise<SecretEntry | undefined> {
-    const signal = owner.controller.signal
+    const signal = owner.signal
     const current = editing()
     if (!openingIsLive(owner) || !current) return undefined
     const generatedName = secretNameFor(
@@ -2051,16 +2055,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return chosen === state.stored ? null : chosen
   }
 
-  /** Write the chosen method to the host record, AFTER the profile is saved.
-   *  The two stores can split: a failure here leaves the dialog open, shows
-   *  the section holding the field, keeps the chosen value with the reason as
-   *  its error, focuses it and names both halves in a warning toast (frame 4).
-   *
-   *  The mode is the value the Save submitted, captured by the caller, and
-   *  every answer is applied only if it is still the editor's current request
-   *  (see hostModeAnswerIsCurrent). 'stale' means the person moved on or a
-   *  newer write overtook this one: the outcome belongs to nothing on screen,
-   *  so the caller must not close a dialog or toast on its behalf. */
   function showHostMethodFailure(host: string, reason: string) {
     showToast({
       level: 'warning',
@@ -2068,11 +2062,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     })
   }
 
+  /** Write the submitted method after the profile save. The return value is
+   * only the operation's result. A current answer updates its opening's field;
+   * a refusal reveals and focuses that field while live, or names the submitted
+   * host in a toast after the opening is gone. An overtaken answer never paints
+   * over a newer request, but still reports its failure to the person. */
   async function saveHostMode(
     owner: EditorOpening,
     profile: SSHProfile,
     mode: HostMode | null,
-  ): Promise<'ok' | 'failed' | 'stale'> {
+  ): Promise<'ok' | 'failed'> {
     if (mode === null) return 'ok'
     const liveAtStart = openingIsLive(owner)
     const request = liveAtStart ? ++owner.hostModeRequest : owner.hostModeRequest
@@ -2086,7 +2085,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           request,
           current: owner.hostModeRequest,
         })
-        return 'stale'
+        return 'ok'
       }
       const state = methodFieldState()
       if (state.kind === 'ready')
@@ -2109,7 +2108,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         showHostMethodFailure(host, reason)
         return 'failed'
       }
-      if (!hostModeAnswerIsCurrent(request, owner)) return 'stale'
+      if (!hostModeAnswerIsCurrent(request, owner)) {
+        showHostMethodFailure(profile.options.host || profile.name, reason)
+        return 'failed'
+      }
       setHostModeWriteError(reason)
       // The field may live on a section the person has since left, and the
       // form's one reveal move is the same one the submit gate makes.
@@ -2123,7 +2125,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   function closeEditor(owner: EditorOpening) {
     if (owner !== opening) return
-    owner.controller.abort()
+    abortOpening?.()
+    abortOpening = undefined
     opening = null
     owner.settlePasswordAsk?.(undefined)
     owner.settlePasswordAsk = undefined
@@ -2478,7 +2481,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         // A failed write has already surfaced its warning independently of
         // the editor; only a live successful continuation closes the dialog.
         if ((await saveHostMode(owner, profile, hostMethod)) !== 'ok') return
-        if (!openingIsLive(owner)) return
+        if (!openingIsLive(owner) || hostModeWriteError() !== undefined) return
         closeEditor(owner)
         return
 
@@ -2487,14 +2490,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           const saved = await persistGuarded()
           const methodResult = await saveHostMode(owner, saved, hostMethod)
 
-          if (methodResult !== 'ok' && openingIsLive(owner)) {
-            // The profile is saved but the method is not, or a newer write
-            // superseded this one. Keep the current editor and refresh the list.
+          if (methodResult === 'failed') {
+            // The profile is saved but the method is not. Its operation has
+            // reported the failure; refresh the list without a second outcome.
             await loadAll()
             void loadSessionStatuses()
             return
           }
-          if (openingIsLive(owner)) closeEditor(owner)
+          if (openingIsLive(owner) && hostModeWriteError() === undefined) closeEditor(owner)
           await loadAll()
           await loadEffective([saved.id])
           void loadSessionStatuses()
@@ -2534,8 +2537,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
           const methodResult = await saveHostMode(owner, profile, hostMethod)
 
-          if (methodResult === 'failed' || (methodResult === 'stale' && openingIsLive(owner)))
-            return
+          if (methodResult === 'failed') return
+          if (openingIsLive(owner) && hostModeWriteError() !== undefined) return
           if (openingIsLive(owner)) {
             closeEditor(owner)
           } else {

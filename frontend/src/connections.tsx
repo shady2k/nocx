@@ -376,8 +376,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  (review ALX-51: a failure for A must not draw A's error, section, focus
    *  or toast over B). */
   let hostModeRequest = 0
-  const hostModeAnswerIsCurrent = (request: number, profileId: string): boolean =>
-    request === hostModeRequest && editing()?.id === profileId
+  let editorOpening: AbortController | undefined
+  // Every continuation is tied to its opening and may mutate editor state only while it remains live.
+  const beginEditorOpening = (): AbortController => {
+    editorOpening?.abort()
+    const opening = new AbortController()
+    editorOpening = opening
+    return opening
+  }
+  const openingIsLive = (opening: AbortController): boolean => !opening.signal.aborted
+  const hostModeAnswerIsCurrent = (request: number, opening: AbortController): boolean =>
+    openingIsLive(opening) && request === hostModeRequest
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   /** The literal a person has typed into a password field and not yet stored.
    *  Two fields, two drafts: the profile editor's and the group defaults'.
@@ -601,8 +610,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * holding rather than showing a reference to a secret that does not exist.
    */
   async function mintProfilePassword(password: string): Promise<SecretEntry | undefined> {
+    const opening = editorOpening
+    const signal = opening?.signal
     const current = editing()
-    if (!current) return undefined
+    if (!opening || !signal || signal.aborted || !current) return undefined
     const generatedName = secretNameFor(
       'password',
       loginLabel(current.options.user, current.options.host),
@@ -612,7 +623,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       minted = await props.client.savePassword(password, generatedName)
     }
     const bind = async (): Promise<void> => {
-      if (!minted) return
+      if (!minted || signal.aborted) return
       const mintedRow: { row: string } = minted
       // Merge into the LIVE draft, not the commit-moment snapshot: the mint
       // runs behind a vault prompt and the person may have edited other
@@ -647,7 +658,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               'options.passwordSecret': mintedRow.row,
             },
           })
+          if (signal.aborted) return
         } catch (err) {
+          if (signal.aborted) return
           // The secret was minted, so the failure is the binding: name the
           // split out loud, or the half-done state reads as a silent success
           // (AGENTS.md: a soft degrade must be visible in the product). The
@@ -692,6 +705,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         }
         await bind()
       } catch (err) {
+        if (signal.aborted) return undefined
         fail(err)
         return undefined
       }
@@ -1783,6 +1797,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   function closeQuickConnect() {
+    editorOpening?.abort()
+    editorOpening = undefined
     setQuickConnectOpen(false)
     setQuickConnectValue('')
   }
@@ -1822,6 +1838,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     closeQuickConnect()
+    beginEditorOpening()
     setProfileSection('general')
     setHostModeState({ kind: 'draft' })
     setHostModeChoice('auto')
@@ -1838,9 +1855,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   function openEditDialog(profile: SSHProfile) {
+    const opening = beginEditorOpening()
     setProfileSection('general')
     setEditing(profile)
-    void loadHostMode(profile)
+    void loadHostMode(profile, opening)
     setDirtyFields(new Set<string>())
     profileValidation.reset()
     // Open on the key source the connection actually uses: the bound secret,
@@ -1971,7 +1989,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  opens and on Retry, never on a selection. A draft names no connection, so
    *  there is nothing to ask. A slow answer for a dialog that has since opened
    *  another connection is dropped rather than painted over the newer one. */
-  async function loadHostMode(profile: SSHProfile): Promise<void> {
+  async function loadHostMode(profile: SSHProfile, opening = editorOpening): Promise<void> {
+    if (!opening || !openingIsLive(opening)) return
     const request = ++hostModeRequest
     setHostModeWriteError(undefined)
     setHostModeChoice('auto')
@@ -1982,7 +2001,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setHostModeState({ kind: 'loading' })
     try {
       const answer = await props.client.hostMode(profile.id)
-      if (!hostModeAnswerIsCurrent(request, profile.id)) {
+      if (!hostModeAnswerIsCurrent(request, opening)) {
         log.warn('dropping a stale host-method read', {
           profileId: profile.id,
           request,
@@ -2000,7 +2019,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
       // A read for a connection the editor has left — or one a newer Retry
       // has replaced — says nothing about what is on screen now.
-      if (!hostModeAnswerIsCurrent(request, profile.id)) return
+      if (!hostModeAnswerIsCurrent(request, opening)) return
       // The reason is the FIELD's, not a toast's: the control is disabled and
       // Retry sits beside it (frame 3). A toast would fade while the control
       // still had no value.
@@ -2011,7 +2030,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   /** Retry re-reads only — it never writes, and it needs no other field. */
   function retryHostMode() {
     const profile = editing()
-    if (profile) void loadHostMode(profile)
+    if (profile && editorOpening) void loadHostMode(profile, editorOpening)
   }
 
   /** The chosen method, when it differs from the host's record and the field
@@ -2041,27 +2060,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  (see hostModeAnswerIsCurrent). 'stale' means the person moved on or a
    *  newer write overtook this one: the outcome belongs to nothing on screen,
    *  so the caller must not close a dialog or toast on its behalf. */
+  function showHostMethodFailure(host: string, reason: string) {
+    showToast({
+      level: 'warning',
+      message: `${t('connections.toasts.methodSaveFailedHead', 'The connection was saved, but the integration method for')} ${host}${t('connections.toasts.methodSaveFailedMid', ' was not: ')}${reason}${t('connections.toasts.methodSaveFailedTail', '. Save Connection to retry.')}`,
+    })
+  }
+
   async function saveHostMode(
     profile: SSHProfile,
     mode: HostMode | null,
-  ): Promise<'ok' | 'failed' | 'stale'> {
+    opening: AbortController,
+  ): Promise<'ok' | 'failed' | 'stale' | { status: 'failed-stale'; host: string; reason: string }> {
     if (mode === null) return 'ok'
-    const request = ++hostModeRequest
+    const liveAtStart = openingIsLive(opening)
+    const request = liveAtStart ? ++hostModeRequest : hostModeRequest
     try {
       await props.client.setHostMode(profile.id, mode)
-      if (!hostModeAnswerIsCurrent(request, profile.id)) {
-        log.warn('dropping a stale host-method write', {
-          profileId: profile.id,
-          mode,
-          request,
-          current: hostModeRequest,
-        })
+      if (!liveAtStart) return 'ok'
+      if (!hostModeAnswerIsCurrent(request, opening)) {
+        log.warn('dropping a stale host-method write', { profileId: profile.id, mode, request, current: hostModeRequest })
         return 'stale'
       }
       const state = methodFieldState()
-      if (state.kind === 'ready') {
-        setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
-      }
+      if (state.kind === 'ready') setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
       setHostModeWriteError(undefined)
       return 'ok'
     } catch (err) {
@@ -2075,7 +2097,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // connection the person has left must not paint its error, section,
       // focus or toast over the one now on screen (review ALX-51), and a
       // refusal overtaken by a newer write must not clear that write's state.
-      if (!hostModeAnswerIsCurrent(request, profile.id)) return 'stale'
+      if (!openingIsLive(opening)) {
+        const host = profile.options.host || profile.name
+        return { status: 'failed-stale', host, reason }
+      }
+      if (!hostModeAnswerIsCurrent(request, opening)) return 'stale'
       setHostModeWriteError(reason)
       // The field may live on a section the person has since left, and the
       // form's one reveal move is the same one the submit gate makes.
@@ -2097,6 +2123,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   function closeDialog() {
+    editorOpening?.abort()
+    editorOpening = undefined
     setDialogOpen(false)
     setEditing(null)
     setHostModeState({ kind: 'draft' })
@@ -2260,7 +2288,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // ── Save / delete / connect ────────────────────────────────────────────
 
   async function saveProfile(profile: SSHProfile) {
-    if (!(await profileGate())) return
+    const opening = editorOpening
+    if (!opening || !openingIsLive(opening)) return
+    if (!(await profileGate()) || !openingIsLive(opening)) return
 
     // A Save landing while a password mint is still resolving waits for the
     // mint's bind: the bind persists the binding AND updates the draft, so
@@ -2269,6 +2299,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     // passwordSecret, the exact on-disk shape of the report (W8).
     if (mintInFlight) {
       await mintInFlight
+      if (!openingIsLive(opening)) return
       const fresh = editing()
       if (fresh) profile = fresh
     }
@@ -2296,6 +2327,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           await run()
         }
       } catch (err) {
+        if (!openingIsLive(opening)) return
         if (err instanceof VaultOperationCancelledError) {
           return
         }
@@ -2331,6 +2363,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         return
       }
       const saved = result!
+      if (!openingIsLive(opening)) {
+        log.warn('dropping a stale key-material save', { profileId: profile.id, row: saved.row })
+        return
+      }
       setProfileKeyFingerprint(saved.fingerprint)
       let keyPassphraseRow: string | undefined
       if (saved.passphraseWanted) {
@@ -2341,6 +2377,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           loginLabel(profile.options.user, profile.options.host),
           secretNameFor('key-passphrase', loginLabel(profile.options.user, profile.options.host)),
         )
+        if (!openingIsLive(opening)) return
         if (outcome.saved && outcome.row) keyPassphraseRow = outcome.row
       }
       // Bind the minted rows on the draft and re-enter: the save below must
@@ -2354,6 +2391,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           ...(keyPassphraseRow ? { keyPassphraseSecret: keyPassphraseRow } : {}),
         },
       }
+      if (!openingIsLive(opening)) return
       setEditing(linked)
       setProfileKeyText('')
       setDirtyFields((prev) => {
@@ -2397,6 +2435,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (isNew) {
       try {
         const saved = await persistGuarded()
+        if (!openingIsLive(opening)) return
         closeDialog()
         await loadAll()
         void loadSessionStatuses()
@@ -2406,6 +2445,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
         })
       } catch (err) {
+        if (!openingIsLive(opening)) return
         const message = (err as Error).message
         log.error('Failed to save', { message })
         showToast({
@@ -2430,28 +2470,32 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
     switch (route.kind) {
       case 'noop':
+        if (!openingIsLive(opening)) return
         // Nothing about the connection changed — unless its HOST's method
         // did. That is a change like any other and lives in the other store,
         // so Save writes it even when the profile needs no write (frame 4).
-        // A stale or failed answer leaves the dialog as it is; a failure that
-        // is still current has already said so on the field.
-        if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
+        // A failed write has already surfaced its warning independently of
+        // the editor; only a live successful continuation closes the dialog.
+        if ((await saveHostMode(profile, hostMethod, opening)) !== 'ok') return
+        if (!openingIsLive(opening)) return
         closeDialog()
         return
 
       case 'update':
         try {
           const saved = await persistGuarded()
-          if ((await saveHostMode(saved, hostMethod)) !== 'ok') {
-            // The connection IS saved; the host's record is not (or the person
-            // has moved to another one). Keep the dialog so the same Save
-            // retries the second store, and refresh the list behind it for
-            // what has already been written.
+          const methodResult = await saveHostMode(saved, hostMethod, opening)
+          if (typeof methodResult === 'object') {
+            showHostMethodFailure(methodResult.host, methodResult.reason)
+          }
+          if (methodResult !== 'ok' && openingIsLive(opening)) {
+            // The profile is saved but the method is not, or a newer write
+            // superseded this one. Keep the current editor and refresh the list.
             await loadAll()
             void loadSessionStatuses()
             return
           }
-          closeDialog()
+          if (openingIsLive(opening)) closeDialog()
           await loadAll()
           await loadEffective([saved.id])
           void loadSessionStatuses()
@@ -2460,6 +2504,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
           })
         } catch (err) {
+          if (!openingIsLive(opening)) return
           const message = (err as Error).message
           log.error('Failed to save', { message })
           showToast({
@@ -2488,13 +2533,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               })()
             : props.client.patchProfile({ id: profile.id, set: route.patchSet }))
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
-          if ((await saveHostMode(profile, hostMethod)) !== 'ok') return
-          closeDialog()
+          const methodResult = await saveHostMode(profile, hostMethod, opening)
+          if (typeof methodResult === 'object') {
+            showHostMethodFailure(methodResult.host, methodResult.reason)
+          }
+          if (methodResult === 'failed' || (methodResult === 'stale' && openingIsLive(opening))) return
+          if (openingIsLive(opening)) {
+            closeDialog()
+          } else {
+            await loadAll()
+            await loadEffective([profile.id])
+            void loadSessionStatuses()
+          }
           showToast({
             level: 'success',
             message: `${t('connections.toasts.saved', 'Saved')} "${profile.name}"`,
           })
         } catch (err) {
+          if (!openingIsLive(opening)) return
           const message = (err as Error).message
           log.error('Failed to save', { message })
           showToast({
@@ -2507,11 +2563,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   async function computeMoveImpact(profileId: string, targetGroupId: string) {
+    const opening = editorOpening
+    if (!opening || !openingIsLive(opening)) return
     setProfileMoveImpact(null)
     try {
       const result = await props.client.moveImpact({ profileIds: [profileId], targetGroupId })
-      setProfileMoveImpact(result)
+      if (openingIsLive(opening)) setProfileMoveImpact(result)
     } catch (err) {
+      if (!openingIsLive(opening)) return
       const message = (err as Error).message
       log.error('Failed to compute move impact', { message })
       setProfileMoveImpact(null)

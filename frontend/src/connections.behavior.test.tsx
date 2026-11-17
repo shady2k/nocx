@@ -1073,7 +1073,7 @@ describe('password binding persists at the mint', () => {
     await vi.waitFor(() => {
       expect(
         toasts().some(
-          (t) => t.level === 'danger' && t.message.includes('stored but this connection'),
+          (t) => t.level === 'warning' && t.message.includes('stored but this connection'),
         ),
       ).toBe(true)
     })
@@ -2900,53 +2900,6 @@ describe('portDiscovery', () => {
 // states, and each test drives one through the surface a person reaches: the
 // Advanced section and Save Connection.
 
-it('T6: deleting A never closes B; A is deleted and its outcome is still shown', async () => {
-  const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-  let resolveDelete!: (value: boolean) => void
-  const deletion = vi.spyOn(client, 'deleteProfile').mockImplementation(
-    () =>
-      new Promise((resolve) => {
-        resolveDelete = resolve
-      }),
-  )
-  await waitForProfiles(container, 2)
-  await openProfileEditor(container, 'prod-web')
-  const dialog = findDialogByTitleContaining(container, 'prod-web')!
-  clickButtonByText(container, 'Delete Connection', dialog)
-  await vi.waitFor(() =>
-    expect(
-      Array.from(document.body.querySelectorAll('dialog')).some(
-        (node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?',
-      ),
-    ).toBe(true),
-  )
-  const confirm = Array.from(document.body.querySelectorAll('dialog'))
-    .filter(
-      (node) => node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?',
-    )
-    .slice(-1)[0]
-  const confirmButtons = Array.from(
-    confirm.closest('.nocx-dialog')!.querySelectorAll<HTMLButtonElement>('.ui-button'),
-  )
-  expect(confirmButtons[1].disabled).toBe(false)
-  confirmButtons[1].click()
-  await vi.waitFor(() => expect(deletion).toHaveBeenCalledWith('ssh:p1'))
-  clickButtonByText(container, 'Cancel')
-  await openProfileEditor(container, 'prod-db')
-  fireEvent.input(container.querySelector('#profile-name')!, { target: { value: 'B draft' } })
-  await vi.waitFor(() =>
-    expect((container.querySelector('#profile-name') as HTMLInputElement).value).toBe('B draft'),
-  )
-  resolveDelete(true)
-  await vi.waitFor(() =>
-    expect(
-      toasts().some(
-        (toast) => toast.message.includes('Deleted') && toast.message.includes('prod-web'),
-      ),
-    ).toBe(true),
-  )
-  expect(findDialogByTitleContaining(container, 'B draft')).toBeTruthy()
-})
 /** Delay vault permission, not the RPC result: releasing a mint must visibly
  * reach savePassword before a test checks another opening's state. */
 function delayedPasswordVault() {
@@ -3052,20 +3005,6 @@ it('T7: a generator continuation from A cannot close or settle B’s generator',
 
 describe('the host integration method', () => {
   /** The field's subtree, addressed the way its label addresses the control. */
-  function methodField(container: HTMLElement) {
-    const label = container.querySelector('label[for="profile-integration-method"]')
-    expect(label, 'Integration method field not found').toBeTruthy()
-    const field = label!.closest('.ui-field') as HTMLElement
-    const select = field.querySelector('.ui-select') as HTMLSelectElement
-    expect(select, 'Integration method select not found').toBeTruthy()
-    return {
-      field,
-      select,
-      description: field.querySelector('.ui-field-desc')?.textContent,
-      error: field.querySelector('.ui-field-error')?.textContent,
-    }
-  }
-
   async function openAdvanced(container: HTMLElement) {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Advanced')
@@ -3076,40 +3015,6 @@ describe('the host integration method', () => {
   const UNKNOWN_HOST_DESC =
     'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.'
   const DIALOG_TITLE = 'Edit Connection: prod-web'
-
-  it('T5b: method-only Save refusal after leaving A reports A without changing B', async () => {
-    const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'raw', hostKnown: true })
-    let rejectWrite!: (reason: unknown) => void
-    setHostMode.mockImplementation(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectWrite = reject
-        }),
-    )
-    await waitForProfiles(container, 2)
-    await openAdvanced(container)
-    await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
-    fireEvent.change(methodField(container).select, { target: { value: 'script' } })
-    clickButtonByText(container, 'Save Connection')
-    await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'script'))
-    clickButtonByText(container, 'Cancel')
-    await openProfileEditor(container, 'prod-db')
-    selectProfileSection(container, 'General')
-    const focus = container.querySelector('#profile-name') as HTMLInputElement
-    focus.focus()
-    rejectWrite(new RpcError('read-only', -32603))
-    await vi.waitFor(() =>
-      expect(
-        toasts().some(
-          (x) => x.message.includes('web.example.com') && x.message.includes('was not'),
-        ),
-      ).toBe(true),
-    )
-    expect(methodField(container).error).toBeUndefined()
-    expect(methodField(container).select.closest('[hidden]')).not.toBeNull()
-    expect(document.activeElement).toBe(focus)
-  })
 
   it('T1: a delayed profile patch cannot invalidate B’s pending host read', async () => {
     const { container, client, hostMode, setHostMode } = mount({
@@ -3201,95 +3106,6 @@ describe('the host integration method', () => {
     currentRead({ profileId: 'ssh:p1', mode: 'script', hostKnown: true })
     await vi.waitFor(() => expect(methodField(container).select.value).toBe('script'))
     expect(methodField(container).select.disabled).toBe(false)
-  })
-
-  it('T3: a delayed patch without a method change leaves B’s open editor and draft untouched', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-    let resolvePatch!: (value: SSHProfile) => void
-    const patch = vi.spyOn(client, 'updateProfile').mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolvePatch = resolve
-        }),
-    )
-    await waitForProfiles(container, 2)
-    await openAdvanced(container)
-    selectProfileSection(container, 'General')
-    fireEvent.input(container.querySelector('#profile-name')!, {
-      target: { value: 'prod-web edited' },
-    })
-    await vi.waitFor(() =>
-      expect((container.querySelector('#profile-name') as HTMLInputElement).value).toBe(
-        'prod-web edited',
-      ),
-    )
-    clickButtonByText(container, 'Save Connection')
-    await vi.waitFor(() => expect(patch).toHaveBeenCalled())
-    clickButtonByText(container, 'Cancel')
-    await openProfileEditor(container, 'prod-db')
-    fireEvent.input(container.querySelector('#profile-name')!, { target: { value: 'B draft' } })
-    await vi.waitFor(() =>
-      expect((container.querySelector('#profile-name') as HTMLInputElement).value).toBe('B draft'),
-    )
-    const toastCount = toasts().length
-    resolvePatch({ ...MOCK_PROFILES[0], name: 'prod-web edited' })
-    await vi.waitFor(() =>
-      expect(
-        toasts()
-          .slice(toastCount)
-          .some((toast) => toast.level === 'success' && toast.message.includes('prod-web edited')),
-      ).toBe(true),
-    )
-    expect(findDialogByTitleContaining(container, 'B draft')).toBeTruthy()
-    expect((container.querySelector('#profile-name') as HTMLInputElement).value).toBe('B draft')
-    expect(container.querySelector('#profile-name')).toBeTruthy()
-    const updateB = vi.spyOn(client, 'updateProfile').mockResolvedValue(MOCK_PROFILES[1])
-    clickButtonByText(container, 'Save Connection')
-    await vi.waitFor(() =>
-      expect(updateB).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'ssh:p2', name: 'B draft' }),
-      ),
-    )
-  })
-
-  it('T4: a delayed key save from A cannot bind into B’s draft', async () => {
-    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 2) })
-    let resolveKey!: (value: {
-      row: string
-      fingerprint: string
-      passphraseWanted: boolean
-    }) => void
-    const saveKeyMaterial = vi.spyOn(client, 'saveKeyMaterial').mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveKey = resolve
-        }),
-    )
-    const patch = vi.spyOn(client, 'updateProfile').mockResolvedValue(MOCK_PROFILES[1])
-    await waitForProfiles(container, 2)
-    await openProfileEditor(container, 'prod-web')
-    selectProfileSection(container, 'Authentication')
-    clickSegmentedOption(container, 'Public Key')
-    clickSegmentedOption(container, 'Paste key')
-    await vi.waitFor(() => expect(container.querySelector('#profile-key-text')).toBeTruthy())
-    fireEvent.input(container.querySelector('#profile-key-text')!, {
-      target: { value: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----' },
-    })
-    clickButtonByText(container, 'Save Connection')
-    await vi.waitFor(() => expect(saveKeyMaterial).toHaveBeenCalled())
-    clickButtonByText(container, 'Cancel')
-    await openProfileEditor(container, 'prod-db')
-    resolveKey({ row: 'key:from-a', fingerprint: 'SHA256:test', passphraseWanted: false })
-    expect(findDialogByTitleContaining(container, 'prod-db')).toBeTruthy()
-    selectProfileSection(container, 'General')
-    fireEvent.input(container.querySelector('#profile-name')!, {
-      target: { value: 'prod-db edited' },
-    })
-    clickButtonByText(container, 'Save Connection')
-    await vi.waitFor(() => expect(patch).toHaveBeenCalled())
-    expect(JSON.stringify(patch.mock.calls.map((call) => call[0].options))).not.toContain(
-      'key:from-a',
-    )
   })
 
   it('T5: delayed host-method refusal reports A without changing B’s field, section or focus', async () => {
@@ -3543,7 +3359,7 @@ describe('the host integration method', () => {
         (toast) =>
           toast.level === 'warning' &&
           toast.message ===
-            'The connection was saved, but the integration method for web.example.com was not: settings store is read-only. Save Connection to retry.',
+            'The connection was saved, but the integration method for web.example.com was not: settings store is read-only. Open "prod-web" and Save Connection to retry.',
       ),
       'the toast names what was saved and what was not, and how to retry',
     ).toBe(true)
@@ -3673,6 +3489,271 @@ describe('the host integration method', () => {
       'the Delivery mode row is gone from the group’s Advanced defaults',
     ).toBeNull()
     expect(container.textContent).not.toContain('Delivery mode')
+  })
+})
+
+function methodField(container: HTMLElement) {
+  const label = container.querySelector('label[for="profile-integration-method"]')
+  expect(label, 'Integration method field not found').toBeTruthy()
+  const field = label!.closest('.ui-field') as HTMLElement
+  const select = field.querySelector('.ui-select') as HTMLSelectElement
+  expect(select, 'Integration method select not found').toBeTruthy()
+  return {
+    field,
+    select,
+    description: field.querySelector('.ui-field-desc')?.textContent,
+    error: field.querySelector('.ui-field-error')?.textContent,
+  }
+}
+
+// The architect's outcome matrix: an operation belongs to submitted A even
+// after its editor closes; only editor-local effects belong to the opening.
+describe('submitted operation outcome matrix', () => {
+  const rows = [
+    [1, 'create success'],
+    [2, 'create failure'],
+    [3, 'update success'],
+    [4, 'update failure'],
+    [5, 'patch success without method'],
+    [6, 'patch failure'],
+    [7, 'method-only refusal'],
+    [8, 'key vault continuation'],
+    [9, 'password mint failure'],
+    [10, 'password binding failure'],
+    [11, 'delete success'],
+  ] as const
+
+  it.each(rows)('row %i: %s reports A and preserves B', async (row) => {
+    let release!: () => void
+    let reject!: (reason: Error) => void
+    const deferred = new Promise<void>((resolve, refuse) => {
+      release = resolve
+      reject = refuse
+    })
+    const isCreate = row <= 2
+    let records = [...MOCK_PROFILES.slice(0, 2)]
+    const vaultPermission = vi.fn()
+    const vault = {
+      status: () => null,
+      showUnlock: () => false,
+      saveSecretWithVault: (run: () => Promise<void>, reason?: string) => {
+        vaultPermission(reason)
+        return row === 8 && reason === 'save this key' ? deferred.then(run) : run()
+      },
+    } as unknown as VaultController
+    const { container, client, hostMode, setHostMode } = mount({
+      profiles: records,
+      vaultController: vault,
+    })
+    vi.spyOn(client, 'listProfiles').mockImplementation(() => Promise.resolve(records))
+    hostMode.mockImplementation((profileId) =>
+      Promise.resolve({ profileId, mode: 'raw', hostKnown: true }),
+    )
+    const create = vi.spyOn(client, 'createProfile').mockImplementation(async (profile) => {
+      await deferred
+      const saved = { ...profile, id: 'ssh:created' }
+      records = [...records, saved]
+      return saved
+    })
+    const update = vi.spyOn(client, 'updateProfile').mockImplementation(async (profile) => {
+      if (row === 4) await deferred
+      records = records.map((p) => (p.id === profile.id ? profile : p))
+      return profile
+    })
+    const patch = vi.spyOn(client, 'patchProfile').mockImplementation(async (params) => {
+      if (params.id === 'ssh:p1' && [5, 6, 10].includes(row)) await deferred
+      return { id: params.id, fields: {} }
+    })
+    const mint = vi.spyOn(client, 'savePassword').mockImplementation(async () => {
+      if ([3, 9].includes(row)) await deferred
+      return { row: 'secrow:A' }
+    })
+    const key = vi.spyOn(client, 'saveKeyMaterial').mockResolvedValue({
+      row: 'secrow:key-A',
+      fingerprint: 'SHA256:A',
+      passphraseWanted: false,
+    })
+    const deletion = vi.spyOn(client, 'deleteProfile').mockImplementation(async () => {
+      await deferred
+      records = records.filter((p) => p.id !== 'ssh:p1')
+      return true
+    })
+    setHostMode.mockImplementation(async (profileId, mode) => {
+      if (row === 7) await deferred
+      return { profileId, mode }
+    })
+    await waitForProfiles(container, 2)
+    if (isCreate) {
+      clickButtonByText(container, '+ New connection')
+      await vi.waitFor(() =>
+        expect(document.activeElement).toBe(container.querySelector('#quick-connect-input')),
+      )
+      fireEvent.input(container.querySelector('#quick-connect-input')!, {
+        target: { value: 'deploy@web.example.com' },
+      })
+      clickButtonByText(container, 'Next')
+      await vi.waitFor(() => expect(container.querySelector('#profile-name')).toBeTruthy())
+      fireEvent.input(container.querySelector('#profile-name')!, { target: { value: 'A created' } })
+    } else {
+      await openProfileEditor(container, 'prod-web')
+    }
+    if ([3, 9, 10].includes(row)) {
+      selectProfileSection(container, 'Authentication')
+      clickSegmentedOption(container, 'Password')
+      await storePassword(container, 'A password')
+      await vi.waitFor(() => expect(mint).toHaveBeenCalled())
+      if (row === 10) await vi.waitFor(() => expect(patch).toHaveBeenCalled())
+    }
+    if (row === 8) {
+      selectProfileSection(container, 'Authentication')
+      clickSegmentedOption(container, 'Public Key')
+      clickSegmentedOption(container, 'Paste key')
+      fireEvent.input(container.querySelector('#profile-key-text')!, {
+        target: { value: '-----BEGIN PRIVATE KEY-----\nA key\n-----END PRIVATE KEY-----' },
+      })
+    }
+    if ([3, 4].includes(row)) {
+      selectProfileSection(container, 'General')
+      fireEvent.input(container.querySelector('#profile-name')!, { target: { value: 'A updated' } })
+    }
+    if ([5, 6].includes(row)) {
+      fireEvent.input(container.querySelector('#profile-keepalive-interval')!, {
+        target: { value: '5000' },
+      })
+    }
+    if (row === 7) {
+      selectProfileSection(container, 'Advanced')
+      await vi.waitFor(() => expect(methodField(container).select.value).toBe('raw'))
+      fireEvent.change(methodField(container).select, { target: { value: 'script' } })
+    }
+    if (row === 11) {
+      clickButtonByText(container, 'Delete Connection')
+      const confirm = await vi.waitFor(() => {
+        const dialog = Array.from(document.body.querySelectorAll('dialog'))
+          .reverse()
+          .find(
+            (node) =>
+              node.open &&
+              node.isConnected &&
+              node.querySelector('.nocx-dialog__message')?.textContent === 'Delete "prod-web"?',
+          )
+        expect(dialog).toBeTruthy()
+        return dialog!
+      })
+      const buttons = confirm
+        .closest('.nocx-dialog')!
+        .querySelectorAll<HTMLButtonElement>('.ui-button')
+      buttons[1].click()
+      await vi.waitFor(() => expect(deletion).toHaveBeenCalled())
+    } else if (![9, 10].includes(row)) {
+      clickButtonByText(container, isCreate ? 'Create Connection' : 'Save Connection')
+      if (isCreate) await vi.waitFor(() => expect(create).toHaveBeenCalled())
+      if (row === 4) await vi.waitFor(() => expect(update).toHaveBeenCalled())
+      if ([5, 6].includes(row)) await vi.waitFor(() => expect(patch).toHaveBeenCalled())
+      if (row === 7) await vi.waitFor(() => expect(setHostMode).toHaveBeenCalled())
+      if (row === 8)
+        await vi.waitFor(() => expect(vaultPermission).toHaveBeenCalledWith('save this key'))
+    }
+    clickButtonByText(container, 'Cancel')
+    // Closing the new-connection editor restores the quick-connect field's
+    // focus. Observe that close outcome before opening B, not during A's RPC.
+    if (isCreate)
+      await vi.waitFor(() => expect(document.activeElement?.id).toBe('quick-connect-input'))
+    await openProfileEditor(container, 'prod-db')
+    if (row === 8) {
+      selectProfileSection(container, 'Authentication')
+      clickSegmentedOption(container, 'Public Key')
+      clickSegmentedOption(container, 'Paste key')
+      fireEvent.input(container.querySelector('#profile-key-text')!, {
+        target: { value: '-----BEGIN PRIVATE KEY-----\nB key\n-----END PRIVATE KEY-----' },
+      })
+    }
+    selectProfileSection(container, 'General')
+    fireEvent.input(container.querySelector('#profile-keepalive-interval')!, {
+      target: { value: '7000' },
+    })
+    const focus = container.querySelector<HTMLInputElement>('#profile-name')!
+    focus.focus()
+    const editor = findDialogByTitleContaining(container, 'prod-db')!
+    if ([2, 4, 6, 7, 9, 10].includes(row)) reject(new RpcError('A operation refused', -32603))
+    else release()
+
+    const aName = isCreate ? 'A created' : [3, 4].includes(row) ? 'A updated' : 'prod-web'
+    await vi.waitFor(() => {
+      if (row === 8) {
+        expect(key).toHaveBeenCalledWith(
+          '-----BEGIN PRIVATE KEY-----\nA key\n-----END PRIVATE KEY-----',
+          'Key for deploy@web.example.com',
+        )
+        expect(
+          toasts().some(
+            (toast) =>
+              toast.level === 'success' &&
+              toast.message.includes('Saved') &&
+              toast.message.includes('prod-web'),
+          ),
+        ).toBe(true)
+      } else {
+        const outcome = toasts().find((toast) => {
+          if (row === 7)
+            return toast.message.includes('web.example.com') && toast.message.includes('was not')
+          if ([2, 4, 6, 9, 10].includes(row))
+            return toast.message.includes(aName) && toast.message.includes('A operation refused')
+          return (
+            toast.message.includes(row === 11 ? 'Deleted' : 'Saved') &&
+            toast.message.includes(aName)
+          )
+        })
+        expect(outcome, 'submitted A has a human-visible outcome').toBeTruthy()
+        expect(outcome!.level).toBe(
+          [2, 4, 6, 9].includes(row) ? 'danger' : [7, 10].includes(row) ? 'warning' : 'success',
+        )
+        if (row === 10) {
+          expect(outcome!.message).toContain('password was stored')
+          expect(outcome!.message).toContain('not updated')
+        }
+      }
+    })
+    if (row === 1) expect(container.querySelector('[aria-label="Edit A created"]')).toBeTruthy()
+    if (row === 3) {
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'ssh:p1',
+          name: 'A updated',
+          options: expect.objectContaining({ passwordSecret: 'secrow:A' }) as SSHProfile['options'],
+        }),
+      )
+    }
+    if (row === 11) expect(container.querySelector('[aria-label="Edit prod-web"]')).toBeNull()
+    expect(findDialogByTitleContaining(container, 'prod-db')).toBe(editor)
+    expect(focus.value).toBe('prod-db')
+    expect((container.querySelector('#profile-keepalive-interval') as HTMLInputElement).value).toBe(
+      '7000',
+    )
+    expect(focus.closest('[hidden]')).toBeNull()
+    expect(document.activeElement).toBe(focus)
+    expect(methodField(container).error).toBeUndefined()
+    if (row === 8) {
+      expect((container.querySelector('#profile-key-text') as HTMLTextAreaElement).value).toContain(
+        'B key',
+      )
+      selectProfileSection(container, 'Authentication')
+      clickSegmentedOption(container, 'Password')
+    }
+    // The saved payload, not a render, proves A did not clear B's dirty marks.
+    patch.mockClear()
+    clickButtonByText(container, 'Save Connection')
+    await vi.waitFor(() =>
+      expect(patch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'ssh:p2',
+          set: expect.objectContaining({ 'options.keepaliveInterval': 7000 }) as Record<
+            string,
+            unknown
+          >,
+        }),
+      ),
+    )
   })
 })
 

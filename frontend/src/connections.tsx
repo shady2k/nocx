@@ -7,7 +7,17 @@
  * Pattern follows the manager surfaces: full-width list, editing in a Dialog.
  * Tabby import moved to Export / Backup / Import section.
  */
-import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
+import {
+  For,
+  Show,
+  createSignal,
+  createMemo,
+  createEffect,
+  on,
+  onMount,
+  untrack,
+  type JSX,
+} from 'solid-js'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
@@ -375,7 +385,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * submitted host or profile; list updates remain keyed by profile id. */
   interface EditorOpening {
     signal: AbortSignal
-    pendingMints: Set<Promise<void>>
+    pendingMints: Set<Promise<SecretEntry | undefined>>
     settlePasswordAsk?: (entry: SecretEntry | undefined) => void
     hostModeRequest: number
   }
@@ -389,10 +399,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     opening = { signal: controller.signal, pendingMints: new Set(), hostModeRequest: 0 }
     return opening
   }
-  const openingIsLive = (owner: EditorOpening): boolean =>
-    opening === owner && !owner.signal.aborted
-  const hostModeAnswerIsCurrent = (request: number, owner: EditorOpening): boolean =>
-    openingIsLive(owner) && request === owner.hostModeRequest
+  function whileOpen(owner: EditorOpening, effect: () => void): void {
+    if (opening === owner && !owner.signal.aborted) effect()
+  }
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   /** The literal a person has typed into a password field and not yet stored.
    *  Two fields, two drafts: the profile editor's and the group defaults'.
@@ -615,9 +624,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     owner: EditorOpening,
     password: string,
   ): Promise<SecretEntry | undefined> {
-    const signal = owner.signal
-    const current = editing()
-    if (!openingIsLive(owner) || !current) return undefined
+    const draft = editing()
+    if (!draft) return undefined
+    const current = { ...draft, options: { ...draft.options } }
+    const isNew = !current.id || !profiles().some((p) => p.id === current.id)
     const generatedName = secretNameFor(
       'password',
       loginLabel(current.options.user, current.options.host),
@@ -627,32 +637,21 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       minted = await props.client.savePassword(password, generatedName)
     }
     const bind = async (): Promise<void> => {
-      if (!minted || signal.aborted) return
+      if (!minted) return
       const mintedRow: { row: string } = minted
-      // Merge into the LIVE draft, not the commit-moment snapshot: the mint
-      // runs behind a vault prompt and the person may have edited other
-      // fields in the meantime (W8).
-      setEditing((prev) =>
-        prev ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } } : prev,
-      )
-      setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
-      setMintedPasswordNames((prev) => {
-        const next = new Map(prev)
-        next.set(mintedRow.row, generatedName)
-        return next
+      whileOpen(owner, () => {
+        setEditing((prev) =>
+          prev ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } } : prev,
+        )
+        setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
+        setMintedPasswordNames((prev) => {
+          const next = new Map(prev)
+          next.set(mintedRow.row, generatedName)
+          return next
+        })
+        setProfilePasswordValue('')
       })
-      setProfilePasswordValue('')
-      // The inventory does not know about this row yet — reload it so the
-      // pickers and any later read see the mint. The chip already names the
-      // secret from mintedPasswordNames, so the display never depends on the
-      // reload landing.
       void loadSecretRows()
-      // The stored profile must carry the pair the editor always keeps
-      // together: a password secret is only ever offered under the Password
-      // method (authentication-editor.tsx), so auth travels with the binding,
-      // or a mint-then-cancel on a profile without a method would store an
-      // invisible secret.
-      const isNew = !current.id || !profiles().some((p) => p.id === current.id)
       if (!isNew) {
         try {
           await props.client.patchProfile({
@@ -662,18 +661,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               'options.passwordSecret': mintedRow.row,
             },
           })
-          if (signal.aborted) return
         } catch (err) {
-          if (signal.aborted) return
-          // The secret was minted, so the failure is the binding: name the
-          // split out loud, or the half-done state reads as a silent success
-          // (AGENTS.md: a soft degrade must be visible in the product). The
-          // draft keeps the binding, so Save Connection retries the write.
           const message = (err as Error).message
           log.error('Failed to persist the password binding', { message })
           showToast({
-            level: 'danger',
-            message: `${t('connections.password.bindingFailedHead', 'The password was stored but this connection was not updated to use it:')} ${message}${t('connections.password.bindingFailedTail', '. Save Connection to retry.')}`,
+            level: 'warning',
+            message: `${t('connections.password.bindingFailedHead', 'The password was stored but this connection was not updated to use it:')} "${current.name}": ${message}${t('connections.password.retryOpening', '. Open "{name}" and Save Connection to retry.', { name: current.name })}`,
           })
         }
       }
@@ -697,7 +690,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       log.error('Failed to save password', { message })
       showToast({
         level: 'danger',
-        message: `${t('connections.password.saveFailedHead', 'Could not save the password:')} ${message}`,
+        message: `${t('connections.password.saveFailedHead', 'Could not save the password:')} "${current.name}": ${message}`,
       })
     }
     const mint = (async (): Promise<SecretEntry | undefined> => {
@@ -709,7 +702,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         }
         await bind()
       } catch (err) {
-        if (signal.aborted) return undefined
         fail(err)
         return undefined
       }
@@ -721,9 +713,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     // bind: the save must write a profile that carries the binding (W8 — the
     // save that landed before the bind produced the auth-without-secret
     // profile on disk).
-    const settled = mint.then(() => undefined)
-    owner.pendingMints.add(settled)
-    void settled.finally(() => owner.pendingMints.delete(settled))
+    owner.pendingMints.add(mint)
+    void mint.finally(() => owner.pendingMints.delete(mint))
     return mint
   }
 
@@ -732,20 +723,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  person typed with the reference — exactly as taking an existing row
    *  does. */
   function openPasswordAsk(owner: EditorOpening): Promise<SecretEntry | undefined> {
-    if (!openingIsLive(owner) || owner.settlePasswordAsk !== undefined)
-      return Promise.resolve(undefined)
-    setProfilePasswordValue('')
-    setProfilePasswordOpen(true)
-    return new Promise((resolve) => {
-      owner.settlePasswordAsk = resolve
+    let answer = Promise.resolve<SecretEntry | undefined>(undefined)
+    whileOpen(owner, () => {
+      if (owner.settlePasswordAsk !== undefined) return
+      setProfilePasswordValue('')
+      setProfilePasswordOpen(true)
+      answer = new Promise((resolve) => {
+        owner.settlePasswordAsk = resolve
+      })
     })
+    return answer
   }
   function closePasswordAsk(owner: EditorOpening, entry?: SecretEntry): void {
-    if (opening !== owner) return
-    setProfilePasswordOpen(false)
-    const settle = owner.settlePasswordAsk
-    owner.settlePasswordAsk = undefined
-    settle?.(entry)
+    whileOpen(owner, () => {
+      setProfilePasswordOpen(false)
+      const settle = owner.settlePasswordAsk
+      owner.settlePasswordAsk = undefined
+      settle?.(entry)
+    })
   }
 
   /** The composition root's panel, listing the rows a PASSWORD field may bind
@@ -1994,40 +1989,29 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    *  there is nothing to ask. A slow answer for a dialog that has since opened
    *  another connection is dropped rather than painted over the newer one. */
   async function loadHostMode(owner: EditorOpening, profile: SSHProfile): Promise<void> {
-    if (!openingIsLive(owner)) return
     const request = ++owner.hostModeRequest
-    setHostModeWriteError(undefined)
-    setHostModeChoice('auto')
-    if (!profile.id) {
-      setHostModeState({ kind: 'draft' })
-      return
-    }
-    setHostModeState({ kind: 'loading' })
+    whileOpen(owner, () => {
+      setHostModeWriteError(undefined)
+      setHostModeChoice('auto')
+      setHostModeState({ kind: profile.id ? 'loading' : 'draft' })
+    })
+    if (!profile.id) return
     try {
       const answer = await props.client.hostMode(profile.id)
-      if (!hostModeAnswerIsCurrent(request, owner)) {
-        log.warn('dropping a stale host-method read', {
-          profileId: profile.id,
-          request,
-          current: owner.hostModeRequest,
-        })
-        return
-      }
-      setHostModeChoice(answer.mode)
-      setHostModeState({ kind: 'ready', stored: answer.mode, hostKnown: answer.hostKnown })
+      whileOpen(owner, () => {
+        if (request !== owner.hostModeRequest) return
+        setHostModeChoice(answer.mode)
+        setHostModeState({ kind: 'ready', stored: answer.mode, hostKnown: answer.hostKnown })
+      })
     } catch (err) {
       const reason = (err as Error).message
       log.error('Could not read the host integration method', {
         profileId: profile.id,
         message: reason,
       })
-      // A read for a connection the editor has left — or one a newer Retry
-      // has replaced — says nothing about what is on screen now.
-      if (!hostModeAnswerIsCurrent(request, owner)) return
-      // The reason is the FIELD's, not a toast's: the control is disabled and
-      // Retry sits beside it (frame 3). A toast would fade while the control
-      // still had no value.
-      setHostModeState({ kind: 'readFailed', reason })
+      whileOpen(owner, () => {
+        if (request === owner.hostModeRequest) setHostModeState({ kind: 'readFailed', reason })
+      })
     }
   }
 
@@ -2055,42 +2039,33 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return chosen === state.stored ? null : chosen
   }
 
-  function showHostMethodFailure(host: string, reason: string) {
+  function showHostMethodFailure(profile: SSHProfile, reason: string) {
     showToast({
       level: 'warning',
-      message: `${t('connections.toasts.methodSaveFailedHead', 'The connection was saved, but the integration method for')} ${host}${t('connections.toasts.methodSaveFailedMid', ' was not: ')}${reason}${t('connections.toasts.methodSaveFailedTail', '. Save Connection to retry.')}`,
+      message: `${t('connections.toasts.methodSaveFailedHead', 'The connection was saved, but the integration method for')} ${profile.options.host || profile.name}${t('connections.toasts.methodSaveFailedMid', ' was not: ')}${reason}${t('connections.password.retryOpening', '. Open "{name}" and Save Connection to retry.', { name: profile.name })}`,
     })
   }
 
-  /** Write the submitted method after the profile save. The return value is
-   * only the operation's result. A current answer updates its opening's field;
-   * a refusal reveals and focuses that field while live, or names the submitted
-   * host in a toast after the opening is gone. An overtaken answer never paints
-   * over a newer request, but still reports its failure to the person. */
+  /** Operation results outlive their opening; only field effects belong to it. */
   async function saveHostMode(
     owner: EditorOpening,
-    profile: SSHProfile,
+    submitted: SSHProfile,
     mode: HostMode | null,
   ): Promise<'ok' | 'failed'> {
     if (mode === null) return 'ok'
-    const liveAtStart = openingIsLive(owner)
-    const request = liveAtStart ? ++owner.hostModeRequest : owner.hostModeRequest
+    const profile = { ...submitted, options: { ...submitted.options } }
+    const request = ++owner.hostModeRequest
     try {
       await props.client.setHostMode(profile.id, mode)
-      if (!liveAtStart) return 'ok'
-      if (!hostModeAnswerIsCurrent(request, owner)) {
-        log.warn('dropping a stale host-method write', {
-          profileId: profile.id,
-          mode,
-          request,
-          current: owner.hostModeRequest,
-        })
-        return 'ok'
-      }
-      const state = methodFieldState()
-      if (state.kind === 'ready')
-        setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
-      setHostModeWriteError(undefined)
+      if (request !== owner.hostModeRequest)
+        log.warn('dropping a stale host-method write', { profileId: profile.id, request })
+      whileOpen(owner, () => {
+        if (request !== owner.hostModeRequest) return
+        const state = untrack(methodFieldState)
+        if (state.kind === 'ready')
+          setHostModeState({ kind: 'ready', stored: mode, hostKnown: state.hostKnown })
+        setHostModeWriteError(undefined)
+      })
       return 'ok'
     } catch (err) {
       const reason = (err as Error).message
@@ -2099,26 +2074,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         mode,
         message: reason,
       })
-      // THE ANSWER IS APPLIED ONLY TO THE EDITOR THAT ASKED. A refusal for a
-      // connection the person has left must not paint its error, section,
-      // focus or toast over the one now on screen (review ALX-51), and a
-      // refusal overtaken by a newer write must not clear that write's state.
-      if (!openingIsLive(owner)) {
-        const host = profile.options.host || profile.name
-        showHostMethodFailure(host, reason)
-        return 'failed'
-      }
-      if (!hostModeAnswerIsCurrent(request, owner)) {
-        showHostMethodFailure(profile.options.host || profile.name, reason)
-        return 'failed'
-      }
-      setHostModeWriteError(reason)
-      // The field may live on a section the person has since left, and the
-      // form's one reveal move is the same one the submit gate makes.
-      setProfileSection('advanced')
-      document.getElementById('profile-integration-method')?.focus()
-      const host = profile.options.host || profile.name
-      showHostMethodFailure(host, reason)
+      whileOpen(owner, () => {
+        if (request !== owner.hostModeRequest) return
+        setHostModeWriteError(reason)
+        setProfileSection('advanced')
+        document.getElementById('profile-integration-method')?.focus()
+      })
+      showHostMethodFailure(profile, reason)
       return 'failed'
     }
   }
@@ -2284,42 +2246,66 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   // A failing field may live on an unopened panel — keepalive fields and the
   // forwards list are not in the DOM until their section is shown, so the
   // reveal hook opens the panel holding the field before focus is attempted.
-  const profileGate = createSubmitGate(profileValidation, {
-    reveal: (field) => {
-      setProfileSection(PROFILE_SECTION[field])
-    },
-  })
+  function profileGate(owner: EditorOpening): Promise<boolean> {
+    // The kit may suspend for section reveal. Its later verdict must still describe
+    // the submitted values, not a replacement opening's reactive validation.
+    const valid = profileValidation.valid()
+    const first = profileValidation.firstErrorField()
+    const message = profileValidation.firstError()
+    const count = profileValidation.errorCount()
+    const controlId = first === undefined ? undefined : profileValidation.controlId(first)
+    return createSubmitGate(
+      {
+        ...profileValidation,
+        valid: () => valid,
+        firstErrorField: () => first,
+        firstError: () => message,
+        errorCount: () => count,
+        controlId: () => {
+          let target: string | undefined
+          whileOpen(owner, () => {
+            target = controlId
+          })
+          return target
+        },
+        revealAll: () => whileOpen(owner, () => profileValidation.revealAll()),
+      },
+      {
+        reveal: (field) => whileOpen(owner, () => setProfileSection(PROFILE_SECTION[field])),
+      },
+    )()
+  }
 
   // ── Save / delete / connect ────────────────────────────────────────────
 
   async function saveProfile(owner: EditorOpening, profile: SSHProfile) {
-    if (!openingIsLive(owner)) return
-    if (!(await profileGate()) || !openingIsLive(owner)) return
-
-    // A Save landing while a password mint is still resolving waits for the
-    // mint's bind: the bind persists the binding AND updates the draft, so
-    // the save must write the freshest state — the one that carries it.
-    // Without this, a save pressed in that window writes auth without
-    // passwordSecret, the exact on-disk shape of the report (W8).
-    if (owner.pendingMints.size > 0) {
-      await Promise.all(owner.pendingMints)
-      if (!openingIsLive(owner)) return
-      const fresh = editing()
-      if (fresh) profile = fresh
+    // All editor inputs belong to the press of Save, not its continuation.
+    profile = { ...profile, options: { ...profile.options } }
+    const keyText = profileKeyText()
+    const keyMode = profileKeyMode()
+    const dirty = new Set(dirtyFields())
+    const hostMethod = pendingHostMode(profile.id)
+    const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
+    const origProfile = profiles().find((p) => p.id === profile.id)
+    if (origProfile && origProfile.group !== profile.group) dirty.add('group')
+    const pendingMints = [...owner.pendingMints]
+    const gate = profileGate(owner)
+    if (!(await gate)) return
+    const minted = await Promise.all(pendingMints)
+    for (const entry of minted) {
+      if (!entry) continue
+      profile.options.passwordSecret = entry.id
+      dirty.add('passwordSecret')
     }
 
     // Key material save (publicKey paste/upload mode)
-    if (
-      profile.options.auth === 'publicKey' &&
-      suppliesMaterial(profileKeyMode()) &&
-      profileKeyText()
-    ) {
+    if (profile.options.auth === 'publicKey' && suppliesMaterial(keyMode) && keyText) {
       const generatedName = generatedSecretName(
         'private-key',
         profile.options.user,
         profile.options.host,
       )
-      const saveKeymat = () => props.client.saveKeyMaterial(profileKeyText(), generatedName)
+      const saveKeymat = () => props.client.saveKeyMaterial(keyText, generatedName)
       let result: { row: string; fingerprint: string; passphraseWanted: boolean } | null = null
       const run = async () => {
         result = await saveKeymat()
@@ -2331,7 +2317,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           await run()
         }
       } catch (err) {
-        if (!openingIsLive(owner)) return
         if (err instanceof VaultOperationCancelledError) {
           return
         }
@@ -2350,10 +2335,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           // one: it distinguishes a public key from a corrupt file from a
           // PEM-encrypted key needing conversion.
           const detail = (err as Error).message
-          setProfileKeyTextError(detail)
+          whileOpen(owner, () => setProfileKeyTextError(detail))
           showToast({
             level: 'danger',
-            message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${detail}`,
+            message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} "${profile.name}": ${detail}`,
           })
           log.error('Invalid key material', { message: detail })
           return
@@ -2362,31 +2347,27 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         log.error('Failed to save key material', { message })
         showToast({
           level: 'danger',
-          message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${message}`,
+          message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} "${profile.name}": ${message}`,
         })
         return
       }
       const saved = result!
-      if (!openingIsLive(owner)) {
-        log.warn('dropping a stale key-material save', { profileId: profile.id, row: saved.row })
-        return
-      }
-      setProfileKeyFingerprint(saved.fingerprint)
+      whileOpen(owner, () => setProfileKeyFingerprint(saved.fingerprint))
       let keyPassphraseRow: string | undefined
       if (saved.passphraseWanted) {
-        const outcome = await askKeyPassphrase(
-          saved.row,
-          // The prompt names the LOGIN the key belongs to, not the key's own
-          // generated name — see the group flow for the same reasoning.
-          loginLabel(profile.options.user, profile.options.host),
-          secretNameFor('key-passphrase', loginLabel(profile.options.user, profile.options.host)),
-        )
-        if (!openingIsLive(owner)) return
+        let ask = Promise.resolve<{ saved: boolean; row?: string }>({ saved: false })
+        whileOpen(owner, () => {
+          ask = askKeyPassphrase(
+            saved.row,
+            loginLabel(profile.options.user, profile.options.host),
+            secretNameFor('key-passphrase', loginLabel(profile.options.user, profile.options.host)),
+          )
+        })
+        const outcome = await ask
         if (outcome.saved && outcome.row) keyPassphraseRow = outcome.row
       }
-      // Bind the minted rows on the draft and re-enter: the save below must
-      // persist the profile with the bindings on it.
-      const linked = {
+      // Continue with the minted rows on this operation’s snapshot.
+      profile = {
         ...profile,
         options: {
           ...profile.options,
@@ -2395,19 +2376,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           ...(keyPassphraseRow ? { keyPassphraseSecret: keyPassphraseRow } : {}),
         },
       }
-      if (!openingIsLive(owner)) return
-      setEditing(linked)
-      setProfileKeyText('')
-      setDirtyFields((prev) => {
-        const next = new Set(prev)
-        next.add('keySecret')
-        if (keyPassphraseRow) next.add('keyPassphraseSecret')
-        return next
+      dirty.add('keySecret')
+      if (keyPassphraseRow) dirty.add('keyPassphraseSecret')
+      whileOpen(owner, () => {
+        setEditing(profile)
+        setProfileKeyText('')
+        setDirtyFields(new Set(dirty))
       })
-      await saveProfile(owner, linked)
-      return
     }
-    const isNew = !profile.id || !profiles().some((x) => x.id === profile.id)
 
     const hasBindings = !!(
       profile.options.passwordSecret ||
@@ -2439,50 +2415,38 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (isNew) {
       try {
         const saved = await persistGuarded()
-        if (!openingIsLive(owner)) return
-        closeEditor(owner)
+        whileOpen(owner, () => closeEditor(owner))
         await loadAll()
         void loadSessionStatuses()
-        void loadEffective([saved.id])
+        await loadEffective([saved.id])
         showToast({
           level: 'success',
           message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
         })
       } catch (err) {
-        if (!openingIsLive(owner)) return
         const message = (err as Error).message
         log.error('Failed to save', { message })
         showToast({
           level: 'danger',
-          message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+          message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} "${profile.name}": ${message}`,
         })
       }
       return
     }
 
-    const dirty = new Set(dirtyFields())
-    // If the group changed from the original, force a full update.
-    const origProfile = profiles().find((p) => p.id === profile.id)
-    if (origProfile && origProfile.group !== profile.group) {
-      dirty.add('group')
-    }
     const route = decideSaveRoute(profile, dirty)
-    // THE SUBMITTED METHOD, FIXED NOW. The profile write below is asynchronous
-    // and the person may open another connection before it returns; reading
-    // the field then would write that connection's choice to this one's host.
-    const hostMethod = pendingHostMode(profile.id)
 
     switch (route.kind) {
       case 'noop':
-        if (!openingIsLive(owner)) return
         // Nothing about the connection changed — unless its HOST's method
         // did. That is a change like any other and lives in the other store,
         // so Save writes it even when the profile needs no write (frame 4).
         // A failed write has already surfaced its warning independently of
         // the editor; only a live successful continuation closes the dialog.
         if ((await saveHostMode(owner, profile, hostMethod)) !== 'ok') return
-        if (!openingIsLive(owner) || hostModeWriteError() !== undefined) return
-        closeEditor(owner)
+        whileOpen(owner, () => {
+          if (untrack(hostModeWriteError) === undefined) closeEditor(owner)
+        })
         return
 
       case 'update':
@@ -2497,7 +2461,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             void loadSessionStatuses()
             return
           }
-          if (openingIsLive(owner) && hostModeWriteError() === undefined) closeEditor(owner)
+          whileOpen(owner, () => {
+            if (untrack(hostModeWriteError) === undefined) closeEditor(owner)
+          })
           await loadAll()
           await loadEffective([saved.id])
           void loadSessionStatuses()
@@ -2506,12 +2472,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
           })
         } catch (err) {
-          if (!openingIsLive(owner)) return
           const message = (err as Error).message
           log.error('Failed to save', { message })
           showToast({
             level: 'danger',
-            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} "${profile.name}": ${message}`,
           })
         }
         return
@@ -2537,26 +2502,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
           const methodResult = await saveHostMode(owner, profile, hostMethod)
 
+          await loadAll()
+          await loadEffective([profile.id])
+          void loadSessionStatuses()
           if (methodResult === 'failed') return
-          if (openingIsLive(owner) && hostModeWriteError() !== undefined) return
-          if (openingIsLive(owner)) {
-            closeEditor(owner)
-          } else {
-            await loadAll()
-            await loadEffective([profile.id])
-            void loadSessionStatuses()
-          }
+          whileOpen(owner, () => {
+            if (untrack(hostModeWriteError) === undefined) closeEditor(owner)
+          })
           showToast({
             level: 'success',
             message: `${t('connections.toasts.saved', 'Saved')} "${profile.name}"`,
           })
         } catch (err) {
-          if (!openingIsLive(owner)) return
           const message = (err as Error).message
           log.error('Failed to save', { message })
           showToast({
             level: 'danger',
-            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} "${profile.name}": ${message}`,
           })
         }
         return
@@ -2564,21 +2526,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   async function computeMoveImpact(owner: EditorOpening, profileId: string, targetGroupId: string) {
-    if (!openingIsLive(owner)) return
-    setProfileMoveImpact(null)
+    whileOpen(owner, () => setProfileMoveImpact(null))
     try {
       const result = await props.client.moveImpact({ profileIds: [profileId], targetGroupId })
-      if (openingIsLive(owner)) setProfileMoveImpact(result)
+      whileOpen(owner, () => setProfileMoveImpact(result))
     } catch (err) {
-      if (!openingIsLive(owner)) return
       const message = (err as Error).message
       log.error('Failed to compute move impact', { message })
-      setProfileMoveImpact(null)
+      whileOpen(owner, () => setProfileMoveImpact(null))
     }
   }
 
   async function deleteProfile(owner: EditorOpening, profile: SSHProfile) {
-    if (!openingIsLive(owner)) return
+    profile = { ...profile, options: { ...profile.options } }
     if (
       !(await showConfirm(
         `${t('connections.editor.deleteConfirmHead', 'Delete')} "${profile.name}"?`,
@@ -2589,7 +2549,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return
     try {
       await props.client.deleteProfile(profile.id)
-      if (openingIsLive(owner)) closeEditor(owner)
+      whileOpen(owner, () => closeEditor(owner))
       await loadAll()
       void loadSessionStatuses()
       showToast({
@@ -3434,7 +3394,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 const owner = opening
                 if (owner)
                   void mintProfilePassword(owner, password).then((entry) => {
-                    if (openingIsLive(owner)) closePasswordAsk(owner, entry)
+                    closePasswordAsk(owner, entry)
                   })
               }}
             />

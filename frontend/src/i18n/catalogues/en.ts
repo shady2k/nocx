@@ -500,6 +500,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.password.bindingFailedHead':
     'The password was stored but this connection was not updated to use it:',
   'connections.password.bindingFailedTail': '. Save Connection to retry.',
+  'connections.password.retryOpening': '. Open "{name}" and Save Connection to retry.',
   'connections.password.cancelled': 'Password was not saved — the vault prompt was cancelled.',
   'connections.password.saveFailedHead': 'Could not save the password:',
   'connections.import.chooseFile': 'Choose a file to import',

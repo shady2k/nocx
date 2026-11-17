@@ -497,10 +497,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'The connection ended before your keys could be sent. Nothing was delivered.',
   'connections.load.failedHead': 'Could not load connections:',
   'connections.load.failedTail': '. The list may be out of date',
-  'connections.password.bindingFailedHead':
-    'The password was stored but this connection was not updated to use it:',
-  'connections.password.bindingFailedTail': '. Save Connection to retry.',
-  'connections.password.retryOpening': '. Open "{name}" and Save Connection to retry.',
+  'connections.password.bindingRecovery':
+    'Password "{password}" was created in the vault but not bound to "{name}": {reason}. Open "{name}", choose "{password}" in the password field and press Save Connection.',
+  'connections.toasts.methodRecovery':
+    'Integration method "{method}" for "{name}" ({host}) was not saved: {reason}. Open "{name}", choose "{method}" again in Advanced → Integration method and press Save Connection.',
   'connections.password.cancelled': 'Password was not saved — the vault prompt was cancelled.',
   'connections.password.saveFailedHead': 'Could not save the password:',
   'connections.import.chooseFile': 'Choose a file to import',
@@ -525,14 +525,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.parseFailedTail': 'try "user@host:port" or "ssh://user@host:port"',
   'connections.toasts.saved': 'Saved',
   'connections.toasts.saveFailedHead': 'Could not save the connection:',
-  // Save's two stores can split (mockup frame 4): the connection is written,
-  // the host's method is not. The surface composes head + host + mid + reason
-  // + tail, because the host and the reason are values and the sentence has to
-  // stay grammatical in a language whose word order is not English's.
-  'connections.toasts.methodSaveFailedHead':
-    'The connection was saved, but the integration method for',
-  'connections.toasts.methodSaveFailedMid': ' was not: ',
-  'connections.toasts.methodSaveFailedTail': '. Save Connection to retry.',
   'connections.toasts.deleted': 'Deleted',
   'connections.toasts.deleteFailedHead': 'Could not delete',
   'connections.actions.edit': 'Edit',

@@ -666,7 +666,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           log.error('Failed to persist the password binding', { message })
           showToast({
             level: 'warning',
-            message: `${t('connections.password.bindingFailedHead', 'The password was stored but this connection was not updated to use it:')} "${current.name}": ${message}${t('connections.password.retryOpening', '. Open "{name}" and Save Connection to retry.', { name: current.name })}`,
+            message: t(
+              'connections.password.bindingRecovery',
+              'Password "{password}" was created in the vault but not bound to "{name}": {reason}. Open "{name}", choose "{password}" in the password field and press Save Connection.',
+              { password: generatedName, name: current.name, reason: message },
+            ),
           })
         }
       }
@@ -2039,10 +2043,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return chosen === state.stored ? null : chosen
   }
 
-  function showHostMethodFailure(profile: SSHProfile, reason: string) {
+  function showHostMethodFailure(profile: SSHProfile, mode: HostMode, reason: string) {
+    const method = HOST_MODES.find((entry) => entry.value === mode)!
+    const methodName = t(method.labelKey, method.labelFallback)
     showToast({
       level: 'warning',
-      message: `${t('connections.toasts.methodSaveFailedHead', 'The connection was saved, but the integration method for')} ${profile.options.host || profile.name}${t('connections.toasts.methodSaveFailedMid', ' was not: ')}${reason}${t('connections.password.retryOpening', '. Open "{name}" and Save Connection to retry.', { name: profile.name })}`,
+      message: t(
+        'connections.toasts.methodRecovery',
+        'Integration method "{method}" for "{name}" ({host}) was not saved: {reason}. Open "{name}", choose "{method}" again in Advanced → Integration method and press Save Connection.',
+        { method: methodName, name: profile.name, host: profile.options.host, reason },
+      ),
     })
   }
 
@@ -2080,7 +2090,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setProfileSection('advanced')
         document.getElementById('profile-integration-method')?.focus()
       })
-      showHostMethodFailure(profile, reason)
+      showHostMethodFailure(profile, mode, reason)
       return 'failed'
     }
   }
@@ -2447,6 +2457,15 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         whileOpen(owner, () => {
           if (untrack(hostModeWriteError) === undefined) closeEditor(owner)
         })
+        if (hostMethod !== null) {
+          await loadAll()
+          await loadEffective([profile.id])
+          void loadSessionStatuses()
+          showToast({
+            level: 'success',
+            message: `${t('connections.toasts.saved', 'Saved')} "${profile.name}"`,
+          })
+        }
         return
 
       case 'update':

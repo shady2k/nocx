@@ -18,6 +18,7 @@ import type { DialogClient } from './dialog-client'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { log } from './log'
+import { setActiveLocale } from './i18n/locale-model'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
@@ -234,6 +235,7 @@ function mount(
 }
 
 afterEach(() => {
+  setActiveLocale('en')
   clearToasts()
   vi.clearAllMocks()
   cleanup()
@@ -3012,8 +3014,15 @@ describe('the host integration method', () => {
 
   const CHANGE_HINT =
     'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.'
-  const UNKNOWN_HOST_DESC =
-    'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.'
+  const AUTO_LABEL = 'Auto — nocx chooses at connect'
+  const AUTO_HINT =
+    "nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission."
+  const UNKNOWN_HOST_DESC = 'Connect to this machine before changing its integration method here.'
+  const RU_AUTO_LABEL = 'Авто — nocx выбирает при подключении'
+  const RU_AUTO_HINT =
+    'nocx выбирает метод интеграции при подключении. Он спрашивает, только если для этой машины ещё нет сохранённого ответа. Если машина уже разрешила хелпер, он продолжит работать без повторного вопроса. Авто сбрасывает только сохранённый метод, но не разрешение машины.'
+  const RU_UNKNOWN_HOST_DESC =
+    'Подключитесь к этой машине, прежде чем менять её метод интеграции здесь.'
   const DIALOG_TITLE = 'Edit Connection: prod-web'
 
   it('T1: a delayed profile patch cannot invalidate B’s pending host read', async () => {
@@ -3200,6 +3209,73 @@ describe('the host integration method', () => {
     await vi.waitFor(() => expect(setHostMode).toHaveBeenCalledWith('ssh:p1', 'auto'))
   })
 
+  // B2 of ALX-195 (ALX-204): the Auto option and its explanation describe a
+  // POLICY. The editor never reads or implies this machine's permission.
+  it('B2: a known stored Auto shows the policy explanation even without a change', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'auto', hostKnown: true })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('auto'))
+    expect(methodField(container).select.disabled).toBe(false)
+    expect(methodField(container).select.selectedOptions[0].text).toBe(AUTO_LABEL)
+    expect(hintTexts(container)).toContain(AUTO_HINT)
+    expect(container.textContent).not.toContain(CHANGE_HINT)
+  })
+
+  it('B2: choosing Auto over a stored Script adds the policy explanation and the change hint', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'script', hostKnown: true })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('script'))
+    expect(hintTexts(container)).not.toContain(AUTO_HINT)
+    fireEvent.change(methodField(container).select, { target: { value: 'auto' } })
+    expect(hintTexts(container)).toContain(AUTO_HINT)
+    expect(container.textContent).toContain(CHANGE_HINT)
+  })
+
+  it('B2: choosing Auto over Helper replaces the helper hint with the policy explanation', async () => {
+    const HELPER_HINT = 'The helper is a binary nocx deploys on the destination.'
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'helper', hostKnown: true })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('helper'))
+    expect(hintTexts(container)).not.toContain(AUTO_HINT)
+    expect(container.textContent).toContain(HELPER_HINT)
+    fireEvent.change(methodField(container).select, { target: { value: 'auto' } })
+    expect(hintTexts(container)).toContain(AUTO_HINT)
+    expect(container.textContent).not.toContain(HELPER_HINT)
+  })
+
+  it('B2 ru: the known Auto option and explanation come from the Russian catalogue', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'auto', hostKnown: true })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).select.value).toBe('auto'))
+
+    setActiveLocale('ru')
+    expect(methodField(container).select.selectedOptions[0].text).toBe(RU_AUTO_LABEL)
+    expect(hintTexts(container)).toContain(RU_AUTO_HINT)
+  })
+
+  it('B2 ru: an unknown host explanation comes from the Russian catalogue', async () => {
+    const { container, hostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'auto', hostKnown: false })
+    await waitForProfiles(container, 1)
+    await openAdvanced(container)
+    await vi.waitFor(() => expect(methodField(container).description).toBe(UNKNOWN_HOST_DESC))
+
+    setActiveLocale('ru')
+    expect(methodField(container).description).toBe(RU_UNKNOWN_HOST_DESC)
+    expect(hintTexts(container)).not.toContain(RU_AUTO_HINT)
+  })
+
   it('frame 2: a host nocx has never connected to shows Auto, disabled, and says when it becomes settable', async () => {
     const { container, hostMode, setHostMode } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     hostMode.mockResolvedValue({ profileId: 'ssh:p1', mode: 'auto', hostKnown: false })
@@ -3210,6 +3286,9 @@ describe('the host integration method', () => {
     const { select } = methodField(container)
     expect(select.disabled, 'there is no fingerprint to write an answer under').toBe(true)
     expect(select.value, 'the effective value is shown, not hidden').toBe('auto')
+    expect(hintTexts(container), 'a disabled field has no policy explanation').not.toContain(
+      AUTO_HINT,
+    )
 
     clickButtonByText(container, 'Save Connection')
     await vi.waitFor(() => expect(findDialogByTitle(container, DIALOG_TITLE)).toBeNull())
@@ -3232,6 +3311,7 @@ describe('the host integration method', () => {
     expect(select.disabled).toBe(true)
     expect(select.value).toBe('auto')
     expect(description).toBe(UNKNOWN_HOST_DESC)
+    expect(hintTexts(container)).not.toContain(AUTO_HINT)
     expect(hostMode, 'a draft names no connection to ask about').not.toHaveBeenCalled()
   })
 
@@ -3491,6 +3571,10 @@ describe('the host integration method', () => {
     expect(container.textContent).not.toContain('Delivery mode')
   })
 })
+
+function hintTexts(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.cm-hint')).map((hint) => hint.textContent ?? '')
+}
 
 function methodField(container: HTMLElement) {
   const label = container.querySelector('label[for="profile-integration-method"]')

@@ -2135,7 +2135,7 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
 <div class="mock-page">
   <h1>Integration method on the host — connection editor</h1>
   <p class="mock-lede">
-    Task <code>nocx-oalo1.11.2</code>, ADR-727g63tr decision 1: the method (<code>auto</code>,
+    Task <code>nocx-oalo1.11.2</code>, Auto copy revision ALX-204 (2026-11-17), following the architect's ALX-18 decision at 13:49:11Z. ADR-727g63tr decision 1: the method (<code>auto</code>,
     <code>script</code>, <code>raw</code>, <code>helper</code>) belongs to the host, keyed by host-key
     fingerprint, and the connection editor reads and writes that record. The field stays where it is
     today — the <b>Advanced</b> section, after <b>Port discovery</b> — and is built from the same kit
@@ -2170,14 +2170,15 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
                   <label for="m1">Integration method</label>
                   <div class="cm-field-row">
                     <select class="ui-select" id="m1" data-mock="dirty">
-                      <option value="auto">Auto — ask on the next connection</option>
+                      <option value="auto" selected>Auto — nocx chooses at connect</option>
                       <option value="script">Script — scripts only, never the helper</option>
-                      <option value="raw" selected>Raw — no integration</option>
+                      <option value="raw">Raw — no integration</option>
                       <option value="helper">Helper — deploy the nocx binary</option>
                     </select>
                   </div>
-                  <p class="ui-field-desc">Set for the machine db-01.internal, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
+                  <p class="ui-field-desc" id="m1-owner">Set for the machine db-01.internal, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
                 </div>
+                <p class="cm-hint" id="m1-auto" data-mock-show="auto">nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</p>
                 <p class="cm-hint" data-mock-show="helper" hidden>The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.</p>
                 <p class="cm-hint" data-mock-show="changed" hidden>Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</p>
                 <div class="cm-check-group">
@@ -2195,13 +2196,15 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
         <button class="ui-button" data-variant="default">Cancel</button>
       </div>
     </div>
-    <p class="mock-note"><b>Try it:</b> change the method in this frame. The two hint lines below the field appear only
-      while the choice differs from what is stored (<i>changed</i>) and while <i>Helper</i> is chosen (the
-      existing <code>helperHint</code>, unchanged). Nothing is written until <b>Save Connection</b>;
+    <p class="mock-note"><b>Try it:</b> the stored choice starts at <i>Auto</i>. Its explanation stays visible even
+      without a change; it describes policy, not a read of this machine's consent. Choosing another method
+      hides it. The existing <code>helperHint</code> appears for <i>Helper</i>, and the change hint appears only
+      while the choice differs from what is stored. Nothing is written until <b>Save Connection</b>;
       <b>Cancel</b> discards the choice like every other field in the editor.</p>
     <table class="mock-keys">
       <tr><td><code>connections.editor.fieldIntegrationMethod</code></td><td>Integration method <span class="mock-dim">— replaces <code>fieldDeliveryMode</code> “Delivery mode”; the connect-time ask already says “Integration method”, so the product has one name</span></td></tr>
-      <tr><td><code>connections.mode.hostAuto</code></td><td>Auto — ask on the next connection <span class="mock-dim">— replaces <code>desiredAuto</code>; on the host, auto means “not answered”</span></td></tr>
+      <tr><td><code>connections.mode.hostAuto</code></td><td>Auto — nocx chooses at connect <span class="mock-dim">— replaces the misleading promise of a question; a missing method is not missing machine consent</span></td></tr>
+      <tr><td><code>connections.editor.methodAutoHint</code> (new)</td><td>nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</td></tr>
       <tr><td><code>connections.mode.desiredScript/Raw/Helper</code></td><td>unchanged</td></tr>
       <tr><td><code>connections.editor.methodHostDescHead</code></td><td>Set for the machine</td></tr>
       <tr><td><code>connections.editor.methodHostDescTail</code></td><td>, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh. <span class="mock-dim">— composed as Head + “ {host}” + Tail, the host as stored in this connection</span></td></tr>
@@ -2218,8 +2221,8 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
         <div class="ui-field" data-label="secondary"><label>Port discovery</label><div class="cm-field-row"><select class="ui-select"><option>— Inherited —</option></select></div></div>
         <div class="ui-field" data-label="secondary">
           <label for="m2">Integration method</label>
-          <div class="cm-field-row"><select class="ui-select" id="m2" disabled><option>Auto — ask on the next connection</option></select></div>
-          <p class="ui-field-desc">nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.</p>
+          <div class="cm-field-row"><select class="ui-select" id="m2" disabled><option>Auto — nocx chooses at connect</option></select></div>
+          <p class="ui-field-desc">Connect to this machine before changing its integration method here.</p>
         </div>
       </div></div></div>
       <div class="nocx-dialog__actions">
@@ -2236,7 +2239,7 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
       select shows <i>Auto</i>, with the description below instead; after Save it resolves the new address
       (frame 1 if that machine is known, frame 2 otherwise).</p>
     <table class="mock-keys">
-      <tr><td><code>connections.editor.methodUnknownHost</code></td><td>nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.</td></tr>
+      <tr><td><code>connections.editor.methodUnknownHost</code></td><td>Connect to this machine before changing its integration method here. <span class="mock-dim">— no promise of a question: a new profile is not necessarily a new machine</span></td></tr>
       <tr><td><code>connections.editor.methodAddressChanged</code></td><td>Save the connection to see the method for the new address.</td></tr>
     </table>
   </section>
@@ -2253,7 +2256,7 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
         <div class="ui-field" data-label="secondary">
           <label for="m3b">Integration method</label>
           <div class="cm-field-row">
-            <select class="ui-select" id="m3b" disabled aria-invalid="true"><option>Auto — ask on the next connection</option></select>
+            <select class="ui-select" id="m3b" disabled aria-invalid="true"><option>Auto — nocx chooses at connect</option></select>
             <button class="ui-button" data-variant="ghost">Retry</button>
           </div>
           <p class="ui-field-error" role="alert">Could not read this machine's method: settings store is locked</p>
@@ -2318,9 +2321,10 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
       <div class="nocx-dialog__body"><div class="cm-form"><div class="ui-stack" data-gap="default">
         <div class="ui-field" data-label="secondary">
           <label for="m5">Integration method</label>
-          <div class="cm-field-row"><select class="ui-select" id="m5"><option>Script — scripts only, never the helper</option></select></div>
-          <p class="ui-field-desc" style="overflow-wrap:anywhere">Set for the machine build-runner-eu-west-3a-0042.ci.internal.example.com, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
+          <div class="cm-field-row"><select class="ui-select" id="m5" aria-describedby="m5-owner m5-auto"><option>Auto — nocx chooses at connect</option></select></div>
+          <p class="ui-field-desc" id="m5-owner" style="overflow-wrap:anywhere">Set for the machine build-runner-eu-west-3a-0042.ci.internal.example.com, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
         </div>
+        <p class="cm-hint" id="m5-auto">nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</p>
         <p class="cm-hint">Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</p>
       </div></div></div>
     </div>
@@ -2362,13 +2366,16 @@ body { margin: 0; background: var(--color-canvas); color: var(--color-text);
 </div>
 
 <script>
-// Frame 1 only: show the two conditional hints exactly as the editor will.
+// Frame 1 only: Auto explains policy even when unchanged; the save hint is separate.
 (function () {
   var sel = document.querySelector('select[data-mock="dirty"]');
   var stored = sel.value;
+  var auto = document.querySelector('[data-mock-show="auto"]');
   var helper = document.querySelector('[data-mock-show="helper"]');
   var changed = document.querySelector('[data-mock-show="changed"]');
   function sync() {
+    auto.hidden = sel.value !== 'auto';
+    sel.setAttribute('aria-describedby', auto.hidden ? 'm1-owner' : 'm1-owner m1-auto');
     helper.hidden = sel.value !== 'helper';
     changed.hidden = sel.value === stored;
   }

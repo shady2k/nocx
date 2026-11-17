@@ -488,8 +488,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     ', а не для этого подключения: так открываются все вкладки к ней — из любого сохранённого подключения и из набранного ssh.',
   'connections.editor.methodChangeHint':
     'Применится при сохранении. Новые вкладки к этой машине откроются так; уже открытая оболочка сохраняет свой метод, пока вы не откроете её заново.',
+  'connections.editor.methodAutoHint':
+    'nocx выбирает метод интеграции при подключении. Он спрашивает, только если для этой машины ещё нет сохранённого ответа. Если машина уже разрешила хелпер, он продолжит работать без повторного вопроса. Авто сбрасывает только сохранённый метод, но не разрешение машины.',
   'connections.editor.methodUnknownHost':
-    'nocx ещё не подключался к этой машине. Он спросит, как интегрироваться, при первом подключении, а ответ можно будет изменить здесь позже.',
+    'Подключитесь к этой машине, прежде чем менять её метод интеграции здесь.',
   'connections.editor.methodAddressChanged':
     'Сохраните подключение, чтобы увидеть метод для нового адреса.',
   'connections.editor.methodLoading': 'Загрузка…',
@@ -518,7 +520,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.empty':
     'Пробросов нет — добавьте один, чтобы открывать его автоматически при подключении.',
   'connections.forward.removeHead': 'Удалить проброс',
-  'connections.mode.hostAuto': 'Авто — спросить при следующем подключении',
+  'connections.mode.hostAuto': 'Авто — nocx выбирает при подключении',
   'connections.mode.desiredScript': 'Скрипты — только скрипты, никогда хелпер',
   'connections.mode.desiredRaw': 'Raw — без интеграции',
   'connections.mode.desiredHelper': 'Хелпер — развернуть бинарный файл nocx',

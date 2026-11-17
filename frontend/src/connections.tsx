@@ -209,11 +209,12 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
 /** The closed host modes, in display order (spec §3.5, ADR-727g63tr), with
- *  honest labels: auto is the absence of an answer for this host — choosing it
- *  removes the record, so the connect-time ask decides on the next connection
- *  (ADR-0033) — and it is also every answer for a destination known_hosts
- *  holds no key for; script is that answer given explicitly, so the helper is
- *  never offered; raw adds nothing; helper allows the Tier-B binary, whose
+ *  honest labels: auto names a POLICY — nocx chooses at connect — and is not
+ *  a report that this machine has no answer. The method and the machine's
+ *  permission are separate facts (ADR-0105): choosing auto clears the saved
+ *  method and leaves a prior helper grant untouched, so the copy never
+ *  promises a new question. Script means scripts only, so the helper is never
+ *  offered; raw adds nothing; helper allows the Tier-B binary, whose
  *  deployment the machine still has to permit at connect. auto leads because
  *  it is what a host nobody has answered is — the list starts where the user
  *  starts. */
@@ -221,7 +222,7 @@ const HOST_MODES: { value: HostMode; labelKey: string; labelFallback: string }[]
   {
     value: 'auto',
     labelKey: 'connections.mode.hostAuto',
-    labelFallback: 'Auto — ask on the next connection',
+    labelFallback: 'Auto — nocx chooses at connect',
   },
   {
     value: 'script',
@@ -1933,7 +1934,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         if (!state.hostKnown) {
           return t(
             'connections.editor.methodUnknownHost',
-            'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+            'Connect to this machine before changing its integration method here.',
           )
         }
         const host = savedHostProfile()?.options.host ?? ''
@@ -1950,7 +1951,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       case 'draft':
         return t(
           'connections.editor.methodUnknownHost',
-          'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+          'Connect to this machine before changing its integration method here.',
         )
       case 'loading':
       case 'readFailed':
@@ -3181,6 +3182,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       </Show>
                     </div>
                   </Field>
+                  <Show when={methodSettable() && hostModeChoice() === 'auto'}>
+                    <p class="cm-hint">
+                      {t(
+                        'connections.editor.methodAutoHint',
+                        "nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.",
+                      )}
+                    </p>
+                  </Show>
                   <Show when={hostModeChoice() === 'helper' && methodSettable()}>
                     <p class="cm-hint">
                       {t(

@@ -694,8 +694,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     ', not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.',
   'connections.editor.methodChangeHint':
     'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.',
+  'connections.editor.methodAutoHint':
+    "nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.",
   'connections.editor.methodUnknownHost':
-    'nocx has not connected to this machine yet. It asks how to integrate on the first connection, and you can change the answer here afterwards.',
+    'Connect to this machine before changing its integration method here.',
   'connections.editor.methodAddressChanged':
     'Save the connection to see the method for the new address.',
   'connections.editor.methodLoading': 'Loading…',
@@ -723,7 +725,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.add': 'Add forward',
   'connections.forward.empty': 'No forwards — add one to open it automatically on connect.',
   'connections.forward.removeHead': 'Remove forward',
-  'connections.mode.hostAuto': 'Auto — ask on the next connection',
+  'connections.mode.hostAuto': 'Auto — nocx chooses at connect',
   'connections.mode.desiredScript': 'Script — scripts only, never the helper',
   'connections.mode.desiredRaw': 'Raw — no integration',
   'connections.mode.desiredHelper': 'Helper — deploy the nocx binary',

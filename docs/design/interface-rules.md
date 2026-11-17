@@ -61,3 +61,23 @@ A setting asked in a dialog and edited in a form carries the same label in both.
 connect-time ask says "Integration method", so the editor says it too.
 
 Introduced by: `nocx-oalo1.11.2` (replaces "Delivery mode").
+
+## Auto describes a policy, not an unanswered permission
+
+When a method and permission are separate facts, an Auto option describes who chooses
+and when; it never promises a new permission question or implies that permission was
+cleared. The host's Auto option says "Auto — nocx chooses at connect". Its explanation
+is visible whenever Auto is selected on a known, editable host, including an unchanged
+stored Auto. It says that nocx asks only without a recorded machine answer, that a prior
+helper grant is reused without asking again, and that clearing the method leaves the
+machine's permission unchanged. This is policy copy, never a consent-status indicator:
+the editor must not infer permission from the selected method.
+
+Keep the owner description and the existing changed-value hint separate. Disabled fields
+say why they cannot be edited; they do not claim to know the machine's permission and do
+not repeat the Auto explanation. At narrow widths the explanation wraps in full, without
+a tooltip, truncation, or a second consent control.
+
+Clarified by: ALX-204, following the architect's ALX-18 decision of 2026-11-17T13:49:11Z
+(B2 of ALX-195), for `nocx-oalo1.11.2`. Copy and mock delta:
+[Auto copy](ssh-foundation/host-integration-method-auto-copy.md).

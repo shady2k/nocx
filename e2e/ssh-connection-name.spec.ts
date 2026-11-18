@@ -18,7 +18,13 @@
 import { appReadyForInput, expect, test, resolveBackend } from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
-import { hostKeyFingerprint, recordHostMethod, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -65,63 +71,22 @@ async function saveProfile(
   profile: { id: string; name: string; user: string },
   fixture: FixtureAddress,
 ): Promise<void> {
-  await page.evaluate(
-    ({ port, token, profile, fixture }) =>
-      new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error('profiles.create timed out')), 10_000)
-        ws.onopen = () =>
-          ws.send(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: 1,
-              method: 'profiles.create',
-              params: {
-                id: profile.id,
-                type: 'ssh',
-                name: profile.name,
-                options: {
-                  host: fixture.host,
-                  port: fixture.port,
-                  user: profile.user,
-                  keyPath: fixture.userKey,
-                },
-              },
-            }),
-          )
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`profiles.create: ${msg.error.message ?? 'rpc error'}`))
-          else resolve()
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error('profiles.create: websocket error'))
-        }
-      }),
-    { port: endpoint.port, token: endpoint.token, profile, fixture },
-  )
+  await rpc(page, endpoint, 'profiles.create', {
+    id: profile.id,
+    type: 'ssh',
+    name: profile.name,
+    options: {
+      host: fixture.host,
+      port: fixture.port,
+      user: profile.user,
+      keyPath: fixture.userKey,
+    },
+  })
 }
 
+/** Cleanup, so an error here never replaces the test's own failure. */
 async function deleteProfile(page: Page, endpoint: Endpoint, id: string): Promise<void> {
-  await page.evaluate(
-    ({ port, token, id }) =>
-      new Promise<void>((resolve) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        ws.onopen = () =>
-          ws.send(
-            JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'profiles.delete', params: { id } }),
-          )
-        ws.onmessage = () => {
-          ws.close()
-          resolve()
-        }
-        ws.onerror = () => resolve()
-      }),
-    { port: endpoint.port, token: endpoint.token, id },
-  )
+  await rpc(page, endpoint, 'profiles.delete', { id }).catch(() => {})
 }
 
 /** Open a saved connection through the palette, the door a person uses. */

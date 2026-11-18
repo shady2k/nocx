@@ -261,7 +261,16 @@ export async function assertSshdReady(fixture: SshdFixture): Promise<void> {
  *
  * The page is the only place in this suite with a WebSocket client, and the
  * socket is token-gated, so a spec that wants to seed state the way Settings
- * would goes through it. Same shape as shell-mode.spec.ts:113.
+ * would goes through it.
+ *
+ * **Only the frame carrying THIS request's id is the answer.** The same socket
+ * also carries server-initiated notifications, which have no id at all
+ * (`session.exit`, `session.ack`, `connections.passwordRequest` …), and the
+ * data plane sends binary frames on it. A reader that takes the first frame to
+ * arrive answers a call with `undefined` whenever a notification was ahead of
+ * its reply, and one that parses a binary frame throws inside the handler
+ * (nocx-oalo1.11.4). Every spec's private copy used to do the first; this is
+ * the one they now share.
  */
 export async function rpc<T>(
   page: Page,
@@ -272,11 +281,18 @@ export async function rpc<T>(
   return page.evaluate(
     ({ port, token, method, params }) =>
       new Promise<T>((resolve, reject) => {
+        const id = 1
         const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
+        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 15_000)
+        ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
         ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
+          if (typeof ev.data !== 'string') return
+          const msg = JSON.parse(ev.data) as {
+            id?: number
+            result?: T
+            error?: { message?: string }
+          }
+          if (msg.id !== id) return
           clearTimeout(timer)
           ws.close()
           if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))

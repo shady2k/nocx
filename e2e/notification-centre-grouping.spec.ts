@@ -13,7 +13,7 @@ import {
 } from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
-import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, rpc } from './sshd-fixture'
 
 /**
  * e2e: a run of notifications is ONE row that opens, and narrowing the feed
@@ -244,38 +244,6 @@ function trustHostKey(fixture: Fixture): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
 
-/** One JSON-RPC method over the real backend socket, as the app does. */
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
-}
-
 // ── the surfaces ──────────────────────────────────────────────────────────
 
 /** The keyboard belongs to the editor again after a click on the chrome.
@@ -459,7 +427,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // (ADR-0069) — script is recorded for the HOST so the connection is never
     // asked (ADR-727g63tr decision 1).
     const profileName = `e2e-grouping-${Date.now()}`
-    const created = await rpc<{ id: string }>(page, ws.port, ws.token, 'profiles.create', {
+    const created = await rpc<{ id: string }>(page, ws, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -611,7 +579,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     try {
       if (profileId) {
         const ws = await resolveBackend(page)
-        await rpc(page, ws.port, ws.token, 'profiles.delete', { id: profileId })
+        await rpc(page, ws, 'profiles.delete', { id: profileId })
       }
     } catch {
       // A cleanup that throws would replace the real failure with its own.

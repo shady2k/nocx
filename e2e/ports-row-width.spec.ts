@@ -40,7 +40,7 @@
 //
 import { appReadyForInput, test, expect, promptReady, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, rpc } from './sshd-fixture'
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer, connect } from 'node:net'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
@@ -137,38 +137,6 @@ function trustHostKey(fixture: Fixture): void {
   const sshDir = path.join(readStand().home, '.ssh')
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
-}
-
-/** Call one JSON-RPC method over the real backend socket, as the app does. */
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
 }
 
 /** The measurement the spec is about: does the element's content overflow its
@@ -317,7 +285,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // ask (ADR-0069) — script is recorded for the HOST so the connection is
     // never asked (ADR-727g63tr decision 1).
     const profileName = `e2e-row-width-${Date.now()}`
-    const created = await rpc<{ id: string }>(page, info.port, info.token, 'profiles.create', {
+    const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -411,7 +379,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // state (nocx-8rda).
     try {
       const info = await resolveBackend(page)
-      if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
+      if (createdId) await rpc(page, info, 'profiles.delete', { id: createdId })
     } catch {
       // A cleanup that throws would replace the real failure with its own.
     }

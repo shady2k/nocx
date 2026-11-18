@@ -4,7 +4,13 @@ import path from 'node:path'
 
 import { appReadyForInput, promptReady, test, expect, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { hostKeyFingerprint, recordHostMethod, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 // nocx-ouru5.1.4: the tab's right-click menu offered Rename, Pin and Close, and
 // one thing was missing — a copy.
@@ -32,33 +38,6 @@ async function stripIds(page: import('./harness').Page): Promise<string[]> {
     Array.from(document.querySelectorAll('.nocx-tab')).map(
       (t) => t.getAttribute('data-pane-id') ?? '',
     ),
-  )
-}
-
-/** One JSON-RPC call over the real backend socket, as the app does. */
-async function rpc<T>(page: import('./harness').Page, method: string, params: unknown): Promise<T> {
-  const info = await resolveBackend(page)
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port: info.port, token: info.token, method, params },
   )
 }
 
@@ -157,8 +136,9 @@ test.describe('an ssh tab duplicates onto the same connection, as a new session'
       // The connection a person would open: a saved host, with the
       // integration mode declared so the connect-time ask is not what this
       // spec measures.
+      const info = await resolveBackend(page)
       const profileName = `duplicate-host-${Date.now()}`
-      const created = await rpc<{ id: string }>(page, 'profiles.create', {
+      const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
         type: 'ssh',
         name: profileName,
         options: {
@@ -169,7 +149,6 @@ test.describe('an ssh tab duplicates onto the same connection, as a new session'
         },
       })
       profileId = created.id
-      const info = await resolveBackend(page)
       await recordHostMethod(page, info, hostKeyFingerprint(host.knownHosts), 'script')
 
       // Open it through quick connect, the palette's own route.
@@ -222,7 +201,7 @@ test.describe('an ssh tab duplicates onto the same connection, as a new session'
       const layout = await rpc<{
         panes: { id: string; kind: string; endpoint: string | null; tabId: string }[]
         tabs: { id: string; workspaceId: string }[]
-      }>(page, 'layout.read', {})
+      }>(page, info, 'layout.read', {})
       const sshPanes = layout.panes.filter((p) => p.kind === 'ssh')
       expect(sshPanes.length, 'the source and its copy are the two ssh panes').toBe(2)
       expect(new Set(sshPanes.map((p) => p.endpoint)).size, 'one endpoint').toBe(1)
@@ -234,7 +213,8 @@ test.describe('an ssh tab duplicates onto the same connection, as a new session'
       // asserts an empty server list (nocx-8rda). Deleting it here, in a
       // finally, is what makes a FAILED run leave nothing either.
       try {
-        if (profileId !== null) await rpc(page, 'profiles.delete', { id: profileId })
+        if (profileId !== null)
+          await rpc(page, await resolveBackend(page), 'profiles.delete', { id: profileId })
       } catch {
         // A cleanup that throws would replace the real failure with its own.
       }

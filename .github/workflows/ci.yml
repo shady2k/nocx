@@ -1416,8 +1416,8 @@ jobs:
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     # Changed-spec repeats are spread over both chromium legs. Each uses the
-    # manifest-derived estimate and caps repeat work at 40 minutes (minimum
-    # three repeats); ordinary suite time still shares this 90-minute limit.
+    # ordinary run's measured JSON durations to budget up to ten repeats in
+    # 40 minutes, with visible reductions/skips; the suite shares this limit.
     timeout-minutes: 90
     # The evidence the quarantine gate reads: one .log and one .status per test
     # step, written by scripts/ci-run-logged.sh (see the header).
@@ -1670,24 +1670,20 @@ jobs:
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
       # REPEAT THE CHANGED SPECS on both chromium legs (nocx-1ebrs.66.1.37).
-      # The helper uses the same duration-balanced planner as the ordinary run,
-      # prints each leg's selection and repeat count, and chooses a count that
-      # fits the measured repeat work within 40 minutes, with a floor of three.
-      # Splitting the files keeps this work inside the existing 90-minute job
-      # alongside the ordinary suite; it avoids running every changed file on
-      # both legs, which would repeat each file twice for no extra coverage.
+      # Each leg intersects the changed specs with its own ordinary run's
+      # actual Playwright JSON report and sums all result durations, including
+      # retries. Repeat count is min(10, floor(2400 / measured seconds)); zero
+      # duration is capped at ten. Reduced counts warn on the PR and appear in
+      # the step summary with the detection probability. If no repeat fits,
+      # record the skipped specs and reason, and keep the step green. The job
+      # timeout stays at 90 minutes; the ordinary planner owns the file layout.
       #
-      # NOT QUARANTINE-GATED, deliberately. The gate reads one result per test
-      # (scripts/quarantine.mjs refuses a report with any other shape, and with
-      # reason), while --repeat-each has ten by construction; routing this
-      # through scripts/ci-run-logged.sh would hand the gate evidence it cannot
-      # judge and turn every red into "named none". The point of the step is a
-      # flake caught, and a quarantine entry would hide exactly that. A failure
-      # fails the job and Playwright prints the spec and test.
+      # NOT QUARANTINE-GATED, deliberately. Repeated results do not fit the
+      # quarantine gate's one-result-per-test contract. A caught flake fails
+      # the job directly, outside scripts/ci-run-logged.sh.
       #
-      # --pass-with-no-tests: a changed spec this platform does not collect —
-      # e2e/first-command-completes.spec.ts is ignored on Linux by
-      # playwright.config.ts — must not turn an empty selection into a red.
+      # A changed spec absent from this leg's report is recorded as not
+      # collected on this leg; no empty selection launches Playwright.
       # --output keeps the repeat's traces beside the ordinary run's instead of
       # letting a second run wipe test-results/ before the upload below.
       - name: Repeat the specs this pull request adds or changes

@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const manifest = JSON.parse(readFileSync(join(here, 'shard-duration-seconds.json'), 'utf8'))
 
-export function planShards(project, files, measured, caseCounts = {}, unknownSpecSeconds = 0) {
+export function planShards(project, files, measured, caseCounts = {}) {
   if (!['chromium', 'webkit'].includes(project))
     throw new Error(`unknown browser project: ${project}`)
   if (new Set(files).size !== files.length)
@@ -22,16 +22,15 @@ export function planShards(project, files, measured, caseCounts = {}, unknownSpe
   const estimates = []
   const durations = {}
   for (const file of files) {
-    const currentCases = caseCounts[file]
+    const currentCases = caseCounts[file] ?? 0
     const oldSeconds = measured.seconds[file]
     const oldCases = priorCases[file] ?? 0
     if (oldSeconds > 0 && oldCases > 0 && currentCases === oldCases) {
       durations[file] = oldSeconds
     } else if (oldSeconds === undefined || oldCases === 0) {
-      durations[file] =
-        currentCases === undefined ? unknownSpecSeconds : currentCases * meanSecondsPerCase
+      durations[file] = currentCases * meanSecondsPerCase
       estimates.push({ file, seconds: durations[file], reason: 'no measured spec duration' })
-    } else if (currentCases !== undefined && currentCases !== oldCases) {
+    } else if (currentCases !== oldCases) {
       durations[file] = (oldSeconds * currentCases) / oldCases
       estimates.push({
         file,
@@ -47,12 +46,7 @@ export function planShards(project, files, measured, caseCounts = {}, unknownSpe
     { files: [], seconds: 0, cases: 0 },
   ]
   for (const file of [...files].sort((a, b) => durations[b] - durations[a] || a.localeCompare(b))) {
-    // File count breaks ties so zero-duration specs still spread across both legs.
-    const shard =
-      shards[0].seconds < shards[1].seconds ||
-      (shards[0].seconds === shards[1].seconds && shards[0].files.length <= shards[1].files.length)
-        ? shards[0]
-        : shards[1]
+    const shard = shards[0].seconds <= shards[1].seconds ? shards[0] : shards[1]
     shard.files.push(file)
     shard.seconds += durations[file]
     shard.cases += caseCounts[file] ?? 0

@@ -142,7 +142,7 @@ func TestKnownHostsFingerprintsForAnswersNothingForAnUnknownOrMissingStore(t *te
 		t.Fatalf("an unanswered destination answered %v/%v, want no fingerprints", got, err)
 	}
 
-	if err := os.Remove(hosts); err != nil {
+	if err = os.Remove(hosts); err != nil {
 		t.Fatalf("remove known_hosts: %v", err)
 	}
 	got, err = client.KnownHostsFingerprintsFor(context.Background(), "127.0.0.1", &ConnectConfig{Port: 2222})

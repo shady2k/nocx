@@ -211,7 +211,7 @@ func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
 	hold.release()
 	ask := askOf(t, err)
 
-	if err := r.modes.Set(ask.Fingerprint, hostmode.Script); !errors.Is(err, hostmode.ErrNotSaved) {
+	if err = r.modes.Set(ask.Fingerprint, hostmode.Script); !errors.Is(err, hostmode.ErrNotSaved) {
 		t.Fatalf("Set on a store that cannot write = %v, want ErrNotSaved", err)
 	}
 
@@ -284,7 +284,7 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	}
 
 	// Auto is the absence of a record, so the next open asks again.
-	if err := r.modes.PersistMany([]string{fingerprint}, hostmode.Auto); err != nil {
+	if err = r.modes.PersistMany([]string{fingerprint}, hostmode.Auto); err != nil {
 		t.Fatalf("the editor's auto: %v", err)
 	}
 	_, hold, selected, err = r.openHoldingLease(context.Background(), remoteConfigFor(), "claim-auto-again")
@@ -292,5 +292,5 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	if !selected {
 		t.Fatal("selected = false, want the ask once the editor chose auto")
 	}
-	askOf(t, err)
+	_ = askOf(t, err)
 }

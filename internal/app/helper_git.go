@@ -1031,7 +1031,7 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		if fingerprint == "" {
 			fingerprint = offeredHostKeyFingerprint(err)
 		}
-		mode := hostModeFor(r.modes, fingerprint)
+		mode = hostModeFor(r.modes, fingerprint)
 		if fingerprint == "" && r.hostKeys != nil {
 			if fingerprints, keyErr := r.hostKeys.KnownHostsFingerprintsFor(ctx, cfg.Host, cfg.Remote); keyErr == nil {
 				for _, known := range fingerprints {

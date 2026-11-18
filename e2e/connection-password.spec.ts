@@ -321,13 +321,13 @@ test.describe('open-time host key consent', () => {
     const ep = await backend.start()
     seedPublicKeyProfile(backend.isolatedHome, fixture.addr, fixture.userKey)
     await bindEndpoint(page, ep)
+    await page.goto('/')
+    await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
     // The method is answered for the HOST (ADR-727g63tr decision 1), so the
     // unknown key raises the plain host-key-only ask rather than the combined
     // one — which is the question this case is about.
     await recordHostMethod(page, ep, hostKeyFingerprint(fixture.knownHosts), 'script')
-    await page.goto('/')
-    await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
-    await appReadyForInput(page)
 
     await setupVault(page)
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()

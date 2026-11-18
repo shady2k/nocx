@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { assertCoverage, planShards } from '../e2e/shard-files.mjs'
+import { assertCoverage, planFilesAcrossShards, planShards } from '../e2e/shard-files.mjs'
+import { planChangedSpecRepeats } from './repeat-changed-specs.mjs'
 import { buildDurationManifest, collectReport } from './refresh-e2e-shard-durations.mjs'
 
 test('duration-balanced shard plan assigns each measured file exactly once', () => {
@@ -124,4 +125,21 @@ test('refresh script tolerates JSON report files whose result has not run yet', 
   }
   const collected = collectReport(report, 'chromium')
   assert.equal(collected.get('not-run').duration, 0)
+})
+
+
+test('changed specs are split across two chromium legs and fit the repeat budget', () => {
+  const files = Array.from({ length: 32 }, (_, i) => `e2e/ssh-${i}.spec.ts`)
+  const measured = { seconds: Object.fromEntries(files.map((file) => [file, 20])), case_counts: Object.fromEntries(files.map((file) => [file, 1])) }
+  const shards = planFilesAcrossShards('chromium', files, measured)
+  const plan = planChangedSpecRepeats(shards, 2400)
+  assert.equal(shards.flatMap((shard) => shard.files).length, files.length)
+  assert.ok(shards.every((shard) => shard.files.length > 0))
+  assert.deepEqual(plan.map((leg) => leg.repeatEach), [3, 3])
+  assert.match(plan[0].summary, /\d+ specs x 3 repeats/)
+})
+
+test('an unmeasured changed spec gets at least three repeats', () => {
+  const plan = planChangedSpecRepeats([{ files: ['e2e/new.spec.ts'], seconds: 0 }], 2400)
+  assert.equal(plan[0].repeatEach, 3)
 })

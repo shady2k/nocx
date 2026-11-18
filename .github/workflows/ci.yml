@@ -1707,19 +1707,14 @@ jobs:
       # --output keeps the repeat's traces beside the ordinary run's instead of
       # letting a second run wipe test-results/ before the upload below.
       - name: Repeat the specs this pull request adds or changes
-        if: github.event_name == 'pull_request' && matrix.project == 'chromium' && matrix.shard == 1 && needs.changes.outputs.e2e_specs != ''
+        if: github.event_name == 'pull_request' && matrix.project == 'chromium' && needs.changes.outputs.e2e_specs != ''
         env:
           REPEAT_SPECS: ${{ needs.changes.outputs.e2e_specs }}
+          SHARD_NUMBER: ${{ matrix.shard }}
           PW_PROJECTS: chromium
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
-        run: |
-          # Wrapped like the ordinary run, for the same reason: ten repeats of a
-          # changed spec are ten traces, and this step's peak is the one the
-          # job's end cannot see (nocx-atpw5.1.40).
-          # shellcheck disable=SC2086 # the list is spec paths, split on purpose
-          node scripts/e2e-disk-watch.mjs --state "$RUNNER_TEMP/nocx-disk-watch-repeat.json" -- \
-            e2e/run-in-container.sh $REPEAT_SPECS --repeat-each=10 --pass-with-no-tests --output=test-results/repeat-changed
+        run: node scripts/repeat-changed-specs.mjs
 
       # Named per project AND per shard: two jobs uploading one name is a
       # collision, and the trace you want is the one from the browser and the

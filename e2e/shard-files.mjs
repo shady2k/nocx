@@ -46,12 +46,21 @@ export function planShards(project, files, measured, caseCounts = {}) {
     { files: [], seconds: 0, cases: 0 },
   ]
   for (const file of [...files].sort((a, b) => durations[b] - durations[a] || a.localeCompare(b))) {
-    const shard = shards[0].seconds <= shards[1].seconds ? shards[0] : shards[1]
+    const shard =
+      shards[0].seconds < shards[1].seconds ||
+      (shards[0].seconds === shards[1].seconds && shards[0].files.length <= shards[1].files.length)
+        ? shards[0]
+        : shards[1]
     shard.files.push(file)
     shard.seconds += durations[file]
     shard.cases += caseCounts[file] ?? 0
   }
   return { project, shards, durations, estimates }
+}
+
+export function planFilesAcrossShards(project, files, measured, caseCounts = {}) {
+  const single = planShards(project, files, measured, caseCounts)
+  return single.shards
 }
 
 export function assertCoverage(files, expectedCases, shards) {

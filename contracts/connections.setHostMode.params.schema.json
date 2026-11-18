@@ -5,10 +5,7 @@
   "description": "Params for connections.setHostMode: the method a person chose for a saved connection's HOST in the connection editor (ADR-727g63tr decision 1). auto is 'ask me again' and removes the host's record rather than writing a fourth value (ADR-0033); the other three are recorded under every host-key fingerprint known_hosts holds for the destination. A destination with no known key has nowhere to keep an answer, so only auto is accepted for it. Choosing helper here records the METHOD only: permission to deploy the binary belongs to the machine and is asked at connect (ADR-0105, ADR-0068), where the connect-time ask answers it.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "profileId",
-    "mode"
-  ],
+  "required": ["profileId", "mode"],
   "properties": {
     "profileId": {
       "description": "The saved connection whose host the method applies to.",
@@ -18,12 +15,7 @@
     "mode": {
       "description": "The chosen integration method, or auto to forget the host's answer so the next open asks again.",
       "type": "string",
-      "enum": [
-        "auto",
-        "raw",
-        "script",
-        "helper"
-      ]
+      "enum": ["auto", "raw", "script", "helper"]
     }
   }
 }

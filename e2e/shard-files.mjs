@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const manifest = JSON.parse(readFileSync(join(here, 'shard-duration-seconds.json'), 'utf8'))
 
-export function planShards(project, files, measured, caseCounts = {}) {
+export function planShards(project, files, measured, caseCounts = {}, unknownSpecSeconds = 0) {
   if (!['chromium', 'webkit'].includes(project))
     throw new Error(`unknown browser project: ${project}`)
   if (new Set(files).size !== files.length)
@@ -28,7 +28,8 @@ export function planShards(project, files, measured, caseCounts = {}) {
     if (oldSeconds > 0 && oldCases > 0 && currentCases === oldCases) {
       durations[file] = oldSeconds
     } else if (oldSeconds === undefined || oldCases === 0) {
-      durations[file] = (currentCases ?? 0) * meanSecondsPerCase
+      durations[file] =
+        currentCases === undefined ? unknownSpecSeconds : currentCases * meanSecondsPerCase
       estimates.push({ file, seconds: durations[file], reason: 'no measured spec duration' })
     } else if (currentCases !== undefined && currentCases !== oldCases) {
       durations[file] = (oldSeconds * currentCases) / oldCases

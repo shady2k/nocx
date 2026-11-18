@@ -7,18 +7,38 @@ import { planShards } from '../e2e/shard-files.mjs'
 
 export const REPEAT_BUDGET_SECONDS = 40 * 60
 export const MIN_REPEAT_EACH = 3
+// Preserve the former ten-repeat ceiling: tiny recorded runtimes do not include
+// Playwright's test expansion, reporting and per-repeat setup costs.
+export const MAX_REPEAT_EACH = 10
+// No listing is available on this path. Reserve one minute per unknown spec for
+// balancing, and run only the minimum on any leg containing one. This is an
+// explicit scheduling allowance, not a claim to have measured the spec.
+export const UNKNOWN_SPEC_SECONDS = 60
 
-export function planChangedSpecRepeats(shards, budgetSeconds = REPEAT_BUDGET_SECONDS) {
+export function planChangedSpecRepeats(
+  shards,
+  budgetSeconds = REPEAT_BUDGET_SECONDS,
+  estimates = [],
+) {
   return shards.map((shard, index) => {
-    const repeatEach = Math.max(
-      MIN_REPEAT_EACH,
-      shard.seconds > 0 ? Math.floor(budgetSeconds / shard.seconds) : MIN_REPEAT_EACH,
-    )
+    if (shard.seconds * MIN_REPEAT_EACH > budgetSeconds) {
+      throw new Error(
+        `chromium-${index + 1}: minimum ${MIN_REPEAT_EACH} repeats need ${((shard.seconds * MIN_REPEAT_EACH) / 60).toFixed(1)} min, exceeding the ${budgetSeconds / 60} min budget; reduce the changed-spec selection or change the shard layout`,
+      )
+    }
+    const unknown = estimates.filter(({ file }) => shard.files.includes(file))
+    const repeatEach =
+      unknown.length || shard.seconds === 0
+        ? MIN_REPEAT_EACH
+        : Math.min(MAX_REPEAT_EACH, Math.floor(budgetSeconds / shard.seconds))
+    const uncertainty = unknown.length
+      ? `; ${unknown.length} unknown timings at ${UNKNOWN_SPEC_SECONDS}s/spec allowance; limited to ${MIN_REPEAT_EACH} repeats (not measured)`
+      : ''
     return {
       shard: index + 1,
       files: shard.files,
       repeatEach,
-      summary: `${shard.files.length} specs x ${repeatEach} repeats (estimated ${((shard.seconds * repeatEach) / 60).toFixed(1)} min)`,
+      summary: `${shard.files.length} specs x ${repeatEach} repeats (estimated ${((shard.seconds * repeatEach) / 60).toFixed(1)} min)${uncertainty}`,
     }
   })
 }
@@ -29,8 +49,11 @@ function run() {
   const manifest = JSON.parse(
     readFileSync(new URL('../e2e/shard-duration-seconds.json', import.meta.url), 'utf8'),
   )
-  const shards = planShards('chromium', files, manifest.projects.chromium).shards
-  const repeats = planChangedSpecRepeats(shards)
+  const timing = planShards('chromium', files, manifest.projects.chromium, {}, UNKNOWN_SPEC_SECONDS)
+  const repeats = planChangedSpecRepeats(timing.shards, REPEAT_BUDGET_SECONDS, timing.estimates)
+  for (const { file, seconds, reason } of timing.estimates) {
+    console.log(`Timing allowance: ${file}: ${seconds}s (${reason}; unknown current case count)`)
+  }
   for (const leg of repeats) {
     console.log(`Repeat plan chromium-${leg.shard}: ${leg.summary}; ${leg.files.join(' ')}`)
   }

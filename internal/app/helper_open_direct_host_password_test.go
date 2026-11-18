@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )

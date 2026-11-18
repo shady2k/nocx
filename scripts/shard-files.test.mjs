@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { assertCoverage, planFilesAcrossShards, planShards } from '../e2e/shard-files.mjs'
+import { assertCoverage, planShards } from '../e2e/shard-files.mjs'
+import { readFileSync } from 'node:fs'
 import { planChangedSpecRepeats } from './repeat-changed-specs.mjs'
 import { buildDurationManifest, collectReport } from './refresh-e2e-shard-durations.mjs'
 
@@ -127,16 +128,31 @@ test('refresh script tolerates JSON report files whose result has not run yet', 
   assert.equal(collected.get('not-run').duration, 0)
 })
 
-
-test('changed specs are split across two chromium legs and fit the repeat budget', () => {
-  const files = Array.from({ length: 32 }, (_, i) => `e2e/ssh-${i}.spec.ts`)
-  const measured = { seconds: Object.fromEntries(files.map((file) => [file, 20])), case_counts: Object.fromEntries(files.map((file) => [file, 1])) }
-  const shards = planFilesAcrossShards('chromium', files, measured)
+test('changed specs use manifest timings to split both chromium legs and size repeats', () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL('../e2e/shard-duration-seconds.json', import.meta.url), 'utf8'),
+  ).projects.chromium
+  const files = Object.keys(manifest.seconds)
+    .filter((file) => manifest.seconds[file] > 0 && manifest.case_counts[file] > 0)
+    .slice(0, 32)
+  const shards = planShards('chromium', files, manifest).shards
   const plan = planChangedSpecRepeats(shards, 2400)
-  assert.equal(shards.flatMap((shard) => shard.files).length, files.length)
+  assert.equal(shards.flatMap((shard) => shard.files).length, 32)
   assert.ok(shards.every((shard) => shard.files.length > 0))
-  assert.deepEqual(plan.map((leg) => leg.repeatEach), [3, 3])
-  assert.match(plan[0].summary, /\d+ specs x 3 repeats/)
+  for (const shard of shards) {
+    assert.equal(
+      shard.seconds,
+      shard.files.reduce((sum, file) => sum + manifest.seconds[file], 0),
+    )
+  }
+  assert.deepEqual(
+    plan.map((leg) => leg.repeatEach),
+    shards.map((shard) => Math.floor(2400 / shard.seconds)),
+  )
+  assert.match(
+    plan[0].summary,
+    new RegExp(`${shards[0].files.length} specs x ${plan[0].repeatEach} repeats`),
+  )
 })
 
 test('an unmeasured changed spec gets at least three repeats', () => {

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { planFilesAcrossShards } from '../e2e/shard-files.mjs'
+import { planShards } from '../e2e/shard-files.mjs'
 
 export const REPEAT_BUDGET_SECONDS = 40 * 60
 export const MIN_REPEAT_EACH = 3
@@ -16,7 +18,7 @@ export function planChangedSpecRepeats(shards, budgetSeconds = REPEAT_BUDGET_SEC
       shard: index + 1,
       files: shard.files,
       repeatEach,
-      summary: `${shard.files.length} specs x ${repeatEach} repeats (estimated ${(shard.seconds * repeatEach / 60).toFixed(1)} min)`,
+      summary: `${shard.files.length} specs x ${repeatEach} repeats (estimated ${((shard.seconds * repeatEach) / 60).toFixed(1)} min)`,
     }
   })
 }
@@ -24,21 +26,23 @@ export function planChangedSpecRepeats(shards, budgetSeconds = REPEAT_BUDGET_SEC
 function run() {
   const files = (process.env.REPEAT_SPECS ?? '').trim().split(/\s+/).filter(Boolean)
   const shardNumber = Number(process.env.SHARD_NUMBER)
-  const manifest = JSON.parse(readFileSync(new URL('../e2e/shard-duration-seconds.json', import.meta.url), 'utf8'))
-  const shards = planFilesAcrossShards('chromium', files, manifest.projects.chromium)
+  const manifest = JSON.parse(
+    readFileSync(new URL('../e2e/shard-duration-seconds.json', import.meta.url), 'utf8'),
+  )
+  const shards = planShards('chromium', files, manifest.projects.chromium).shards
   const repeats = planChangedSpecRepeats(shards)
   for (const leg of repeats) {
     console.log(`Repeat plan chromium-${leg.shard}: ${leg.summary}; ${leg.files.join(' ')}`)
   }
   const selected = repeats[shardNumber - 1]
   if (!selected) throw new Error(`SHARD_NUMBER must be 1 or 2, received ${shardNumber}`)
-  if (selected.files.length && process.env.REPEAT_PLAN_ONLY !== '1') {
+  if (selected.files.length && !process.argv.includes('--plan')) {
     const result = spawnSync(
       'node',
       [
         'scripts/e2e-disk-watch.mjs',
         '--state',
-        `${process.env.RUNNER_TEMP}/nocx-disk-watch-repeat.json`,
+        `${process.env.RUNNER_TEMP ?? tmpdir()}/nocx-disk-watch-repeat.json`,
         '--',
         'e2e/run-in-container.sh',
         ...selected.files,
@@ -51,7 +55,7 @@ function run() {
     process.exitCode = result.status ?? 1
   }
 }
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     run()
   } catch (error) {

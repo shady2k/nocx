@@ -1415,15 +1415,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    # 90, up from 40, for the one step below that repeats the specs a pull
-    # request adds or changes (nocx-1ebrs.66.1.37). That cost is 10x the
-    # changed specs and is not part of the duration-balanced plan. The
-    # committed timings put the median changed spec at 8.6 s and the worst at
-    # 254 s (transcript-scroll-budget), so ten repeats of the worst add 42
-    # minutes to a leg measured around 20 — 60 would have killed exactly the
-    # PR this gate is for, on the clock, where a reader learns nothing. Two
-    # heavy specs in one PR can still exceed this; the cap is a ceiling, not a
-    # target, and a run that finishes in 20 still does.
+    # Changed-spec repeats are spread over both chromium legs. Each uses the
+    # manifest-derived estimate and caps repeat work at 40 minutes (minimum
+    # three repeats); ordinary suite time still shares this 90-minute limit.
     timeout-minutes: 90
     # The evidence the quarantine gate reads: one .log and one .status per test
     # step, written by scripts/ci-run-logged.sh (see the header).
@@ -1675,23 +1669,13 @@ jobs:
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
-      # THE SPECS THIS PULL REQUEST ADDS OR CHANGES, REPEATED TEN TIMES
-      # (nocx-1ebrs.66.1.37).
-      #
-      # The suite walks every test once, so a new test that fails one time in
-      # ten passes nine pull requests out of ten and reddens somebody else's.
-      # This runs only the files the PR itself touched, through the same image
-      # and the same stand as the step above, with Playwright's own
-      # --repeat-each. Nothing here decides what a spec is beyond the diff the
-      # `changes` job published; the ordinary run above still covers every
-      # spec once.
-      #
-      # ONE LEG: chromium, shard 1. Both browsers would double the added time,
-      # and what an unlucky run loses is almost always product or renderer
-      # logic rather than the engine — the full suite still runs both browsers
-      # once. Within chromium the repeats are one run, not one per shard: the
-      # shard split exists to divide the fixed suite, and a file repeated on
-      # both shards would be the same ten runs twice.
+      # REPEAT THE CHANGED SPECS on both chromium legs (nocx-1ebrs.66.1.37).
+      # The helper uses the same duration-balanced planner as the ordinary run,
+      # prints each leg's selection and repeat count, and chooses a count that
+      # fits the measured repeat work within 40 minutes, with a floor of three.
+      # Splitting the files keeps this work inside the existing 90-minute job
+      # alongside the ordinary suite; it avoids running every changed file on
+      # both legs, which would repeat each file twice for no extra coverage.
       #
       # NOT QUARANTINE-GATED, deliberately. The gate reads one result per test
       # (scripts/quarantine.mjs refuses a report with any other shape, and with

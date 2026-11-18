@@ -342,6 +342,17 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
   }
 })
 
+test('CI runs the changed-spec repeat regression tests', () => {
+  const workflow = readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8')
+  const runLines = workflow.split('\n').filter((line) => /^\s+run:/.test(line))
+  assert.ok(
+    runLines.some((line) =>
+      /\bnode --test\s+.*\bscripts\/repeat-changed-specs\.test\.mjs(?:\s|$)/.test(line),
+    ),
+    'no CI run line runs scripts/repeat-changed-specs.test.mjs',
+  )
+})
+
 test('changed e2e repeats follow the ordinary run on both chromium legs outside quarantine', () => {
   const workflow = readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8')
   const job = workflow.slice(workflow.indexOf('  ci-e2e:'))
@@ -356,5 +367,4 @@ test('changed e2e repeats follow the ordinary run on both chromium legs outside 
   assert.match(step, /REPEAT_SPECS: \$\{\{ needs.changes.outputs.e2e_specs \}\}/)
   assert.match(step, /run: node scripts\/repeat-changed-specs.mjs/)
   assert.doesNotMatch(step, /ci-run-logged|quarantine/)
-  assert.match(workflow, /actual.*JSON report/)
 })

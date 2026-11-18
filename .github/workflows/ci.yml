@@ -1217,7 +1217,7 @@ jobs:
 
       - name: Duration shard planner tests
         working-directory: .
-        run: node --test scripts/shard-files.test.mjs
+        run: node --test scripts/shard-files.test.mjs scripts/repeat-changed-specs.test.mjs
 
       # The disk sampler the e2e legs run under (nocx-atpw5.1.40). Its decision
       # is a pure one — what the minimum was, and whether that minimum is below

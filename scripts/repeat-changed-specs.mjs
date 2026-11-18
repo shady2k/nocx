@@ -10,8 +10,10 @@ export const MAX_REPEAT_EACH = 10
 
 export function planChangedSpecRepeats(files, report) {
   const durations = new Map()
-  for (const { file, duration } of collectReport(report, 'chromium').values()) {
-    durations.set(file, (durations.get(file) ?? 0) + duration)
+  const withoutTiming = new Map()
+  for (const { file, measuredDuration, hasTiming } of collectReport(report, 'chromium').values()) {
+    durations.set(file, (durations.get(file) ?? 0) + measuredDuration)
+    if (!hasTiming) withoutTiming.set(file, (withoutTiming.get(file) ?? 0) + 1)
   }
   const selected = [...new Set(files)].filter((file) => durations.has(file))
   const seconds = selected.reduce((sum, file) => sum + durations.get(file), 0)
@@ -25,6 +27,7 @@ export function planChangedSpecRepeats(files, report) {
     notCollected: [...new Set(files)].filter((file) => !durations.has(file)),
     durations,
     seconds,
+    testsWithoutTiming: selected.reduce((sum, file) => sum + (withoutTiming.get(file) ?? 0), 0),
     repeatEach,
   }
 }
@@ -46,6 +49,7 @@ export function runChangedSpecRepeats(
       (file) => `${file}: not collected on chromium-${shardNumber}; not repeated on this leg`,
     ),
   ]
+  if (plan.testsWithoutTiming) lines.push(`${plan.testsWithoutTiming} tests without timing`)
   if (plan.files.length && repeatEach === 0) {
     lines.push(
       `Repeat skipped: measured ${seconds}s exceeds the ${REPEAT_BUDGET_SECONDS}s repeat budget; not repeated: ${plan.files.join(', ')}`,

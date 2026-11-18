@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { planChangedSpecRepeats, runChangedSpecRepeats } from './repeat-changed-specs.mjs'
+import { buildDurationManifest } from './refresh-e2e-shard-durations.mjs'
 
 // Fixed Playwright-shaped fixtures: nested suites, multiple cases and retries.
 const report = (seconds) => ({
@@ -27,6 +28,85 @@ const report = (seconds) => ({
   ],
 })
 const changed = ['e2e/a.spec.ts']
+
+// A serial group stops after its first failure; remaining tests may be skipped
+// or have no result at all. A skipped result is not a duration measurement.
+const serialReport = () => ({
+  suites: [
+    {
+      file: 'a.spec.ts',
+      suites: [
+        {
+          title: 'serial group',
+          specs: [
+            {
+              id: 'failed',
+              tests: [
+                { projectName: 'chromium', results: [{ status: 'failed', duration: 30000 }] },
+              ],
+            },
+            {
+              id: 'skipped',
+              tests: [{ projectName: 'chromium', results: [{ status: 'skipped', duration: 0 }] }],
+            },
+            { id: 'not-run', tests: [{ projectName: 'chromium', results: [] }] },
+          ],
+        },
+      ],
+    },
+  ],
+})
+
+test('serial-group tests without timing are reported in the plan and summary without a warning', (t) => {
+  const fixture = serialReport()
+  const plan = planChangedSpecRepeats(changed, fixture)
+  assert.equal(plan.seconds, 30)
+  assert.equal(plan.testsWithoutTiming, 2)
+  assert.equal(plan.repeatEach, 10)
+  const result = invoke(t, fixture, changed, true)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /2 tests without timing/)
+  assert.match(result.summary, /2 tests without timing/)
+  assert.doesNotMatch(result.stdout, /::warning::/)
+})
+
+test('skipped results never add to repeat time and unselected tests do not add missing timing', () => {
+  const fixture = serialReport()
+  fixture.suites[0].suites[0].specs[1].tests[0].results[0].duration = 900000
+  fixture.suites.push({
+    file: 'unchanged.spec.ts',
+    specs: [{ id: 'unchanged', tests: [{ projectName: 'chromium', results: [] }] }],
+  })
+  const plan = planChangedSpecRepeats(changed, fixture)
+  assert.equal(plan.seconds, 30)
+  assert.equal(plan.testsWithoutTiming, 2)
+})
+
+test('the manifest still counts all serial-group cases, including skipped and unreported cases', () => {
+  const inputs = ['chromium', 'webkit'].map((project) => {
+    const fixture = serialReport()
+    for (const spec of fixture.suites[0].suites[0].specs) {
+      spec.tests[0].projectName = project
+    }
+    return { project, report: fixture }
+  })
+  const manifest = buildDurationManifest(inputs)
+  for (const project of ['chromium', 'webkit']) {
+    assert.deepEqual(manifest.projects[project], {
+      seconds: { 'e2e/a.spec.ts': 30 },
+      case_counts: { 'e2e/a.spec.ts': 3 },
+    })
+  }
+})
+
+test('only unmeasured selected tests still get ten repeats', () => {
+  const fixture = serialReport()
+  fixture.suites[0].suites[0].specs.shift()
+  const plan = planChangedSpecRepeats(changed, fixture)
+  assert.equal(plan.seconds, 0)
+  assert.equal(plan.repeatEach, 10)
+  assert.equal(plan.testsWithoutTiming, 2)
+})
 
 test('measured repeat counts at and around budget boundaries, including the ten-repeat ceiling', () => {
   for (const [seconds, expected] of [

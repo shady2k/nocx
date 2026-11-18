@@ -198,6 +198,51 @@ func TestOnePaneCostsTheFarHostOneAuthentication(t *testing.T) {
 		srv.connCount(), srv.subsystemsSeen())
 }
 
+// A saved connection without a vault secret must retain the editor's raw
+// choice even though the non-interactive probe cannot authenticate. The fixture
+// accepts shell requests but rejects launch exec, so an accidental auto/script
+// open cannot pass merely by authenticating successfully.
+func TestOpenPath_SavedConnectionWithoutASecretKeepsRecordedRaw(t *testing.T) {
+	srv := startPasswordSSHServer(t)
+	stand := startFilesStand(t, srv, nil)
+	recordFixtureMode(t, stand, srv, hostmode.Raw)
+	seam := openSeamOver(t, stand)
+
+	asker := newDirectHostAsker(openPasswordFixturePassword)
+	stand.prompts.set(asker)
+	cfg := session.Config{
+		Kind:      session.KindRemote,
+		Host:      srv.addr,
+		ProfileID: "ssh:saved-without-secret",
+		PaneID:    "pane-saved-without-secret",
+		Cols:      80, Rows: 24,
+		Remote: &ssh.ConnectConfig{
+			User:               filesFixtureUser,
+			AuthMode:           "password",
+			ConnectionName:     "Saved without a password",
+			AuthorizedEndpoint: srv.addr,
+			PasswordRequester:  asker,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	openPanes(t, ctx, seam, cfg, "claim-saved-without-secret")
+	if got := cfg.Remote.IntegrationMode; got != string(hostmode.Raw) {
+		t.Fatalf("open mode = %q, want the editor's recorded raw despite the password-only probe", got)
+	}
+	asker.awaitAsk(t, 1)
+	if got := asker.count(); got != 1 {
+		t.Fatalf("the person was asked %d time(s), want exactly 1", got)
+	}
+	if got := asker.asked()[0].Connection; got != cfg.Remote.ConnectionName {
+		t.Errorf("password ask names connection %q, want %q", got, cfg.Remote.ConnectionName)
+	}
+	if attempts := srv.authAttempts(); len(attempts) != 1 || attempts[0] != openPasswordFixturePassword {
+		t.Fatalf("server password attempts = %v, want only the interactive answer", attempts)
+	}
+}
+
 // TestASecondPaneOnADifferentDestinationAuthenticatesSeparately is the paired
 // case, and it is what keeps the criterion above from being satisfied by a
 // mechanism that shares too much: a pooled connection is keyed by the

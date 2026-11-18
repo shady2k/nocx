@@ -1025,12 +1025,20 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		if ask := helperConsentAskForProbeFailure(cfg.ProfileID, cfg.Host, offeredHostKeyFingerprint(err), err, r.consent, r.modes); ask != nil {
 			return transport.HostedSessionOpen{}, hold, true, ask
 		}
-		// A probe that failed before any key was seen leaves no fingerprint,
-		// so the host is auto by the same rule as one nobody answered for; a
-		// host-key failure names the key it was offered, and the record may
-		// already carry an answer for it. Either way the fall-through open
-		// below uses the host's mode, and NOT the connection's stored one.
-		cfg.Remote.IntegrationMode = string(hostModeFor(r.modes, offeredHostKeyFingerprint(err)))
+		// A probe that got as far as a key NAMES the machine it saw, and the
+		// answer is asked by that fingerprint: a build with no artifact for
+		// the platform, or a failed uname on a host that answered, must not
+		// forget a method the host already keeps. Only when the probe saw no
+		// key at all does the host stay auto, by the same rule as one nobody
+		// answered for; a host-key failure still names the key it was offered,
+		// and the record may already carry an answer for it. Either way the
+		// fall-through open below uses the host's mode, and NOT the
+		// connection's stored one.
+		answered := fingerprint
+		if answered == "" {
+			answered = offeredHostKeyFingerprint(err)
+		}
+		cfg.Remote.IntegrationMode = string(hostModeFor(r.modes, answered))
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
 	// THE OPEN'S OWN CONFIG CARRIES THE HOST'S ANSWER. Every later reader of

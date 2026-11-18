@@ -82,6 +82,7 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 	consentStore, installStore := testConsentStores(t)
 	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	remote.registry = stand.registry
+	remote.modes = stand.modes
 	return openSeam{
 		hosted: &hostedOpeners{local: stand.opener, remote: remote},
 		routes: stand.routes,
@@ -287,6 +288,7 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	stand.opener.paneConns = panedriver.New("consent-pane", nil)
 	seam := openSeamOver(t, stand)
 	seam.hosted.remote.source = stubArtifacts(t)
+	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, secrets, "pane-consent")
 	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -298,6 +300,7 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	}
 	waittest.WaitForTimeout(t, "the probe-only connection to close after consent refusal", 5*time.Second,
 		func() bool { return srv.liveConns() == 0 })
+	recordFixtureMode(t, stand, srv, hostmode.Raw)
 	cfg.Remote.IntegrationMode = string(hostmode.Raw)
 	openPanes(t, ctx, seam, cfg, "claim-answered")
 	if got := srv.connCount(); got != 2 {
@@ -326,6 +329,7 @@ func TestACancelledConsentOpenStillReleasesItsConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	seam.hosted.remote.source = cancellingConsentArtifacts{ArtifactSource: stubArtifacts(t), cancel: cancel}
+	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, &askRecorder{value: openPasswordFixturePassword}, "pane-cancelled-consent")
 	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	_, _, err := seam.hosted.OpenHosted(ctx, cfg, "claim-cancelled-consent")

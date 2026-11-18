@@ -100,6 +100,12 @@ func directHostPaneConfig(srv *pwSSHServer, asker *directHostAsker, paneID strin
 // answer authenticates and opens the pane.
 func TestOpenPath_DirectHostWithoutASecretPromptsAndOpens(t *testing.T) {
 	srv := startPasswordSSHServer(t)
+	// A direct host has no saved connection and the probe cannot name a host
+	// key before the pane's own dial (it has no credential to offer), so its
+	// method is auto — "not yet answered" (ADR-0033), which delivers the
+	// launcher. The fixture therefore has to run the launch carrier; this test
+	// is about the prompt, not about which carrier the far side accepts.
+	srv.acceptLaunchExec = true
 	stand := startFilesStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
 	seam := openSeamOver(t, stand)
 
@@ -192,6 +198,7 @@ func TestOpenPath_DirectHostWrongPasswordAtThePublishReadsAsASentence(t *testing
 	stand.prompts.set(asker)
 
 	// Auto mode: the publish runs, and its lease dial is the first to ask.
+	recordFixtureMode(t, stand, srv, hostmode.Auto)
 	cfg := directHostPaneConfig(srv, asker, "pane-direct-publish")
 	cfg.Remote.IntegrationMode = string(hostmode.Auto)
 

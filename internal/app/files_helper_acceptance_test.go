@@ -64,11 +64,13 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 const (
@@ -105,6 +107,12 @@ type filesStand struct {
 	// what makes a hosted open an open rather than a spawn: the helper mints
 	// the id, and this process takes the session under it.
 	registry *session.Reg
+	// modes is the HOST record the open path reads instead of the connection's
+	// field (ADR-727g63tr decision 1). Every fixture this stand serves answers
+	// a plain shell request and refuses a launch exec, which is the raw
+	// method, so each one is recorded raw here; a test that opens under
+	// another method overwrites its host's record before the open.
+	modes *hostmode.Store
 }
 
 // askRecorder is the reverse side's credential resolver: it answers from a
@@ -244,6 +252,11 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// than a nil leg that would panic the day something else asks.
 	routes := installLeaseRoutes{viaLocal: over, probes: &helperProbes{local: opener, resolve: rc}}
 
+	modes := newTestHostModes(t)
+	for _, fixture := range append([]*pwSSHServer{srv}, extra...) {
+		mustRecordHostMode(t, modes, gossh.FingerprintSHA256(fixture.hostSigner.PublicKey()), hostmode.Raw)
+	}
+
 	return &filesStand{
 		srv:      srv,
 		root:     srv.rootDir,
@@ -252,6 +265,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 		routes:   routes,
 		prompts:  prompts,
 		registry: registry,
+		modes:    modes,
 		factory:  filesystemProviderFactory(routes),
 		opts: []ssh.ConnectOption{
 			ssh.WithUser(filesFixtureUser),
@@ -263,6 +277,24 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 			ssh.WithConnectionName("Files acceptance"),
 		},
 	}
+}
+
+// recordFixtureMode answers the method this fixture's HOST keeps, through the
+// same store and the same write the connect-time ask performs — the record the
+// open path reads (ADR-727g63tr decision 1), rather than the connection's
+// stored field.
+func recordFixtureMode(t *testing.T, stand *filesStand, srv *pwSSHServer, mode hostmode.Mode) {
+	t.Helper()
+	fingerprint := gossh.FingerprintSHA256(srv.hostSigner.PublicKey())
+	if mode == hostmode.Auto {
+		// Auto is the ABSENCE of an answer (ADR-0033), and this is the write
+		// the editor's auto performs.
+		if err := stand.modes.PersistMany([]string{fingerprint}, hostmode.Auto); err != nil {
+			t.Fatalf("forget the method for %s: %v", fingerprint, err)
+		}
+		return
+	}
+	mustRecordHostMode(t, stand.modes, fingerprint, mode)
 }
 
 // provider asks the PRODUCT's factory for the provider a remote session gets:

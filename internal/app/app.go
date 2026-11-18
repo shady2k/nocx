@@ -1032,6 +1032,7 @@ func New(opts ...Option) (*App, error) {
 	// — the narrowness rule this file's own comments keep.
 	helperReg.tools = overHelper
 	helperReg.modes = hostModes
+	helperReg.hostKeys = sshClient
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is

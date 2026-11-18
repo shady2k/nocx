@@ -74,9 +74,7 @@ func (a *directHostAsker) awaitAsk(t *testing.T, n int) {
 // ConnectionName, no stored credential. The requester is stamped here for
 // the reason openPasswordConfig stamps its own: the transport stamps it in
 // production (resolveRemote's direct-host branch, nocx-1ebrs.44), and this
-// harness drives the seam below the transport. DesiredRaw keeps the bundle
-// publish out of the open, so the pane's own dial is the only one — and the
-// wrong-password case fails exactly where a person watches it fail.
+// harness drives the seam below the transport.
 func directHostPaneConfig(srv *pwSSHServer, asker *directHostAsker, paneID string) session.Config {
 	return session.Config{
 		Kind:   session.KindRemote,
@@ -88,7 +86,6 @@ func directHostPaneConfig(srv *pwSSHServer, asker *directHostAsker, paneID strin
 			// NO AuthMode: auto, the connect UI's shape. No secrets, no key
 			// file, no agent — the machine has nothing to offer, which is
 			// why the prompt rung is the ladder's whole answer.
-			IntegrationMode:   string(hostmode.Raw),
 			PasswordRequester: asker,
 		},
 	}
@@ -100,13 +97,8 @@ func directHostPaneConfig(srv *pwSSHServer, asker *directHostAsker, paneID strin
 // answer authenticates and opens the pane.
 func TestOpenPath_DirectHostWithoutASecretPromptsAndOpens(t *testing.T) {
 	srv := startPasswordSSHServer(t)
-	// A direct host has no saved connection and the probe cannot name a host
-	// key before the pane's own dial (it has no credential to offer), so its
-	// method is auto — "not yet answered" (ADR-0033), which delivers the
-	// launcher. The fixture therefore has to run the launch carrier; this test
-	// is about the prompt, not about which carrier the far side accepts.
-	srv.acceptLaunchExec = true
 	stand := startFilesStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
+	recordFixtureMode(t, stand, srv, hostmode.Raw)
 	seam := openSeamOver(t, stand)
 
 	asker := newDirectHostAsker(openPasswordFixturePassword)
@@ -115,7 +107,11 @@ func TestOpenPath_DirectHostWithoutASecretPromptsAndOpens(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sess := openPanes(t, ctx, seam, directHostPaneConfig(srv, asker, "pane-direct-prompt"), "claim-direct-prompt")
+	cfg := directHostPaneConfig(srv, asker, "pane-direct-prompt")
+	sess := openPanes(t, ctx, seam, cfg, "claim-direct-prompt")
+	if got := cfg.Remote.IntegrationMode; got != string(hostmode.Raw) {
+		t.Fatalf("open mode = %q, want the host's recorded raw despite the password-only probe", got)
+	}
 
 	// THE ASK'S SHAPE: one prompt, naming no connection — the dialog shows
 	// no remember checkbox for an ask that has nothing to remember onto.
@@ -200,7 +196,6 @@ func TestOpenPath_DirectHostWrongPasswordAtThePublishReadsAsASentence(t *testing
 	// Auto mode: the publish runs, and its lease dial is the first to ask.
 	recordFixtureMode(t, stand, srv, hostmode.Auto)
 	cfg := directHostPaneConfig(srv, asker, "pane-direct-publish")
-	cfg.Remote.IntegrationMode = string(hostmode.Auto)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -50,6 +50,26 @@ func askOf(t *testing.T, err error) *transport.ErrHelperConsentNeeded {
 // Both halves are here: a host recorded script opens as script for both
 // profiles and brings up no helper lane, and a host recorded helper with a
 // granted machine is served by the far helper for both.
+func TestProbeFailureKeepsRecordedHostMode(t *testing.T) {
+	for _, mode := range []hostmode.Mode{hostmode.Raw, hostmode.Script} {
+		t.Run(string(mode), func(t *testing.T) {
+			provider := &fakeLaneProvider{uname: "malformed"}
+			store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
+			r := newTestRegistry(t, provider, store)
+			mustRecordHostMode(t, r.modes, "SHA256:fake", mode)
+			cfg := remoteConfigFor()
+			_, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "claim-probe-failure")
+			hold.release()
+			if err != nil || selected {
+				t.Fatalf("open selected=%v err=%v, want the local opener after failed uname", selected, err)
+			}
+			if got := cfg.Remote.IntegrationMode; got != string(mode) {
+				t.Fatalf("mode after failed uname = %q, want recorded host method %q", got, mode)
+			}
+		})
+	}
+}
+
 func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 	t.Run("the host's script answers both profiles", func(t *testing.T) {
 		provider := &fakeLaneProvider{peer: realHelperPeer(t)}

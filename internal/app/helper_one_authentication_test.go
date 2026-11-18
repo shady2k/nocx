@@ -83,6 +83,7 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	remote.registry = stand.registry
 	remote.modes = stand.modes
+	remote.hostKeys = stand.hostKeys
 	return openSeam{
 		hosted: &hostedOpeners{local: stand.opener, remote: remote},
 		routes: stand.routes,
@@ -91,10 +92,7 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 
 // paneDestination asks the far host for the password the vault holds.
 //
-// DesiredRaw is this test's starting state and not a product claim: the fixture
-// serves no remote forward, so an integrated pane could not keep a lifecycle
-// channel. What the count is about is the DIAL, and both modes dial the same way
-// — the probe and the spawn, on one pooled connection.
+// The fixture's credentials and destination are shared by the open and probe.
 func paneDestination(srv *pwSSHServer, secrets credential.Resolver) *ssh.ConnectConfig {
 	return &ssh.ConnectConfig{
 		User:               filesFixtureUser,
@@ -103,7 +101,6 @@ func paneDestination(srv *pwSSHServer, secrets credential.Resolver) *ssh.Connect
 		Secrets:            secrets,
 		SecretID:           filesFixtureSecret,
 		AuthorizedEndpoint: srv.addr,
-		IntegrationMode:    string(hostmode.Raw),
 	}
 }
 
@@ -290,7 +287,6 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	seam.hosted.remote.source = stubArtifacts(t)
 	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, secrets, "pane-consent")
-	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	opened, selected, err := seam.hosted.OpenHosted(ctx, cfg, "claim-consent")
@@ -301,7 +297,6 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	waittest.WaitForTimeout(t, "the probe-only connection to close after consent refusal", 5*time.Second,
 		func() bool { return srv.liveConns() == 0 })
 	recordFixtureMode(t, stand, srv, hostmode.Raw)
-	cfg.Remote.IntegrationMode = string(hostmode.Raw)
 	openPanes(t, ctx, seam, cfg, "claim-answered")
 	if got := srv.connCount(); got != 2 {
 		t.Fatalf("authenticated %d connections, want probe-only open plus answered open", got)
@@ -331,7 +326,6 @@ func TestACancelledConsentOpenStillReleasesItsConnection(t *testing.T) {
 	seam.hosted.remote.source = cancellingConsentArtifacts{ArtifactSource: stubArtifacts(t), cancel: cancel}
 	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, &askRecorder{value: openPasswordFixturePassword}, "pane-cancelled-consent")
-	cfg.Remote.IntegrationMode = string(hostmode.Helper)
 	_, _, err := seam.hosted.OpenHosted(ctx, cfg, "claim-cancelled-consent")
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) || ctx.Err() == nil {

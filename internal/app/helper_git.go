@@ -678,7 +678,10 @@ type helperRegistry struct {
 	// and it is a different question from consent beside it. Nil (a test
 	// double, or a build that wired none) reads every host as auto — not yet
 	// answered — which is the ask.
-	modes     *hostmode.Store
+	modes    *hostmode.Store
+	hostKeys interface {
+		KnownHostsFingerprintsFor(context.Context, string, *ssh.ConnectConfig) ([]string, error)
+	}
 	registry  *session.Reg
 	lifecycle lifecyclechannel.Kernel
 	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
@@ -1025,20 +1028,21 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 		if ask := helperConsentAskForProbeFailure(cfg.ProfileID, cfg.Host, offeredHostKeyFingerprint(err), err, r.consent, r.modes); ask != nil {
 			return transport.HostedSessionOpen{}, hold, true, ask
 		}
-		// A probe that got as far as a key NAMES the machine it saw, and the
-		// answer is asked by that fingerprint: a build with no artifact for
-		// the platform, or a failed uname on a host that answered, must not
-		// forget a method the host already keeps. Only when the probe saw no
-		// key at all does the host stay auto, by the same rule as one nobody
-		// answered for; a host-key failure still names the key it was offered,
-		// and the record may already carry an answer for it. Either way the
-		// fall-through open below uses the host's mode, and NOT the
-		// connection's stored one.
-		answered := fingerprint
-		if answered == "" {
-			answered = offeredHostKeyFingerprint(err)
+		if fingerprint == "" {
+			fingerprint = offeredHostKeyFingerprint(err)
 		}
-		cfg.Remote.IntegrationMode = string(hostModeFor(r.modes, answered))
+		mode := hostModeFor(r.modes, fingerprint)
+		if fingerprint == "" && r.hostKeys != nil {
+			if fingerprints, keyErr := r.hostKeys.KnownHostsFingerprintsFor(ctx, cfg.Host, cfg.Remote); keyErr == nil {
+				for _, known := range fingerprints {
+					if recorded, ok := r.modes.Lookup(known); ok {
+						mode = recorded
+						break
+					}
+				}
+			}
+		}
+		cfg.Remote.IntegrationMode = string(mode)
 		return transport.HostedSessionOpen{}, hold, false, nil
 	}
 	// THE OPEN'S OWN CONFIG CARRIES THE HOST'S ANSWER. Every later reader of

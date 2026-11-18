@@ -112,7 +112,10 @@ type filesStand struct {
 	// a plain shell request and refuses a launch exec, which is the raw
 	// method, so each one is recorded raw here; a test that opens under
 	// another method overwrites its host's record before the open.
-	modes *hostmode.Store
+	modes    *hostmode.Store
+	hostKeys interface {
+		KnownHostsFingerprintsFor(context.Context, string, *ssh.ConnectConfig) ([]string, error)
+	}
 }
 
 // askRecorder is the reverse side's credential resolver: it answers from a
@@ -258,6 +261,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	}
 
 	return &filesStand{
+		hostKeys: rc,
 		srv:      srv,
 		root:     srv.rootDir,
 		khPath:   khPath,

@@ -328,6 +328,11 @@ func TestATouchNamedByASymlinkedSpellingStillMovesTheStamp(t *testing.T) {
 	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
 	checkout := expectedWorktreePath(root, repoLink, "feat/one")
 	key := nocxCheckoutRepoKey(repoLink)
+	// The row must be older than the touch before the touch proves
+	// anything: Touch only ever moves the stamp forward, so a row stamped
+	// by the spawn's real clock would swallow a fixed sweepNow the day the
+	// clock passes it, and the test would pass on a touch that did nothing.
+	ageCheckout(t, stand, key, checkout, sweepNow.Add(-31*24*time.Hour))
 
 	if err := stand.checkouts.Touch(context.Background(), symlinkedDir(t, checkout), sweepNow); err != nil {
 		t.Fatalf("touch: %v", err)

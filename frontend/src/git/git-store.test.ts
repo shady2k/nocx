@@ -572,6 +572,38 @@ describe('a -32602 is only an unknown binding when the reason says so', () => {
     expect(store.mutationError()?.message).toContain('nothing is staged')
   })
 
+  it('a typed refusal carries its reason beside the prose — the panel decides by the reason (nocx-oalo1.6.3)', async () => {
+    const { store, services } = await openStore()
+    const stage = mockHandle(services, 'stage')
+    stage.mockRejectedValueOnce(
+      new RpcError('git: cannot stage or unstage all while "conf.txt" is conflicted', -32602, {
+        reason: 'conflicted',
+      }),
+    )
+
+    store.stage(['a.txt'])
+    await settle()
+    // The prose is what a person reads; the reason is what the code reads.
+    // Deliberately not the message text: contracts/git.error.schema.json is
+    // the vocabulary both ends agree on.
+    expect(store.mutationError()?.reason).toBe('conflicted')
+    expect(store.mutationError()?.message).toContain('conflicted')
+  })
+
+  it('a failure with no typed reason carries none — prose is not turned into a reason', async () => {
+    const { store, services } = await openStore()
+    const stage = mockHandle(services, 'stage')
+    // An invocation failure: git's own output, -32603, no reason payload
+    // (contracts/git.error.schema.json: "A git invocation failure carries no
+    // data at all").
+    stage.mockRejectedValueOnce(new RpcError('index.lock exists', -32603))
+
+    store.stage(['a.txt'])
+    await settle()
+    expect(store.mutationError()?.message).toContain('index.lock exists')
+    expect(store.mutationError()?.reason).toBeNull()
+  })
+
   it('a bare -32602 with no data (a malformed-params refusal) does NOT re-resolve', async () => {
     const { store, services } = await openStore()
     const open = mockHandle(services, 'open')

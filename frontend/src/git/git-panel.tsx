@@ -75,7 +75,8 @@ import type { UrlOpener } from '../open-url'
 import { branchUrl, commitUrl } from './git-remote-url'
 import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
-import type { GitStore } from './git-store'
+import type { GitMutationError, GitStore } from './git-store'
+import type { GitError } from '../generated/git.error'
 
 /** The diff-tab opener seam (worker G's surface, design §5.4): the panel
  *  calls this fixed contract and never builds the tab itself. A no-op
@@ -123,58 +124,74 @@ function diffSideFor(letter: FileStatus): GitDiffSide {
   return letter === '?' ? 'untracked' : 'unstaged'
 }
 
-/** Turn one rejected mutation's reason into the sentence a person reads in
- *  the toast (nocx-8sudy — the git panel's tenth site of the error-home
- *  sweep). The wire carries the backend's own words: the git domain errors
- *  from internal/git/errors.go ride the JSON-RPC message verbatim
- *  (gitErrorCode only picks the code), an invocation failure is a fmt error
- *  carrying git's own output, and a dropped socket rejects with the
- *  transport's plain words ("closed", "ws closed", "not connected"). The
- *  mapped sentence stays a person's while the reason survives, exactly like
- *  ports.tsx's listingFailureMessage.
+/** The sentence a refusal that means "this view no longer owns the
+ *  repository" earns — not-owned and handle-released are one situation seen
+ *  at its two ends. A function, not a resolved constant: `t()` reads the
+ *  locale signal, so the sentence has to be built where it is shown. */
+function repositoryGone(): string {
+  return t(
+    'git.refusal.repositoryGone',
+    "The change could not be made — this view's repository is no longer available.",
+  )
+}
+
+/** The wire's typed git refusals (contracts/git.error.schema.json), each with
+ *  the sentence a person reads. A TABLE, not a match on the backend's prose:
+ *  the reason is the answer to "what was refused", and the message travels
+ *  beside it as prose the backend may reword (nocx-oalo1.6.3). Reasons
+ *  outside this table are refusals this mapper has no sentence for and take
+ *  the open sentence below. */
+const TYPED_REFUSAL_SENTENCE: Partial<Record<GitError['reason'], () => string>> = {
+  'not-owned': repositoryGone,
+  'handle-released': repositoryGone,
+  'nothing-to-commit': () =>
+    t('git.refusal.nothingStaged', 'Nothing is staged to commit — stage a file first.'),
+  'amend-unborn': () => t('git.refusal.nothingToAmend', 'This branch has no commit to amend yet.'),
+  conflicted: () =>
+    t(
+      'git.refusal.conflicted',
+      'The change could not be made while a merge conflict is unresolved.',
+    ),
+}
+
+/** Turn one rejected mutation into the sentence a person reads in the toast
+ *  (nocx-8sudy — the git panel's tenth site of the error-home sweep). A
+ *  refusal the wire typed is decided by its reason and nothing else
+ *  (nocx-oalo1.6.3). What remains is what the wire does not type: a dropped
+ *  socket rejects with the transport's plain words ("closed", "ws closed",
+ *  "not connected") and a missing git plane with its own, and an invocation
+ *  failure is a fmt error carrying git's own output. Those are read as text
+ *  for now — the connection-loss and availability halves leave with
+ *  nocx-oalo1.6.3c.
  *
  *  A control-plane refusal never reaches this mapper at all: the store keeps
  *  it as its own state (mutationRefused) with a Retry, because it is not a
  *  failed mutation — nothing ran and nothing is stale (ADR-8eej3e66 stage 1).
- *  Not mapped here: "git: unknown binding" (the store re-resolves that ONE
- *  refusal — reason "unknown-binding" on the wire, nocx-bpqil — through
- *  git.open before the error is stored; every other -32602 refusal reaches
- *  this mapper as itself) and a failed commit's OUTPUT (that is the commit
- *  state, shown in the panel, D11 — never a rejection).
+ *  A failed commit's OUTPUT is likewise not a rejection: it is the commit
+ *  state, shown in the panel (D11).
  */
-function mutationFailureMessage(reason: string): string {
-  const r = reason.toLowerCase()
+function mutationFailureMessage(err: GitMutationError): string {
+  if (err.reason !== null) {
+    const typed = TYPED_REFUSAL_SENTENCE[err.reason]
+    if (typed !== undefined) return typed()
+  }
+  const r = err.message.toLowerCase()
   if (
     /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
     r.includes('disconnected')
   ) {
     return t('git.refusal.disconnected', 'The change could not be made — the connection was lost.')
   }
-  if (r.includes('nothing is staged')) {
-    return t('git.refusal.nothingStaged', 'Nothing is staged to commit — stage a file first.')
-  }
-  if (r.includes('cannot amend')) {
-    return t('git.refusal.nothingToAmend', 'This branch has no commit to amend yet.')
-  }
-  if (r.includes('belongs to session') || r.includes('handle released')) {
-    return t(
-      'git.refusal.repositoryGone',
-      "The change could not be made — this view's repository is no longer available.",
-    )
-  }
-  if (r.includes('conflicted')) {
-    return t(
-      'git.refusal.conflicted',
-      'The change could not be made while a merge conflict is unresolved.',
-    )
-  }
   if (r.includes('not available')) {
     return t('git.refusal.gitUnavailable', 'The change could not be made — git is not available.')
   }
   // The open set: never pretend to a completeness we cannot have. The
-  // sentence stays a person's; the reason is appended so the diagnostic
-  // survives (AGENTS.md: a soft degrade must be visible in the product).
-  return t('git.refusal.reason', 'The change could not be made ({reason}).', { reason })
+  // sentence stays a person's; the backend's words are appended so the
+  // diagnostic survives (AGENTS.md: a soft degrade must be visible in the
+  // product).
+  return t('git.refusal.reason', 'The change could not be made ({reason}).', {
+    reason: err.message,
+  })
 }
 
 type RowList = 'staged' | 'unstaged' | 'conflicted'
@@ -220,7 +237,7 @@ export function GitPanel(props: GitPanelProps) {
       () => props.store.mutationError(),
       (err) => {
         if (err === null) return
-        showToast({ level: 'danger', message: mutationFailureMessage(err.message) })
+        showToast({ level: 'danger', message: mutationFailureMessage(err) })
       },
     ),
   )

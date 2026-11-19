@@ -8045,6 +8045,7 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 		{"exec refused, the channel alive", ssh.ReasonExecRefused},
 		{"exec accepted and substituted", ssh.ReasonExecSubstituted},
 		{"the SFTP subsystem refused", ssh.ReasonPublishUnavailable},
+		{"the authenticated host key was unavailable", ssh.ReasonHostKeyUnconfirmed},
 		{"the lifecycle channel refused", ssh.ReasonChannelUnavailable},
 		{"an open channel severed mid-frame", ssh.ReasonBootstrapInterrupted},
 		// The bootstrap's own closed set. The first is the one the brief

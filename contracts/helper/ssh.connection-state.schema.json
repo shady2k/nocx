@@ -30,7 +30,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -81,7 +81,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -140,7 +140,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -186,7 +186,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -236,7 +236,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -292,7 +292,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -343,7 +343,7 @@
           "minimum": 0
         },
         "generation": {
-          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
+          "description": "Which LINK of the supervisor this observation is about: a monotonic identifier of the transport, not a count of links. It moves when a link is admitted and again when that link is retired or detached, so consecutive links do not have consecutive numbers — the first link is 1, its retirement 2, the second link 3 — and an observation taken while there is no link carries the number the retirement produced. Zero means no link has ever existed for this connection. Readers compare numbers (`!=`, `<`) and never read a value as an index. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },

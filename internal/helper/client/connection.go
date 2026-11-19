@@ -42,9 +42,11 @@ func (c *Client) ConnectionID(ctx context.Context, destination proto.SSHDestinat
 // BEFORE it re-binds any pane: the entries it rebuilds include the connections
 // no pane rides, which nothing else can tell it about.
 //
-// A helper that does not answer the op is older than this app; the error is the
-// ordinary `unknown_op` refusal, and a caller reads it the way it reads one on
-// any other op — this machine's helper predates the table.
+// THE PAIR IS FENCED AT HELLO, not here: a helper whose generation predates
+// this one refuses this app before any op runs, so Dial's version mismatch is
+// what a caller actually meets on such a machine. An `unknown_op` refusal still
+// means "this helper does not have the table", and a caller reads it the way it
+// reads one on any other op.
 func (c *Client) Connections(ctx context.Context) ([]proto.ConnectionSummary, error) {
 	var result proto.ConnectionsResult
 	if err := c.Call(ctx, proto.ServiceSSH, proto.OpConnections, proto.ConnectionsParams{}, &result); err != nil {

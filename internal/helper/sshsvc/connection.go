@@ -161,8 +161,19 @@ func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 	s.mu.Lock()
 	if s.connectionsWatches[conn] != nil {
 		// THIS COORDINATOR ALREADY READS THE WHOLE TABLE, which covers every
-		// connection including the ones created later. A second subscription for
-		// this one would put each observation on the wire twice.
+		// connection including the ones created later, so there is nothing for
+		// a per-connection subscription to add. THE DEDUPLICATION RUNS ONE WAY
+		// ONLY: it stops a per-connection watch from being installed AFTER the
+		// table's, and it does not end the per-connection watches a coordinator
+		// already held — the ordinary order for a coordinator that did not
+		// restart is panes first, `connections` second. Each of those goes on
+		// delivering alongside the table's stream, so such an observation
+		// arrives twice. That is absorbed where it is read rather than
+		// prevented here: the receiver keeps the newest `seq` per connection and
+		// refuses anything not greater, which is the same fence a late frame
+		// meets. One subscription per connection would need the table's install
+		// to tear the others down mid-delivery, and the cost it would buy is
+		// reading one frame that is dropped anyway.
 		s.mu.Unlock()
 		return
 	}
@@ -199,6 +210,12 @@ func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 // manager's table announces connections it creates later, which is the whole
 // point — a tunnel that appears a second after the answer must not need a second
 // request to be visible.
+//
+// IT DOES NOT END THE PER-CONNECTION SUBSCRIPTIONS THIS COORDINATOR ALREADY
+// HAS. A coordinator that opened panes before asking for the table — every
+// coordinator that did not just restart — keeps both streams, so an observation
+// of a connection it already watched is written twice. The duplicate is refused
+// at the receiver's sequence fence; see the one-way note in ensureConnectionWatch.
 func (s *Service) ensureConnectionsWatch(conn *host.Host) {
 	s.mu.Lock()
 	if s.connectionsWatches == nil {

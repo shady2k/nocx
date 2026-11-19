@@ -166,7 +166,10 @@ var (
 	// lease: the client was closed and its pooled reference released, so
 	// nothing on this lease can ever succeed again. A poisoned lease is a
 	// terminal state the caller can observe — not a silent retry loop.
-	ErrFSDead = errors.New("ssh: sftp lease dead: hard timeout exceeded")
+	// The watchdog is its only producer, so it also matches the standard
+	// deadline cause. A poll can poison the lease before a person's listing
+	// reaches its own deadline; that listing must still render timedOut.
+	ErrFSDead = fmt.Errorf("ssh: sftp lease dead: hard timeout exceeded: %w", context.DeadlineExceeded)
 	// ErrPosixRenameUnsupported is returned by PosixRename when the server
 	// does not implement posix-rename@openssh.com — it answers the extended
 	// request SSH_FX_OP_UNSUPPORTED. It is deliberately distinguishable

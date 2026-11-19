@@ -457,34 +457,42 @@ func (refusingDocumentStore) Delete(string) error            { return errors.New
 // pane's head repeats that sentence (terminal-content.ts) and a silent failure
 // would leave the person unaware that the chosen mode was not saved.
 func TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo(t *testing.T) {
-	modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
-	srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
+	for _, method := range []hostmode.Mode{hostmode.Script, hostmode.Raw} {
+		t.Run(string(method), func(t *testing.T) {
+			modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
+			srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
 
-	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "script",
-	})
-	var result struct {
-		Result struct {
-			HostRecordSaved *bool `json:"hostRecordSaved"`
-		} `json:"result"`
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if result.Error != nil {
-		t.Fatalf("an applied answer must succeed: %s", resp)
-	}
-	if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
-		t.Fatalf("want result.hostRecordSaved=false: %s", resp)
-	}
-	// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
-	// retries does not fall back into the same dialog.
-	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
-		t.Fatalf("host record after a failed write = %q/%v, want the answer kept for this run", mode, ok)
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": "SHA256:abc",
+				"method":      string(method),
+			})
+			var result struct {
+				Result struct {
+					HostRecordSaved    *bool `json:"hostRecordSaved"`
+					HelperConsentSaved *bool `json:"helperConsentSaved"`
+				} `json:"result"`
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &result); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if result.Error != nil {
+				t.Fatalf("an applied answer must succeed: %s", resp)
+			}
+			if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
+				t.Fatalf("want result.hostRecordSaved=false: %s", resp)
+			}
+			if result.Result.HelperConsentSaved == nil || *result.Result.HelperConsentSaved {
+				t.Fatalf("want result.helperConsentSaved=false: %s", resp)
+			}
+			// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
+			// retries does not fall back into the same dialog.
+			if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != method {
+				t.Fatalf("host record after a failed write = %q/%v, want the answer kept for this run", mode, ok)
+			}
+		})
 	}
 }
 

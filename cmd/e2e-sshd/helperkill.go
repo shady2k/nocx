@@ -24,7 +24,7 @@ package main
 // the daemon was installed into, so it can answer "whose daemon is this" from
 // the command line itself.
 //
-// # The cue is the gate file's CONTENT
+// # The cue is the gate file's CONTENT, and it is published atomically
 //
 // A gate file that must appear (like -sftp-slow-until) cannot be re-armed
 // without a race: remove-then-write is one state change the fixture's poll may
@@ -32,14 +32,28 @@ package main
 // distinct content is one cue, the same content is nothing, and a removed file
 // forgets the last one. The spec writes a new nonce per kill.
 //
+// The writer publishes that content by renaming a temporary file onto the gate,
+// never by truncating and rewriting it in place: a truncate-then-write leaves an
+// EMPTY file for as long as the write takes, and a poll landing in that window
+// would read blank content. The gate therefore refuses a blank file outright —
+// a blank file is not a request — so even a writer that does not rename cannot
+// turn a mid-update read into a kill.
+//
 // # What it announces, and why the lines exist
 //
-// `HELPERKILLED=<pid>` per process signalled and a final `HELPERKILLDONE=<n>`,
-// printed in that order: the done line is the observable a spec waits on, so a
-// wrong match fails at once instead of waiting out a timeout for a state the
-// far side never reached. A process table that cannot be read is announced as
-// `HELPERKILLFAILED=` and counted as zero; a kill that fails for one pid is not
-// counted, because the far side only claims a death it caused.
+// `HELPERKILLED=<pid> cue=<cue>` per process signalled, then one
+// `HELPERKILLDONE=<n> cue=<cue>`, printed in that order. A process table that
+// cannot be read is announced as `HELPERKILLFAILED=<msg> cue=<cue>` and counted
+// as zero; a kill that fails for one pid is not counted, because the far side
+// only claims a death it caused.
+//
+// EVERY answer names the cue it answers, because the reader must wait for the
+// answer to ITS OWN request. A reader that waits for the count of done lines to
+// move can be satisfied by a late answer to the previous cue — the previous
+// request's pid list, or its DONE=0 — and then act before this request has been
+// looked at. The done line is the observable a spec waits on, so a wrong match
+// fails at once instead of waiting out a timeout for a state the far side never
+// reached.
 
 import (
 	"fmt"
@@ -86,15 +100,29 @@ func newHelperKillGate(path, home string) *helperKillGate {
 	}
 }
 
+// readCue answers the gate's current cue. Absent is no cue, and so is blank
+// content: the writer renames a complete file onto the gate, but a writer that
+// truncates in place leaves it empty while it writes, and a poll in that window
+// must not read the gap as a request. The cue is the trimmed content, so the
+// ordinary `echo nonce > cue` is a cue too.
+func (g *helperKillGate) readCue() (string, bool) {
+	data, err := os.ReadFile(g.path)
+	if err != nil {
+		return "", false
+	}
+	cue := strings.TrimSpace(string(data))
+	return cue, cue != ""
+}
+
 // seed records a gate that was already there when the fixture started, without
 // killing anything: a file that predates this run is not a cue this run
 // received.
 func (g *helperKillGate) seed() {
-	data, err := os.ReadFile(g.path)
-	if err != nil {
+	cue, ok := g.readCue()
+	if !ok {
 		return
 	}
-	g.seen, g.armed = string(data), true
+	g.seen, g.armed = cue, true
 }
 
 // watch polls until the process ends. It does NOT seed: run() seeds before it
@@ -108,23 +136,23 @@ func (g *helperKillGate) watch() {
 	}
 }
 
-// observe acts on one look at the gate: nothing for a file that is absent or
-// unchanged, one kill for each new content.
+// observe acts on one look at the gate: nothing for a file that is absent,
+// blank or unchanged, one kill for each new cue.
 func (g *helperKillGate) observe() {
-	data, err := os.ReadFile(g.path)
-	if err != nil {
+	cue, ok := g.readCue()
+	if !ok {
 		g.seen, g.armed = "", false
 		return
 	}
-	if g.armed && string(data) == g.seen {
+	if g.armed && cue == g.seen {
 		return
 	}
-	g.seen, g.armed = string(data), true
+	g.seen, g.armed = cue, true
 
 	table, err := g.list()
 	if err != nil {
-		g.print("HELPERKILLFAILED=" + oneLine(fmt.Sprint(err)))
-		g.print("HELPERKILLDONE=0")
+		g.print(helperKillAnswer("HELPERKILLFAILED", fmt.Sprint(err), cue))
+		g.print(helperKillAnswer("HELPERKILLDONE", "0", cue))
 		return
 	}
 	killed := 0
@@ -133,9 +161,17 @@ func (g *helperKillGate) observe() {
 			continue
 		}
 		killed++
-		g.print("HELPERKILLED=" + strconv.Itoa(pid))
+		g.print(helperKillAnswer("HELPERKILLED", strconv.Itoa(pid), cue))
 	}
-	g.print("HELPERKILLDONE=" + strconv.Itoa(killed))
+	g.print(helperKillAnswer("HELPERKILLDONE", strconv.Itoa(killed), cue))
+}
+
+// helperKillAnswer frames one answer as `<name>=<value> cue=<cue>`, so every
+// line names the request it answers. The cue itself is flattened to one line:
+// the reader compares the exact text it wrote, and a cue the status line cannot
+// carry is not one the gate should have accepted.
+func helperKillAnswer(name, value, cue string) string {
+	return name + "=" + oneLine(value) + " cue=" + oneLine(cue)
 }
 
 // daemons answers this account's helper daemons in one process table, under

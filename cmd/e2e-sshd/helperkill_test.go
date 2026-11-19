@@ -23,6 +23,8 @@ package main
 // fake mode (fakeHelperDaemonEnv) instead of running this suite again.
 
 import (
+	"bufio"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,17 +43,32 @@ import (
 // children a test starts, never in the test process itself.
 const fakeHelperDaemonEnv = "NOCX_E2E_SSHD_FAKE_HELPER_DAEMON"
 
+// fixtureModeEnv puts this binary into fixture mode: run(), the same function
+// main() calls, with the flags on os.Args. It is how the wiring test below
+// drives the real program — flag parsing, the HELPERKILL= announcement, the
+// seed, READY and the watcher — without compiling a second binary.
+const fixtureModeEnv = "NOCX_E2E_SSHD_AS_FIXTURE"
+
 // fakeExitWait bounds a wait for a SIGKILLed process to be reaped. It is a
 // guard against a hung fixture, not a pace: the wait itself is on the process's
 // exit, which is the event that matters.
 const fakeExitWait = 10 * time.Second
 
 func TestMain(m *testing.M) {
-	if os.Getenv(fakeHelperDaemonEnv) != "" {
+	switch {
+	case os.Getenv(fakeHelperDaemonEnv) != "":
 		// A far helper daemon stands here, and only a signal ends it.
 		for {
 			time.Sleep(time.Hour)
 		}
+	case os.Getenv(fixtureModeEnv) != "":
+		// The fixture itself: the flags are this binary's own argv, and run()
+		// parses them exactly as main() does.
+		if err := run(); err != nil {
+			os.Stderr.WriteString("e2e-sshd: " + err.Error() + "\n")
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -110,7 +127,9 @@ func TestHelperKillGate_KillsOncePerCueAndAnnouncesIt(t *testing.T) {
 	if want := []int{7}; !slices.Equal(killed, want) {
 		t.Fatalf("killed = %v, want %v", killed, want)
 	}
-	if want := []string{"HELPERKILLED=7", "HELPERKILLDONE=1"}; !slices.Equal(printed, want) {
+	// Every answer names the cue it answers: that is how a reader waits for
+	// its own request rather than for an answer count to move.
+	if want := []string{"HELPERKILLED=7 cue=cue-1", "HELPERKILLDONE=1 cue=cue-1"}; !slices.Equal(printed, want) {
 		t.Fatalf("printed = %v, want %v", printed, want)
 	}
 
@@ -135,7 +154,8 @@ func TestHelperKillGate_KillsOncePerCueAndAnnouncesIt(t *testing.T) {
 	writeGate(t, gatePath, "cue-3")
 	gate.observe()
 	if got := printed[len(printed)-2:]; !strings.HasPrefix(got[0], "HELPERKILLFAILED=") ||
-		got[1] != "HELPERKILLDONE=0" {
+		!strings.HasSuffix(got[0], " cue=cue-3") ||
+		got[1] != "HELPERKILLDONE=0 cue=cue-3" {
 		t.Fatalf("a failed process table printed %q, want a failure and a zero count", got)
 	}
 
@@ -149,6 +169,58 @@ func TestHelperKillGate_KillsOncePerCueAndAnnouncesIt(t *testing.T) {
 	gate.observe()
 	if len(killed) != 3 {
 		t.Fatalf("a gate re-created with the same content did not kill: %v", killed)
+	}
+}
+
+// TestHelperKillGate_ABlankGateIsNotACue pins the read a writer's truncate
+// leaves behind: an in-place publish empties the gate before it writes, and a
+// poll landing in that window must not read the gap as a request. The same look
+// must still accept the cue once the write lands, or refusing the blank would
+// have bought a gate that ignores a real kill.
+func TestHelperKillGate_ABlankGateIsNotACue(t *testing.T) {
+	home := t.TempDir()
+	gatePath := filepath.Join(home, "cue")
+	table := []byte("    7 " + home + "/.nocx/helper/g/nocx-helper serve\n")
+
+	var printed []string
+	var killed []int
+	gate := &helperKillGate{
+		path:  gatePath,
+		home:  home,
+		print: func(line string) { printed = append(printed, line) },
+		list:  func() ([]byte, error) { return table, nil },
+		kill:  func(pid int) error { killed = append(killed, pid); return nil },
+	}
+	gate.seed()
+
+	// The truncate half of an in-place publish: the file exists and is empty.
+	writeGate(t, gatePath, "")
+	gate.observe()
+	// Whitespace is not content either: a newline-only gate is the same
+	// no-request as a blank one.
+	writeGate(t, gatePath, "\n")
+	gate.observe()
+	if len(killed) != 0 || len(printed) != 0 {
+		t.Fatalf("a blank gate was read as a cue: killed=%v printed=%v", killed, printed)
+	}
+
+	// The cue lands: one kill, and the answer names the cue that caused it.
+	writeGate(t, gatePath, "cue-1")
+	gate.observe()
+	if want := []int{7}; !slices.Equal(killed, want) {
+		t.Fatalf("killed after the blank gate = %v, want %v", killed, want)
+	}
+	if want := []string{"HELPERKILLED=7 cue=cue-1", "HELPERKILLDONE=1 cue=cue-1"}; !slices.Equal(printed, want) {
+		t.Fatalf("printed = %v, want %v", printed, want)
+	}
+
+	// The cue is the file's trimmed content, so the ordinary `echo` spelling
+	// is a cue too — and its answer carries what was asked, without the
+	// newline that framed the line.
+	writeGate(t, gatePath, "cue-2\n")
+	gate.observe()
+	if want := "HELPERKILLDONE=1 cue=cue-2"; printed[len(printed)-1] != want {
+		t.Fatalf("an echo-written cue answered %q, want %q", printed[len(printed)-1], want)
 	}
 }
 
@@ -181,13 +253,13 @@ func TestHelperKillGate_KillsTheDaemonAndNotItsBridgeOrAnotherHomesDaemon(t *tes
 
 	printedMu.Lock()
 	defer printedMu.Unlock()
-	if want := "HELPERKILLED=" + strconv.Itoa(daemon.pid); !slices.Contains(printed, want) {
+	if want := "HELPERKILLED=" + strconv.Itoa(daemon.pid) + " cue=cue-1"; !slices.Contains(printed, want) {
 		t.Fatalf("the far side announced %q, want %q", printed, want)
 	}
 	// One, and only one: a bridge is not a daemon and another home's daemon is
 	// not this home's, so a rule that lost either comparison would say 2 or 3.
-	if !slices.Contains(printed, "HELPERKILLDONE=1") {
-		t.Fatalf("the far side announced %q, want HELPERKILLDONE=1", printed)
+	if !slices.Contains(printed, "HELPERKILLDONE=1 cue=cue-1") {
+		t.Fatalf("the far side announced %q, want HELPERKILLDONE=1 cue=cue-1", printed)
 	}
 }
 
@@ -224,12 +296,116 @@ func TestHelperKillGate_LeavesALiveSshTransportServing(t *testing.T) {
 	}
 }
 
+// TestFixture_KillsOnCueAndSaysSoOnItsOwnStdout is the wiring test the switch
+// did not have: the tests above drive the gate's parts, and the TypeScript unit
+// tests stand in for the far host, so run() could stop announcing HELPERKILL=
+// or stop starting watch() and every suite would stay green. This starts the
+// real program and asks it to kill a real process.
+func TestFixture_KillsOnCueAndSaysSoOnItsOwnStdout(t *testing.T) {
+	home, gateDir := t.TempDir(), t.TempDir()
+	daemon := startFakeDaemon(t, installFakeHelper(t, home), "serve")
+
+	// os.Args[0] is this test binary, and fixtureModeEnv makes TestMain call
+	// run() — the function main() calls — with these flags.
+	//nolint:gosec // this test's own binary, in fixture mode, by this test's decision
+	cmd := exec.Command(os.Args[0], "-helper-kill-dir", gateDir)
+	cmd.Env = append(os.Environ(), fixtureModeEnv+"=1", "HOME="+home)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("the fixture's stdout: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	lines := readFixtureLines(stdout)
+	announced := lines.waitFor(t, "HELPERKILL=", func(line string) bool {
+		return strings.HasPrefix(line, "HELPERKILL=")
+	})
+	gatePath := strings.TrimPrefix(announced, "HELPERKILL=")
+	if want := filepath.Join(gateDir, "cue"); gatePath != want {
+		t.Fatalf("the fixture watches %q, want %q", gatePath, want)
+	}
+	// The gate is announced and seeded BEFORE READY, which is the promise a
+	// spec stands on: a cue written after READY cannot be mistaken for a file
+	// that predated the run.
+	lines.waitFor(t, "READY", func(line string) bool { return line == "READY" })
+
+	cue := "cue-" + strconv.Itoa(os.Getpid())
+	writeGate(t, gatePath, cue)
+	lines.waitFor(t, "HELPERKILLDONE=1 cue="+cue, func(line string) bool {
+		return line == "HELPERKILLDONE=1 cue="+cue
+	})
+	daemon.waitExit(t)
+
+	if want := "HELPERKILLED=" + strconv.Itoa(daemon.pid) + " cue=" + cue; !slices.Contains(lines.seen, want) {
+		t.Fatalf("the fixture answered %v, want %q", lines.seen, want)
+	}
+}
+
+// fixtureLines reads the fixture's stdout as it arrives. A line is what the
+// fixture says it did, so a test waits for the line it needs and never for a
+// while to pass; seen keeps everything read so far for a failure message.
+type fixtureLines struct {
+	lines chan string
+	seen  []string
+}
+
+func readFixtureLines(r io.Reader) *fixtureLines {
+	f := &fixtureLines{lines: make(chan string, 64)}
+	go func() {
+		defer close(f.lines)
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			f.lines <- sc.Text()
+		}
+	}()
+	return f
+}
+
+// waitFor consumes lines until one satisfies match and answers it, or fails the
+// test when the fixture's stdout ends or the guard expires first.
+func (f *fixtureLines) waitFor(t *testing.T, what string, match func(string) bool) string {
+	t.Helper()
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case line, ok := <-f.lines:
+			if !ok {
+				t.Fatalf("the fixture's stdout ended while waiting for %s; saw %v", what, f.seen)
+			}
+			f.seen = append(f.seen, line)
+			if match(line) {
+				return line
+			}
+		case <-deadline.C:
+			t.Fatalf("the fixture printed no %s within 30s; saw %v", what, f.seen)
+		}
+	}
+}
+
 // TestAccountHomes_OffersTheResolvedSpellingBesideTheGivenOne pins the macOS
 // hazard the match exists against: a home reached through a symlink is the same
 // account, and an install path made through SFTP's realpath carries the
 // resolved spelling, so the table may hold either one.
 func TestAccountHomes_OffersTheResolvedSpellingBesideTheGivenOne(t *testing.T) {
-	dir := t.TempDir()
+	// The PARENT is canonicalised before the symlink is made under it. When
+	// the temp directory is itself reached through a symlink — GOTMPDIR on a
+	// machine whose tmp is linked, which is macOS's /var every day —
+	// EvalSymlinks resolves the parent too, and a `real` written from the
+	// given spelling is then a different STRING for the same directory. The
+	// test would be checking the resolution against a path it never created
+	// (nocx-oalo1.6.3).
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("the canonical temp dir: %v", err)
+	}
 	real := filepath.Join(dir, "real-home")
 	if err := os.Mkdir(real, 0o750); err != nil {
 		t.Fatalf("the real home: %v", err)

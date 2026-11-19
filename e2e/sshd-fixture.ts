@@ -57,8 +57,14 @@ export interface SshdFixture {
   /**
    * The gate this fixture watches for a kill cue: writing a new string there
    * SIGKILLs the helper daemon installed under its account, with the SSH
-   * transport untouched, and the fixture answers with `HELPERKILLED=<pid>` per
-   * process signalled and `HELPERKILLDONE=<n>`.
+   * transport untouched, and the fixture answers each cue with
+   * `HELPERKILLED=<pid> cue=<cue>` per process signalled and a final
+   * `HELPERKILLDONE=<n> cue=<cue>`.
+   *
+   * Empty unless the caller started the fixture with `-helper-kill-dir <dir>`
+   * (an entry in `args`): a run that kills nothing watches nothing. The
+   * directory belongs to the caller — the cue file is `<dir>/cue`, and the
+   * caller removes the directory.
    *
    * It is `killFarHelper`'s business in `far-helper-faults.ts`, which is where
    * the protocol is stated and where a spec should look; this field is only the

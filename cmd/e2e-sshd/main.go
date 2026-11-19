@@ -60,8 +60,9 @@
 //	                        e2e/ssh-helper-happy-path.spec.ts, whose first
 //	                        criterion is that a pane and Files on one host
 //	                        share ONE connection (nocx-50w7p.6).
-//	HELPERKILL=<path>       the gate this run watches for a kill cue: a new
-//	                        content there kills the far helper daemon (below)
+//	HELPERKILL=<path>       printed ONLY under -helper-kill-dir: the gate this
+//	                        run watches for a kill cue, a new content there
+//	                        kills the far helper daemon (below)
 //	READY
 //
 // Fault switches, for the tests that need the far side to be the broken thing:
@@ -79,16 +80,24 @@
 //	                        duration, such as 2s): a host that lets a person in
 //	                        late but does let them in, which is not the same
 //	                        condition as one that refuses them.
+//	-helper-kill-dir <dir>  watch <dir>/cue for a kill cue, announcing
+//	                        HELPERKILL=<dir>/cue. The directory is the
+//	                        caller's, and it is the caller's to remove; no run
+//	                        without this flag watches anything.
 //
-// The far helper's death, on cue, is not a flag: every run announces the path
-// it watches as HELPERKILL=<path>, and each distinct content written there is
-// one cue that SIGKILLs the helper daemon installed under this account's home —
-// the process whose command is `<home>/.nocx/helper/<generation>/nocx-helper
-// serve`, and nothing else. The SSH transport is untouched, which is the whole
-// point: the daemon's death and the connection's life are different facts
-// (design §5.10, lifecycle scenario 4). Each cue is answered with
-// HELPERKILLED=<pid> per process signalled and a final HELPERKILLDONE=<n>; a
-// process table that could not be read is HELPERKILLFAILED= and a zero count.
+// The far helper's death, on cue, is what -helper-kill-dir turns on. Each
+// distinct content written to the announced gate is one cue that SIGKILLs the
+// helper daemon installed under this account's home — the process whose command
+// is `<home>/.nocx/helper/<generation>/nocx-helper serve`, and nothing else.
+// The SSH transport is untouched, which is the whole point: the daemon's death
+// and the connection's life are different facts (design §5.10, lifecycle
+// scenario 4).
+//
+// The writer publishes a cue by renaming a complete file onto the gate, and a
+// blank gate is not a cue. Every answer names the request it answers: each
+// covered pid as HELPERKILLED=<pid> cue=<cue>, then HELPERKILLDONE=<n> cue=<cue>
+// — and HELPERKILLFAILED=<msg> cue=<cue> for a process table that could not be
+// read, counted as zero.
 package main
 
 import (
@@ -204,6 +213,7 @@ func run() error {
 	dropAfterAccept := flag.Int("drop-after-accept", 0, "reset this many newly accepted connections before any SSH byte is sent, then serve normally: a real sshd at MaxStartups (0 disables)")
 	changedHostKey := flag.Bool("changed-host-key", false, "present a host key other than the one KNOWNHOSTS= names: a host whose key changed under a client that trusts its own record")
 	signInDelay := flag.Duration("sign-in-delay", 0, "hold every real userauth answer this long (a Go duration such as 2s): a host that lets a person in late")
+	helperKillDir := flag.String("helper-kill-dir", "", "watch <dir>/cue for the far helper's kill cue, announcing HELPERKILL=<dir>/cue: each new content SIGKILLs the helper daemon installed under this account's home and answers on stdout; empty disables the switch, and the directory is the caller's to remove")
 	flag.Parse()
 	if fixtureLoginShell != "" {
 		resolved, err := exec.LookPath(fixtureLoginShell)
@@ -310,19 +320,31 @@ func run() error {
 		printLine("MARKER=" + marker)
 		printLine("HOSTILE_B64=" + base64.StdEncoding.EncodeToString([]byte(hostile)))
 	}
-	// The far helper's kill switch: a path a spec writes to ask this host to
-	// kill the helper daemon it runs for this account. Announced before READY
-	// so a spec never has to guess it, and armed only once READY has been said.
-	helperKillDir, err := os.MkdirTemp("", "nocx-e2e-sshd-kill-*")
-	if err != nil {
-		return fmt.Errorf("helper kill gate: %w", err)
+	// The far helper's kill switch, for the fixture a spec starts to watch the
+	// helper DIE. It is off unless -helper-kill-dir names the directory, because
+	// a gate is a poller that opens a file twenty times a second and runs `ps`
+	// on every cue: a fixture that kills nothing should pay none of that. The
+	// file lives in the directory the CALLER named — its own temporary
+	// directory, which it removes — never in a global TMPDIR this fixture would
+	// leak on every start. Announced before READY so a spec never has to guess
+	// it, and armed only once READY has been said.
+	if *helperKillDir != "" {
+		dir, err := filepath.Abs(*helperKillDir)
+		if err != nil {
+			return fmt.Errorf("helper kill dir: %w", err)
+		}
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("helper kill dir %s: %w", dir, err)
+		}
+		helperKillPath := filepath.Join(dir, "cue")
+		printLine("HELPERKILL=" + helperKillPath)
+		helperKill := newHelperKillGate(helperKillPath, accountHome())
+		helperKill.seed()
+		printLine("READY")
+		go helperKill.watch()
+	} else {
+		printLine("READY")
 	}
-	helperKillPath := filepath.Join(helperKillDir, "cue")
-	printLine("HELPERKILL=" + helperKillPath)
-	helperKill := newHelperKillGate(helperKillPath, accountHome())
-	helperKill.seed()
-	printLine("READY")
-	go helperKill.watch()
 
 	acceptor(ln, f, func(conn net.Conn) *gossh.ServerConfig {
 		// CONN= is per connection: printed when the client's first userauth

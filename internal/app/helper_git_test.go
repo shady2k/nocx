@@ -307,6 +307,7 @@ func (f *fakeLaneConn) closeCount() int {
 type laneRequest struct {
 	machine    proto.Machine
 	generation proto.GenerationID
+	pin        string
 }
 
 // fakeLaneProvider hands out a fresh scripted lane per LaneConn call and
@@ -334,6 +335,7 @@ type fakeLaneProvider struct {
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
+	installPin  string
 	// inflate, when set, is the install's decompression seam; nil refuses it, so
 	// every test that is not about the optimisation installs the plain way
 	// (nocx-evj4b.1.3).
@@ -373,7 +375,11 @@ func (p *fakeLaneProvider) awaitClosedPeers(t *testing.T) {
 	}
 }
 
-func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto.Machine, generation proto.GenerationID, _ ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	if p.laneErr != nil {
 		return nil, p.laneErr
 	}
@@ -388,7 +394,7 @@ func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto
 	c.startErr = p.startErr
 	p.mu.Lock()
 	p.conns = append(p.conns, c)
-	p.request = append(p.request, laneRequest{machine: machine, generation: generation})
+	p.request = append(p.request, laneRequest{machine: machine, generation: generation, pin: cfg.HostKeyFingerprint})
 	p.mu.Unlock()
 	return c, nil
 }
@@ -412,7 +418,44 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 	return &fakeProbeConn{uname: uname, fingerprint: p.fingerprint}, nil
 }
 
-func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+func TestFakeLaneProviderConcurrentInstallLeasesShareOneFilesystem(t *testing.T) {
+	const callers = 32
+	provider := &fakeLaneProvider{}
+	start := make(chan struct{})
+	leases := make(chan ssh.HelperInstallConn, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Go(func() {
+			<-start
+			lease, err := provider.HelperInstallConn(t.Context(), "host.example", ssh.WithHostKeyPin("SHA256:approved"))
+			if err != nil {
+				t.Errorf("install lease: %v", err)
+				return
+			}
+			leases <- lease
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(leases)
+	for lease := range leases {
+		if lease != provider.install {
+			t.Error("concurrent install leases used different remote filesystems")
+		}
+	}
+	if provider.installPin != "SHA256:approved" {
+		t.Errorf("install pin = %q, want approved host key", provider.installPin)
+	}
+}
+
+func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.installPin = cfg.HostKeyFingerprint
 	if p.installFail != nil {
 		return nil, p.installFail
 	}

@@ -165,8 +165,8 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // the `reconnect` field on `session.spawn-ssh.params`, a field a frozen shape
 // cannot gain without a fence.
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "28" {
-		t.Fatalf("helper protocol version = %q, want 28", Version)
+	if Version != "29" {
+		t.Fatalf("helper protocol version = %q, want 29", Version)
 	}
 }
 

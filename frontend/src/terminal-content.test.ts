@@ -1118,8 +1118,12 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
   // the renderer's answer carries that sentence, and the pane's head is where a
   // statement about a host belongs — a toast fades whether or not the fact
   // still holds, and a silent failure is the soft degrade AGENTS.md forbids.
-  for (const hostRecordSaved of [false, true]) {
-    it(`uses the decision result in the head and reopens without another ask (saved=${hostRecordSaved})`, async () => {
+  for (const { hostRecordSaved, method } of [
+    { hostRecordSaved: false, method: 'script' as const },
+    { hostRecordSaved: true, method: 'script' as const },
+    { hostRecordSaved: false, method: 'helper' as const },
+  ]) {
+    it(`uses the decision result in the head and reopens without another ask (method=${method}, saved=${hostRecordSaved})`, async () => {
       const openSSHSession = vi
         .fn()
         .mockRejectedValueOnce(
@@ -1132,12 +1136,13 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         .mockImplementation(() => Promise.resolve(makeSession()))
       const setIntegrationMethod = vi.fn().mockResolvedValue({
         fingerprint: 'SHA256:trusted',
-        method: 'script',
+        method,
         hostRecordSaved,
+        helperConsentSaved: method === 'helper',
       })
       const queue = new HelperConsentAskQueue((request) => {
         if (request)
-          void decideIntegrationMethod(request, 'script', {
+          void decideIntegrationMethod(request, method, {
             helperConsentAsks: queue,
             profileClient: { setIntegrationMethod },
             setHelperConsentAskBusy: vi.fn(),
@@ -1155,7 +1160,10 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
       const first = await mountTerminal(makeClipboard(), options, client)
       try {
         expect(openSSHSession).toHaveBeenCalledTimes(2)
-        const note = `The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.`
+        const note =
+          method === 'helper'
+            ? `The helper method is in force for this host, but the host’s method was not saved. Permission to deploy the helper was saved and can be reused after a restart without asking again.`
+            : `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use the previously saved method (or Auto if none) and any permission already saved for this machine.`
         if (hostRecordSaved) expect(first.tab.pane.textContent).not.toContain(note)
         else await vi.waitFor(() => expect(first.tab.pane.textContent).toContain(note))
         const second = await mountTerminal(makeClipboard(), options, client)

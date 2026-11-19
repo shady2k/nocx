@@ -271,3 +271,20 @@ func TestAnUnreachableProbeKeepsItsSentence(t *testing.T) {
 		t.Fatalf("err = %v, want the helper's own sentence carried through", err)
 	}
 }
+
+func TestHelperProbeLeaseCarriesHostKeyPin(t *testing.T) {
+	helper := &recordingHelperSource{}
+	probes := &helperProbes{local: helper, resolve: &recordingResolver{}}
+	lease, err := probes.acquire(context.Background(), "host.example", ssh.WithHostKeyPin("SHA256:approved"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := lease.Close(); closeErr != nil {
+			t.Errorf("close probe lease: %v", closeErr)
+		}
+	}()
+	if helper.asked[0].HostKeyFingerprint != "SHA256:approved" {
+		t.Fatalf("pin = %q", helper.asked[0].HostKeyFingerprint)
+	}
+}

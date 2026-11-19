@@ -11,6 +11,10 @@
       "description": "What to connect to and what to authenticate as, the same resolved shape `probe` and `open` take.",
       "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
     },
+    "hostKeyFingerprint": {
+      "description": "The previously accepted host key fingerprint bridge execution must match. Omitted or empty leaves verification to the ordinary known_hosts policy.",
+      "type": "string"
+    },
     "machine": {
       "description": "Which installed helper of that machine to run: the install DIRECTORY the coordinator installed into. It is the narrowest honest identity — a lane runs `<dir>/nocx-helper bridge <generation>` and nothing else — and it is the fact both of the coordinator's paths already hold: the install it just completed, and the binary path a reopened session's durable route carries.",
       "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/machine"

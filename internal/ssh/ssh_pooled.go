@@ -77,6 +77,9 @@ type PooledSpec struct {
 	Config *gossh.ClientConfig
 	// Prepare rebuilds request-bound callbacks for each supervisor-owned attempt.
 	Prepare func(context.Context) (*gossh.ClientConfig, []PooledHop, error)
+	// Admit is the caller's pure, nonblocking check before a supervised lease
+	// is issued, including when the transport is already warm.
+	Admit func(*PooledConn) error
 	// Route is the hosts this destination is reached THROUGH, in dial order:
 	// Route[0] is dialed from this machine, each next hop through the one
 	// before it, and this spec's own destination through the last. Empty for a

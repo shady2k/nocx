@@ -993,6 +993,7 @@ func New(opts ...Option) (*App, error) {
 	// read it, and without this line the mode is the profile's again on every
 	// run while the tests still prove the store works.
 	hostModes := hostmode.NewStore(logger, docStore, "host-modes.json")
+	localOpener.modes = hostModes
 	// The helper-backed git factory and the registry that owns its live
 	// helper channels (remote-helper design D8, D25): one registry serves
 	// both the factory's per-session helpers and the uninstall surface's
@@ -1032,7 +1033,6 @@ func New(opts ...Option) (*App, error) {
 	// — the narrowness rule this file's own comments keep.
 	helperReg.tools = overHelper
 	helperReg.modes = hostModes
-	helperReg.hostKeys = sshClient
 	helperReg.registry = sess
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is

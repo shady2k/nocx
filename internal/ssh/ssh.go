@@ -111,7 +111,9 @@ var ErrCommandTooLong = errors.New("ssh: the remote command is longer than the b
 type RefusalReason string
 
 const (
-	ReasonNone                   RefusalReason = ""
+	ReasonNone RefusalReason = ""
+	// No authenticated host identity was available to authorise delivery.
+	ReasonHostKeyUnconfirmed     RefusalReason = "host-key-unconfirmed"
 	ReasonUnsupportedShell       RefusalReason = "unsupported-shell"
 	ReasonUnsupportedFishStartup RefusalReason = "unsupported-fish-startup"
 	ReasonNoSecureTemp           RefusalReason = "no-secure-temp"
@@ -439,12 +441,15 @@ type RemoteLauncher interface {
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
-	User         string
-	Port         int
-	KeyFile      string
-	UseAgent     bool
-	AuthMethods  []gossh.AuthMethod
-	KeyExchanges []string
+	// HostKeyFingerprint pins each acquired connection to the host identity
+	// approved for this operation, including reuse of a warm pooled connection.
+	HostKeyFingerprint string
+	User               string
+	Port               int
+	KeyFile            string
+	UseAgent           bool
+	AuthMethods        []gossh.AuthMethod
+	KeyExchanges       []string
 	// RemoteInstaller publishes the integration bundle on the far host, over
 	// the transport the carrier owns: this machine's helper since
 	// nocx-50w7p.15, which opens an sftp channel on the destination's pooled
@@ -608,6 +613,12 @@ type ConnectConfig struct {
 	// CredentialID identifies which credential this config was resolved from.
 	// Used by revocation to scope session matching by credential.
 	CredentialID string
+}
+
+// WithHostKeyPin requires the acquired connection to carry this host key.
+// An empty fingerprint leaves the operation unpinned.
+func WithHostKeyPin(fingerprint string) ConnectOption {
+	return func(c *ConnectConfig) { c.HostKeyFingerprint = fingerprint }
 }
 
 func WithUser(user string) ConnectOption {

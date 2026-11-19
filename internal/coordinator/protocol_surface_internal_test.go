@@ -139,7 +139,8 @@ func discoveryShapes() []string {
 // contractJSONs reads the window/coordinator JSON contracts recursively:
 // wire schemas, tools/ subschemas and OpenRPC. contracts/update is the signed
 // artifact channel, not this protocol: build identity cannot require a
-// window/coordinator compatibility bump (nocx-1ebrs.66.1.11).
+// window/coordinator compatibility bump (nocx-1ebrs.66.1.11). contracts/helper
+// belongs to the helper/coordinator wire, fenced separately by proto.Version.
 func contractJSONs(t *testing.T) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
@@ -148,7 +149,7 @@ func contractJSONs(t *testing.T) map[string][]byte {
 			return err
 		}
 		if d.IsDir() {
-			if path == filepath.Join(contractsDir, "update") {
+			if path == filepath.Join(contractsDir, "update") || path == filepath.Join(contractsDir, "helper") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -836,9 +837,20 @@ func TestTheSurfaceIgnoresOperationCatalogueMetadataButNotTheWire(t *testing.T) 
 	}
 }
 
-// TestTheSurfaceFilesExcludeOnlyTheOperationCatalogue checks the rule against
-// the real tree: the catalogue files are absent, and the OpenRPC entry the
-// surface does hash carries no projection.
+func TestHelperContractsAreOutsideTheCoordinatorProtocol(t *testing.T) {
+	files := contractJSONs(t)
+	for name := range files {
+		if strings.HasPrefix(name, "contracts/helper/") {
+			t.Fatalf("helper contract %s belongs to proto.Version, not the window protocol", name)
+		}
+	}
+	if _, ok := files["contracts/openrpc.json"]; !ok {
+		t.Fatal("window OpenRPC contract missing from surface")
+	}
+}
+
+// TestTheSurfaceFilesExcludeOnlyTheOperationCatalogue checks the catalogue
+// exclusion against the real tree; OpenRPC still carries the wire method set.
 func TestTheSurfaceFilesExcludeOnlyTheOperationCatalogue(t *testing.T) {
 	files := protocolSurfaceFiles(t)
 	if _, ok := files["contracts/operations.json"]; ok {

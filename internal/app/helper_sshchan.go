@@ -106,9 +106,10 @@ func (h *sshOverHelper) LaneConn(ctx context.Context, host string, machine proto
 		return nil, err
 	}
 	lane, err := local.OpenLane(ctx, proto.LaneParams{
-		Destination: ssh.WireDestination(target),
-		Machine:     machine,
-		Generation:  generation,
+		HostKeyFingerprint: hostKeyPinFromOptions(opts),
+		Destination:        ssh.WireDestination(target),
+		Machine:            machine,
+		Generation:         generation,
 	})
 	if err != nil {
 		return nil, h.translate(host, err)
@@ -384,8 +385,9 @@ func (h *sshOverHelper) openChannel(ctx context.Context, kind proto.ChannelKind,
 		return nil, err
 	}
 	stream, err := client.OpenChannel(ctx, proto.OpenChannelParams{
-		Destination: ssh.WireDestination(target),
-		Kind:        kind,
+		HostKeyFingerprint: hostKeyPinFromOptions(opts),
+		Destination:        ssh.WireDestination(target),
+		Kind:               kind,
 		// FALSE, and it is not a default: a channel open has no caller that
 		// can answer the accept flow (that flow belongs to a pane open, where
 		// a person is watching). An unknown host key therefore comes back as
@@ -438,6 +440,13 @@ func hostKeyErrorFromHelperRefusal(err error) error {
 		}
 	}
 	return err
+}
+
+// hostKeyPinMismatch distinguishes a stale integration decision from a trust
+// failure. Genuine known_hosts failures must still reach the trust flow.
+func hostKeyPinMismatch(err error) bool {
+	var refusal *helperclient.RefusalError
+	return errors.As(err, &refusal) && refusal.Code == proto.ErrCodeHostKeyPinMismatch
 }
 
 // definitiveAuthRejection reports whether err is the far side's definitive
@@ -729,7 +738,8 @@ func (h *sshOverHelper) OpenFarPaneToolSocket(ctx context.Context, host string, 
 		return proto.ForwardID{}, err
 	}
 	res, err := client.OpenToolSocket(ctx, proto.ToolSocketParams{
-		Destination: ssh.WireDestination(target),
+		HostKeyFingerprint: hostKeyPinFromOptions(opts),
+		Destination:        ssh.WireDestination(target),
 		// FALSE, and not a default: the accept flow belongs to a pane open,
 		// where a person is watching. This op runs after one, on a connection
 		// the helper has already authenticated, so an unknown key here is the

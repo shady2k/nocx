@@ -12,8 +12,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -453,35 +455,89 @@ func (refusingDocumentStore) Delete(string) error            { return errors.New
 // refused answer: the store keeps it for this run, so the retried open uses it
 // and does not ask again — and the response SAYS it was not saved, because the
 // pane's head repeats that sentence (terminal-content.ts) and a silent failure
-// would be a person told nothing about a host that will be asked again.
+// would leave the person unaware that the chosen mode was not saved.
 func TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo(t *testing.T) {
-	modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
-	srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+	for _, method := range []hostmode.Mode{hostmode.Script, hostmode.Raw} {
+		t.Run(string(method), func(t *testing.T) {
+			modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
+			srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
+
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": "SHA256:abc",
+				"method":      string(method),
+			})
+			var result struct {
+				Result struct {
+					HostRecordSaved    *bool `json:"hostRecordSaved"`
+					HelperConsentSaved *bool `json:"helperConsentSaved"`
+				} `json:"result"`
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &result); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if result.Error != nil {
+				t.Fatalf("an applied answer must succeed: %s", resp)
+			}
+			if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
+				t.Fatalf("want result.hostRecordSaved=false: %s", resp)
+			}
+			if result.Result.HelperConsentSaved == nil || *result.Result.HelperConsentSaved {
+				t.Fatalf("want result.helperConsentSaved=false: %s", resp)
+			}
+			// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
+			// retries does not fall back into the same dialog.
+			if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != method {
+				t.Fatalf("host record after a failed write = %q/%v, want the answer kept for this run", mode, ok)
+			}
+		})
+	}
+}
+
+func TestIntegrationMethod_HelperGrantSurvivesFailedModeWrite_OverTheWireConformsToContract(t *testing.T) {
+	_, logger := logtest.New(t)
+	dir := t.TempDir()
+	docs := storage.NewDocumentStore(dir)
+	grants := consent.NewStore(logger, docs, "consent.json")
+	modes := hostmode.NewStore(logger, refusingDocumentStore{}, "host-modes.json")
+	srv, _ := startIntegrationMethodServerWithStore(t, grants, nil, modes)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
-
 	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "script",
+		"fingerprint": "SHA256:partial", "method": "helper",
 	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("applied answer must succeed: %s", resp)
+	}
 	var result struct {
-		Result struct {
-			HostRecordSaved *bool `json:"hostRecordSaved"`
-		} `json:"result"`
-		Error *jsonrpcErrorObj `json:"error"`
+		HostRecordSaved    *bool `json:"hostRecordSaved"`
+		HelperConsentSaved *bool `json:"helperConsentSaved"`
 	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(envelope.Result, &result); err != nil {
+		t.Fatal(err)
 	}
-	if result.Error != nil {
-		t.Fatalf("an applied answer must succeed: %s", resp)
+	if result.HostRecordSaved == nil || *result.HostRecordSaved || result.HelperConsentSaved == nil || !*result.HelperConsentSaved {
+		t.Fatalf("want separate mode=false and grant=true outcomes: %s", resp)
 	}
-	if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
-		t.Fatalf("want result.hostRecordSaved=false: %s", resp)
+	validateJSON(t, loadSchema(t, "connections.setIntegrationMethod.schema.json"), envelope.Result, "partial save result")
+	if mode, ok := modes.Lookup("SHA256:partial"); !ok || mode != hostmode.Helper {
+		t.Fatalf("current mode = %q/%v", mode, ok)
 	}
-	// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
-	// retries does not fall back into the same dialog.
-	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
-		t.Fatalf("host record after a failed write = %q/%v, want the answer kept for this run", mode, ok)
+	reopenedModes := hostmode.NewStore(logger, storage.NewDocumentStore(dir), "host-modes.json")
+	if mode, ok := reopenedModes.Lookup("SHA256:partial"); ok {
+		t.Fatalf("mode unexpectedly persisted: %q", mode)
+	}
+	reopenedGrants := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
+	if grant, ok := reopenedGrants.Lookup("SHA256:partial"); !ok || grant != consent.Granted {
+		t.Fatalf("durable grant = %q/%v", grant, ok)
 	}
 }

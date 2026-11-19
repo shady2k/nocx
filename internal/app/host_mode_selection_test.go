@@ -112,6 +112,9 @@ func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: openHoldingLease: %v", claim, err)
 			}
+			if provider.installPin != "SHA256:fake" {
+				t.Errorf("install pin = %q, want consent-approved key", provider.installPin)
+			}
 			if !selected || opened.Session == nil {
 				t.Fatalf("%s: selected=%v session=%v, want the far helper serving this host", claim, selected, opened.Session)
 			}
@@ -293,4 +296,50 @@ func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 		t.Fatal("selected = false, want the ask once the editor chose auto")
 	}
 	_ = askOf(t, err)
+}
+
+type failingHostModeWrites struct{ storage.DocumentStore }
+
+func (f failingHostModeWrites) Write(string, any) error { return errors.New("disk is full") }
+
+func TestFailedHostModeWriteReopensPreviouslySavedMethod(t *testing.T) {
+	logger := log.NewSlogAdapter(discardLogger(t))
+	doc := storage.NewDocumentStore(t.TempDir())
+	modes := hostmode.NewStore(logger, doc, "host-modes.json")
+	mustRecordHostMode(t, modes, "SHA256:fake", hostmode.Raw)
+	modes = hostmode.NewStore(logger, failingHostModeWrites{doc}, "host-modes.json")
+	if err := modes.Set("SHA256:fake", hostmode.Script); !errors.Is(err, hostmode.ErrNotSaved) {
+		t.Fatalf("write = %v", err)
+	}
+	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	r := newTestRegistry(t, provider, nil)
+	r.modes = modes
+	cfg := remoteConfigFor()
+	_, hold, selected, err := r.openHoldingLease(context.Background(), cfg, "volatile")
+	hold.release()
+	if err != nil || selected || cfg.Remote.IntegrationMode != string(hostmode.Script) {
+		t.Fatalf("current run: selected=%v err=%v mode=%q", selected, err, cfg.Remote.IntegrationMode)
+	}
+	r.modes = hostmode.NewStore(logger, doc, "host-modes.json")
+	cfg = remoteConfigFor()
+	_, hold, selected, err = r.openHoldingLease(context.Background(), cfg, "reopened")
+	hold.release()
+	if err != nil || selected || cfg.Remote.IntegrationMode != string(hostmode.Raw) {
+		t.Fatalf("reopened: selected=%v err=%v mode=%q", selected, err, cfg.Remote.IntegrationMode)
+	}
+}
+
+func TestHelperInstallPinMismatchWritesNothing(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer(t), installFail: refusalWith("host-key-pin-mismatch", nil)}
+	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
+	r := newTestRegistry(t, provider, store)
+	mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)
+	_, hold, _, err := r.openHoldingLease(context.Background(), remoteConfigFor(), "replacement")
+	hold.release()
+	if !hostKeyPinMismatch(err) {
+		t.Fatalf("install failure lost pin mismatch: %v", err)
+	}
+	if provider.installPin != "SHA256:fake" || provider.install != nil || provider.laneCount() != 0 {
+		t.Fatalf("install reached replacement host: pin=%q fs=%v lanes=%d", provider.installPin, provider.install, provider.laneCount())
+	}
 }

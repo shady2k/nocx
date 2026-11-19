@@ -45,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // remoteShellSetupTimeout is a deliberate spawn-to-first-PTY-output budget,
@@ -150,6 +151,8 @@ type hostedSpawnResult struct {
 	// ADR-0004). The result is therefore the only place the fact can be
 	// carried to the party that tells the person.
 	PublishFailure shellintegration.PublishFailureReason
+	// IntegrationReason is a coordinator-side refusal before delivery.
+	IntegrationReason ssh.RefusalReason
 }
 
 // spawnFunc is the ONE act that differs between the panes this opener hosts:

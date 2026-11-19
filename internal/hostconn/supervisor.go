@@ -47,6 +47,10 @@ type Plan struct {
 	Carrier  string
 	Key      Key
 	Material any
+	// Admit checks this caller's admission before a lease is issued. It runs
+	// under the supervisor mutex and must be pure and nonblocking. A refusal
+	// leaves the connection and the admitted holders' plan unchanged.
+	Admit func(Link) error
 	// Holds is what the holder that is acquiring declares about itself — a
 	// plain shell or nothing. The supervisor counts it, because nobody else
 	// can: the closing policy may not end a shell that would die with the
@@ -677,9 +681,6 @@ const maxSteps = 32
 // exist: before the first call there is a supervisor and no connection, which
 // is the state a person is in while the first dial runs.
 func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
-	s.mu.Lock()
-	s.plan, s.planContext = plan, context.WithoutCancel(ctx)
-	s.mu.Unlock()
 	for {
 		var (
 			fenced   chan struct{}
@@ -736,11 +737,15 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 					// or the caller's deadline.
 					changed = s.changed
 				} else {
-					// A HOLDER THAT STATES A CADENCE REACHES THE ONE PROBER
-					// (design §5.3). The shipped open order dials through the
-					// shell-integration publish before the shell exists, so the
-					// profile's number arrives second — and it is the shell's,
-					// the one a person set.
+					if plan.Admit != nil {
+						if err := plan.Admit(l.link); err != nil {
+							s.mu.Unlock()
+							return nil, err
+						}
+					}
+					// The reconnect plan belongs to an admitted holder from this
+					// lease's issue until the next lease is issued.
+					s.plan, s.planContext = plan, context.WithoutCancel(ctx)
 					l.adoptInterval(plan.ProbeInterval)
 					l.holders++
 					if plan.Holds&HoldsPlainShell != 0 {
@@ -787,6 +792,8 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		}
 		flight := make(chan struct{})
 		s.dialing = flight
+		beforeState, beforeSince, beforeLook := s.state, s.stateSince, s.lookAnsweredAt
+		beforeSteps := append([]Step(nil), s.steps...)
 		s.beginAttempt()
 		dialStarted := s.clock.Now()
 		s.mu.Unlock()
@@ -805,9 +812,15 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		}
 
 		s.mu.Lock()
-		s.dialing = nil
-		close(flight)
 		if err != nil {
+			// Before the first lease, the first failed dial owns recovery.
+			// Once a lease is issued, only another admitted holder may
+			// replace its reconnect plan.
+			if s.planContext == nil {
+				s.plan, s.planContext = plan, context.WithoutCancel(ctx)
+			}
+			s.dialing = nil
+			close(flight)
 			// The carrier has already said what kind of failure this was
 			// through the sink (refused, waiting for a person, or lost); a
 			// carrier that said nothing leaves the attempt where its last stage
@@ -816,6 +829,27 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			s.mu.Unlock()
 			return nil, err
 		}
+		if plan.Admit != nil {
+			if err := plan.Admit(link); err != nil {
+				s.state, s.stateSince, s.lookAnsweredAt = beforeState, beforeSince, beforeLook
+				s.steps = beforeSteps
+				close(s.changed)
+				s.changed = make(chan struct{})
+				s.notifyLocked()
+				s.mu.Unlock()
+				// Keep the dial fenced until the unowned pool reference is
+				// closed, so another acquire cannot join it during teardown.
+				_ = link.Close()
+				s.mu.Lock()
+				s.dialing = nil
+				close(flight)
+				s.mu.Unlock()
+				return nil, err
+			}
+		}
+		s.dialing = nil
+		close(flight)
+		s.plan, s.planContext = plan, context.WithoutCancel(ctx)
 		live := &live{
 			link: link, holders: 1, route: plan.Route, rideHops: plan.Route,
 			stop:        make(chan struct{}),

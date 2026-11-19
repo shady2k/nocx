@@ -197,7 +197,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				host:    sess.Host(),
 				account: accountFromOptions(sess.SSHOptions()),
 				fp:      sess.HostKeyFingerprint(),
-				opts:    sess.SSHOptions(),
+				opts:    append(append([]ssh.ConnectOption(nil), sess.SSHOptions()...), ssh.WithHostKeyPin(sess.HostKeyFingerprint())),
 				install: installed,
 			}}
 		default:
@@ -431,7 +431,8 @@ func probeHelperPlatformHeld(ctx context.Context, host string, opts []ssh.Connec
 // install lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
 func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
-	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source, platform)
+	opts := append(append([]ssh.ConnectOption(nil), sess.SSHOptions()...), ssh.WithHostKeyPin(sess.HostKeyFingerprint()))
+	return installHelperAt(context.Background(), sess.Host(), opts, lanes, source, platform)
 }
 
 func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
@@ -678,10 +679,7 @@ type helperRegistry struct {
 	// and it is a different question from consent beside it. Nil (a test
 	// double, or a build that wired none) reads every host as auto — not yet
 	// answered — which is the ask.
-	modes    *hostmode.Store
-	hostKeys interface {
-		KnownHostsFingerprintsFor(context.Context, string, *ssh.ConnectConfig) ([]string, error)
-	}
+	modes     *hostmode.Store
 	registry  *session.Reg
 	lifecycle lifecyclechannel.Kernel
 	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
@@ -1032,15 +1030,10 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 			fingerprint = offeredHostKeyFingerprint(err)
 		}
 		mode = hostModeFor(r.modes, fingerprint)
-		if fingerprint == "" && r.hostKeys != nil {
-			if fingerprints, keyErr := r.hostKeys.KnownHostsFingerprintsFor(ctx, cfg.Host, cfg.Remote); keyErr == nil {
-				for _, known := range fingerprints {
-					if recorded, ok := r.modes.Lookup(known); ok {
-						mode = recorded
-						break
-					}
-				}
-			}
+		if fingerprint == "" {
+			// known_hosts lists acceptable keys, not the key this connection
+			// authenticated. Defer delivery until the local opener has a lease.
+			mode = hostmode.Raw
 		}
 		cfg.Remote.IntegrationMode = string(mode)
 		return transport.HostedSessionOpen{}, hold, false, nil
@@ -1157,6 +1150,7 @@ func offeredHostKeyFingerprint(err error) string {
 // would be a second answer to "what did the probe say", and on a host whose
 // answer is expensive to obtain that second answer is another login.
 func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, claim string, opts []ssh.ConnectOption, platform deploy.Platform, fingerprint string) (transport.HostedSessionOpen, bool, error) {
+	opts = append(append([]ssh.ConnectOption(nil), opts...), ssh.WithHostKeyPin(fingerprint))
 	endInstall := diagnostics.Stage(ctx, diagnostics.StageInstall)
 	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
 	endInstall(err)

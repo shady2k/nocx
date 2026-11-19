@@ -266,7 +266,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
 func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*pooledConn, remoteEnd, error) {
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, p.HostKeyFingerprint, false, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -328,7 +328,17 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 	if err != nil {
 		return nil, err
 	}
+	var admit func(*ssh.PooledConn) error
+	if fingerprint != "" {
+		admit = func(pooled *ssh.PooledConn) error {
+			if pooled.Fingerprint() != fingerprint {
+				return &ssh.ErrHostKeyPinMismatch{Fingerprint: pooled.Fingerprint(), Expected: fingerprint}
+			}
+			return nil
+		}
+	}
 	lease, err := s.client.Acquire(ctx, ssh.PooledSpec{
+		Admit:    admit,
 		Host:     ep.Host,
 		Port:     ep.Port,
 		User:     ep.User,
@@ -709,6 +719,13 @@ func identityKey(id proto.SSHIdentity) string {
 // transport failure would leave a person staring at "could not open a channel"
 // while the sheet they needed was never raised.
 func classifyChannelError(err error) error {
+	var pinned *ssh.ErrHostKeyPinMismatch
+	if errors.As(err, &pinned) {
+		return &proto.Refusal{
+			Code: proto.ErrCodeHostKeyPinMismatch, Message: pinned.Error(),
+			Details: hostKeyEvidence(pinned.Addr, pinned.Addr, pinned.KeyAlgo, pinned.Key, pinned.Fingerprint, pinned.Expected),
+		}
+	}
 	var refusal *proto.Refusal
 	if errors.As(err, &refusal) {
 		return refusal

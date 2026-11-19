@@ -398,6 +398,9 @@ type localHelperOpener struct {
 	// not carry (nocx-y6fh7 items 5, 6). Nil is a legitimate wiring for a
 	// test that exercises no consumer of HostKeyFingerprint.
 	hostKeys *hostKeyObserver
+	// modes is the same host record the registry reads, resolved again from
+	// the authenticated lease before this opener makes any remote changes.
+	modes *hostmode.Store
 
 	mu sync.Mutex
 	// installed is what App.Start put on this machine, and dir is the
@@ -897,6 +900,15 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		}
 		status, reason = localIntegrationStatus(launch, res.LifecycleLane)
 		o.watchForReplacement(res.Session, launch.Pid, shell)
+	} else if res.IntegrationReason != ssh.ReasonNone {
+		status, reason = transport.IntegrationConventional, res.IntegrationReason
+		shell = remote.Shell
+		if shell == "" {
+			shell = string(cfg.Remote.Shell)
+		}
+		if shell == "" {
+			shell = "unknown"
+		}
 	}
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
 		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid), remote == nil)
@@ -1032,13 +1044,6 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// facts are written by different statements in different files.
 		return hostedSpawnResult{}, errors.New("open an ssh pane on this machine's helper: the config carries no destination")
 	}
-	// A raw shell is deliberately launched without the integration script, so
-	// it cannot authenticate the lifecycle channel. Ask the mode's owner before
-	// hostedSpawn creates an adapter or launch; local sessions retain their
-	// existing default and never pass through this route.
-	if !hostmode.Mode(cfg.Remote.IntegrationMode).DeliversScripts() {
-		spawn.lifecycle = nil
-	}
 	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
@@ -1108,11 +1113,35 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// connection — which is what this file's own header and
 	// helper_publish.go's already claim happens ("one authentication for one
 	// machine") and what the shared pool key (AD-4) exists for.
-	if remote := cfg.Remote; remote != nil && remote.RemoteInstaller != nil &&
-		hostmode.Mode(remote.IntegrationMode).DeliversScripts() {
+	var authenticatedFingerprint string
+	var integrationReason ssh.RefusalReason
+	if refusal, _ := ctx.Value(sshIntegrationRefusalKey{}).(error); hostKeyPinMismatch(refusal) {
+		// The approved install met a different host. Do not re-read that host's
+		// method and turn this same open back into an integration attempt.
+		cfg.Remote.IntegrationMode = string(hostmode.Raw)
+		cfg.Remote.HostKeyFingerprint = ""
+		integrationReason = ssh.ReasonHostKeyUnconfirmed
+	}
+	if remote := cfg.Remote; integrationReason == ssh.ReasonNone && remote != nil && (o.modes != nil ||
+		(remote.RemoteInstaller != nil && hostmode.Mode(remote.IntegrationMode).DeliversScripts())) {
 		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
 		hold, herr := o.holdConnection(ctx, target)
 		endHold(herr)
+		if herr == nil {
+			authenticatedFingerprint = hold.Fingerprint()
+		}
+		if o.modes != nil {
+			// Only an authenticated lease identifies the host whose mode may
+			// authorise publication and launch. A failed hold or missing key
+			// must not reuse another acceptable key's answer.
+			mode := hostmode.Raw
+			if herr == nil && hold.Fingerprint() != "" {
+				mode = hostModeFor(o.modes, authenticatedFingerprint)
+			} else {
+				integrationReason = ssh.ReasonHostKeyUnconfirmed
+			}
+			remote.IntegrationMode = string(mode)
+		}
 		if herr != nil {
 			// A DEFINITIVE REJECTION IS THE ANSWER, NOT A SETBACK
 			// (nocx-1ebrs.18). The hold is an optimisation, so every failure
@@ -1138,6 +1167,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 			defer func() { _ = hold.Close() }()
 		}
 	}
+	// A raw shell cannot authenticate the integration lifecycle channel.
+	if !hostmode.Mode(cfg.Remote.IntegrationMode).DeliversScripts() {
+		spawn.lifecycle = nil
+	}
 	// WHAT THE PERSON IS TOLD WHEN THE COPY DID NOT LAND (nocx-1kejz.4).
 	//
 	// The reason is taken HERE, at the branch that already had to decide
@@ -1153,9 +1186,17 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// vocabulary in internal/shellintegration is what crosses.
 	publishFailure := shellintegration.PublishFailureNone
 	endPublish := diagnostics.Stage(ctx, diagnostics.StagePublish)
+	cfg.Remote.HostKeyFingerprint = authenticatedFingerprint
 	perr := o.publishForPane(ctx, cfg)
 	endPublish(perr)
 	if perr != nil {
+		if hostKeyPinMismatch(perr) {
+			authenticatedFingerprint = ""
+			cfg.Remote.HostKeyFingerprint = ""
+			cfg.Remote.IntegrationMode = string(hostmode.Raw)
+			integrationReason = ssh.ReasonHostKeyUnconfirmed
+			spawn.lifecycle = nil
+		}
 		// AND A FAILED PUBLISH NEVER COSTS A SECOND AUTHENTICATION.
 		//
 		// A publish that failed on a connection which is UP — the far side
@@ -1206,6 +1247,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// round 3: the publish's own destination was the one that reached a
 		// person first, and it had no such stamp until this moved here).
 		Destination: ssh.WireDestination(target),
+		// Refuse a replacement connection presenting a different key.
+		HostKeyFingerprint: authenticatedFingerprint,
 		// The two facts the far launcher is built for, read off the config the
 		// registry accepted rather than off the caller's spec: the shell pin a
 		// profile may carry (nocx-pu4.1) and the integration mode the host
@@ -1267,6 +1310,19 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		params.Lifecycle = life
 		return spawn.client.SpawnSSH(ctx, params)
 	})
+	if err != nil && params.HostKeyFingerprint != "" && hostKeyPinMismatch(err) {
+		// The new key may be trusted, but it has not authorised this integration.
+		params.HostKeyFingerprint = ""
+		params.IntegrationMode = proto.SSHMode(hostmode.Raw)
+		params.Lifecycle = nil
+		cfg.Remote.HostKeyFingerprint = ""
+		cfg.Remote.IntegrationMode = string(hostmode.Raw)
+		spawn.lifecycle = nil
+		integrationReason = ssh.ReasonHostKeyUnconfirmed
+		res, err = spawn.run(ctx, cfg, func(ctx context.Context, _ *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+			return spawn.client.SpawnSSH(ctx, params)
+		})
+	}
 	if err != nil {
 		// A pane open that hit an unrecorded or changed host key is the
 		// coordinator's own accept-on-first-use flow waiting to be asked, not
@@ -1299,6 +1355,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// and the open's own error, which is the right answer there, is already on
 	// its way back.
 	res.PublishFailure = publishFailure
+	res.IntegrationReason = integrationReason
 	// THE CONNECTION THIS SHELL RIDES, carried to the adoption so a late one
 	// from a connection the pane has since left is refused (internal/panedriver's
 	// AdoptSession).
@@ -2062,6 +2119,10 @@ func (o *localHelperOpener) bindSSHConnection(ctx context.Context, cfg session.C
 	return binding, nil
 }
 
+// sshIntegrationRefusalKey carries only this open's refused fingerprint decision.
+// It must not persist: a new Connect action may authenticate and decide anew.
+type sshIntegrationRefusalKey struct{}
+
 // hostedOpeners is the one seam the transport asks, and the only thing in the
 // composition root that knows a destination has two possible helpers.
 //
@@ -2133,6 +2194,9 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 	}
 	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
 	defer hold.release()
+	if hostKeyPinMismatch(err) {
+		return h.local.OpenHosted(context.WithValue(ctx, sshIntegrationRefusalKey{}, err), cfg, claim)
+	}
 	if selected {
 		// A consent refusal created no shell. Its probe-only connection must
 		// not outlive the open while the person decides; the answered retry

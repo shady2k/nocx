@@ -277,7 +277,7 @@ func (rp *readoptPass) stageReadopt(ctx context.Context, p content.PendingSessio
 	}
 	f := &sessionFactory{
 		reg: rp.registry, sid: session.ID(p.SessionID), host: p.Host, account: p.Account,
-		opts:    opts,
+		opts:    append(opts, ssh.WithHostKeyPin(p.Fingerprint)),
 		install: installedHelper{dir: path.Dir(p.HelperCommand), generation: p.Generation, command: p.HelperCommand},
 	}
 	return rp.registry.stageReadoptHelper(ctx, f)
@@ -361,7 +361,7 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	// helper was installed into, whatever a later layout calls it.
 	f := &sessionFactory{
 		reg: rp.registry, sid: session.ID(p.SessionID), host: p.Host,
-		account: p.Account, opts: opts,
+		account: p.Account, opts: append(opts, ssh.WithHostKeyPin(p.Fingerprint)),
 		install: installedHelper{
 			dir:        path.Dir(p.HelperCommand),
 			generation: p.Generation,

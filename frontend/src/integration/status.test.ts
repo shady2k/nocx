@@ -56,6 +56,12 @@ const fact = (over: Partial<SessionIntegrationChanged> = {}): SessionIntegration
 })
 
 describe('what the product says about a degraded session', () => {
+  it('explains that an unconfirmed host key prevented integration delivery', () => {
+    const message = integrationMessage(fact({ reason: 'host-key-unconfirmed' }), 'unknown')
+    expect(message!.description).toContain('host key')
+    expect(message!.description).toContain('not delivered')
+  })
+
   // The loops below are all `for (const reason of REASONS)`, so a vocabulary
   // that came back empty would make every one of them pass while asserting
   // nothing. The count is stated here so that failure is loud.

@@ -110,12 +110,16 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 // scripted is also the counter `spawned()` reads, so a caller with a spawner
 // of its own passes the one it delegates to; it is never nil on this path.
 func startLocalEndpointWith(t *testing.T, dir, generation string,
-	spawner helpersession.Spawner, scripted *scriptedSpawner,
+	spawner helpersession.Spawner, scripted *scriptedSpawner, extra ...host.Service,
 ) *fakeLocalEndpoint {
 	t.Helper()
 	ln, err := endpoint.Listen(dir, proto.GenerationID(generation))
 	if err != nil {
 		t.Fatalf("serving this machine's endpoint at %s: %v", dir, err)
+	}
+	sshSpawner := helpersession.SSHSpawner(scripted)
+	if candidate, ok := spawner.(helpersession.SSHSpawner); ok {
+		sshSpawner = candidate
 	}
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(generation),
@@ -124,7 +128,7 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 		// `spawn-ssh` on this endpoint is refused as unavailable, so no test
 		// built here can open an ssh pane for this machine's daemon to hold —
 		// which is the shape the pane-screen owner must answer for.
-		SSHSpawner: scripted,
+		SSHSpawner: sshSpawner,
 		Log:        discardLogger(t),
 	})
 	// The daemon ends with the test, so the sessions it holds do too
@@ -155,6 +159,9 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 			h := host.New(conn, conn, generation, "instance-1", discardLogger(t))
 			h.Register(hostsvc.New(localgit.NewFactory()))
 			h.Register(svc)
+			for _, service := range extra {
+				h.Register(service)
+			}
 			release := svc.Bind(h)
 			defer release()
 			_ = h.Serve(ctx)

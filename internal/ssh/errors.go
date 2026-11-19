@@ -114,6 +114,21 @@ func (e *ErrHostKeyMismatch) Error() string {
 		e.Addr, e.Fingerprint, e.Expected)
 }
 
+// ErrHostKeyPinMismatch is returned when a host presents a different key
+// from the caller's approved fingerprint. Unlike ErrHostKeyMismatch, this
+// does not reject the host's ordinary known_hosts trust decision.
+type ErrHostKeyPinMismatch struct {
+	Addr        string
+	KeyAlgo     string
+	Fingerprint string
+	Expected    string
+	Key         []byte
+}
+
+func (e *ErrHostKeyPinMismatch) Error() string {
+	return "the host key does not match the approved fingerprint"
+}
+
 // ErrUnknownHostKey is returned when the remote host is not present in
 // known_hosts at all. The UI should prompt the user to accept and add it.
 type ErrUnknownHostKey struct {

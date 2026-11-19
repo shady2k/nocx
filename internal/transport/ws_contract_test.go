@@ -1534,9 +1534,10 @@ func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
 		for _, saved := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/saved=%t", method, saved), func(t *testing.T) {
 				dto := integrationMethodResult{
-					Fingerprint:     "SHA256:abc",
-					Method:          method,
-					HostRecordSaved: saved,
+					Fingerprint:        "SHA256:abc",
+					Method:             method,
+					HostRecordSaved:    saved,
+					HelperConsentSaved: method == "helper",
 				}
 				raw, err := json.Marshal(dto)
 				if err != nil {
@@ -1576,10 +1577,14 @@ func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testin
 			}
 			validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
 			var result struct {
-				HostRecordSaved *bool `json:"hostRecordSaved"`
+				HostRecordSaved    *bool `json:"hostRecordSaved"`
+				HelperConsentSaved *bool `json:"helperConsentSaved"`
 			}
 			if err := json.Unmarshal(envelope.Result, &result); err != nil {
 				t.Fatal(err)
+			}
+			if result.HelperConsentSaved == nil || !*result.HelperConsentSaved {
+				t.Fatalf("want helperConsentSaved=true: %s", resp)
 			}
 			if result.HostRecordSaved == nil || *result.HostRecordSaved != saved {
 				t.Fatalf("want hostRecordSaved=%t: %s", saved, resp)
@@ -8040,6 +8045,7 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 		{"exec refused, the channel alive", ssh.ReasonExecRefused},
 		{"exec accepted and substituted", ssh.ReasonExecSubstituted},
 		{"the SFTP subsystem refused", ssh.ReasonPublishUnavailable},
+		{"the authenticated host key was unavailable", ssh.ReasonHostKeyUnconfirmed},
 		{"the lifecycle channel refused", ssh.ReasonChannelUnavailable},
 		{"an open channel severed mid-frame", ssh.ReasonBootstrapInterrupted},
 		// The bootstrap's own closed set. The first is the one the brief

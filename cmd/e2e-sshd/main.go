@@ -60,6 +60,8 @@
 //	                        e2e/ssh-helper-happy-path.spec.ts, whose first
 //	                        criterion is that a pane and Files on one host
 //	                        share ONE connection (nocx-50w7p.6).
+//	HELPERKILL=<path>       the gate this run watches for a kill cue: a new
+//	                        content there kills the far helper daemon (below)
 //	READY
 //
 // Fault switches, for the tests that need the far side to be the broken thing:
@@ -77,6 +79,16 @@
 //	                        duration, such as 2s): a host that lets a person in
 //	                        late but does let them in, which is not the same
 //	                        condition as one that refuses them.
+//
+// The far helper's death, on cue, is not a flag: every run announces the path
+// it watches as HELPERKILL=<path>, and each distinct content written there is
+// one cue that SIGKILLs the helper daemon installed under this account's home —
+// the process whose command is `<home>/.nocx/helper/<generation>/nocx-helper
+// serve`, and nothing else. The SSH transport is untouched, which is the whole
+// point: the daemon's death and the connection's life are different facts
+// (design §5.10, lifecycle scenario 4). Each cue is answered with
+// HELPERKILLED=<pid> per process signalled and a final HELPERKILLDONE=<n>; a
+// process table that could not be read is HELPERKILLFAILED= and a zero count.
 package main
 
 import (
@@ -298,7 +310,19 @@ func run() error {
 		printLine("MARKER=" + marker)
 		printLine("HOSTILE_B64=" + base64.StdEncoding.EncodeToString([]byte(hostile)))
 	}
+	// The far helper's kill switch: a path a spec writes to ask this host to
+	// kill the helper daemon it runs for this account. Announced before READY
+	// so a spec never has to guess it, and armed only once READY has been said.
+	helperKillDir, err := os.MkdirTemp("", "nocx-e2e-sshd-kill-*")
+	if err != nil {
+		return fmt.Errorf("helper kill gate: %w", err)
+	}
+	helperKillPath := filepath.Join(helperKillDir, "cue")
+	printLine("HELPERKILL=" + helperKillPath)
+	helperKill := newHelperKillGate(helperKillPath, accountHome())
+	helperKill.seed()
 	printLine("READY")
+	go helperKill.watch()
 
 	acceptor(ln, f, func(conn net.Conn) *gossh.ServerConfig {
 		// CONN= is per connection: printed when the client's first userauth

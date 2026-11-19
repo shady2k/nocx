@@ -341,3 +341,30 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
     assert.ok(!code.includes(name), `${name} is written in ci.yml; the selection has one owner`)
   }
 })
+
+test('CI runs the changed-spec repeat regression tests', () => {
+  const workflow = readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8')
+  const runLines = workflow.split('\n').filter((line) => /^\s+run:/.test(line))
+  assert.ok(
+    runLines.some((line) =>
+      /\bnode --test\s+.*\bscripts\/repeat-changed-specs\.test\.mjs(?:\s|$)/.test(line),
+    ),
+    'no CI run line runs scripts/repeat-changed-specs.test.mjs',
+  )
+})
+
+test('changed e2e repeats follow the ordinary run on both chromium legs outside quarantine', () => {
+  const workflow = readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8')
+  const job = workflow.slice(workflow.indexOf('  ci-e2e:'))
+  assert.match(job, /timeout-minutes: 90/)
+  assert.match(job, /shard: \[1, 2\]/)
+  const repeatAt = job.indexOf('- name: Repeat the specs this pull request adds or changes')
+  assert.ok(job.indexOf('scripts/ci-run-logged.sh "e2e-') > -1)
+  assert.ok(repeatAt > job.indexOf('scripts/ci-run-logged.sh "e2e-'))
+  const step = job.slice(repeatAt, job.indexOf('\n\n', repeatAt))
+  assert.match(step, /matrix.project == 'chromium'/)
+  assert.match(step, /SHARD_NUMBER: \$\{\{ matrix.shard \}\}/)
+  assert.match(step, /REPEAT_SPECS: \$\{\{ needs.changes.outputs.e2e_specs \}\}/)
+  assert.match(step, /run: node scripts\/repeat-changed-specs.mjs/)
+  assert.doesNotMatch(step, /ci-run-logged|quarantine/)
+})

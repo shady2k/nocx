@@ -76,6 +76,10 @@
     {
       "test": "job:ci-backend (with-secret-service)#828",
       "bead": "nocx-f7jk1"
+    },
+    {
+      "test": "e2e:e2e/transcript-scroll-budget.spec.ts › long transcript scroll budget › measures 500 blocks and preserves native selection/search",
+      "bead": "nocx-o8p3b"
     }
   ]
 }

@@ -18,11 +18,23 @@ export function collectReport(report, project) {
           const id = spec.id
           if (!id) throw new Error(`Playwright report has a test without an id: ${spec.title}`)
           if (cases.has(id)) throw new Error(`duplicate Playwright test id in reports: ${id}`)
-          const duration = (test.results ?? []).reduce(
-            (sum, result) => sum + (Number.isFinite(result.duration) ? result.duration / 1000 : 0),
-            0,
-          )
-          cases.set(id, { file: `e2e/${specFile.replaceAll('\\', '/')}`, duration })
+          let duration = 0
+          let measuredDuration = 0
+          let hasTiming = false
+          for (const result of test.results ?? []) {
+            if (!Number.isFinite(result.duration)) continue
+            duration += result.duration / 1000
+            if (result.status !== 'skipped') {
+              measuredDuration += result.duration / 1000
+              hasTiming = true
+            }
+          }
+          cases.set(id, {
+            file: `e2e/${specFile.replaceAll('\\', '/')}`,
+            duration,
+            measuredDuration,
+            hasTiming,
+          })
         }
       }
       visit(suite.suites, suiteFile)

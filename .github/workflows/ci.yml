@@ -1217,7 +1217,7 @@ jobs:
 
       - name: Duration shard planner tests
         working-directory: .
-        run: node --test scripts/shard-files.test.mjs
+        run: node --test scripts/shard-files.test.mjs scripts/repeat-changed-specs.test.mjs
 
       # The disk sampler the e2e legs run under (nocx-atpw5.1.40). Its decision
       # is a pure one — what the minimum was, and whether that minimum is below
@@ -1415,15 +1415,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    # 90, up from 40, for the one step below that repeats the specs a pull
-    # request adds or changes (nocx-1ebrs.66.1.37). That cost is 10x the
-    # changed specs and is not part of the duration-balanced plan. The
-    # committed timings put the median changed spec at 8.6 s and the worst at
-    # 254 s (transcript-scroll-budget), so ten repeats of the worst add 42
-    # minutes to a leg measured around 20 — 60 would have killed exactly the
-    # PR this gate is for, on the clock, where a reader learns nothing. Two
-    # heavy specs in one PR can still exceed this; the cap is a ceiling, not a
-    # target, and a run that finishes in 20 still does.
+    # Changed-spec repeats are spread over both chromium legs. Each uses the
+    # ordinary run's measured JSON durations to budget up to ten repeats in
+    # 40 minutes, with visible reductions/skips; the suite shares this limit.
     timeout-minutes: 90
     # The evidence the quarantine gate reads: one .log and one .status per test
     # step, written by scripts/ci-run-logged.sh (see the header).
@@ -1675,51 +1669,32 @@ jobs:
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
 
-      # THE SPECS THIS PULL REQUEST ADDS OR CHANGES, REPEATED TEN TIMES
-      # (nocx-1ebrs.66.1.37).
+      # REPEAT THE CHANGED SPECS on both chromium legs (nocx-1ebrs.66.1.37).
+      # Each leg intersects the changed specs with its own ordinary run's
+      # actual Playwright JSON report and sums all result durations, including
+      # retries. Repeat count is min(10, floor(2400 / measured seconds)); zero
+      # duration is capped at ten. Reduced counts warn on the PR and appear in
+      # the step summary with the detection probability. If no repeat fits,
+      # record the skipped specs and reason, and keep the step green. The job
+      # timeout stays at 90 minutes; the ordinary planner owns the file layout.
       #
-      # The suite walks every test once, so a new test that fails one time in
-      # ten passes nine pull requests out of ten and reddens somebody else's.
-      # This runs only the files the PR itself touched, through the same image
-      # and the same stand as the step above, with Playwright's own
-      # --repeat-each. Nothing here decides what a spec is beyond the diff the
-      # `changes` job published; the ordinary run above still covers every
-      # spec once.
+      # NOT QUARANTINE-GATED, deliberately. Repeated results do not fit the
+      # quarantine gate's one-result-per-test contract. A caught flake fails
+      # the job directly, outside scripts/ci-run-logged.sh.
       #
-      # ONE LEG: chromium, shard 1. Both browsers would double the added time,
-      # and what an unlucky run loses is almost always product or renderer
-      # logic rather than the engine — the full suite still runs both browsers
-      # once. Within chromium the repeats are one run, not one per shard: the
-      # shard split exists to divide the fixed suite, and a file repeated on
-      # both shards would be the same ten runs twice.
-      #
-      # NOT QUARANTINE-GATED, deliberately. The gate reads one result per test
-      # (scripts/quarantine.mjs refuses a report with any other shape, and with
-      # reason), while --repeat-each has ten by construction; routing this
-      # through scripts/ci-run-logged.sh would hand the gate evidence it cannot
-      # judge and turn every red into "named none". The point of the step is a
-      # flake caught, and a quarantine entry would hide exactly that. A failure
-      # fails the job and Playwright prints the spec and test.
-      #
-      # --pass-with-no-tests: a changed spec this platform does not collect —
-      # e2e/first-command-completes.spec.ts is ignored on Linux by
-      # playwright.config.ts — must not turn an empty selection into a red.
+      # A changed spec absent from this leg's report is recorded as not
+      # collected on this leg; no empty selection launches Playwright.
       # --output keeps the repeat's traces beside the ordinary run's instead of
       # letting a second run wipe test-results/ before the upload below.
       - name: Repeat the specs this pull request adds or changes
-        if: github.event_name == 'pull_request' && matrix.project == 'chromium' && matrix.shard == 1 && needs.changes.outputs.e2e_specs != ''
+        if: github.event_name == 'pull_request' && matrix.project == 'chromium' && needs.changes.outputs.e2e_specs != ''
         env:
           REPEAT_SPECS: ${{ needs.changes.outputs.e2e_specs }}
+          SHARD_NUMBER: ${{ matrix.shard }}
           PW_PROJECTS: chromium
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
-        run: |
-          # Wrapped like the ordinary run, for the same reason: ten repeats of a
-          # changed spec are ten traces, and this step's peak is the one the
-          # job's end cannot see (nocx-atpw5.1.40).
-          # shellcheck disable=SC2086 # the list is spec paths, split on purpose
-          node scripts/e2e-disk-watch.mjs --state "$RUNNER_TEMP/nocx-disk-watch-repeat.json" -- \
-            e2e/run-in-container.sh $REPEAT_SPECS --repeat-each=10 --pass-with-no-tests --output=test-results/repeat-changed
+        run: node scripts/repeat-changed-specs.mjs
 
       # Named per project AND per shard: two jobs uploading one name is a
       # collision, and the trace you want is the one from the browser and the

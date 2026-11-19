@@ -429,6 +429,10 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
     'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
     'The connection opened and ran what it is configured to run, in place of what nocx asked for.',
   ),
+  'host-key-unconfirmed': notIntegrated(
+    'The host key was not confirmed, so shell integration was not delivered.',
+    'The terminal opened without integration; nocx could not confirm which host record authorises delivery.',
+  ),
   'publish-unavailable': notIntegrated(
     'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
     'The connection opened and authenticated. Copying the integration across was refused.',

@@ -111,7 +111,9 @@ var ErrCommandTooLong = errors.New("ssh: the remote command is longer than the b
 type RefusalReason string
 
 const (
-	ReasonNone                   RefusalReason = ""
+	ReasonNone RefusalReason = ""
+	// No authenticated host identity was available to authorise delivery.
+	ReasonHostKeyUnconfirmed     RefusalReason = "host-key-unconfirmed"
 	ReasonUnsupportedShell       RefusalReason = "unsupported-shell"
 	ReasonUnsupportedFishStartup RefusalReason = "unsupported-fish-startup"
 	ReasonNoSecureTemp           RefusalReason = "no-secure-temp"

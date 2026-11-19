@@ -76,6 +76,13 @@ func TestHostModeUsesAuthenticatedLeaseBeforePublishing(t *testing.T) {
 			if requests[0].Mode != wantMode {
 				t.Errorf("spawn mode = %q, want %q", requests[0].Mode, wantMode)
 			}
+			if verified == "" {
+				if opened.IntegrationStatus != "conventional" || string(opened.IntegrationReason) != "host-key-unconfirmed" {
+					t.Errorf("missing key must explain fallback: status=%q reason=%q", opened.IntegrationStatus, opened.IntegrationReason)
+				}
+			} else if opened.IntegrationReason != "" {
+				t.Errorf("authenticated mode must not report a hold failure: %q", opened.IntegrationReason)
+			}
 		})
 	}
 }
@@ -110,5 +117,11 @@ func TestHostModeFailedLeaseDeliversNothing(t *testing.T) {
 	}
 	if got := stand.daemon.spawner.sshSpawns()[0].Mode; got != proto.SSHMode(hostmode.Raw) {
 		t.Fatalf("spawn mode %q, want raw", got)
+	}
+	if opened.IntegrationStatus != "conventional" || string(opened.IntegrationReason) != "host-key-unconfirmed" {
+		t.Fatalf("failed lease must explain the safe fallback: status=%q reason=%q", opened.IntegrationStatus, opened.IntegrationReason)
+	}
+	if opened.IntegrationShell == "" {
+		t.Fatal("degraded integration must name its shell so transport registers the reason")
 	}
 }

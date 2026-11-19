@@ -900,6 +900,15 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		}
 		status, reason = localIntegrationStatus(launch, res.LifecycleLane)
 		o.watchForReplacement(res.Session, launch.Pid, shell)
+	} else if res.IntegrationReason != ssh.ReasonNone {
+		status, reason = transport.IntegrationConventional, res.IntegrationReason
+		shell = remote.Shell
+		if shell == "" {
+			shell = string(cfg.Remote.Shell)
+		}
+		if shell == "" {
+			shell = "unknown"
+		}
 	}
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
 		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid), remote == nil)
@@ -1105,6 +1114,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// helper_publish.go's already claim happens ("one authentication for one
 	// machine") and what the shared pool key (AD-4) exists for.
 	var authenticatedFingerprint string
+	var integrationReason ssh.RefusalReason
 	if remote := cfg.Remote; remote != nil && (o.modes != nil ||
 		(remote.RemoteInstaller != nil && hostmode.Mode(remote.IntegrationMode).DeliversScripts())) {
 		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
@@ -1118,6 +1128,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 			if herr == nil && hold.Fingerprint() != "" {
 				authenticatedFingerprint = hold.Fingerprint()
 				mode = hostModeFor(o.modes, authenticatedFingerprint)
+			} else {
+				integrationReason = ssh.ReasonHostKeyUnconfirmed
 			}
 			remote.IntegrationMode = string(mode)
 		}
@@ -1313,6 +1325,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// and the open's own error, which is the right answer there, is already on
 	// its way back.
 	res.PublishFailure = publishFailure
+	res.IntegrationReason = integrationReason
 	// THE CONNECTION THIS SHELL RIDES, carried to the adoption so a late one
 	// from a connection the pane has since left is refused (internal/panedriver's
 	// AdoptSession).

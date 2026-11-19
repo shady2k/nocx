@@ -163,7 +163,11 @@ package coordinator
 // connect-time ask carries `profileId`, which is where a 39 window's copy would
 // claim a typed ssh can be changed "from the connection's settings" it does not
 // have.
-const ProtocolVersion = 40
+// 41 (nocx-oalo1.11.11): connections.setIntegrationMethod gains required
+// helperConsentSaved in its result; a version 40 window does not read it.
+// The integration axis also names host-key-unconfirmed when delivery cannot
+// be authorised without an authenticated host key.
+const ProtocolVersion = 41
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

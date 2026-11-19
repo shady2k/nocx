@@ -46,6 +46,7 @@ export interface SessionIntegrationChanged {
     | 'exec-refused'
     | 'exec-substituted'
     | 'publish-unavailable'
+    | 'host-key-unconfirmed'
     | 'loader-termios-unavailable'
     | 'bootstrap-interrupted'
     | 'bootstrap-protocol'

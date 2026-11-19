@@ -178,8 +178,9 @@ type Connection struct {
 	// HostKeyFingerprint is the machine's host key, observed at dial time; it
 	// keys the host's mode and the machine's consent.
 	HostKeyFingerprint string
-	// Generation is bumped by the transport for every new link. A result
-	// tagged with an older generation is dropped.
+	// Generation is which of the transport's LINKS this observation is about,
+	// as the helper reports it. A result tagged with an older generation is
+	// dropped.
 	Generation uint64
 	// State is hostconn's own state name. Only Connected makes the axis able
 	// to serve; every other state pauses it.
@@ -197,8 +198,9 @@ type Connection struct {
 }
 
 // Connections is the source of connection observations. The composition root
-// supplies it; until stage A's `connections` op lands, the root adapts the
-// existing per-connection events and rebuilds the list from them.
+// supplies it: the local helper's `connections` answer is the table — a
+// connection no pane rides included — and the same coordinator's
+// connection-state stream keeps it current.
 type Connections interface {
 	// List answers the connections the local helper holds right now, panes or
 	// no panes. A coordinator restart rebuilds its entries from this.

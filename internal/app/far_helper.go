@@ -241,26 +241,144 @@ func (h *sshOverHelper) openLaneFor(ctx context.Context, params proto.LaneParams
 	return lane, nil
 }
 
-// farHelperConnections is the ConnectionSource farhelper reads, fed by the two
-// places the coordinator already learns about a connection: the pane's bind
-// (which names the resolved destination) and the helper's own connection-state
-// notifications (which name the transport's state).
+// farHelperConnections is the ConnectionSource farhelper reads. Its entries are
+// the local helper's connection table: the `connections` answer names every
+// connection the helper's supervisors hold — a tunnel, a probe lease or the far
+// helper's own lane included — with the destination and the host key its link
+// was verified against, and the connection-state stream keeps those entries
+// current. What of that table is worth deciding about is this adapter's half;
+// the helper's answer is unfiltered (see farHelperDecidable).
 //
-// # Generation until stage A
+// # Why the table is the source, and what a pane's bind still adds
 //
-// The helper does not yet carry its transport generation on the wire, so this
-// adapter mints one locally: a connection that reaches `connected` after being
-// in any other state is a new link, and the counter moves. It is the same fence
-// with a coarser source; stage A's Facts.Generation replaces the counter and
-// this comment goes with it. The Shells count is the event's PlainShells: a
-// helper-hosted shell implies an install already happened, so the only
-// connection C9 must gate is the one whose own plain shell is what proves the
-// host usable.
+// A coordinator that restarts knows nothing, and the connections its panes
+// never bound are exactly the ones a per-pane subscription could never show
+// it (design §5.10, scenario 7). So the table is read from the helper (Sync)
+// rather than rebuilt from what this process saw. A pane's bind still runs
+// first for a connection that has not dialled: it names the destination and
+// the pin the open was built with, which the helper's table cannot have until
+// something acquires the connection.
+//
+// # Generation and Shells are the helper's, not this adapter's
+//
+// The helper reports which LINK an observation is about (hostconn's Facts
+// carries the same generation, on the wire since protocol 30), so a decision's
+// fence is the transport's own number rather than a local count of
+// transitions: a reconnect under a stall and a replaced link are no longer the
+// same event here either. PlainShells is the same record's count of shells
+// that would end, for every connection including one no pane rides.
+//
+// # A helper that restarted is a new epoch
+//
+// The sequence and generation numbers belong to one helper PROCESS (the
+// hello's instance id), and a replacement daemon starts them over. Observations
+// from an instance this cache has not seen are therefore applied with a fresh
+// fence, and the entries of the replaced instance are announced as ended: the
+// helper that held them is gone, and a decision that kept riding its client
+// would serve a dead transport.
 type farHelperConnections struct {
 	mu       sync.Mutex
 	conns    map[string]farhelper.Connection
 	watchers map[uint64]func(farhelper.Connection)
 	next     uint64
+	// instance is the helper process the cached sequences were observed from,
+	// as the hello named it. Empty until the first observation.
+	instance string
+}
+
+// farHelperTable is the one question this adapter asks the local helper: every
+// connection it holds, and the subscription that keeps answering. The helper
+// client is the implementation; the pair is an interface so the adapter is
+// testable without a daemon.
+type farHelperTable interface {
+	Connections(ctx context.Context) ([]proto.ConnectionSummary, error)
+	InstanceID() string
+}
+
+// Sync adopts the helper's whole connection table.
+//
+// IT IS THE TABLE and not a delta: the answer replaces what the cache holds
+// for a helper this coordinator has not seen before, so a restart builds
+// entries for connections no pane of this process ever bound. The instance is
+// adopted BEFORE the request is made, so an observation the new helper sends
+// while this read is in flight is folded into the new epoch rather than
+// discarded with the old one.
+//
+// WHAT IT DOES NOT UNFOLD is the table's dead half: a record in `ended` or
+// `failed`, and one that never had a link (generation zero), is not a
+// connection the far helper can act on, and the helper keeps its supervisors
+// for the life of the daemon. See farHelperDecidable.
+func (f *farHelperConnections) Sync(ctx context.Context, table farHelperTable) error {
+	if f == nil || table == nil {
+		return nil
+	}
+	f.adoptInstance(table.InstanceID())
+	summaries, err := table.Connections(ctx)
+	if err != nil {
+		return err
+	}
+	for _, summary := range summaries {
+		f.fold(summary.Connection, summary.Destination, summary.HostKeyFingerprint)
+	}
+	return nil
+}
+
+// adoptInstance makes instance the helper process this cache reads, and ends
+// the entries of the one it replaces.
+//
+// THE ENTRIES END BECAUSE NOTHING THEY SAID IS ABOUT THE NEW PROCESS: its
+// supervisors and their sequence numbers begin again, so a fence built on the
+// old numbers would refuse every observation for ever, and a client a decision
+// is still riding rides a transport that died with the helper. An entry that
+// the new helper also holds comes back from Sync with a current observation,
+// and a fresh decision.
+//
+// It is called before the table is read, not after, so an observation the new
+// helper sends while the read is in flight is folded into the epoch it belongs
+// to instead of being discarded with the old one.
+func (f *farHelperConnections) adoptInstance(instance string) {
+	if f == nil || instance == "" {
+		return
+	}
+	f.mu.Lock()
+	if f.instance == instance {
+		f.mu.Unlock()
+		return
+	}
+	first := f.instance == ""
+	f.instance = instance
+	if first {
+		f.mu.Unlock()
+		return
+	}
+	dropped := f.conns
+	f.conns = make(map[string]farhelper.Connection)
+	watchers := f.snapshotLocked()
+	f.mu.Unlock()
+	for _, c := range dropped {
+		c.State = hostconn.Ended
+		for _, fn := range watchers {
+			fn(c)
+		}
+	}
+}
+
+// acceptInstance reports whether an observation from instance may be applied:
+// the first instance is adopted, one this cache has already replaced is
+// refused. The epoch is opened explicitly — by adoptInstance, on the client the
+// opener handed out — rather than by whichever frame arrives next, so a
+// replaced helper's last queued event cannot take the cache back.
+func (f *farHelperConnections) acceptInstance(instance string) bool {
+	if instance == "" {
+		return true
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.instance == "" {
+		f.instance = instance
+		return true
+	}
+	return f.instance == instance
 }
 
 func newFarHelperConnections() *farHelperConnections {
@@ -297,15 +415,16 @@ func (f *farHelperConnections) Watch(fn func(farhelper.Connection)) (stop func()
 }
 
 // Observe records what a bind knows about a connection. A bind names the
-// destination and the machine; it carries no ordered state, so an observation
-// that is already known keeps its state and shell count.
+// destination and the machine, and it carries no ordered state, so an
+// observation of a connection the table already named keeps that connection's
+// state, generation and counts: the bind is newer information about WHERE, and
+// nothing at all about WHAT the transport is doing.
 func (f *farHelperConnections) Observe(c farhelper.Connection) {
 	if f == nil || c.ID == "" {
 		return
 	}
 	f.mu.Lock()
-	previous, known := f.conns[c.ID]
-	if known && c.Seq == 0 {
+	if previous, known := f.conns[c.ID]; known {
 		if c.Destination.Host != "" {
 			previous.Destination = c.Destination
 		}
@@ -313,9 +432,6 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 			previous.HostKeyFingerprint = c.HostKeyFingerprint
 		}
 		c = previous
-	}
-	if !known && c.State == hostconn.Opening && c.Generation == 0 {
-		// A bind before any event: the connection exists and is opening.
 	}
 	f.conns[c.ID] = c
 	watchers := f.snapshotLocked()
@@ -325,33 +441,67 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 	}
 }
 
-// Apply folds one connection-state notification into the cache. An event for a
-// connection no bind named a destination for is ignored until stage A's
-// `connections` op can answer it: a decision needs a destination, and guessing
-// one from an id would be a second derivation of it.
-func (f *farHelperConnections) Apply(_ string, ev proto.ConnectionStateEvent) {
+// Apply folds one connection-state notification into the cache.
+//
+// A notification carries no destination, so it only updates a connection the
+// table (or a pane's bind) named: a decision needs one, and deriving it from
+// the id would be a second answer to "which address is this". The answer that
+// adds a connection this process never bound is Sync.
+func (f *farHelperConnections) Apply(source string, ev proto.ConnectionStateEvent) {
 	if f == nil || ev.ConnectionID == "" {
 		return
 	}
+	if !f.acceptInstance(source) {
+		return
+	}
+	f.fold(ev, nil, "")
+}
+
+// fold merges one observation — a table entry or a notification — into the
+// cache. Both arrive in the same shape because the helper answers the table
+// with the event it publishes (proto.ConnectionSummary), which is what lets
+// one function own the fence, the generation and the shell count.
+func (f *farHelperConnections) fold(ev proto.ConnectionStateEvent, destination *proto.SSHDestination, fingerprint string) {
 	f.mu.Lock()
 	c, known := f.conns[ev.ConnectionID]
 	if !known {
-		f.mu.Unlock()
-		return
+		if destination == nil {
+			// The notification for a connection nothing has named: it cannot
+			// be decided about until the helper's table, or a bind, says where
+			// it dials.
+			f.mu.Unlock()
+			return
+		}
+		if !farHelperDecidable(ev) {
+			// The helper's table is every supervisor it has ever created and is
+			// never pruned, so it carries connections that ended, ones whose
+			// last link failed, and ones that never dialled. None of them is
+			// unfolded: a dead host is not something to probe, and a connection
+			// with no link cannot be decided about at all. The voice that
+			// brings such a connection back is a pane's bind (Observe) or the
+			// next table read, not a notification — notifications carry no
+			// destination, so they can only update an entry that exists.
+			f.mu.Unlock()
+			return
+		}
+		c = farhelper.Connection{ID: ev.ConnectionID}
 	}
 	if ev.Seq != 0 && c.Seq != 0 && ev.Seq <= c.Seq {
 		f.mu.Unlock()
 		return
 	}
-	previous := c.State
+	if destination != nil {
+		c.Destination = *destination
+	}
+	if fingerprint != "" {
+		c.HostKeyFingerprint = fingerprint
+	}
 	c.Seq = ev.Seq
+	c.Generation = ev.Generation
 	c.State = farHelperKind(ev.State)
 	c.Slow = ev.Slow
 	c.Shells = ev.PlainShells
-	if c.State == hostconn.Connected && previous != hostconn.Connected {
-		c.Generation++
-	}
-	f.conns[ev.ConnectionID] = c
+	f.conns[c.ID] = c
 	watchers := f.snapshotLocked()
 	f.mu.Unlock()
 	for _, fn := range watchers {
@@ -368,6 +518,28 @@ func (f *farHelperConnections) snapshotLocked() []func(farhelper.Connection) {
 		out = append(out, fn)
 	}
 	return out
+}
+
+// farHelperDecidable reports whether a connection the table reports is one the
+// far helper may ever act on.
+//
+// TWO THINGS DISQUALIFY IT, and both are facts the table cannot hide by
+// omission. A connection in `ended` or `failed` is a host not to probe: the
+// helper keeps its supervisors for the life of the daemon, so a record of a
+// link that is gone outlives it. Generation zero means no link has ever existed
+// for the connection, which is what a supervisor created by a `connection` or a
+// `disconnect` op looks like before anything dials — there is nothing to decide
+// and nothing to write to. Anything else — opening, waiting for a person,
+// connected, stalled, reconnecting — has a link to reason about.
+func farHelperDecidable(ev proto.ConnectionStateEvent) bool {
+	if ev.Generation == 0 {
+		return false
+	}
+	switch farHelperKind(ev.State) {
+	case hostconn.Ended, hostconn.Failed:
+		return false
+	}
+	return true
 }
 
 // farHelperKind translates the wire's state name into hostconn's own kind. An
@@ -390,6 +562,60 @@ func farHelperKind(state string) hostconn.Kind {
 	default:
 		return hostconn.Opening
 	}
+}
+
+// adoptFarTable reads the local helper's connection table into the far
+// helper's source, once per client.
+//
+// ONE READ PER HELPER CONNECTION, and the client is the identity that matters:
+// the answer is the daemon's table and the subscription it installs is per
+// coordinator connection, so a second ask would answer the same list and add a
+// second subscription. A new client — a restarted daemon, a generation that
+// replaced it — is a new table and is read again.
+//
+// A REFUSAL IS NOT A STARTUP FAILURE, and it is not retried when the helper
+// simply does not have the op: an older generation answers unknown_op, and a
+// helper built without the ssh service answers unknown_service, and neither
+// will grow the op on the next open. The entries a pane binds still arrive
+// through Observe, which is the behaviour every helper had before this op
+// existed. Any other failure — a write that lost the transport, an answer that
+// did not arrive — is left for the next opener that reaches for the helper.
+func (o *localHelperOpener) adoptFarTable(ctx context.Context, c *helperclient.Client) {
+	if o == nil || c == nil {
+		return
+	}
+	o.mu.Lock()
+	if o.farConnections == nil || o.farTableAsked == c {
+		o.mu.Unlock()
+		return
+	}
+	o.farTableAsked = c
+	conns := o.farConnections
+	o.mu.Unlock()
+	// BEFORE THE READ, so a bind another opener performs while this request is
+	// in flight already addresses this helper's epoch: the cache ends the
+	// replaced helper's entries here, and Sync folds the table into the same
+	// one.
+	conns.adoptInstance(c.InstanceID())
+	if err := conns.Sync(ctx, c); err != nil {
+		o.mu.Lock()
+		if o.farTableAsked == c && !helperAnswersNoSuchOp(err) {
+			o.farTableAsked = nil
+		}
+		o.mu.Unlock()
+		if o.log != nil {
+			o.log.Debug("ssh: the helper's connection table was not read", "error", err)
+		}
+	}
+}
+
+// helperAnswersNoSuchOp reports whether a refusal is the helper saying it does
+// not have the op, which is how a generation older than this app answers one
+// it never knew.
+func helperAnswersNoSuchOp(err error) bool {
+	var refusal *helperclient.RefusalError
+	return errors.As(err, &refusal) &&
+		(refusal.Code == proto.ErrCodeUnknownOp || refusal.Code == proto.ErrCodeUnknownService)
 }
 
 // farHelperCloser is D25's close-before-remove, with the far helper's clients

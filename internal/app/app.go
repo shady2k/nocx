@@ -1043,9 +1043,11 @@ func New(opts ...Option) (*App, error) {
 	// THE FAR HELPER'S AXIS (ADR-727g63tr decision 2). One registry for the
 	// process, deciding per connection in the background; it publishes nothing
 	// yet (stage C carries the axis on pane.connection), and it owns the far
-	// helper client Git and Files will share. Its connection source is fed by
-	// the two places the coordinator learns about a connection: the pane's
-	// bind and the helper's connection-state events.
+	// helper client Git and Files will share. Its connection source is the
+	// local helper's `connections` table, read once per helper client by the
+	// opener below, plus the two places a connection is learned about first: a
+	// pane's bind (which names the destination before anything dials) and the
+	// helper's connection-state events.
 	farConns := newFarHelperConnections()
 	localOpener.farConnections = farConns
 	farHelpers := farhelper.New(farhelper.Config{

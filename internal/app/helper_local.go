@@ -408,6 +408,12 @@ type localHelperOpener struct {
 	// destination, and the helper's per-connection events are where the state
 	// arrives. Nil is a legitimate wiring for a test and then nothing is fed.
 	farConnections *farHelperConnections
+	// farTableAsked is the local helper client whose connection table has
+	// already been adopted into farConnections. It is what makes the read ONE
+	// per helper process rather than one per opener that reaches for the
+	// helper: the table is the daemon's, and its subscription is per
+	// coordinator connection.
+	farTableAsked *helperclient.Client
 
 	mu sync.Mutex
 	// installed is what App.Start put on this machine, and dir is the
@@ -1731,6 +1737,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 			// what a replaced helper's numbers would otherwise look stale
 			// against.
 			notePaneSource(paneConns, existing)
+			o.adoptFarTable(ctx, existing)
 			return existing, string(installed.Generation), nil
 		}
 	}
@@ -1767,6 +1774,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		o.connectedAt = time.Now()
 		o.mu.Unlock()
 		notePaneSource(paneConns, c)
+		o.adoptFarTable(ctx, c)
 		return c, string(installed.Generation), nil
 	}
 	// A second open raced this one and stored its connection first. The loser
@@ -1777,6 +1785,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 	winner := o.client
 	o.mu.Unlock()
 	_ = c.Close()
+	o.adoptFarTable(ctx, winner)
 	return winner, string(installed.Generation), nil
 }
 

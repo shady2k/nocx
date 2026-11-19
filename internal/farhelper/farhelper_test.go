@@ -408,6 +408,7 @@ func (l *fakeLane) Close() error {
 	})
 	return nil
 }
+
 func (l *fakeLane) lose(err error) {
 	l.lostErr = err
 	l.doneOnce.Do(func() { close(l.done) })

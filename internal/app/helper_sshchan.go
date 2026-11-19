@@ -738,7 +738,8 @@ func (h *sshOverHelper) OpenFarPaneToolSocket(ctx context.Context, host string, 
 		return proto.ForwardID{}, err
 	}
 	res, err := client.OpenToolSocket(ctx, proto.ToolSocketParams{
-		Destination: ssh.WireDestination(target),
+		HostKeyFingerprint: hostKeyPinFromOptions(opts),
+		Destination:        ssh.WireDestination(target),
 		// FALSE, and not a default: the accept flow belongs to a pane open,
 		// where a person is watching. This op runs after one, on a connection
 		// the helper has already authenticated, so an unknown key here is the

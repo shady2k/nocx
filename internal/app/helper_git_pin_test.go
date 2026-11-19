@@ -29,7 +29,42 @@ func TestHostKeyPinHelperGitBridgePinsTheReadoptedSessionHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readopt session: %v", err)
 	}
-	assertGitBridgePin(t, provider, sess)
+	selection := second.gitFor(sess)
+	if selection.Factory == nil {
+		t.Fatalf("git selection refused: %+v", selection.Refusal)
+	}
+	h := second.reg.hosts[sess.ID()]
+	if h == nil {
+		t.Fatal("readopt did not register its helper")
+	}
+	for attempt := range 2 {
+		if attempt == 1 {
+			h.mu.Lock()
+			c := h.client
+			h.mu.Unlock()
+			h.invalidate(c)
+			if err := c.Close(); err != nil {
+				t.Fatalf("lose readopt client: %v", err)
+			}
+		}
+		repo, outcome, err := selection.Factory.Open(context.Background(), fixtureRepo(t))
+		if err != nil || outcome.State != git.OpenOK {
+			t.Fatalf("open %d: outcome %+v, error %v", attempt, outcome, err)
+		}
+		if err := repo.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if second.reg.hosts[sess.ID()] != h {
+			t.Fatal("git did not reuse the readopt registry entry")
+		}
+	}
+	// Both the restoration lane and the replacement lane must use the
+	// durable session's key, not merely the factory git.open constructed.
+	for i := 1; i < provider.laneCount(); i++ {
+		if got := provider.asked(i).pin; got != binding.Fingerprint {
+			t.Errorf("lane %d pin = %q, want %q", i, got, binding.Fingerprint)
+		}
+	}
 }
 
 func assertGitBridgePin(t *testing.T, provider *fakeLaneProvider, sess session.Session) {

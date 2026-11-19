@@ -256,28 +256,45 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: "+refusal))
 		return
 	}
-	defer func() {
+	// release ends the pane's guard, and it runs BEFORE the answer, never
+	// after. The client may press again as soon as it reads the reply, and
+	// that press arrives on another request; an answer written with the
+	// guard still held refuses it with "a reconnect is already running" for
+	// work that is already over. The flag makes the deferred call a no-op
+	// once a branch has released, so a retry that has since taken the guard
+	// is not released by its predecessor.
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
 		h.machine.paneMu.Lock()
 		rec.busy = false
 		close(rec.registering)
 		rec.registering = nil
 		h.machine.paneMu.Unlock()
-	}()
+	}
+	defer release()
 	if shellOnly {
 		policy, ok := h.machine.paneConnectionPolicy.(paneShellPolicy)
 		if !ok {
+			release()
 			(openHandlers{}).answerOpenFailure(ctx, h.r, req, refuse(-32603, "Shell retry is unavailable (no pane driver wired)"))
 			return
 		}
 		if err := policy.RequestShellRetry(rec.ctx, params.PaneID, params.ConnectionEpoch); err != nil {
+			release()
 			(openHandlers{}).answerOpenFailure(ctx, h.r, req, err)
 			return
 		}
+		release()
 		raw, _ := json.Marshal(paneReconnectResult{params.PaneID, true})
 		_ = respond(h.r, newJSONRPCResult(req.ID, raw))
 		return
 	}
 	if h.machine.opener == nil {
+		release()
 		(openHandlers{}).answerOpenFailure(ctx, h.r, req, errOpenShuttingDown)
 		return
 	}
@@ -285,9 +302,11 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	stop := context.AfterFunc(rec.ctx, cancel)
 	defer func() { stop(); cancel() }()
 	if err := h.machine.opener.registerReconnect(registerCtx, rec.params, sequence); err != nil {
+		release()
 		(openHandlers{}).answerOpenFailure(ctx, h.r, req, err)
 		return
 	}
+	release()
 	raw, _ := json.Marshal(paneReconnectResult{params.PaneID, true})
 	_ = respond(h.r, newJSONRPCResult(req.ID, raw))
 }

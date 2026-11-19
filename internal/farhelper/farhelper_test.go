@@ -571,11 +571,6 @@ func (h *harness) want(id string, state farhelper.State, reason farhelper.Reason
 	})
 }
 
-func (h *harness) waitCalls(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	waittest.WaitFor(t, what, cond)
-}
-
 func (h *harness) sawState(state farhelper.State) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -629,9 +624,11 @@ func TestAHealthyConnectionProbesInstallsAndServes(t *testing.T) {
 func TestOneGenerationDecidesOnce(t *testing.T) {
 	h := newHarness(t)
 	h.granted(machine)
+	var seq uint64
 	for i := 0; i < 20; i++ {
 		c := connected("c1", 1)
-		c.Seq = uint64(i + 1)
+		seq++
+		c.Seq = seq
 		c.Slow = i%2 == 0
 		c.Shells = 1 + i%3
 		h.conns.Put(c)
@@ -853,7 +850,9 @@ func TestALostDaemonBacksOffAndRefreshes(t *testing.T) {
 
 	// Refresh redials at once, without waiting for the backoff. The doubling
 	// schedule itself is asserted by TestTheRedialSchedule in backoff_test.go.
-	h.reg.Refresh(context.Background(), "c1")
+	if err := h.reg.Refresh(context.Background(), "c1"); err != nil {
+		t.Fatalf("refresh c1: %v", err)
+	}
 	waittest.WaitFor(t, "the refresh redial", func() bool { return h.dial.count() == 3 })
 	if got := h.install.count(); got != 1 {
 		t.Fatalf("install calls = %d after refresh, want 1", got)

@@ -142,7 +142,28 @@ package coordinator
 // question), and agent.cancel and agent.runState carry droppedSteers, the
 // messages a cancelled turn's agent never used, so a window built against 37
 // could neither steer nor ask a dropped message next.
-const ProtocolVersion = 38
+// 39 (nocx-oalo1.11.2): the integration method is the HOST's. The open result
+// carries `integrationMode` where it carried `desiredMode`, the open request
+// and every profile and group shape lose their copy of it, and
+// connections.setIntegrationMethod no longer patches a saved connection — so a
+// window built against 38 would send a field this coordinator refuses
+// (additionalProperties: false) and read one it no longer sends. Two new
+// methods, connections.hostMode and connections.setHostMode, are how the
+// connection editor reads and writes the host record now; a 38 window does not
+// know them, which is the second half of the same incompatibility.
+// 40 (nocx-oalo1.11.1, ALX-53; nocx-oalo1.11.2, ALX-72): the connection
+// editor's five states are on the wire, and the connect-time answer with them,
+// over one version carrying both. An applied integration-method answer is
+// always a result, with required hostRecordSaved stating its durability — an
+// error never means that the answer was applied. The host-mode read gains
+// `hostKnown`, without which a 39 window cannot tell "nobody answered" from
+// "never connected" and would show a method it could not write; the write
+// loses `note`, because a record that could not be persisted is now an error
+// carrying the reason the field shows, and nothing about the host changes. The
+// connect-time ask carries `profileId`, which is where a 39 window's copy would
+// claim a typed ssh can be changed "from the connection's settings" it does not
+// have.
+const ProtocolVersion = 40
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

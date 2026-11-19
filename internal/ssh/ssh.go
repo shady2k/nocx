@@ -470,16 +470,18 @@ type ConnectConfig struct {
 	// prompt. Nil means no channel.
 	RemoteLifecycle RemoteLifecycle
 
-	// DesiredMode is the resolved destination mode (auto|raw|script|helper,
-	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate,
-	// read through profile.DesiredMode.DeliversScripts: auto (the default —
-	// ADR-0033), script, and empty (the direct-host default) publish the
-	// bundle and integrate; raw publishes nothing and opens a plain shell;
-	// helper does not integrate either, which is nocx-7k8ma. The transport
-	// also carries it verbatim to the open ack so the renderer sees the
-	// AXIS value — every mode must stay distinguishable from every other
-	// even where two of them gate integration the same way.
-	DesiredMode string
+	// IntegrationMode is the mode the HOST keeps (auto|raw|script|helper,
+	// ADR-727g63tr decision 1), stamped by the open path after a dial has seen
+	// the host key. It is the open-time gate, read through
+	// hostmode.Mode.DeliversScripts: auto (the default — ADR-0033), script, and
+	// empty (a local session, and the direct-host value before a dial answers)
+	// publish the bundle and integrate; raw publishes nothing and opens a plain
+	// shell; helper integrates too — the tiers are additive (§5.2). The
+	// transport also carries it verbatim to the open ack so the renderer sees
+	// the AXIS value — every mode must stay distinguishable from every other
+	// even where two of them gate integration the same way. A saved connection
+	// has no copy of it (ADR-727g63tr).
+	IntegrationMode string
 
 	// SessionID is the backend-assigned session ID (AD-7) for the session
 	// this connection serves. The launcher embeds it as NOCX_SESSION_ID;
@@ -665,12 +667,12 @@ func WithRemoteLauncher(l RemoteLauncher) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteLauncher = l }
 }
 
-// WithDesiredMode sets the resolved destination mode (raw|script|helper,
-// nocx-mlm7), the open-time gate shellStartCommand consults: script (or
-// empty — the pre-mode default) publishes and integrates; raw and helper
-// open a plain shell and publish nothing.
-func WithDesiredMode(mode string) ConnectOption {
-	return func(c *ConnectConfig) { c.DesiredMode = mode }
+// WithIntegrationMode sets the mode the HOST keeps (ADR-727g63tr decision 1),
+// the open-time gate the spawn consults: script (or empty) publishes and
+// integrates, helper integrates too, and raw alone opens a plain shell and
+// writes nothing.
+func WithIntegrationMode(mode string) ConnectOption {
+	return func(c *ConnectConfig) { c.IntegrationMode = mode }
 }
 
 // WithShell pins the far shell the launcher must target, winning over the

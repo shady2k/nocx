@@ -497,9 +497,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'The connection ended before your keys could be sent. Nothing was delivered.',
   'connections.load.failedHead': 'Could not load connections:',
   'connections.load.failedTail': '. The list may be out of date',
-  'connections.password.bindingFailedHead':
-    'The password was stored but this connection was not updated to use it:',
-  'connections.password.bindingFailedTail': '. Save Connection to retry.',
+  'connections.password.bindingRecovery':
+    'Password "{password}" was created in the vault but not bound to "{name}": {reason}. Open "{name}", choose "{password}" in the password field and press Save Connection.',
+  'connections.toasts.methodRecovery':
+    'Integration method "{method}" for "{name}" ({host}) was not saved: {reason}. Open "{name}", choose "{method}" again in Advanced → Integration method and press Save Connection.',
   'connections.password.cancelled': 'Password was not saved — the vault prompt was cancelled.',
   'connections.password.saveFailedHead': 'Could not save the password:',
   'connections.import.chooseFile': 'Choose a file to import',
@@ -611,7 +612,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.fieldReadyTimeout': 'Ready timeout (ms)',
   'connections.group.fieldAgentForward': 'Agent forward',
   'connections.group.fieldPortDiscovery': 'Port discovery',
-  'connections.group.fieldDeliveryMode': 'Delivery mode',
   'connections.group.notSetInherit': '— Not set (inherit) —',
   'connections.group.inheritedHint':
     'Inherited by every connection in this group and its subgroups, unless the connection overrides it.',
@@ -654,7 +654,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.impact.fieldReadyTimeout': 'ready timeout',
   'connections.impact.fieldAgentForwarding': 'agent forwarding',
   'connections.impact.fieldPortDiscovery': 'port discovery',
-  'connections.impact.fieldDeliveryMode': 'delivery mode',
   'connections.editor.title': 'Edit Connection:',
   'connections.editor.save': 'Save Connection',
   'connections.editor.create': 'Create Connection',
@@ -686,7 +685,25 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.fieldJumpServer': 'Jump server',
   'connections.editor.none': '&mdash; None &mdash;',
   'connections.editor.fieldPortDiscovery': 'Port discovery',
-  'connections.editor.fieldDeliveryMode': 'Delivery mode',
+  // The integration method is the HOST's (ADR-727g63tr decision 1). The mockup
+  // (docs/design/ssh-foundation/host-integration-method.html) is where these
+  // sentences are decided; the keys are its own.
+  'connections.editor.fieldIntegrationMethod': 'Integration method',
+  'connections.editor.methodHostDescHead': 'Set for the machine',
+  'connections.editor.methodHostDescTail':
+    ', not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.',
+  'connections.editor.methodChangeHint':
+    'Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.',
+  'connections.editor.methodAutoHint':
+    "nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.",
+  'connections.editor.methodUnknownHost':
+    'Connect to this machine before changing its integration method here.',
+  'connections.editor.methodAddressChanged':
+    'Save the connection to see the method for the new address.',
+  'connections.editor.methodLoading': 'Loading…',
+  'connections.editor.methodReadFailedHead': "Could not read this machine's method:",
+  'connections.editor.methodNotSavedHead': 'Not saved:',
+  'connections.editor.methodRetry': 'Retry',
   'connections.editor.inherited': '&mdash; Inherited &mdash;',
   'connections.editor.helperHint':
     'The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.',
@@ -708,7 +725,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.add': 'Add forward',
   'connections.forward.empty': 'No forwards — add one to open it automatically on connect.',
   'connections.forward.removeHead': 'Remove forward',
-  'connections.mode.desiredAuto': 'Auto — install scripts, ask before the helper',
+  'connections.mode.hostAuto': 'Auto — nocx chooses at connect',
   'connections.mode.desiredScript': 'Script — scripts only, never the helper',
   'connections.mode.desiredRaw': 'Raw — no integration',
   'connections.mode.desiredHelper': 'Helper — deploy the nocx binary',
@@ -1950,6 +1967,23 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.hostKey.changed': 'Host key changed',
   'connections.hostKey.choose': 'Choose how nocx connects',
   'connections.hostKey.unknown': 'Unknown host key',
+  // The connect-time ask (ADR-0069). The method is the machine's now
+  // (ADR-727g63tr decision 1), so the lead says where it is saved and the last
+  // sentence says where it can be changed — by asking the ask's OWN profileId
+  // which of the two sentences is true.
+  'connections.helperAsk.lead':
+    'Choose how nocx integrates with this machine. The method is saved for the machine — every tab to it, from any saved connection or a typed ssh, opens this way — and permission to deploy nocx’s helper here is remembered with it, so this is asked once.',
+  'connections.helperAsk.consent':
+    'Choosing Helper also allows nocx to deploy its helper binary on this machine; Raw and Script never do.',
+  'connections.helperAsk.changeLater': 'Change your mind later from the connection’s settings.',
+  'connections.helperAsk.changeLaterTyped':
+    'To change it later, save a connection to this machine and open its settings.',
+  // The answer's own sentence, which the pane head shows when the host record
+  // could not be written — the method is in force for this run either way.
+  'connections.helperAsk.notSaved':
+    'The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.',
+  'connections.helperAsk.applyFailed':
+    'Could not apply the integration method for {host}. The choice was not saved.',
   'connections.import.sshConfigPath': 'SSH config ({path})',
   'connections.probe.accepted': 'Accepted',
   'connections.probe.hostKeyChanged': 'Host key changed',

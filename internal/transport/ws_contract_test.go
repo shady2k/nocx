@@ -33,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -1529,41 +1530,65 @@ func TestConnectionsTrustHostKey_OverTheWireConformsToContract(t *testing.T) {
 
 func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
-	for _, tc := range []integrationMethodResult{
-		{Fingerprint: "SHA256:abc", Method: "raw"},
-		{Fingerprint: "SHA256:abc", Method: "script", ProfileID: "ssh-1"},
-		{Fingerprint: "SHA256:abc", Method: "helper", ProfileID: "ssh-1"},
-	} {
-		raw, err := json.Marshal(tc)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+	for _, method := range []string{"raw", "script", "helper"} {
+		for _, saved := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/saved=%t", method, saved), func(t *testing.T) {
+				dto := integrationMethodResult{
+					Fingerprint:     "SHA256:abc",
+					Method:          method,
+					HostRecordSaved: saved,
+				}
+				raw, err := json.Marshal(dto)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				validateJSON(t, schema, raw, "connections.setIntegrationMethod DTO")
+			})
 		}
-		validateJSON(t, schema, raw, "connections.setIntegrationMethod result ("+tc.Method+")")
 	}
 }
 
 func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "connections.setIntegrationMethod.schema.json")
-	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, nil)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
+	for _, saved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("saved=%t", saved), func(t *testing.T) {
+			modes := newHostModeStore(t)
+			if !saved {
+				modes = hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
+			}
+			srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
 
-	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "helper",
-	})
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct{}       `json:"error,omitempty"`
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": "SHA256:abc",
+				"method":      "helper",
+			})
+			var envelope struct {
+				Result json.RawMessage `json:"result"`
+				Error  *struct{}       `json:"error,omitempty"`
+			}
+			if err := json.Unmarshal(resp, &envelope); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if envelope.Error != nil {
+				t.Fatalf("unexpected RPC error: %s", resp)
+			}
+			validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
+			var result struct {
+				HostRecordSaved *bool `json:"hostRecordSaved"`
+			}
+			if err := json.Unmarshal(envelope.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.HostRecordSaved == nil || *result.HostRecordSaved != saved {
+				t.Fatalf("want hostRecordSaved=%t: %s", saved, resp)
+			}
+			if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Helper {
+				t.Fatalf("host record = %q/%v, want helper kept for this run", mode, ok)
+			}
+		})
 	}
-	if err := json.Unmarshal(resp, &envelope); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	if envelope.Error != nil {
-		t.Fatalf("unexpected RPC error: %s", resp)
-	}
-	validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
 }
 
 // ── the connect-time helper ask (ADR-0068) ──────────────────────────────
@@ -1595,7 +1620,7 @@ func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testin
 	reg := newRegWithStub(logger)
 	ws := NewWSServer(logger, reg,
 		WithHelperSessionOpener(&consentAskHelperOpener{
-			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:trusted", nil),
+			err: NewHelperConsentNeeded("ssh:test:1", "host.example.com:22", "SHA256:trusted", nil),
 		}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
@@ -1638,6 +1663,11 @@ func TestOpenHelperConsentAsk_HelperOnly_OverTheWireConformsToContract(t *testin
 	if !data.HelperAsk || data.Fingerprint != "SHA256:trusted" || data.HostKey != nil {
 		t.Errorf("data = %+v, want helperAsk with the trusted fingerprint and no hostKey", data)
 	}
+	// The connection the open named rides the ask, so the dialog can say where
+	// the answer can be changed later without guessing from renderer state.
+	if data.ProfileID != "ssh:test:1" {
+		t.Errorf("profileId = %q, want the connection the open named", data.ProfileID)
+	}
 }
 
 // TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract: the
@@ -1657,7 +1687,7 @@ func TestOpenHelperConsentAsk_WithHostKey_OverTheWireConformsToContract(t *testi
 	}
 	ws := NewWSServer(logger, reg,
 		WithHelperSessionOpener(&consentAskHelperOpener{
-			err: NewHelperConsentNeeded("host.example.com:22", "SHA256:offered", cause),
+			err: NewHelperConsentNeeded("ssh:test:1", "host.example.com:22", "SHA256:offered", cause),
 		}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
@@ -2153,9 +2183,9 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 // failures that matter most arrive after it. session.integrationChanged owns
 // that question now, and additionalProperties:false is what makes the
 // removal real rather than a comment — a handler that still sent the field
-// would fail here. desiredMode (the resolved destination mode, nocx-mlm7) is
-// present for every session, including local ones — a renderer that
-// defaulted a missing field to "script" would show a raw tab as silently
+// would fail here. integrationMode (the mode the HOST keeps, ADR-727g63tr
+// decision 1) is present for every session, including local ones — a renderer
+// that defaulted a missing field to "script" would show a raw tab as silently
 // integrated. Each of the three mode values must marshal; the schema pins
 // the enum. instanceId + sessionEpoch (nocx-3oupk) name the incarnation
 // and are present on every ack, so the renderer always learns the identity
@@ -2169,13 +2199,13 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"helper": "helper",
 	} {
 		raw, err := json.Marshal(openResult{
-			SessionID:     "0123456789abcdef0123456789abcdef",
-			InstanceID:    "fedcba9876543210fedcba9876543210",
-			SessionEpoch:  1,
-			WorkspaceID:   string(workspace.Default),
-			Cwd:           "~/work",
-			DesiredMode:   mode,
-			EffectiveSize: sizeResultOf(session.Size{Cols: 132, Rows: 43}),
+			SessionID:       "0123456789abcdef0123456789abcdef",
+			InstanceID:      "fedcba9876543210fedcba9876543210",
+			SessionEpoch:    1,
+			WorkspaceID:     string(workspace.Default),
+			Cwd:             "~/work",
+			IntegrationMode: mode,
+			EffectiveSize:   sizeResultOf(session.Size{Cols: 132, Rows: 43}),
 		})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
@@ -2188,13 +2218,13 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	// and the schema's minimum:1 is what makes "never zero" a check rather
 	// than a sentence in a description.
 	noClient, err := json.Marshal(openResult{
-		SessionID:     "0123456789abcdef0123456789abcdef",
-		InstanceID:    "fedcba9876543210fedcba9876543210",
-		SessionEpoch:  1,
-		WorkspaceID:   string(workspace.Default),
-		Cwd:           "~/work",
-		DesiredMode:   "script",
-		EffectiveSize: sizeResultOf(session.DefaultSize()),
+		SessionID:       "0123456789abcdef0123456789abcdef",
+		InstanceID:      "fedcba9876543210fedcba9876543210",
+		SessionEpoch:    1,
+		WorkspaceID:     string(workspace.Default),
+		Cwd:             "~/work",
+		IntegrationMode: "script",
+		EffectiveSize:   sizeResultOf(session.DefaultSize()),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2205,12 +2235,12 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	// with no size is what the client owning it degraded to, and the
 	// contract has to refuse it rather than carry 0x0 to a renderer.
 	sizeless, err := json.Marshal(openResult{
-		SessionID:    "0123456789abcdef0123456789abcdef",
-		InstanceID:   "fedcba9876543210fedcba9876543210",
-		SessionEpoch: 1,
-		WorkspaceID:  string(workspace.Default),
-		Cwd:          "~/work",
-		DesiredMode:  "script",
+		SessionID:       "0123456789abcdef0123456789abcdef",
+		InstanceID:      "fedcba9876543210fedcba9876543210",
+		SessionEpoch:    1,
+		WorkspaceID:     string(workspace.Default),
+		Cwd:             "~/work",
+		IntegrationMode: "script",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2227,7 +2257,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"instanceId":             "fedcba9876543210fedcba9876543210",
 		"sessionEpoch":           1,
 		"cwd":                    "~/work",
-		"desiredMode":            "script",
+		"integrationMode":        "script",
 		"effectiveSize":          map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0},
 		"shellIntegrationReason": "no-secure-temp",
 	})
@@ -2313,7 +2343,7 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
 	var got struct {
 		SessionID         string     `json:"sessionId"`
-		DesiredMode       string     `json:"desiredMode"`
+		IntegrationMode   string     `json:"integrationMode"`
 		EffectiveSize     sizeResult `json:"effectiveSize"`
 		AwaitsIntegration bool       `json:"awaitsIntegration"`
 	}
@@ -2371,15 +2401,12 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	if status.Shell != string(ssh.ShellAuto) {
 		t.Errorf("shell = %q, want %q for an unpinned remote", status.Shell, ssh.ShellAuto)
 	}
-	// The resolver stamped no mode (openProfileResolver builds a bare
-	// config), so the ack must report the default. A direct-host or
-	// profile-less open is unanswered in exactly the sense a profile that
-	// resolves to nothing is, so it reports the SAME value — read from the
-	// cascade rather than spelled again here, which is what stops this
-	// assertion from drifting away from the resolver the way the ack's own
-	// literal did (ADR-0033).
-	if want := string(profile.DefaultDesiredMode()); got.DesiredMode != want {
-		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, want)
+	// The resolver names no host key, so it stamps no mode
+	// (ADR-727g63tr decision 1), and the ack must report auto — "not yet
+	// answered" (ADR-0033). A direct-host or profile-less open is unanswered
+	// in the same sense, and there is no second default to drift from.
+	if got.IntegrationMode != "auto" {
+		t.Errorf("integrationMode = %q, want auto (nothing answered for this host)", got.IntegrationMode)
 	}
 
 	// The launcher the transport option attached must have reached the

@@ -15,7 +15,6 @@ function evidence(knownHostsHost: string, key: string): HostKeyErrorEvidence {
     algorithm: 'ssh-ed25519',
     fingerprint: 'SHA256:abc',
     key,
-    profileId: 'ssh:test',
   }
 }
 
@@ -90,12 +89,15 @@ describe('HelperConsentAskQueue', () => {
     const differentSettled = vi.fn()
     void different.then(differentSettled)
 
-    queue.settleMatchingQueued(accepted, 'script')
-    await expect(duplicate).resolves.toBe('script')
+    // A NOTE TRAVELS WITH THE METHOD when the backend could not remember it —
+    // both waiting tabs get the same answer, sentence and all.
+    const answer = { method: 'script' as const, note: 'the host record was not saved' }
+    queue.settleMatchingQueued(accepted, answer)
+    await expect(duplicate).resolves.toEqual(answer)
     expect(differentSettled).not.toHaveBeenCalled()
 
-    queue.settle(accepted, 'script')
-    await expect(first).resolves.toBe('script')
+    queue.settle(accepted, answer)
+    await expect(first).resolves.toEqual(answer)
     expect(active[active.length - 1]?.evidence.fingerprint).toBe('SHA256:other')
   })
 

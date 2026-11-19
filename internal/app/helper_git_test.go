@@ -43,8 +43,8 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -325,8 +325,12 @@ type fakeLaneProvider struct {
 	// laneBlock, when set, parks every LaneConn on it (or on the caller's
 	// context): a host that accepts nothing and refuses nothing, which is what
 	// a machine behind a black-holing firewall looks like.
-	laneBlock   chan struct{}
-	uname       string // the probe's canned answer; default "Linux x86_64"
+	laneBlock chan struct{}
+	uname     string // the probe's canned answer; default "Linux x86_64"
+	// fingerprint is the host key the platform probe reports; default
+	// "SHA256:fake". A test about the identity a real it dial observed sets it
+	// to the fingerprint its own known_hosts entry answers.
+	fingerprint string
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
@@ -405,7 +409,7 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 	if uname == "" {
 		uname = "Linux x86_64"
 	}
-	return &fakeProbeConn{uname: uname}, nil
+	return &fakeProbeConn{uname: uname, fingerprint: p.fingerprint}, nil
 }
 
 func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
@@ -449,16 +453,22 @@ func (p *fakeLaneProvider) lane(i int) *fakeLaneConn {
 // fakeProbeConn is a DiscoveryConn that answers the platform probe with a
 // canned uname line — the only exec the selection runs.
 type fakeProbeConn struct {
-	uname string
+	uname       string
+	fingerprint string // empty means the stand's usual "SHA256:fake"
 }
 
 func (f *fakeProbeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
 	return &ssh.ExecResult{Stdout: []byte(f.uname)}, nil
 }
-func (f *fakeProbeConn) Done() <-chan struct{}      { return make(chan struct{}) }
-func (f *fakeProbeConn) LostErr() error             { return nil }
-func (f *fakeProbeConn) Close() error               { return nil }
-func (f *fakeProbeConn) HostKeyFingerprint() string { return "SHA256:fake" }
+func (f *fakeProbeConn) Done() <-chan struct{} { return make(chan struct{}) }
+func (f *fakeProbeConn) LostErr() error        { return nil }
+func (f *fakeProbeConn) Close() error          { return nil }
+func (f *fakeProbeConn) HostKeyFingerprint() string {
+	if f.fingerprint != "" {
+		return f.fingerprint
+	}
+	return "SHA256:fake"
+}
 
 // fakeInstallConn is a HelperInstallConn whose FS is an in-memory map. The
 // REAL deploy.Ensure runs against it, so the selection's install path is
@@ -728,13 +738,11 @@ func helperPeerWithoutSession(t testing.TB) func(in io.Reader, out io.Writer) in
 }
 
 // fakeRemoteSession is a session.Session whose only interesting facts are
-// the id, kind, host, fingerprint, mode and SSH options the helper
-// selection reads.
+// the id, kind, host, fingerprint and SSH options the helper selection reads.
 type fakeRemoteSession struct {
 	id          session.ID
 	host        string
 	fingerprint string
-	mode        profile.DesiredMode
 }
 
 func (s *fakeRemoteSession) ID() session.ID     { return s.id }
@@ -815,12 +823,10 @@ func (s *fakeRemoteSession) OpenBootstrapWindow() (session.BootstrapWindow, erro
 	return nil, errors.New("fakeRemoteSession has no terminal")
 }
 
-func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption {
-	if s.mode == "" {
-		return nil
-	}
-	return []ssh.ConnectOption{ssh.WithDesiredMode(string(s.mode))}
-}
+// SSHOptions answers none: a saved connection carries no integration method
+// any more (ADR-727g63tr decision 1), so there is nothing here for the
+// selection to read.
+func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption { return nil }
 
 // discardLogger used to be a bare io.Discard sink shared by every caller, so
 // a failure showed only the assertion that tripped and none of the debug
@@ -1306,26 +1312,31 @@ func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
 	}
 }
 
-// TestHelperSelectionExplicitRawWritesNothing: a machine at explicit raw is
-// never asked and never written to (consent design §4.2); the selection
-// answers the resolver's Refused as a reason with no earned state, and
-// git.open's not-available error carries it.
-func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
+// TestHelperSelectionAHostRecordedRawWritesNothing: a host whose record says
+// raw is never asked and never written to (consent design §4.2) — there is no
+// per-connection mode to consult at all any more (ADR-727g63tr decision 1), so
+// the host's record is the only answer. The selection answers the resolver's
+// Refused as a reason with no earned state, and git.open's not-available error
+// carries it.
+func TestHelperSelectionAHostRecordedRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	reg.modes = newTestHostModes(t)
+	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Raw)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for explicit raw", selection)
+		t.Fatalf("selection = %+v, want no factory for a host recorded raw", selection)
 	}
 	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
 		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("explicit raw wrote %d uploads, want 0", provider.install.uploadCount())
+		t.Fatalf("a host recorded raw wrote %d uploads, want 0", provider.install.uploadCount())
 	}
 }
 
@@ -1367,11 +1378,14 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	reg.modes = newTestHostModes(t)
+	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Script)
 
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for an explicit script — it was never upgraded", selection)
+		t.Fatalf("selection = %+v, want no factory for a host recorded script — it was never upgraded", selection)
 	}
 	if selection.Refusal == nil {
 		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")

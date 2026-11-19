@@ -178,6 +178,28 @@ describe('the connection head', () => {
     ).toBe('true')
   })
 
+  it('says the host record it could not remember in the same line, and marks the state a warning', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+      }),
+    )
+    expect(line()).toBe('Connected · 1.4 s')
+    head?.note('the host\u2019s method was not saved')
+    // ONE LINE, STILL (design §5.8): the fact that matters about the host rides
+    // the sentence the head already says, and the healthy tone becomes a
+    // warning because there is something to act on.
+    expect(line()).toBe('Connected · 1.4 s \u00b7 the host\u2019s method was not saved')
+    expect(target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-tone')).toBe(
+      'warn',
+    )
+    head?.note(null)
+    expect(line()).toBe('Connected · 1.4 s')
+  })
+
   it('calls the press once and stays disabled until the next observation', () => {
     const onReconnect = vi.fn()
     mount(onReconnect)

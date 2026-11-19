@@ -26,7 +26,7 @@
 // the repo root. A tab's cwd is where a dropped file goes, so leaving that to
 // inheritance means uploading into the checkout. The caller states it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import path from 'node:path'
@@ -180,6 +180,42 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
   return promise
 }
 
+/**
+ * The SHA256 fingerprint of a host key, from its known_hosts line, in the form
+ * every nocx surface uses (`SHA256:` + base64, no padding) — the identity a
+ * host record is keyed by (ADR-727g63tr decision 1).
+ *
+ * The line's format is `hosts keytype blob` — the shape `knownhosts.Line`
+ * writes (`[127.0.0.1]:2222 ssh-ed25519 AAAAC3Nza…`), where `hosts` may be
+ * several comma-separated names and `keytype` is the algorithm's name
+ * (`ssh-ed25519`), not key material. The fingerprint is the hash of the blob
+ * alone, so it is the THIRD field; hashing the second hashes the eleven ASCII
+ * characters of the algorithm's name, which no host's key ever hashes to.
+ */
+export function hostKeyFingerprint(knownHostsLine: string): string {
+  const fields = knownHostsLine.trim().split(/\s+/)
+  const blob = Buffer.from(fields[2] ?? '', 'base64')
+  return 'SHA256:' + createHash('sha256').update(blob).digest('base64').replace(/=+$/, '')
+}
+
+/**
+ * Record an integration method for a host, through the same
+ * connections.setIntegrationMethod a person's answer to the connect-time ask
+ * calls. A saved connection has no method of its own any more (ADR-727g63tr
+ * decision 1), so a spec that needs its host at script or raw — or one that
+ * must not be asked at connect — answers HERE instead of carrying a profile
+ * option that no longer exists. Choosing helper also records the machine's
+ * consent, which is what a person answering the dialog does.
+ */
+export async function recordHostMethod(
+  page: Page,
+  endpoint: { port: number; token: string },
+  fingerprint: string,
+  method: 'raw' | 'script' | 'helper',
+): Promise<void> {
+  await rpc(page, endpoint, 'connections.setIntegrationMethod', { fingerprint, method })
+}
+
 /** Prove the fixture still serves SSH immediately before a caller opens it.
  * READY proves startup, not that a later stage left the listener alive. Read
  * the server's banner without authenticating, so connection-count assertions
@@ -225,7 +261,16 @@ export async function assertSshdReady(fixture: SshdFixture): Promise<void> {
  *
  * The page is the only place in this suite with a WebSocket client, and the
  * socket is token-gated, so a spec that wants to seed state the way Settings
- * would goes through it. Same shape as shell-mode.spec.ts:113.
+ * would goes through it.
+ *
+ * **Only the frame carrying THIS request's id is the answer.** The same socket
+ * also carries server-initiated notifications, which have no id at all
+ * (`session.exit`, `session.ack`, `connections.passwordRequest` …), and the
+ * data plane sends binary frames on it. A reader that takes the first frame to
+ * arrive answers a call with `undefined` whenever a notification was ahead of
+ * its reply, and one that parses a binary frame throws inside the handler
+ * (nocx-oalo1.11.4). Every spec's private copy used to do the first; this is
+ * the one they now share.
  */
 export async function rpc<T>(
   page: Page,
@@ -236,11 +281,18 @@ export async function rpc<T>(
   return page.evaluate(
     ({ port, token, method, params }) =>
       new Promise<T>((resolve, reject) => {
+        const id = 1
         const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
+        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 15_000)
+        ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
         ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
+          if (typeof ev.data !== 'string') return
+          const msg = JSON.parse(ev.data) as {
+            id?: number
+            result?: T
+            error?: { message?: string }
+          }
+          if (msg.id !== id) return
           clearTimeout(timer)
           ws.close()
           if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))

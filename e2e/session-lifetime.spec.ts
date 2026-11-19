@@ -52,7 +52,6 @@ for (const kind of ['local', 'ssh'] as const) {
               port: fixture.port,
               user: fixture.user,
               keyPath: fixture.userKey,
-              desiredMode: 'helper',
             },
           })
         } finally {

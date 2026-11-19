@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -780,6 +781,16 @@ type WSServer struct {
 	// (connections.trustHostKey — accept-on-first-use). When nil, the
 	// handler returns a JSON-RPC error.
 	hostKeyTruster HostKeyTruster
+	// hostModes is the HOST record: the integration method each machine keeps,
+	// by host-key fingerprint (ADR-727g63tr decision 1). The connect-time ask
+	// writes it (ws_integration_method.go) and the open path reads it, which is
+	// what makes the mode the host's rather than a saved connection's.
+	hostModes *hostmode.Store
+	// hostKeyIndex answers which host-key fingerprints known_hosts holds for a
+	// saved connection's destination, which is what lets the editor read and
+	// write the host record a person names by profile (ws_host_mode.go). When
+	// nil, both methods refuse by name.
+	hostKeyIndex HostKeyIndex
 	// helperConsentWriter grants the machine's helper consent when the
 	// connect-time ask is answered "helper" (connections.setIntegrationMethod
 	// — ADR-0069). When nil, choosing helper fails; choosing raw or script
@@ -3088,10 +3099,6 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
-	// DesiredMode is a one-shot integration-method override for a direct-host
-	// ssh open with no saved profile (ADR-0069) — see OpenSpec.DesiredMode.
-	// Empty is the ordinary case.
-	DesiredMode string `json:"desiredMode,omitempty"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -4080,30 +4087,27 @@ func (s *WSServer) connMethodsFor(wconn *wsConn) map[string]controlMethod {
 
 // --- control-plane handlers -----------------------------------------------
 
-// desiredModeForAck reports the resolved destination mode for the open ack
-// (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
-// from the profile's effective desiredMode; a direct-host open (alias or
-// ad-hoc — no profile to say otherwise) and a local session keep the
-// hardcoded default. Unknown values fall back to that same default so
-// malformed profile data can never violate the open schema over the real
-// socket.
+// integrationModeForAck reports the mode the session opened with, for the
+// open ack (ADR-727g63tr decision 1). The open path stamps the HOST's recorded
+// mode on the ConnectConfig by the fingerprint its dial observed, so this reads
+// that one value; a local session, and a remote one whose open path never
+// reached a dial (a refusal answered before the probe), has none and says auto,
+// which is "not yet answered" (ADR-0033).
 //
-// The default is auto, and it must stay the same value the cascade's
-// hardcoded default carries (ADR-0033) — not a literal that merely happens
-// to agree today. Two defaults for one absent mode is what let the ack call
-// a connection `script` while the consent resolver read the same absence as
-// `auto` and offered an upgrade, which is exactly what D8 forbids for a
-// machine at script.
-func desiredModeForAck(remote *ssh.ConnectConfig) string {
-	if remote == nil || remote.DesiredMode == "" {
-		return string(profile.DefaultDesiredMode())
+// An unrecognised value also answers auto rather than reaching the wire: the
+// open schema's enum is the closed set, and malformed profile data must not be
+// able to violate it over the real socket.
+func integrationModeForAck(remote *ssh.ConnectConfig) string {
+	if remote == nil || remote.IntegrationMode == "" {
+		return string(hostmode.Auto)
 	}
-	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper:
-		return remote.DesiredMode
-	default:
-		return string(profile.DefaultDesiredMode())
+	if mode, ok := hostmode.Parse(remote.IntegrationMode); ok {
+		return string(mode)
 	}
+	if remote.IntegrationMode == string(hostmode.Auto) {
+		return remote.IntegrationMode
+	}
+	return string(hostmode.Auto)
 }
 
 // replayStoredForwards opens the profile's stored forwards at connect time

@@ -91,7 +91,7 @@ func TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpe
 	opened, selected, err := reg.OpenHosted(ctx, session.Config{
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: "pane-1", ProfileID: "profile-1",
-		Remote: &ssh.ConnectConfig{User: "u", DesiredMode: "helper"},
+		Remote: &ssh.ConnectConfig{User: "u", IntegrationMode: "helper"},
 	}, "")
 	if err != nil {
 		t.Fatalf("opening a helper-hosted session: %v", err)
@@ -255,7 +255,7 @@ func TestGitOpenRefusingNotARepositoryOnALiveFarHelperConnectionLeavesTheSession
 	opened, selected, err := reg.OpenHosted(ctx, session.Config{
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: "pane-1", ProfileID: "profile-1",
-		Remote: &ssh.ConnectConfig{User: "u", DesiredMode: "helper"},
+		Remote: &ssh.ConnectConfig{User: "u", IntegrationMode: "helper"},
 	}, "")
 	if err != nil {
 		t.Fatalf("opening a helper-hosted session: %v", err)

@@ -25,11 +25,11 @@ import (
 	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -64,7 +64,7 @@ func (o registryOpener) OpenHosted(ctx context.Context, cfg session.Config, clai
 type traceResolver struct{ host string }
 
 func (r traceResolver) Resolve(string) (string, *ssh.ConnectConfig, error) {
-	return r.host, &ssh.ConnectConfig{User: "tester", DesiredMode: string(profile.DesiredHelper)}, nil
+	return r.host, &ssh.ConnectConfig{User: "tester", IntegrationMode: string(hostmode.Helper)}, nil
 }
 
 type traceProvider struct{}

@@ -33,6 +33,7 @@ import {
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
+import { rpc } from './sshd-fixture'
 
 const serverBin = () => readStand().server
 
@@ -48,39 +49,6 @@ const test = base
 type Endpoint = { port: number; token: string }
 
 type LiveSession = { sessionId: string; attached: boolean; replayFrom: number }
-
-/** One JSON-RPC call on a socket of the test's own, against the backend the
- *  page is bound to. The page's client is the product's and is not reachable
- *  from here; this asks the same server the same question. */
-async function rpc(
-  page: import('@playwright/test').Page,
-  ep: Endpoint,
-  method: string,
-  params: unknown,
-): Promise<Record<string, unknown>> {
-  return page.evaluate(
-    (a: { p: number; t: string; m: string; par: unknown }) =>
-      new Promise<Record<string, unknown>>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${a.p}/session`, `nocx.token.${a.t}`)
-        const timer = setTimeout(() => reject(new Error('rpc timeout')), 15_000)
-        ws.onopen = () =>
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: a.m, params: a.par }))
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error('rpc socket error'))
-        }
-        ws.onmessage = (ev) => {
-          if (typeof ev.data !== 'string') return
-          const msg = JSON.parse(ev.data) as Record<string, unknown>
-          if (msg.id !== 1) return
-          clearTimeout(timer)
-          ws.close()
-          resolve((msg.result ?? { error: msg.error }) as Record<string, unknown>)
-        }
-      }),
-    { p: ep.port, t: ep.token, m: method, par: params },
-  )
-}
 
 /** Read the sessions still held by the helper, independent of the renderer. */
 async function liveSessions(ep: Endpoint): Promise<LiveSession[]> {

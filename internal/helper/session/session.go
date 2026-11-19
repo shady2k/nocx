@@ -144,12 +144,11 @@ type SSHSpawnRequest struct {
 	Reconnect bool
 	// Shell is the far shell the launcher is built for.
 	Shell proto.SSHShellKind
-	// Mode is the caller's integration intent, carried through UNINTERPRETED.
-	// The gate that decides whether a mode integrates is
-	// profile.DesiredMode.DeliversScripts() and it has one owner: the spawner
-	// asks it, in the build-tagged file, because internal/profile is reachable
-	// only from a tagged helper and a second copy of the predicate here would
-	// be a second answer to one question (AD-8).
+	// Mode is the integration method the HOST keeps, carried through
+	// UNINTERPRETED. The gate that decides whether a mode integrates is
+	// hostmode.Mode.DeliversScripts() and it has one owner: the spawner asks
+	// it, in the build-tagged file, and a second copy of the predicate here
+	// would be a second answer to one question (AD-8).
 	Mode proto.SSHMode
 	// AgentToolEndpoint is THIS request's own tool endpoint on the helper's
 	// machine: what every connection arriving on the far-side tool socket is

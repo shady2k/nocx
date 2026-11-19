@@ -1415,7 +1415,7 @@ func (s *sshStand) spawnParams(t *testing.T, mode proto.SSHMode) proto.SSHSpawnP
 		HostKeyFingerprint: s.fixture.fingerprint(),
 		Cols:               80,
 		Rows:               24,
-		DesiredMode:        mode,
+		IntegrationMode:    mode,
 		AgentToolEndpoint:  s.toolSocket,
 	}
 }

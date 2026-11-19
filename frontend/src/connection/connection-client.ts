@@ -56,15 +56,14 @@ export class ConnectionClient {
 
   /** Open an SSH session by host or alias, resolved through ~/.ssh/config.
    *
-   *  desiredMode is the connect-time ask's one-shot answer for THIS session
-   *  (ADR-0069): a hand-typed connection has no saved profile to write the
-   *  choice onto, so a retry after the ask carries it here instead. */
+   *  No integration method travels with it: the mode is the HOST's, recorded by
+   *  the connect-time ask under the fingerprint it named (ADR-727g63tr
+   *  decision 1), so the open reads the record when the dial sees the key. */
   openByHost(
     size: SessionSize,
     host: string,
     user?: string,
     anchor: OpenAnchor = {},
-    desiredMode?: string,
     watch?: OpenWatch,
   ): Promise<SessionHandle> {
     return this.client.dispatcher
@@ -75,7 +74,6 @@ export class ConnectionClient {
           kind: 'ssh',
           host,
           user,
-          ...(desiredMode ? { desiredMode } : {}),
           ...paneParam(anchor),
         },
         undefined,

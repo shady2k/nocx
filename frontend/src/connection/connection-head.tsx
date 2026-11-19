@@ -39,6 +39,12 @@ import { t } from '../i18n/locale-model'
 export interface ConnectionHeadHandle {
   /** The strip itself, so the pane can place it once its scrollback exists. */
   readonly element: HTMLElement
+  /** A sentence the backend's answer left behind, in its own words — today the
+   *  host's mode that could not be remembered. It rides the one line (design
+   *  §5.8: one line above the transcript), and null clears it. A statement
+   *  about the HOST outlives the attempt that produced it, so this is not a
+   *  toast: it stays for as long as the pane does. */
+  note(sentence: string | null): void
   dispose(): void
 }
 
@@ -296,23 +302,40 @@ export function mountConnectionHead(
   const [observation, setObservation] = createSignal<PaneConnection | null>(
     deps.store.current()?.observation ?? null,
   )
+  const [note, setNote] = createSignal<string | null>(null)
   const [restartEnded, setRestartEnded] = createSignal(deps.store.restartEnded())
   const [pressed, setPressed] = createSignal(false)
   const startedAt = Date.now()
   const [now, setNow] = createSignal(startedAt)
   const tick = window.setInterval(() => setNow(Date.now()), 1000)
 
+  // THE NOTE IS THE SECOND HALF OF THE SAME SENTENCE, not a second surface.
+  // It comes from an answer the backend gave about the HOST (a mode it could
+  // not remember), so the line still says what the connection is doing and
+  // then, after a separator, what the person should know about it. A state
+  // that was healthy reads as a warning when there is something to warn about;
+  // a failure keeps its own tone, because the failure is the larger fact.
+  const withNote = (facts: HeadFacts): HeadFacts => {
+    const sentence = note()
+    if (sentence === null || sentence === '') return facts
+    return {
+      ...facts,
+      text: `${facts.text} \u00b7 ${sentence}`,
+      tone: facts.tone === 'ok' ? 'warn' : facts.tone,
+    }
+  }
+
   const facts = (): HeadFacts => {
     if (restartEnded())
-      return {
+      return withNote({
         state: 'ended',
         text: t('connection.backendRestarted', 'The backend restarted and this shell is gone'),
         tone: 'bad',
         busy: false,
         offer: { endsShells: 0, shellOnly: false },
-      }
+      })
     const offer = deps.store.offer()
-    return factsFor(observation(), startedAt, now(), offer?.endsShells ?? null)
+    return withNote(factsFor(observation(), startedAt, now(), offer?.endsShells ?? null))
   }
 
   const unsubscribe = deps.store.onChange(() => {
@@ -388,6 +411,9 @@ export function mountConnectionHead(
 
   return {
     element: frame.header,
+    note(sentence: string | null): void {
+      setNote(sentence)
+    },
     dispose(): void {
       window.clearInterval(tick)
       unsubscribe()

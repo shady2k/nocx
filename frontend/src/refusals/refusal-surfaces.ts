@@ -179,6 +179,8 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'connections.test',
       'connections.trustHostKey',
       'connections.setIntegrationMethod',
+      'connections.hostMode',
+      'connections.setHostMode',
       'connections.passwordResolved',
       'sessions.status',
       'sshConfig.aliases',

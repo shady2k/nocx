@@ -4,7 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
@@ -80,15 +85,47 @@ func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 		{"the API waiting for a response", recordedChrome(t, "claude-lmstudio-turn", 72000), agentdriver.StateError},
 		{"the turn finished", recordedChrome(t, "claude-2.1.266-subagent-finished", 126000), agentdriver.StateFreeText},
 	}
+	schema := loadSchema(t, "session.observationChanged.schema.json")
 	for _, step := range steps {
 		term.emit(t, step.chrome)
-		raw := readNotification(t, conn, "session.observationChanged", wantWithin)
-		var got observationChangedParams
-		if err := json.Unmarshal(raw, &got); err != nil {
-			t.Fatalf("%s: unmarshal: %v", step.name, err)
-		}
+		got := awaitClassification(t, conn, schema, step.name)
 		if got.State != string(step.want) {
 			t.Fatalf("%s: observed %q, want %q", step.name, got.State, step.want)
 		}
+	}
+}
+
+// awaitClassification reads observations until one reports a CLASSIFIED state,
+// and answers it. The emit above reaches the pane asynchronously, so a
+// notification already in flight when the bytes land reports the pane as it
+// was BEFORE them — "unknown", the reading of a screen no driver has anything
+// to say about. Reading exactly one notification made that ordering a race,
+// and it fired on a loaded 4-CPU box; the reading this test is about is the
+// first one the driver produced FROM the emitted screen, so that is what it
+// waits for, and the step's own assertion below still names the state
+// exactly. A run in which no classification ever arrives fails here, with the
+// states that did (nocx-oalo1.11.3).
+func awaitClassification(t *testing.T, conn *websocket.Conn, schema *jsonschema.Schema, step string) observationChangedParams {
+	t.Helper()
+	deadline := time.Now().Add(wantWithin)
+	var seen []string
+	for {
+		msg, err := awaitFrame(conn, deadline, isNotification("session.observationChanged"))
+		if err != nil {
+			t.Fatalf("%s: no classification arrived; states seen: %s (%v)", step, strings.Join(seen, ", "), err)
+		}
+		f, ok := decodeFrame(msg)
+		if !ok {
+			t.Fatalf("%s: undecodable notification: %s", step, msg)
+		}
+		validateJSON(t, schema, f.Params, "session.observationChanged params (real socket)")
+		var got observationChangedParams
+		if err := json.Unmarshal(f.Params, &got); err != nil {
+			t.Fatalf("%s: unmarshal: %v", step, err)
+		}
+		if got.State != string(agentdriver.StateUnknown) {
+			return got
+		}
+		seen = append(seen, got.State)
 	}
 }

@@ -34,7 +34,7 @@ func TestPaneOpened_OverTheWireConformsToContract(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	wc := soleWSConn(t, ws)
 	state := newConnState()
-	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24, DesiredMode: "raw"}
+	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
 	ws.bindPane(helperOpenPane, wc, state, params)
 	generation := driver.Bind(helperOpenPane, "conn-1")
 	ws.paneRecordOf(helperOpenPane).bindingGeneration = generation
@@ -83,7 +83,7 @@ func TestPaneOpened_OverTheWireConformsToContract(t *testing.T) {
 		if err := json.Unmarshal(raw, &opened); err != nil {
 			t.Fatal(err)
 		}
-		if opened.Generation <= generation || opened.Open.DesiredMode != "auto" || !opened.Open.AwaitsIntegration || opened.Open.WorkspaceID == "" {
+		if opened.Generation <= generation || opened.Open.IntegrationMode != "auto" || !opened.Open.AwaitsIntegration || opened.Open.WorkspaceID == "" {
 			t.Fatalf("replacement facts: %+v", opened)
 		}
 		state.mu.Lock()
@@ -146,7 +146,7 @@ func TestPaneOpened_OverTheWireConformsToContract(t *testing.T) {
 }
 
 func TestPaneOpened_DTOConformsToContract(t *testing.T) {
-	raw, err := json.Marshal(paneOpened{PaneID: helperOpenPane, Generation: 2, Open: openResult{SessionID: "0123456789abcdef0123456789abcdef", InstanceID: "instance", SessionEpoch: 1, WorkspaceID: "workspace", Cwd: "~", DesiredMode: "raw", EffectiveSize: sizeResult{Cols: 80, Rows: 24}}})
+	raw, err := json.Marshal(paneOpened{PaneID: helperOpenPane, Generation: 2, Open: openResult{SessionID: "0123456789abcdef0123456789abcdef", InstanceID: "instance", SessionEpoch: 1, WorkspaceID: "workspace", Cwd: "~", IntegrationMode: "raw", EffectiveSize: sizeResult{Cols: 80, Rows: 24}}})
 	if err != nil {
 		t.Fatal(err)
 	}

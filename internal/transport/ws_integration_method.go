@@ -7,28 +7,29 @@ package transport
 // failure's ask (session_open_helper_consent.go): raw, script or helper —
 // never auto, which is not an answer (ADR-0033).
 //
-// The answer is written to the SAME place the connection editor writes it —
-// profileId's desiredMode, through capability.ConfigService.PatchProfile,
-// the exact path profiles.patch uses — so this method is never a second
-// owner of what a connection's method is (AD-8). A hand-typed connection
-// with no saved profile has nowhere to keep the answer; profileId is then
-// absent, nothing is patched, and the renderer carries the choice on the
-// very open it retries instead (open.params.schema.json's desiredMode).
+// THE ANSWER IS THE HOST'S (ADR-727g63tr decision 1, which supersedes
+// ADR-0069's "the saved connection's desiredMode, and a typed ssh's choice
+// applies to that session only"). It is written to internal/hostmode's record
+// by the fingerprint the ask named, for a saved connection and a hand-typed
+// one alike, because which method a machine uses is a fact about that machine
+// — two tabs to one host resolve one mode, and a second open raises no ask.
 //
-// Choosing helper ALSO records the machine's consent to deploy the binary,
-// by fingerprint (ADR-0034, internal/helper/consent) — the same store the
-// connect-time decision (openHoldingLease) and the git-lane selection both
-// read. Choosing raw or script writes NOTHING to that store: a fingerprint
-// record answers "may a binary be deployed here", never "which method this
-// connection uses" — the two questions stay unmerged (ADR-0034's own
-// rationale, carried forward by ADR-0069).
+// One other write rides beside it and does not own the answer: the machine's
+// CONSENT to deploy the binary, by fingerprint, and only when the chosen method
+// is helper (ADR-0034, internal/helper/consent). Choosing raw or script writes
+// nothing to that store: a fingerprint record there answers "may a binary be
+// deployed here", never "which method this host uses" — the two questions stay
+// unmerged (ADR-0105). That is why hostmode is a separate store beside consent
+// and not a field of it. The connection editor's own write is a separate
+// method (ws_host_mode.go) because it names a profile instead of a fingerprint
+// and grants nothing.
 
 import (
 	"context"
 	"encoding/json"
 
-	"github.com/shady2k/nocx/internal/capability"
-	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/hostmode"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // HelperConsentGranter is the seam this method grants the helper through:
@@ -51,40 +52,46 @@ func WithHelperConsentWriter(w HelperConsentGranter) WSServerOption {
 	return func(s *WSServer) { s.helperConsentWriter = w }
 }
 
+// WithHostModeStore attaches the HOST record the connect-time ask writes and
+// the open path reads (ADR-727g63tr decision 1). It is required: without it
+// this method has nowhere to record an answer that every later open of the
+// host depends on, so a request naming no store is refused rather than
+// answered into nothing.
+func WithHostModeStore(store *hostmode.Store) WSServerOption {
+	return func(s *WSServer) { s.hostModes = store }
+}
+
 // integrationMethodParams is the payload of "connections.setIntegrationMethod":
 // the fingerprint the ask named (echoed from the open failure's
-// helperConsentData), the chosen method, and — when the answer belongs to a
-// saved connection — the profile it is written to. Host travels for the log
-// line only.
+// helperConsentData) and the chosen method. Host travels for the log line
+// only.
 type integrationMethodParams struct {
 	Fingerprint string `json:"fingerprint"`
 	Host        string `json:"host,omitempty"`
-	ProfileID   string `json:"profileId,omitempty"`
 	Method      string `json:"method"`
 }
 
-// integrationMethodResult confirms which fingerprint was answered, with
-// which method, and which connection (if any) received the write — so the
-// renderer's retry is keyed on the identity the backend actually acted on
-// rather than trusting its own copy of the request back.
+// integrationMethodResult confirms which fingerprint was answered, with which
+// method — so the renderer's retry is keyed on the identity the backend
+// actually acted on rather than trusting its own copy of the request back.
 type integrationMethodResult struct {
-	Fingerprint string `json:"fingerprint"`
-	Method      string `json:"method"`
-	ProfileID   string `json:"profileId,omitempty"`
+	Fingerprint     string `json:"fingerprint"`
+	Method          string `json:"method"`
+	HostRecordSaved bool   `json:"hostRecordSaved"`
 }
 
 type integrationMethodHandlers struct {
-	op      capability.ConfigOperation // nil → config domain not wired
-	wired   bool                       // profile repository wired (needed only when ProfileID is set)
-	granter HelperConsentGranter       // nil → choosing helper fails
+	granter HelperConsentGranter // nil → choosing helper fails
+	modes   *hostmode.Store      // nil → nothing may be answered
 	r       Responder
+	log     log.Logger
 }
 
 // handleConnectionsSetIntegrationMethod writes the person's answer to the
 // connect-time ask.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.setIntegrationMethod","params":{"fingerprint":"SHA256:MKEj…","host":"1.2.3.4:22","profileId":"ssh-1","method":"script"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","profileId":"ssh-1"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","hostRecordSaved":true}}
 func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	var params integrationMethodParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -95,56 +102,61 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: fingerprint required"})
 		return
 	}
-	switch profile.DesiredMode(params.Method) {
-	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper:
-	default:
+	mode, ok := hostmode.Parse(params.Method)
+	if !ok {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: method must be raw, script or helper"})
 		return
 	}
 
-	// The saved-connection write, through the SAME path profiles.patch
-	// uses — never a second writer of desiredMode (AD-8). Absent profileId
-	// is legitimate (a hand-typed connection): nothing is patched, and the
-	// renderer carries the choice on the retried open instead.
-	if params.ProfileID != "" {
-		if !h.wired || h.op == nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "profiles not available"})
-			return
-		}
-		err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-			return svc.PatchProfile(params.ProfileID, map[string]any{
-				"options.desiredMode": params.Method,
-			}, nil)
-		})
-		if err != nil {
-			code := profileMethodErrorCode(err)
-			if patchValidationError(err) {
-				code = -32602
-			}
-			_ = h.r.TryError(req.ID, RPCError{Code: code, Message: err.Error()})
-			return
-		}
+	// The host record owns the answer for saved and typed connections alike
+	// (ADR-727g63tr decision 1). Refuse before granting consent if no store
+	// can retain the chosen mode.
+	if h.modes == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host mode store not available (no store wired)"})
+		return
 	}
-
 	// The machine grant, by fingerprint (ADR-0034) — only for helper.
-	// Raw and script write nothing here: the two questions ("which method"
-	// and "may a binary be deployed here") stay unmerged.
-	if profile.DesiredMode(params.Method) == profile.DesiredHelper {
+	// Raw and script write nothing here: the two questions ("which method
+	// this host uses" and "may a binary be deployed here") stay unmerged.
+	if mode == hostmode.Helper {
 		if h.granter == nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Helper consent not available (no granter wired)"})
 			return
 		}
 		if err := h.granter.Grant(params.Fingerprint); err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed: " + err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Record helper consent failed"})
 			return
 		}
 	}
+	// Consent and mode are separate facts (ADR-0105). Grant first: a failed
+	// consent write must never leave a durable helper mode without consent.
+	recordErr := h.modes.Set(params.Fingerprint, mode)
+
+	// A failed host-record write still applies the answer for this run.
+	// This is success with hostRecordSaved=false, so the renderer can retry
+	// the open and explain that the host will ask again after restart.
+	if recordErr != nil {
+		// The detail is the developer's (a document store that could not
+		// write); the person gets the sentence that tells them what it means
+		// for them. Never the store's own error text in a pane.
+		h.warn("the host's record could not be saved; the answer stands for this run",
+			"fingerprint", params.Fingerprint, "mode", params.Method, "error", recordErr)
+	}
 
 	_ = h.r.TryResult(req.ID, mustMarshal(integrationMethodResult{
-		Fingerprint: params.Fingerprint,
-		Method:      params.Method,
-		ProfileID:   params.ProfileID,
+		Fingerprint:     params.Fingerprint,
+		Method:          params.Method,
+		HostRecordSaved: recordErr == nil,
 	}))
+}
+
+// warn writes one line about a write that failed while the answer stood. The
+// handler holds the logger for the developer who has to find the store;
+// the response carries only whether the record was saved.
+func (h integrationMethodHandlers) warn(msg string, args ...any) {
+	if h.log != nil {
+		h.log.Warn(msg, args...)
+	}
 }
 
 // validateIntegrationMethodRaw is the registered validator for
@@ -165,18 +177,11 @@ func validateIntegrationMethodRaw(raw json.RawMessage) string {
 	if msg := validateStringBound("fingerprint", p.Fingerprint, maxHostRunes); msg != "" {
 		return msg
 	}
-	switch p.Method {
-	case "raw", "script", "helper":
-	default:
+	if _, ok := hostmode.Parse(p.Method); !ok {
 		return "method must be raw, script or helper"
 	}
 	if p.Host != "" {
 		if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
-			return msg
-		}
-	}
-	if p.ProfileID != "" {
-		if msg := validateStringBound("profileId", p.ProfileID, maxIDRunes); msg != "" {
 			return msg
 		}
 	}

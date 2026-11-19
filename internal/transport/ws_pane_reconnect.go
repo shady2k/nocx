@@ -189,7 +189,7 @@ func (o *sessionOpener) registerReconnect(ctx context.Context, params openParams
 		return refuse(-32602, "Invalid params: "+fmt.Sprint(err))
 	}
 	cfg := session.Config{PaneID: params.PaneID, Kind: session.KindRemote}
-	spec := OpenSpec{PaneID: params.PaneID, Kind: params.Kind, ProfileID: params.ProfileID, Host: params.Host, User: params.User, DesiredMode: params.DesiredMode, Shell: params.Shell}
+	spec := OpenSpec{PaneID: params.PaneID, Kind: params.Kind, ProfileID: params.ProfileID, Host: params.Host, User: params.User, Shell: params.Shell}
 	if err := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		return o.resolveRemote(ctx, svc, spec, &cfg)
 	}); err != nil {

@@ -63,7 +63,7 @@ import {
   settingsReady,
   VaultBackend,
 } from './harness'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
@@ -251,13 +251,13 @@ test('a running ssh command’s header is on the column its output is on', async
         port: fixture.port,
         user: fixture.user,
         keyPath: fixture.userKey,
-        // Shell integration, so the remote command is a block like a local
-        // one: the report is about a command's header, and a markerless shell
-        // has no block at all.
-        desiredMode: 'script',
       },
     })
     createdId = created.id
+    // Shell integration, so the remote command is a block like a local one:
+    // the report is about a command's header, and a markerless shell has no
+    // block at all. The method is the HOST's (ADR-727g63tr decision 1).
+    await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible({ timeout: 30_000 })

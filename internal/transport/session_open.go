@@ -71,15 +71,6 @@ type OpenSpec struct {
 	ProfileID string
 	Host      string
 	User      string
-	// DesiredMode is a one-shot integration-method override for a direct-host
-	// ssh open with no saved profile (ADR-0069): the connect-time ask has
-	// nowhere to persist a hand-typed connection's answer, so the renderer's
-	// retry carries the chosen method here instead. Empty (the ordinary
-	// case) leaves the resolved destination's own mode untouched. A profile
-	// open ignores this field — its answer was already written to the
-	// profile's desiredMode by connections.setIntegrationMethod, which the
-	// resolver reads fresh on every open.
-	DesiredMode string
 	// Shell pins the far shell the launcher targets. Anything unrecognised
 	// is ignored with a warn, never honoured.
 	Shell string
@@ -527,12 +518,6 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 			RemoteLauncher:  o.launcher,
 			RemoteInstaller: o.installer,
 			RemoteLifecycle: o.lifecycle,
-			// The connect-time ask's one-shot answer for a hand-typed
-			// connection (ADR-0069): there is no profile to persist it on,
-			// so a chosen method rides the very open it retries. Empty
-			// leaves the destination at auto, exactly as before this field
-			// existed.
-			DesiredMode: spec.DesiredMode,
 			// THE PROMPT RUNG REACHES AN UNSAVED HOST TOO (nocx-1ebrs.44).
 			// Without this line the helper's resolution saw a password-capable
 			// connection with nothing to offer: discovered keys followed by

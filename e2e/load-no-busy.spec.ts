@@ -40,7 +40,13 @@ import {
 } from './harness'
 import type { Page } from '@playwright/test'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  startSshd,
+  rpc,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 import { callOperationDeclaration } from '../frontend/src/generated/operations'
 
@@ -351,10 +357,10 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
           port,
           user: 'e2e',
           keyPath: fixture!.userKey,
-          desiredMode: 'script',
         },
       })
       profileIDs.push(created.id)
+      await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture!.knownHosts), 'script')
       return created.id
     }
     const stamp = Date.now()
@@ -366,8 +372,11 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     // ── the two far tabs, and the Files panel following the active one ───
     await openConnection(page, healthyProfile)
     await expect(page.locator(TAB)).toHaveCount(2)
-    await showSidebarView(page, 'files')
+    // promptReady waits for the EDITOR to hold the keyboard, so it runs before
+    // the panel is shown: showing it clicks the Files icon, and the click
+    // leaves the keyboard on the activity-bar button (nocx-l5b5f).
     await promptReady(page)
+    await showSidebarView(page, 'files')
 
     // Load the blocked tab's tree while its network still passes: the churn
     // directory's 25 children cost one listing, and each unexpanded child is a
@@ -428,8 +437,9 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     // being taken away.
     await openConnection(page, blockedProfile)
     await expect(page.locator(TAB)).toHaveCount(3)
-    await showSidebarView(page, 'files')
+    // Same order as above, for the same reason.
     await promptReady(page)
+    await showSidebarView(page, 'files')
     // The panel may have collapsed back to its root, so the churn directory is
     // expanded here — while the blocked tab's network still passes, because
     // after the blackhole nothing on it can list.

@@ -12,8 +12,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // fakeHelperConsentGranter records what it was asked to grant and can be
@@ -43,15 +45,31 @@ func (f *fakeHelperConsentGranter) grantedFingerprints() []string {
 	return append([]string(nil), f.granted...)
 }
 
+// newHostModeStore is the production host record over a temporary document —
+// the store connections.setIntegrationMethod writes and the open path reads.
+func newHostModeStore(t *testing.T) *hostmode.Store {
+	t.Helper()
+	return hostmode.NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "host-modes.json")
+}
+
 // startIntegrationMethodServer wires the config domain (so ProfileID writes
-// have somewhere to land) plus the optional granter. Tests that never send a
-// profileId do not need the profile store at all, but wiring it uniformly
-// keeps this harness one shape rather than two.
-func startIntegrationMethodServer(t *testing.T, w HelperConsentGranter, ps *profile.JSONStore) *WSServer {
+// have somewhere to land), the optional granter, and the host record the
+// answer belongs to. Tests that never send a profileId do not need the profile
+// store at all, but wiring one uniformly keeps this harness one shape rather
+// than two.
+func startIntegrationMethodServer(t *testing.T, w HelperConsentGranter, ps *profile.JSONStore) (*WSServer, *hostmode.Store) {
+	t.Helper()
+	return startIntegrationMethodServerWithStore(t, w, ps, newHostModeStore(t))
+}
+
+// startIntegrationMethodServerWithStore is the same stand with the host record
+// the caller chose — the failure case builds one over a document store that
+// cannot write.
+func startIntegrationMethodServerWithStore(t *testing.T, w HelperConsentGranter, ps *profile.JSONStore, modes *hostmode.Store) (*WSServer, *hostmode.Store) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	opts := []WSServerOption{WithCredentialStore(newTestStore())}
+	opts := []WSServerOption{WithCredentialStore(newTestStore()), WithHostModeStore(modes)}
 	if w != nil {
 		opts = append(opts, WithHelperConsentWriter(w))
 	}
@@ -64,7 +82,7 @@ func startIntegrationMethodServer(t *testing.T, w HelperConsentGranter, ps *prof
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = srv.Stop(ctx) })
-	return srv
+	return srv, modes
 }
 
 func newIntegrationMethodProfileStore(t *testing.T, id string) *profile.JSONStore {
@@ -82,20 +100,19 @@ func newIntegrationMethodProfileStore(t *testing.T, id string) *profile.JSONStor
 	return ps
 }
 
-// TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath: choosing
-// script on a saved connection is read back through profiles.effective the
-// same way an editor-driven patch would be — the acceptance criterion in
-// nocx-xn63t.6.5 — and grants nothing.
-func TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
+// TestIntegrationMethod_ScriptRecordsTheHostMethodOnly: choosing script writes
+// the HOST's record and grants nothing. The saved connection has no copy of the
+// method any more (ADR-727g63tr decision 1), so profiles.effective is not a
+// place the answer could be read back from — and a test that looked there
+// would be asserting a field the wire no longer carries.
+func TestIntegrationMethod_ScriptRecordsTheHostMethodOnly(t *testing.T) {
 	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "script",
 	})
 	var result struct {
@@ -108,48 +125,28 @@ func TestIntegrationMethod_ScriptWritesDesiredModeThroughThePatchPath(t *testing
 	if result.Error != nil {
 		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
 	}
-	if result.Result.Method != "script" || result.Result.ProfileID != "ssh-1" {
-		t.Errorf("result = %+v, want method script / profileId ssh-1", result.Result)
+	if result.Result.Method != "script" || result.Result.Fingerprint != "SHA256:abc" {
+		t.Errorf("result = %+v, want method script for SHA256:abc", result.Result)
 	}
 	if len(granter.grantedFingerprints()) != 0 {
 		t.Error("choosing script must not grant helper consent")
 	}
-
-	// Read back through the same seam the editor's Delivery mode field uses:
-	// profiles.effective's desiredMode.
-	effResp := jsonrpcCall(t, conn, "profiles.effective", map[string]any{"ids": []string{"ssh-1"}})
-	var eff struct {
-		Result struct {
-			Profiles []struct {
-				Fields struct {
-					DesiredMode struct {
-						Value string `json:"value"`
-					} `json:"desiredMode"`
-				} `json:"fields"`
-			} `json:"profiles"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(effResp, &eff); err != nil {
-		t.Fatalf("unmarshal effective: %v", err)
-	}
-	if len(eff.Result.Profiles) != 1 || eff.Result.Profiles[0].Fields.DesiredMode.Value != "script" {
-		t.Fatalf("effective profiles = %+v, want one profile with desiredMode script", eff.Result.Profiles)
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
+		t.Errorf("host record = %q/%v, want script", mode, ok)
 	}
 }
 
-// TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent: choosing
-// helper on a saved connection does both writes ADR-0069 names — the
-// connection's desiredMode AND the machine's fingerprint-keyed grant.
-func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
+// TestIntegrationMethod_HelperRecordsTheHostMethodAndGrantsConsent: choosing
+// helper does both writes ADR-0069 names — the host's method AND the machine's
+// fingerprint-keyed grant — and they are two questions with two stores.
+func TestIntegrationMethod_HelperRecordsTheHostMethodAndGrantsConsent(t *testing.T) {
 	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "helper",
 	})
 	var result struct {
@@ -164,6 +161,9 @@ func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T)
 	}
 	if got := granter.grantedFingerprints(); len(got) != 1 || got[0] != "SHA256:abc" {
 		t.Errorf("Grant called with %v, want [SHA256:abc]", got)
+	}
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Helper {
+		t.Errorf("host record = %q/%v, want helper", mode, ok)
 	}
 }
 
@@ -171,51 +171,20 @@ func TestIntegrationMethod_HelperWritesDesiredModeAndGrantsConsent(t *testing.T)
 // store either — the same rule as script, checked separately because raw and
 // script are refused by two different arms of the resolver.
 func TestIntegrationMethod_RawWritesNoConsent(t *testing.T) {
-	ps := newIntegrationMethodProfileStore(t, "ssh-1")
 	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, ps)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
 	jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
 		"fingerprint": "SHA256:abc",
-		"profileId":   "ssh-1",
 		"method":      "raw",
 	})
 	if len(granter.grantedFingerprints()) != 0 {
 		t.Error("choosing raw must not grant helper consent")
 	}
-}
-
-// TestIntegrationMethod_NoProfileID: a hand-typed connection has nowhere to
-// keep the answer. Helper still grants — the machine consent is independent
-// of any saved connection — but nothing is patched, and no profile store
-// needs to be wired at all.
-func TestIntegrationMethod_NoProfileID(t *testing.T) {
-	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, nil)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
-
-	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
-		"fingerprint": "SHA256:abc",
-		"method":      "helper",
-	})
-	var result struct {
-		Result integrationMethodResult `json:"result"`
-		Error  *jsonrpcErrorObj        `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if result.Error != nil {
-		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
-	}
-	if result.Result.ProfileID != "" {
-		t.Errorf("profileId = %q, want empty when none was named", result.Result.ProfileID)
-	}
-	if got := granter.grantedFingerprints(); len(got) != 1 || got[0] != "SHA256:abc" {
-		t.Errorf("Grant called with %v, want [SHA256:abc]", got)
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Raw {
+		t.Errorf("host record = %q/%v, want raw", mode, ok)
 	}
 }
 
@@ -223,7 +192,7 @@ func TestIntegrationMethod_NoProfileID(t *testing.T) {
 // than silently accepting a grant nobody can ever look up — but only for
 // helper; raw and script need no granter.
 func TestIntegrationMethod_NoGranter_Helper(t *testing.T) {
-	srv := startIntegrationMethodServer(t, nil, nil)
+	srv, _ := startIntegrationMethodServer(t, nil, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -249,7 +218,7 @@ func TestIntegrationMethod_NoGranter_Helper(t *testing.T) {
 // an ask answered script succeeds even when nothing was wired to grant the
 // helper.
 func TestIntegrationMethod_NoGranter_Script(t *testing.T) {
-	srv := startIntegrationMethodServer(t, nil, nil)
+	srv, _ := startIntegrationMethodServer(t, nil, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -274,7 +243,7 @@ func TestIntegrationMethod_NoGranter_Script(t *testing.T) {
 // touched.
 func TestIntegrationMethod_MissingFingerprint(t *testing.T) {
 	granter := &fakeHelperConsentGranter{}
-	srv := startIntegrationMethodServer(t, granter, nil)
+	srv, _ := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -301,7 +270,7 @@ func TestIntegrationMethod_MissingFingerprint(t *testing.T) {
 // TestIntegrationMethod_InvalidMethod: "auto" is not an answer (ADR-0033)
 // and neither is anything else outside the three the product offers.
 func TestIntegrationMethod_InvalidMethod(t *testing.T) {
-	srv := startIntegrationMethodServer(t, nil, nil)
+	srv, _ := startIntegrationMethodServer(t, nil, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -331,7 +300,7 @@ func TestIntegrationMethod_InvalidMethod(t *testing.T) {
 // (consent design §6).
 func TestIntegrationMethod_GrantFailure(t *testing.T) {
 	granter := &fakeHelperConsentGranter{grantErr: errors.New("disk full")}
-	srv := startIntegrationMethodServer(t, granter, nil)
+	srv, modes := startIntegrationMethodServer(t, granter, nil)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -351,14 +320,75 @@ func TestIntegrationMethod_GrantFailure(t *testing.T) {
 	if result.Error.Code != -32603 {
 		t.Errorf("expected code -32603, got %d", result.Error.Code)
 	}
+	if got := result.Error.Message; got != "Record helper consent failed" {
+		t.Errorf("error message = %q, want stable non-sensitive consent failure", got)
+	}
+	var envelope struct {
+		Error map[string]json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal error envelope: %v", err)
+	}
+	if data, present := envelope.Error["data"]; present {
+		t.Errorf("error data = %s, want absent", data)
+	}
+	if mode, ok := modes.Lookup("SHA256:abc"); ok {
+		t.Errorf("mode after consent failure = %q, want no record", mode)
+	}
 }
 
-// TestIntegrationMethod_UnknownProfileID: a profileId naming no stored
-// connection is refused rather than silently accepted — the same refusal
-// profiles.patch itself gives.
-func TestIntegrationMethod_UnknownProfileID(t *testing.T) {
+func TestIntegrationMethod_ErrorsHaveNoDataAndDoNotApplyAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		method      string
+		fingerprint string
+		noStore     bool
+	}{
+		{name: "missing fingerprint", method: "helper"},
+		{name: "invalid method", fingerprint: "SHA256:abc", method: "auto"},
+		{name: "missing store", fingerprint: "SHA256:abc", method: "helper", noStore: true},
+		{name: "missing granter", fingerprint: "SHA256:abc", method: "helper"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			modes := newHostModeStore(t)
+			if tc.noStore {
+				modes = nil
+			}
+			srv, _ := startIntegrationMethodServerWithStore(t, nil, nil, modes)
+			conn := connectWS(t, srv)
+			defer conn.Close() //nolint:errcheck
+			resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+				"fingerprint": tc.fingerprint, "method": tc.method,
+			})
+			var envelope struct {
+				Error map[string]json.RawMessage `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error == nil {
+				t.Fatalf("expected error: %s", resp)
+			}
+			if data, present := envelope.Error["data"]; present {
+				t.Errorf("error data = %s, want absent", data)
+			}
+			if modes != nil {
+				if mode, ok := modes.Lookup(tc.fingerprint); ok {
+					t.Errorf("mode after error = %q, want no record", mode)
+				}
+			}
+		})
+	}
+}
+
+// TestIntegrationMethod_AnUnknownProfileStillRecordsTheHost: the answer is the
+// HOST's since ADR-727g63tr decision 1, so a profileId that no longer resolves
+// — a saved connection deleted between the open and the answer — must not lose
+// it. The legacy profile write is attempted and its failure is a warning; the
+// record is written and answers the next open.
+func TestIntegrationMethod_AnUnknownProfileStillRecordsTheHost(t *testing.T) {
 	ps := newIntegrationMethodProfileStore(t, "ssh-1")
-	srv := startIntegrationMethodServer(t, nil, ps)
+	srv, modes := startIntegrationMethodServer(t, nil, ps)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
@@ -368,12 +398,90 @@ func TestIntegrationMethod_UnknownProfileID(t *testing.T) {
 		"method":      "script",
 	})
 	var result struct {
+		Result integrationMethodResult `json:"result"`
+		Error  *jsonrpcErrorObj        `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error != nil {
+		t.Fatalf("the host's answer was refused because a saved connection was gone: %d %s", result.Error.Code, result.Error.Message)
+	}
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
+		t.Fatalf("host record = %q/%v, want script", mode, ok)
+	}
+}
+
+// TestIntegrationMethod_ATypedConnectionRecordsTheHost: a hand-typed ssh has no
+// saved connection to write and is no longer the exception ADR-0069 made it —
+// its answer is the host's too, so the very next open of that machine (by any
+// connection) is silent.
+func TestIntegrationMethod_ATypedConnectionRecordsTheHost(t *testing.T) {
+	srv, modes := startIntegrationMethodServer(t, &fakeHelperConsentGranter{}, nil)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+		"fingerprint": "SHA256:typed",
+		"method":      "raw",
+	})
+	var result struct {
+		Result integrationMethodResult `json:"result"`
+		Error  *jsonrpcErrorObj        `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error != nil {
+		t.Fatalf("expected success, got RPC error %d: %s", result.Error.Code, result.Error.Message)
+	}
+	if mode, ok := modes.Lookup("SHA256:typed"); !ok || mode != hostmode.Raw {
+		t.Fatalf("host record = %q/%v, want raw for a typed connection", mode, ok)
+	}
+}
+
+// refusingDocumentStore is a disk that answers no: reads find nothing, writes
+// fail. It stands where the host record's file would be.
+type refusingDocumentStore struct{}
+
+func (refusingDocumentStore) Read(string, any) (bool, error) { return false, nil }
+func (refusingDocumentStore) Write(string, any) error        { return errors.New("disk is full") }
+func (refusingDocumentStore) Delete(string) error            { return errors.New("disk is full") }
+
+// TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo is
+// assertion 4's answer-path half. A record that cannot be written is not a
+// refused answer: the store keeps it for this run, so the retried open uses it
+// and does not ask again — and the response SAYS it was not saved, because the
+// pane's head repeats that sentence (terminal-content.ts) and a silent failure
+// would be a person told nothing about a host that will be asked again.
+func TestIntegrationMethod_AFailedHostRecordWriteStillAnswersAndSaysSo(t *testing.T) {
+	modes := hostmode.NewStore(log.NewSlogAdapter(nil), refusingDocumentStore{}, "host-modes.json")
+	srv, _ := startIntegrationMethodServerWithStore(t, &fakeHelperConsentGranter{}, nil, modes)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	resp := jsonrpcCall(t, conn, "connections.setIntegrationMethod", map[string]any{
+		"fingerprint": "SHA256:abc",
+		"method":      "script",
+	})
+	var result struct {
+		Result struct {
+			HostRecordSaved *bool `json:"hostRecordSaved"`
+		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result.Error == nil {
-		t.Fatal("expected an error for an unknown profileId")
+	if result.Error != nil {
+		t.Fatalf("an applied answer must succeed: %s", resp)
+	}
+	if result.Result.HostRecordSaved == nil || *result.Result.HostRecordSaved {
+		t.Fatalf("want result.hostRecordSaved=false: %s", resp)
+	}
+	// THE ANSWER STANDS FOR THIS OPEN: the store kept it, so the open that
+	// retries does not fall back into the same dialog.
+	if mode, ok := modes.Lookup("SHA256:abc"); !ok || mode != hostmode.Script {
+		t.Fatalf("host record after a failed write = %q/%v, want the answer kept for this run", mode, ok)
 	}
 }

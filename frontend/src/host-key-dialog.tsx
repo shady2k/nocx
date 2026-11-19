@@ -18,9 +18,34 @@ interface HostKeyDecisionEvidence {
  *  answered how nocx integrates with it. Only the identity travels here —
  *  the methods offered and what each means is fixed copy in the dialog
  *  below, the same way AgentApprovalDialog states its own grant rather than
- *  taking it as a prop. */
+ *  taking it as a prop.
+ *
+ *  profileId is the saved connection the open named, and it is here because
+ *  the last sentence says where the answer can be changed later: a saved
+ *  connection has settings to point at, and a destination typed into ssh has
+ *  none. It is read from the ask's own data rather than inferred from what
+ *  the renderer holds, so the sentence cannot disagree with the request it
+ *  is answering (ADR-727g63tr decision 1, mockup frame 7). */
 interface HelperConsentAskEvidence {
   fingerprint: string
+  profileId?: string
+}
+
+/** The last sentence of the ask, chosen by the ask's own data: a saved
+ *  connection points at its settings; a typed ssh has none, so it names the
+ *  one way to get some. Two sentences rather than one composed from a host,
+ *  because "the connection's settings" is false for a destination that is
+ *  not a connection. */
+function changeMethodLater(profileId: string | undefined): string {
+  return profileId
+    ? t(
+        'connections.helperAsk.changeLater',
+        'Change your mind later from the connection’s settings.',
+      )
+    : t(
+        'connections.helperAsk.changeLaterTyped',
+        'To change it later, save a connection to this machine and open its settings.',
+      )
 }
 
 /** The methods the connect-time ask offers — built from the modes the
@@ -167,9 +192,10 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
           {(ask) => (
             <>
               <p>
-                Choose how nocx integrates with this machine. The method is saved on the connection,
-                and permission to deploy nocx&rsquo;s helper here is remembered for the machine
-                itself — so this is asked once, whichever of the two was still open.
+                {t(
+                  'connections.helperAsk.lead',
+                  'Choose how nocx integrates with this machine. The method is saved for the machine — every tab to it, from any saved connection or a typed ssh, opens this way — and permission to deploy nocx’s helper here is remembered with it, so this is asked once.',
+                )}
               </p>
               <SegmentedControl
                 ariaLabel="Integration method"
@@ -179,8 +205,11 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
                 disabled={props.busy}
               />
               <p>
-                Choosing Helper also allows nocx to deploy its helper binary on this machine; Raw
-                and Script never do. Change your mind later from the connection&rsquo;s settings.
+                {t(
+                  'connections.helperAsk.consent',
+                  'Choosing Helper also allows nocx to deploy its helper binary on this machine; Raw and Script never do.',
+                )}{' '}
+                {changeMethodLater(ask.profileId)}
               </p>
               <p>
                 Fingerprint: <code>{ask.fingerprint}</code>

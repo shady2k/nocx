@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -17,8 +17,8 @@ import (
 // that only an integration script could answer. Script-delivering modes keep
 // the authenticated channel.
 func TestRawSSHDoesNotAskForLifecycleHello(t *testing.T) {
-	for _, mode := range []profile.DesiredMode{
-		profile.DesiredRaw, profile.DesiredAuto, profile.DesiredScript, profile.DesiredHelper,
+	for _, mode := range []hostmode.Mode{
+		hostmode.Raw, hostmode.Auto, hostmode.Script, hostmode.Helper,
 	} {
 		t.Run(string(mode), func(t *testing.T) {
 			stand := startPaneStand(t)
@@ -34,7 +34,7 @@ func TestRawSSHDoesNotAskForLifecycleHello(t *testing.T) {
 					Secrets:            rememberedPassword{value: openPasswordFixturePassword},
 					SecretID:           "sec:pane-publish:1",
 					AuthorizedEndpoint: "host.example:22",
-					DesiredMode:        string(mode),
+					IntegrationMode:    string(mode),
 					Shell:              "bash",
 				},
 			}, "")

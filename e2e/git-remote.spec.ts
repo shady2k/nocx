@@ -51,7 +51,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import type { Page } from './harness'
+import { rpc } from './sshd-fixture'
 
 // ── Selectors (read from frontend/src/git/git-panel.tsx — not invented) ──
 
@@ -212,37 +212,6 @@ function remoteFileExists(fixture: RemoteFixture, p: string): boolean {
   }
 }
 
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
-}
-
 test('a commit from the panel, on a remote host, through its own pre-commit hook', async ({
   page,
 }) => {
@@ -274,7 +243,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     const profileName = `e2e-git-remote-${Date.now()}`
     wsPort = wsInfo.port
     wsToken = wsInfo.token
-    const created = await rpc<{ id?: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    const created = await rpc<{ id?: string }>(page, wsInfo, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -282,7 +251,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No desiredMode option: the cascade's hardcoded default is Auto
+        // No method record for this host: its record says nothing, so Auto
         // (ADR-0033), which is what makes this connect raise the
         // connect-time ask (ADR-0069) below — an explicit Script would skip
         // straight past it, and Helper is asked too but answers a different
@@ -438,9 +407,9 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     // Best-effort cleanup inside the existing finally: a cleanup that
     // throws would replace the real failure with its own.
     if (createdProfileId !== null && wsPort !== null && wsToken !== null) {
-      await rpc(page, wsPort, wsToken, 'profiles.delete', { id: createdProfileId }).catch(
-        () => undefined,
-      )
+      await rpc(page, { port: wsPort, token: wsToken }, 'profiles.delete', {
+        id: createdProfileId,
+      }).catch(() => undefined)
     }
     fixture.proc.kill('SIGKILL')
     rmSync(seedRoot, { recursive: true, force: true })

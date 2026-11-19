@@ -508,14 +508,13 @@ const (
 	SSHShellUnknown SSHShellKind = "unknown"
 )
 
-// SSHMode is what the caller WANTS of this session's integration, in the
-// closed set internal/profile declares as DesiredMode.
+// SSHMode is the integration method the HOST keeps (ADR-727g63tr decision 1),
+// in the closed set internal/hostmode declares — auto, raw, script, helper.
 //
 // Spelled here for the leaf-package reason above, and the GATE is not spelled
-// here: whether a mode delivers shell integration is profile.DesiredMode
+// here: whether a mode delivers shell integration is hostmode.Mode
 // .DeliversScripts(), one predicate with one owner, which the helper's ssh
-// spawner asks directly (it is build-tagged, and a tagged helper links
-// internal/profile already through internal/ssh).
+// spawner asks directly.
 type SSHMode string
 
 const (
@@ -615,10 +614,13 @@ type SSHSpawnParams struct {
 	// two facts that the channel exists are the two a caller can already check:
 	// the session's lifecycle window, and what `adopt-lifecycle` answers.
 	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
-	// DesiredMode is the caller's integration intent, and the helper applies
-	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell
-	// and integrates nothing, and an unrecognised value fails closed.
-	DesiredMode SSHMode `json:"desiredMode"`
+	// IntegrationMode is the mode the HOST keeps, resolved by the open path
+	// from the host record. The helper applies hostmode.Mode's own gate to it:
+	// `raw` opens a plain login shell and integrates nothing, and an
+	// unrecognised value fails closed. The JSON tag keeps its original spelling
+	// because this wire is frozen and versioned (proto.Version): renaming it
+	// would be a protocol bump that buys the helper nothing.
+	IntegrationMode SSHMode `json:"desiredMode"`
 	// AgentToolEndpoint is the LOCAL socket every connection arriving on the
 	// far-side tool socket is piped into: this pane's own coordinator's tool
 	// endpoint on THIS machine, which is the one that asked for the pane.
@@ -681,8 +683,8 @@ type SSHSpawnParams struct {
 	// connection (ADR-0057): the coordinator has no transport of its own left
 	// to probe, so "how often" is a fact this spawn must carry rather than a
 	// setting the far side of the wire could apply on its own — the same
-	// reason Shell and DesiredMode travel per spawn rather than living in the
-	// helper's own defaults. Zero is a real, honest state (a profile with no
+	// reason Shell and IntegrationMode travel per spawn rather than living in
+	// the helper's own defaults. Zero is a real, honest state (a profile with no
 	// interval configured), not a gap: nocx-y6fh7 item 6 measured that the
 	// pre-ADR-0057 coordinator-side prober silently vanished for every
 	// helper-hosted pane once the dial moved here and nothing replaced it —

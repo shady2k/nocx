@@ -84,7 +84,7 @@
       "minimum": 0
     },
     "desiredMode": {
-      "description": "The caller's integration intent, in the set internal/profile declares as DesiredMode: `auto`, `raw`, `script`, `helper`. The helper applies that axis's OWN gate (profile.DesiredMode.DeliversScripts) rather than a copy of it — `raw` opens a plain login shell and integrates nothing, and an unrecognised value fails closed there, so a caller cannot invent its way into a launcher.",
+      "description": "The integration method the HOST keeps (ADR-727g63tr decision 1), in the set internal/hostmode declares: `auto`, `raw`, `script`, `helper`. The helper applies that mode's OWN gate (hostmode.Mode.DeliversScripts) rather than a copy of it — `raw` opens a plain login shell and integrates nothing, and an unrecognised value fails closed there, so a caller cannot invent its way into a launcher. The property keeps its original spelling because this wire is frozen and versioned; it carries the host's answer, not a per-connection intent.",
       "type": "string",
       "enum": ["auto", "raw", "script", "helper"]
     },

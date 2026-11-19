@@ -62,6 +62,18 @@ describe('Select', () => {
     expect(sel).toHaveProperty('disabled', true)
   })
 
+  // A disabled select whose value is not an answer — the connection editor's
+  // failed read (interface-rules.md, nocx-oalo1.11.2) — says so to assistive
+  // technology through the native attribute, the same one a text field
+  // carries when its value is refused.
+  it('marks a refused value aria-invalid only when asked', () => {
+    subject({ invalid: true })
+    expect(screen.getByRole('combobox').getAttribute('aria-invalid')).toBe('true')
+    cleanup()
+    subject()
+    expect(screen.getByRole('combobox').getAttribute('aria-invalid')).toBeNull()
+  })
+
   // An option a caller cannot take is DRAWN and disabled rather than left
   // out. An answer that silently disappears from a list reads as an answer
   // that does not exist; one that is visibly unavailable — carrying, in its

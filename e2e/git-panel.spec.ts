@@ -24,6 +24,7 @@ import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 import type { Page } from './harness'
 import { createRepo, createUnbornRepo, cleanupRepo, git, gitAllow } from './git-fixture'
+import { rpc } from './sshd-fixture'
 
 // ── Selectors (read from frontend/src/git/git-panel.tsx — not invented) ──
 
@@ -665,36 +666,6 @@ function trustHostKey(fixture: SshFixture): void {
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
-}
 
 test('on an SSH tab whose connection was set to Script at the connect-time ask, the panel says what it cannot do and offers NO install action anywhere', async ({
   page,
@@ -724,7 +695,7 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     const profileName = `e2e-git-remote-${Date.now()}`
     wsPort = wsInfo.port
     wsToken = wsInfo.token
-    const created = await rpc<{ id?: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    const created = await rpc<{ id?: string }>(page, wsInfo, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -732,7 +703,7 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        // No desiredMode option: the cascade's hardcoded default is Auto
+        // No method record for this host: its record says nothing, so Auto
         // (ADR-0033), which wraps and installs the launcher automatically
         // — landing the OSC 7 that makes the cwd verified and lets the
         // git store reach git.open — and is also what raises the
@@ -760,7 +731,7 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     // probe succeeds and the one unanswered question is the method alone
     // — raised on the same one-dialog surface the host-key ask uses
     // (HostKeyDialog), titled for the method-only case. Choosing Script is
-    // a RECORDED answer (written to the connection's desiredMode, ADR-0069)
+    // a RECORDED answer (written to the HOST's record, ADR-727g63tr decision 1)
     // rather than the old yes/no "Not now": the retried open proceeds
     // without the helper, script-tier, and the connection stays usable —
     // the same outcome the removed decline button gave, reached the way a
@@ -779,8 +750,9 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     // The git panel never asks (ADR-0068): git.open answers the SAME
     // not-available error a raw or Script connection gets, rendered as the
     // ordinary failed-open card — naming the setting that would change it
-    // (Delivery mode Helper, or Auto to be offered the ask again) rather
-    // than offering to ask again itself. Script is an ANSWER under
+    // (the host's Integration method set to Helper, or Auto to be offered the
+    // ask again) rather than offering to ask again itself. Script is an
+    // ANSWER under
     // ADR-0069 (internal/app/helper_git.go's refusedHelperReason), not a
     // decline recorded against the machine — there is no more "declined"
     // to read back here; the connect-time ask no longer writes one.
@@ -827,9 +799,9 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     // replace the real failure with its own, and the test result is what
     // somebody is about to read.
     if (createdProfileId !== null && wsPort !== null && wsToken !== null) {
-      await rpc(page, wsPort, wsToken, 'profiles.delete', { id: createdProfileId }).catch(
-        () => undefined,
-      )
+      await rpc(page, { port: wsPort, token: wsToken }, 'profiles.delete', {
+        id: createdProfileId,
+      }).catch(() => undefined)
     }
     fixture.proc.kill('SIGKILL')
   }

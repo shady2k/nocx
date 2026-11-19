@@ -12,8 +12,8 @@
  *
  * # What this asserts, and where it reads it
  *
- * The pane opens on a host whose account shell is `sh` (dash) with
- * `desiredMode: 'script'`: the launcher runs, stage-1 finds no bash/zsh to
+ * The pane opens on a host whose account shell is `sh` (dash), recorded at
+ * script: the launcher runs, stage-1 finds no bash/zsh to
  * integrate, and the session settles `conventional` — there is no prompt mark
  * and there never will be one. During that startup interval the composer is the
  * person's input surface; FIVE submits are typed into it. Each Enter still
@@ -58,7 +58,13 @@ import path from 'node:path'
 
 import { expect, appReadyForInput, resolveBackend, test } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 const PANE = '.pane.active'
 const EDITOR = `${PANE} .nocx-editor-input`
@@ -171,10 +177,10 @@ test('an ssh pane on a non-integrated sh writes none of its held submits before 
         // authenticates the key and does not care about the name.
         user: 'nocx-e2e-long-bound',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     profileId = created.id
+    await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')

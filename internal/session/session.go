@@ -1028,12 +1028,12 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteLifecycle != nil {
 		opts = append(opts, ssh.WithRemoteLifecycle(cfg.RemoteLifecycle))
 	}
-	// The resolved destination mode rides the same path (nocx-mlm7):
-	// without this the profile's effective desiredMode dies here and every
-	// profile — raw or helper included — would integrate at open. A field
-	// that is carried and discarded is worse than one that is missing.
-	if cfg.DesiredMode != "" {
-		opts = append(opts, ssh.WithDesiredMode(cfg.DesiredMode))
+	// The host's mode rides the same path (ADR-727g63tr decision 1): without
+	// this the open path's answer dies here and every session — raw included —
+	// would integrate at open. A field that is carried and discarded is worse
+	// than one that is missing.
+	if cfg.IntegrationMode != "" {
+		opts = append(opts, ssh.WithIntegrationMode(cfg.IntegrationMode))
 	}
 	// The shell pin rides the same path as the launcher: without this the
 	// pin dies here and the launcher always receives ShellAuto — a field
@@ -1062,7 +1062,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	// exit, no mark and nothing to reconnect from.
 	//
 	// This is the third time a field has been carried to this function and
-	// dropped by it (DesiredMode, nocx-mlm7; Shell, nocx-pu4.1), and both of
+	// dropped by it (the integration mode, nocx-mlm7; Shell, nocx-pu4.1), and both of
 	// those comments say why it is worse than a field that was never there:
 	// it looks configured. TestSSHOptions_Carry* is the ratchet — a field
 	// added to ConnectConfig and not to this list now fails a test rather

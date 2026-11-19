@@ -21,13 +21,13 @@ import (
 
 // openWire is the ack as the renderer decodes it, including the parent edge.
 type openWire struct {
-	SessionID    string           `json:"sessionId"`
-	InstanceID   string           `json:"instanceId"`
-	SessionEpoch uint64           `json:"sessionEpoch"`
-	Cwd          string           `json:"cwd"`
-	DesiredMode  string           `json:"desiredMode"`
-	Parent       *openParentWire  `json:"parent"`
-	Error        *jsonrpcErrorObj `json:"-"`
+	SessionID       string           `json:"sessionId"`
+	InstanceID      string           `json:"instanceId"`
+	SessionEpoch    uint64           `json:"sessionEpoch"`
+	Cwd             string           `json:"cwd"`
+	IntegrationMode string           `json:"integrationMode"`
+	Parent          *openParentWire  `json:"parent"`
+	Error           *jsonrpcErrorObj `json:"-"`
 }
 
 type openParentWire struct {
@@ -226,9 +226,9 @@ func TestOpenParent_DTOConformsToContract(t *testing.T) {
 		SessionEpoch: 2,
 		// workspaceId became required with a minLength of 1 when nocx-fraus
 		// merged; a session is always in a workspace and there is no null.
-		WorkspaceID: "workspace:default",
-		Cwd:         "~/work",
-		DesiredMode: "script",
+		WorkspaceID:     "workspace:default",
+		Cwd:             "~/work",
+		IntegrationMode: "script",
 		// effectiveSize became required with nocx-eidfb.1: every session has
 		// a size, so every ack carries one.
 		EffectiveSize: sizeResultOf(session.DefaultSize()),
@@ -246,12 +246,12 @@ func TestOpenParent_DTOConformsToContract(t *testing.T) {
 	// A partial edge must not satisfy the contract: half an identity is the
 	// bare parentId this change exists to refuse.
 	partial, err := json.Marshal(map[string]any{
-		"sessionId":    "0123456789abcdef0123456789abcdef",
-		"instanceId":   "fedcba9876543210fedcba9876543210",
-		"sessionEpoch": 2,
-		"cwd":          "~/work",
-		"desiredMode":  "script",
-		"parent":       map[string]any{"sessionId": "00000000000000000000000000000001"},
+		"sessionId":       "0123456789abcdef0123456789abcdef",
+		"instanceId":      "fedcba9876543210fedcba9876543210",
+		"sessionEpoch":    2,
+		"cwd":             "~/work",
+		"integrationMode": "script",
+		"parent":          map[string]any{"sessionId": "00000000000000000000000000000001"},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

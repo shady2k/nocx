@@ -279,9 +279,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     'Соединение завершилось раньше, чем удалось отправить нажатия. Ничего не доставлено.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
-  'connections.password.bindingFailedHead':
-    'Пароль был сохранён, но это подключение не обновлено для его использования:',
-  'connections.password.bindingFailedTail': '. Нажмите «Сохранить подключение», чтобы повторить.',
+  'connections.password.bindingRecovery':
+    'Пароль «{password}» создан в хранилище, но не привязан к «{name}»: {reason}. Откройте «{name}», выберите «{password}» в поле пароля и нажмите «Сохранить подключение».',
+  'connections.toasts.methodRecovery':
+    'Метод интеграции «{method}» для «{name}» ({host}) не сохранён: {reason}. Откройте «{name}», снова выберите «{method}» в разделе «Дополнительно» → «Метод интеграции» и нажмите «Сохранить подключение».',
   'connections.password.cancelled': 'Пароль не сохранён — запрос хранилища был отменён.',
   'connections.password.saveFailedHead': 'Не удалось сохранить пароль:',
   'connections.import.chooseFile': 'Выберите файл для импорта',
@@ -307,6 +308,17 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     'попробуйте формат "user@host:port" или "ssh://user@host:port"',
   'connections.toasts.saved': 'Сохранено:',
   'connections.toasts.saveFailedHead': 'Не удалось сохранить подключение:',
+  'connections.helperAsk.lead':
+    'Выберите, как nocx интегрируется с этой машиной. Метод сохраняется для машины — так открываются все вкладки к ней, из любого сохранённого подключения и из набранного ssh, — и разрешение на развёртывание хелпера nocx здесь запоминается вместе с ним, поэтому вопрос задаётся один раз.',
+  'connections.helperAsk.consent':
+    'Выбор «Хелпер» также разрешает nocx развернуть здесь свой бинарный файл; Raw и «Скрипты» этого не делают.',
+  'connections.helperAsk.changeLater': 'Передумать можно позже в настройках подключения.',
+  'connections.helperAsk.changeLaterTyped':
+    'Чтобы изменить это позже, сохраните подключение к этой машине и откройте его настройки.',
+  'connections.helperAsk.notSaved':
+    'Метод действует для этой машины, но запись машины не сохранена, поэтому nocx спросит снова после перезапуска.',
+  'connections.helperAsk.applyFailed':
+    'Не удалось применить метод интеграции для {host}. Выбор не сохранён.',
   'connections.toasts.deleted': 'Удалено:',
   'connections.toasts.deleteFailedHead': 'Не удалось удалить',
   'connections.actions.edit': 'Изменить',
@@ -395,7 +407,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.fieldReadyTimeout': 'Тайм-аут готовности (мс)',
   'connections.group.fieldAgentForward': 'Проброс агента',
   'connections.group.fieldPortDiscovery': 'Определение порта',
-  'connections.group.fieldDeliveryMode': 'Режим доставки',
   'connections.group.notSetInherit': '— Не задано (наследуется) —',
   'connections.group.inheritedHint':
     'Наследуется всеми подключениями этой группы и её подгруппами, если подключение не переопределяет значение.',
@@ -438,7 +449,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.impact.fieldReadyTimeout': 'тайм-аут готовности',
   'connections.impact.fieldAgentForwarding': 'проброс агента',
   'connections.impact.fieldPortDiscovery': 'определение порта',
-  'connections.impact.fieldDeliveryMode': 'режим доставки',
   'connections.editor.title': 'Изменение подключения:',
   'connections.editor.save': 'Сохранить подключение',
   'connections.editor.create': 'Создать подключение',
@@ -472,7 +482,22 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.fieldJumpServer': 'Jump-сервер',
   'connections.editor.none': '&mdash; Нет &mdash;',
   'connections.editor.fieldPortDiscovery': 'Определение порта',
-  'connections.editor.fieldDeliveryMode': 'Режим доставки',
+  'connections.editor.fieldIntegrationMethod': 'Метод интеграции',
+  'connections.editor.methodHostDescHead': 'Задано для машины',
+  'connections.editor.methodHostDescTail':
+    ', а не для этого подключения: так открываются все вкладки к ней — из любого сохранённого подключения и из набранного ssh.',
+  'connections.editor.methodChangeHint':
+    'Применится при сохранении. Новые вкладки к этой машине откроются так; уже открытая оболочка сохраняет свой метод, пока вы не откроете её заново.',
+  'connections.editor.methodAutoHint':
+    'nocx выбирает метод интеграции при подключении. Он спрашивает, только если для этой машины ещё нет сохранённого ответа. Если машина уже разрешила хелпер, он продолжит работать без повторного вопроса. Авто сбрасывает только сохранённый метод, но не разрешение машины.',
+  'connections.editor.methodUnknownHost':
+    'Подключитесь к этой машине, прежде чем менять её метод интеграции здесь.',
+  'connections.editor.methodAddressChanged':
+    'Сохраните подключение, чтобы увидеть метод для нового адреса.',
+  'connections.editor.methodLoading': 'Загрузка…',
+  'connections.editor.methodReadFailedHead': 'Не удалось прочитать метод этой машины:',
+  'connections.editor.methodNotSavedHead': 'Не сохранено:',
+  'connections.editor.methodRetry': 'Повторить',
   'connections.editor.inherited': '&mdash; Наследуется &mdash;',
   'connections.editor.helperHint':
     'Хелпер — это бинарный файл, который nocx разворачивает на целевой машине. Разрешение на его развёртывание принадлежит машине, а не этому подключению: nocx спрашивает при первом подключении, и каждое подключение к этому хосту повторно использует полученный ответ.',
@@ -495,7 +520,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.forward.empty':
     'Пробросов нет — добавьте один, чтобы открывать его автоматически при подключении.',
   'connections.forward.removeHead': 'Удалить проброс',
-  'connections.mode.desiredAuto': 'Авто — установить скрипты, спрашивать перед хелпером',
+  'connections.mode.hostAuto': 'Авто — nocx выбирает при подключении',
   'connections.mode.desiredScript': 'Скрипты — только скрипты, никогда хелпер',
   'connections.mode.desiredRaw': 'Raw — без интеграции',
   'connections.mode.desiredHelper': 'Хелпер — развернуть бинарный файл nocx',

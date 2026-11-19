@@ -229,7 +229,7 @@ import {
   shellStateFromLifecycle,
   type ShellState,
   type InputPresentation,
-  type DesiredMode,
+  type HostMode,
 } from './capability'
 import { createCellModel, snapshotRowText, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
@@ -485,13 +485,9 @@ export interface HostKeyErrorEvidence {
   storedFingerprint?: string
   key: string
   changed: boolean
-  profileId?: string
 }
 
-function hostKeyEvidenceFromOpenError(
-  err: unknown,
-  profileId?: string,
-): HostKeyErrorEvidence | null {
+function hostKeyEvidenceFromOpenError(err: unknown): HostKeyErrorEvidence | null {
   if (!(err instanceof RpcError)) return null
   const data: unknown = err.data
   if (
@@ -523,7 +519,6 @@ function hostKeyEvidenceFromOpenError(
         ? data.storedFingerprint
         : undefined,
     key: data.key,
-    profileId,
   }
 }
 
@@ -536,14 +531,26 @@ function hostKeyEvidenceFromOpenError(
 export interface HelperConsentAskEvidence {
   host: string
   fingerprint: string
-  hostKey: HostKeyErrorEvidence | null
+  /** The saved connection the open named; absent for a typed ssh. The ask's
+   *  dialog chooses where the answer can be changed later from this field —
+   *  the question's own data, never a guess from renderer state. */
   profileId?: string
+  hostKey: HostKeyErrorEvidence | null
 }
 
-function helperConsentAskFromOpenError(
-  err: unknown,
-  profileId?: string,
-): HelperConsentAskEvidence | null {
+/** What the connect-time ask resolved to. `note` is present when the backend
+ *  answered with the method but could not write the host's record: the answer
+ *  stands for this open — the retried open uses it and does not ask again —
+ *  and the sentence says it will not be remembered after a restart. It is
+ *  carried here rather than shown as a toast because the head is where a
+ *  statement about a pane's host belongs, and a toast fades whether or not the
+ *  fact still holds. */
+export interface HelperConsentAnswer {
+  method: IntegrationMethod
+  note?: string
+}
+
+function helperConsentAskFromOpenError(err: unknown): HelperConsentAskEvidence | null {
   if (!(err instanceof RpcError)) return null
   const data: unknown = err.data
   if (
@@ -588,15 +595,15 @@ function helperConsentAskFromOpenError(
             ? hk.storedFingerprint
             : undefined,
         key: hk.key,
-        profileId,
       }
     }
   }
   return {
     host: data.host,
     fingerprint: data.fingerprint,
+    profileId:
+      'profileId' in data && typeof data.profileId === 'string' ? data.profileId : undefined,
     hostKey,
-    profileId,
   }
 }
 
@@ -877,19 +884,18 @@ export interface TerminalContentHooks {
    *  Abort closes a pending decision when the tab is closed. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
   /** An SSH connection needs a person's choice of integration method for
-   *  this destination before it may proceed (ADR-0069's connect-time ask) —
-   *  with the host-key evidence carried alongside when the same dial also
-   *  needs a trust decision. The promise resolves with the chosen method
-   *  once it was written (to the saved connection's desiredMode, or —
-   *  absent a profileId — nowhere, since a hand-typed connection carries the
-   *  choice on the retried open instead); mount then retries. null means the
-   *  person closed the dialog, or trusted only the host key, without
-   *  choosing a method — the open fails. Abort closes a pending decision
-   *  when the tab is closed. */
+   *  this HOST before it may proceed (ADR-727g63tr decision 1 — the ask
+   *  itself is ADR-0069) with the host-key evidence carried alongside when
+   *  the same dial also needs a trust decision. The promise resolves with the
+   *  chosen method, plus a sentence when the backend could not remember it;
+   *  mount then retries, and the sentence goes to the pane's head. null means
+   *  the person closed the dialog, or trusted only the host key, without
+   *  choosing a method — the open fails. Abort closes a pending decision when
+   *  the tab is closed. */
   onHelperConsentAsk?: (
     ask: HelperConsentAskEvidence,
     signal: AbortSignal,
-  ) => Promise<IntegrationMethod | null>
+  ) => Promise<HelperConsentAnswer | null>
   /** The reference picker's setup offer needs the setup dialog (no OS key):
    *  the vault layer owns it — wired by main.tsx to
    *  vaultController.openSetup. */
@@ -1808,7 +1814,7 @@ export class TerminalContent extends BasePaneContent {
    *  disagreed with the cascade's default is the two-defaults defect that
    *  ADR closed on the backend. raw refuses every rewrite and remote
    *  write; helper allows the Tier-B binary. */
-  private _policy: DesiredMode = 'auto'
+  private _policy: HostMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
    *  which could not report the two failures that matter most because both
@@ -3098,7 +3104,6 @@ export class TerminalContent extends BasePaneContent {
         this.sshOpts.host,
         this.sshOpts.user,
         anchor,
-        this._sessionDesiredModeOverride,
         this._watchOpeningCall,
       )
     } finally {
@@ -3186,13 +3191,6 @@ export class TerminalContent extends BasePaneContent {
     this._openingCall = null
   }
 
-  /** A one-shot integration-method override for a hand-typed connection with
-   *  no saved profile, set once the connect-time ask (ADR-0069) is answered
-   *  for THIS session — there is nowhere else to keep the choice. Read by
-   *  openRequestedSession's retry; a profile-backed connection never sets
-   *  this, since its answer was written to the connection itself. */
-  private _sessionDesiredModeOverride: IntegrationMethod | undefined
-
   private _showInventoryOffer(message: string): void {
     if (!this._paneTarget || this._disposed) return
     if (this._inventoryOffer) this._inventoryOffer.set(message)
@@ -3273,27 +3271,25 @@ export class TerminalContent extends BasePaneContent {
         // evidence, nested, when the key also needs a trust decision — so
         // checking host-key-only second is what keeps a combined refusal
         // from ever raising two dialogs in sequence.
-        const ask = helperConsentAskFromOpenError(err, this.sshOpts?.profileId)
+        const ask = helperConsentAskFromOpenError(err)
         if (ask && this.hooks.onHelperConsentAsk) {
-          const method = await this.hooks.onHelperConsentAsk(ask, signal)
-          if (!method) {
+          const answer = await this.hooks.onHelperConsentAsk(ask, signal)
+          if (!answer) {
             throw new Error(`The connection to ${ask.host} needs an answer before it can continue`)
           }
           if (signal.aborted) {
             throw new Error('SSH open cancelled')
           }
-          // A hand-typed connection (no saved profile) has nowhere to keep
-          // the answer — connections.setIntegrationMethod wrote nothing for
-          // it to persist — so the retry itself carries the chosen method,
-          // for this session alone (ADR-0069). A saved connection needs no
-          // override: the write already updated its desiredMode, and the
-          // resolver reads that fresh on every open.
-          if (!this.sshOpts?.profileId) {
-            this._sessionDesiredModeOverride = method
-          }
+          // THE ANSWER IS THE HOST'S (ADR-727g63tr decision 1), recorded by
+          // the fingerprint the ask named, so the retry carries no copy of it:
+          // it reads the same record the first attempt would have. A record the
+          // backend could not write is kept for this run and said out loud, in
+          // the head, rather than lost silently or turned into a dialog the
+          // person answers again on the next connect.
+          this._connectionHead?.note(answer.note ?? null)
           continue
         }
-        const evidence = hostKeyEvidenceFromOpenError(err, this.sshOpts?.profileId)
+        const evidence = hostKeyEvidenceFromOpenError(err)
         if (!evidence || !this.hooks.onHostKeyError) {
           throw err
         }
@@ -5746,7 +5742,7 @@ export class TerminalContent extends BasePaneContent {
     // reason (nocx-4t37.2): the capability control starts from the
     // backend's own resolution, never from a second fetch that could
     // disagree with it.
-    this._policy = session.desiredMode ?? 'auto'
+    this._policy = session.integrationMode ?? 'auto'
     // awaitsIntegration rides the session handle regardless of which ack
     // produced it — the open ack (nocx-ui8q6.6) for a session this pane
     // opened, the attach ack (nocx-ty0hc) for one it reclaimed or reattached
@@ -8492,7 +8488,7 @@ export class TerminalContent extends BasePaneContent {
     this._restoreEditor()
   }
 
-  get policy(): DesiredMode {
+  get policy(): HostMode {
     return this._policy
   }
 

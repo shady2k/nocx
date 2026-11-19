@@ -324,6 +324,17 @@ func TestATouchNamedByASymlinkedSpellingStillMovesTheStamp(t *testing.T) {
 	stand.checkouts.worktreeRoot = root
 	stand.spawner.worktreeRoot = root
 	repoLink := symlinkedDir(t, repoDir)
+
+	// The creation row's stamp is STRICTLY BEHIND the touch instant, and it
+	// has to be. Touch moves a stamp only forward — the store's statement
+	// decides that, not the caller's clock (`WHERE ... AND last_used_at < ?`)
+	// — so a row created AT the touch instant would match no row for the
+	// ordinary reason, Touch would change nothing, and the assertion below
+	// would hold while proving nothing about the symlinked spelling. Injected
+	// here, before the spawn writes the row, so the touch is the only thing
+	// that can move the stamp.
+	createdAt := sweepNow.Add(-time.Hour)
+	stand.checkouts.now = func() time.Time { return createdAt }
 	coordA := stand.openCoordinator(t, "pane-a", repoLink)
 	stand.spawnCheckoutWorker(t, coordA, "worker-1", "feat/one", "t")
 	checkout := expectedWorktreePath(root, repoLink, "feat/one")

@@ -142,7 +142,7 @@ func (s *paneStand) sshConfig(mode string, installer ssh.RemoteInstaller) sessio
 			// A linked credential may only be spent on the endpoint its profile
 			// names, and this process is the party that checks it.
 			AuthorizedEndpoint: "host.example:22",
-			DesiredMode:        mode,
+			IntegrationMode:    mode,
 			Shell:              "bash",
 			RemoteInstaller:    installer,
 		},
@@ -207,7 +207,7 @@ func TestAnSSHPanePublishesItsBundleBeforeItAsksForTheSpawn(t *testing.T) {
 
 // TestARawPanePublishesNothing is the first pair, and it is the mode axis's own
 // rule rather than this file's: `raw` is the one answer that means "nothing
-// added" (profile.DesiredMode.DeliversScripts), and a pane that asks for a
+// added" (hostmode.Mode.DeliversScripts), and a pane that asks for a
 // plain login shell must not have a bundle written on somebody's host for it.
 //
 // It is asserted through the SAME open, because the gate is a predicate applied

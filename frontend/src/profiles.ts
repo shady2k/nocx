@@ -3,6 +3,9 @@ import type { ConnectionTestResult } from './generated/connections.probe'
 import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { ConnectionsSetIntegrationMethodResult } from './generated/connections.setIntegrationMethod'
+import type { ConnectionsHostModeResult } from './generated/connections.hostMode'
+import type { ConnectionsSetHostModeResult } from './generated/connections.setHostMode'
+import type { HostMode } from './capability'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
@@ -63,17 +66,14 @@ export interface SSHProfileOptions {
   jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
-  /** Desired destination mode (raw|script|helper, nocx-mlm7): the
-   *  connection-scope default the tab's capability control starts from.
-   *  script (the default — N3) wraps and installs automatically; raw adds
-   *  nothing; helper is consent-gated. */
-  desiredMode?: 'raw' | 'script' | 'helper'
   /** Helper consent (unknown|granted|denied, spec §3.5). A persisted
    *  per-connection value that NO decision reads: consent to deploy the
    *  helper belongs to the machine, keyed by its host-key fingerprint
-   *  (ADR-0034), and is answered at connect — a connection's `desiredMode`
-   *  is not it (ADR-0105, nocx-1kejz.3). Kept on the wire until the field
-   *  itself is removed; nothing in the renderer offers it any more. */
+   *  (ADR-0034), and is answered at connect. The integration method is not it
+   *  either (ADR-0105, nocx-1kejz.3) — and that has no per-connection field at
+   *  all any more: it is the HOST's, read through `hostMode` (ADR-727g63tr
+   *  decision 1). Kept on the wire until the field itself is removed; nothing
+   *  in the renderer offers it any more. */
   helperConsent?: 'unknown' | 'granted' | 'denied'
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
   portDiscovery?: 'auto' | 'ask' | 'off'
@@ -491,20 +491,39 @@ export class ProfileClient {
    * connections.setIntegrationMethod — record the person's answer to the
    * connect-time ask (ADR-0069): a choice of integration method, not a
    * yes/no about the helper. fingerprint is echoed verbatim from the open
-   * failure's helperConsentData; host travels for the backend's log line
-   * only. profileId names the saved connection the method is written to
-   * (through the SAME write path the connection editor uses) — absent for a
-   * hand-typed connection, which has nowhere to keep the answer. Choosing
-   * helper also grants the machine's consent by fingerprint (ADR-0034); raw
-   * and script write nothing to that store.
+   * failure's helperConsentData, and the answer is written to the HOST record
+   * under it (ADR-727g63tr decision 1) — a saved connection has no copy.
+   * host travels for the backend's log line only. Choosing helper also grants
+   * the machine's consent by fingerprint (ADR-0034); raw and script write
+   * nothing to that store.
    */
   setIntegrationMethod(
     fingerprint: string,
     method: 'raw' | 'script' | 'helper',
     host?: string,
-    profileId?: string,
   ): Promise<ConnectionsSetIntegrationMethodResult> {
-    return this.call('connections.setIntegrationMethod', { fingerprint, method, host, profileId })
+    return this.call('connections.setIntegrationMethod', { fingerprint, method, host })
+  }
+
+  /** The integration method a saved connection's HOST keeps, in the closed set
+   *  the host record carries (ADR-727g63tr decision 1). `auto` is not an
+   *  answer but the absence of one: the connect-time ask decides, and for a
+   *  destination known_hosts holds no key for it is the only value there is.
+   *  The backend resolves the connection's destination — alias, port, jump
+   *  route — exactly as an open would, because the record is keyed by the
+   *  host-key fingerprint that resolution produces. */
+  hostMode(profileId: string): Promise<ConnectionsHostModeResult> {
+    return this.call('connections.hostMode', { profileId })
+  }
+
+  /** Set the integration method for the connection's HOST. `auto` forgets the
+   *  record so the next open asks again. Choosing helper here records the
+   *  METHOD only: permission to deploy the binary is the machine's and is
+   *  asked at connect (ADR-0105). A record that could not be persisted is an
+   *  RPC error whose message is the reason the editor puts after "Not saved: "
+   *  — nothing about the host changes, so the same Save can be pressed again. */
+  setHostMode(profileId: string, mode: HostMode): Promise<ConnectionsSetHostModeResult> {
+    return this.call('connections.setHostMode', { profileId, mode })
   }
 
   /**

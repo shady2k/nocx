@@ -199,7 +199,7 @@ const HOST_KEY_CHANGED = {
 
 function openHostKeyDialog(props: {
   evidence?: typeof HOST_KEY_UNKNOWN | null
-  helperAsk?: { fingerprint: string } | null
+  helperAsk?: { fingerprint: string; profileId?: string } | null
   busy?: boolean
 }) {
   const onAcceptHostKey = vi.fn()
@@ -276,6 +276,35 @@ describe('HostKeyDialog — connect-time integration-method ask (ADR-0069)', () 
     fireEvent.click(view.getByText('Cancel'))
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(onChooseMethod).not.toHaveBeenCalled()
+  })
+
+  // Frame 7 of the mockup: the lead says the method is saved for the MACHINE,
+  // and the last sentence points at the connection's settings only when the
+  // open named one. A typed ssh has no settings to point at, and a person sent
+  // there would look for a screen that does not exist for that destination.
+  it('says the method is the machine’s, and points a saved connection at its settings', () => {
+    const { view } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted', profileId: 'ssh:prod-db' },
+    })
+    expect(view.container.textContent).toContain(
+      'The method is saved for the machine — every tab to it, from any saved connection or a typed ssh, opens this way',
+    )
+    expect(view.container.textContent).toContain(
+      'Change your mind later from the connection’s settings.',
+    )
+    expect(view.container.textContent).not.toContain('save a connection to this machine')
+  })
+
+  it('tells a typed ssh where to save a connection, because it has no settings of its own', () => {
+    const { view } = openHostKeyDialog({
+      helperAsk: { fingerprint: 'SHA256:trusted' },
+    })
+    expect(view.container.textContent).toContain(
+      'To change it later, save a connection to this machine and open its settings.',
+    )
+    expect(view.container.textContent).not.toContain(
+      'Change your mind later from the connection’s settings.',
+    )
   })
 
   it('choosing helper reaches onChooseMethod with "helper"', () => {

@@ -48,13 +48,13 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/procwatch"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -1033,10 +1033,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		return hostedSpawnResult{}, errors.New("open an ssh pane on this machine's helper: the config carries no destination")
 	}
 	// A raw shell is deliberately launched without the integration script, so
-	// it cannot authenticate the lifecycle channel. Use the mode axis' owner
-	// before hostedSpawn creates an adapter or launch; local sessions retain
-	// their existing default and never pass through this route.
-	if !profile.DesiredMode(cfg.Remote.DesiredMode).DeliversScripts() {
+	// it cannot authenticate the lifecycle channel. Ask the mode's owner before
+	// hostedSpawn creates an adapter or launch; local sessions retain their
+	// existing default and never pass through this route.
+	if !hostmode.Mode(cfg.Remote.IntegrationMode).DeliversScripts() {
 		spawn.lifecycle = nil
 	}
 	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
@@ -1109,7 +1109,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// helper_publish.go's already claim happens ("one authentication for one
 	// machine") and what the shared pool key (AD-4) exists for.
 	if remote := cfg.Remote; remote != nil && remote.RemoteInstaller != nil &&
-		profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
+		hostmode.Mode(remote.IntegrationMode).DeliversScripts() {
 		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
 		hold, herr := o.holdConnection(ctx, target)
 		endHold(herr)
@@ -1208,13 +1208,13 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		Destination: ssh.WireDestination(target),
 		// The two facts the far launcher is built for, read off the config the
 		// registry accepted rather than off the caller's spec: the shell pin a
-		// profile may carry (nocx-pu4.1) and the integration mode the resolver
-		// concluded. Their vocabularies are the same closed sets, and an EMPTY
-		// mode is not a gap to fill in here — it means "this destination was
-		// never asked", which profile.DesiredMode's own gate answers as the
+		// profile may carry (nocx-pu4.1) and the integration mode the host
+		// record answered. Their vocabularies are the same closed sets, and an
+		// EMPTY mode is not a gap to fill in here — it means "this destination
+		// was never asked", which hostmode.Mode's own gate answers as the
 		// default does (AD-8, one owner for that question).
-		Shell:       proto.SSHShellKind(cfg.Remote.Shell),
-		DesiredMode: proto.SSHMode(cfg.Remote.DesiredMode),
+		Shell:           proto.SSHShellKind(cfg.Remote.Shell),
+		IntegrationMode: proto.SSHMode(cfg.Remote.IntegrationMode),
 
 		Cols:   cfg.Cols,
 		Rows:   cfg.Rows,
@@ -1337,8 +1337,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 // destination one authentication (helper_publish.go's pool key is the
 // resolved destination).
 //
-// The MODE GATE is asked of the axis (`profile.DesiredMode.DeliversScripts`),
-// the one owner of "does this destination integrate" (AD-8), and it is asked
+// The MODE GATE is asked of the mode (`hostmode.Mode.DeliversScripts`), the one
+// owner of "does this destination integrate" (AD-8), and it is asked
 // with the same input the daemon asks it with — the mode that is about to
 // travel in the spawn params. A `raw` pane publishes nothing, and a nil
 // installer publishes nothing, which is not a refusal: a build wiring no
@@ -1358,7 +1358,7 @@ func (o *localHelperOpener) publishForPane(ctx context.Context, cfg session.Conf
 	if remote == nil || remote.RemoteInstaller == nil {
 		return nil
 	}
-	if !profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
+	if !hostmode.Mode(remote.IntegrationMode).DeliversScripts() {
 		return nil
 	}
 	if err := remote.RemoteInstaller.EnsureInstalledRemote(

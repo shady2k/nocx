@@ -376,7 +376,6 @@ func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
 		"portDiscovery":        field("auto", profile.EffectiveSourceDefault),
 		"canBeJumpServer":      field(false, profile.EffectiveSourceDefault),
 		"behaviorOnSessionEnd": field("auto", profile.EffectiveSourceDefault),
-		"desiredMode":          field("helper", profile.EffectiveSourceProfile),
 	}
 
 	cases := map[string]profile.EffectiveProfileDTO{
@@ -399,10 +398,11 @@ func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
 }
 
 // TestProfilesEffective_OverTheWireConformsToContract runs the real method
-// off the real socket: a stored profile in helper mode with granted consent
-// must come back with desiredMode=helper in the closed fields map and
-// helperConsent=granted at the top level — the shape the connection UI
-// renders consent state from.
+// off the real socket: a stored profile with granted consent must come back
+// with helperConsent=granted at the top level — the shape the connection UI
+// renders consent state from. It also pins what the profile no longer carries:
+// desiredMode left the effective map with the profile field (ADR-727g63tr
+// decision 1), and the schema's closed key set is what refuses it.
 func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "profiles.effective.schema.json")
 
@@ -412,7 +412,6 @@ func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 		Base: profile.Base{ID: "ssh:helper:1", Type: "ssh", Name: "helper"},
 		Options: profile.StoredSSHProfileOptions{
 			Host:          "helper.example.com",
-			DesiredMode:   profile.Ptr(profile.DesiredHelper),
 			HelperConsent: profile.Ptr(profile.ConsentGranted),
 		},
 	}
@@ -458,9 +457,7 @@ func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	if got.Profiles[0].HelperConsent != profile.ConsentGranted {
 		t.Errorf("helperConsent = %q, want granted", got.Profiles[0].HelperConsent)
 	}
-	if f, ok := got.Profiles[0].Fields["desiredMode"]; !ok {
-		t.Error("fields missing desiredMode")
-	} else if f.Value != "helper" {
-		t.Errorf("desiredMode value = %v, want helper", f.Value)
+	if _, ok := got.Profiles[0].Fields["desiredMode"]; ok {
+		t.Error("the effective profile still carries desiredMode: the method belongs to the host, not to the connection")
 	}
 }

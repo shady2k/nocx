@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 
 import { appReadyForInput, test, expect, openControlPlane, resolveBackend } from './harness'
 import { readStand } from './stand'
+import { hostKeyFingerprint, recordHostMethod } from './sshd-fixture'
 
 const CHECKING = 'Checking this shell…'
 const COMMAND = 'sleep 20'
@@ -91,10 +92,15 @@ test('a command submitted during shell startup has a visible running block', asy
           port: Number(fixture.addr.split(':')[1]),
           user: 'e2e',
           keyPath: fixture.userKey,
-          desiredMode: 'script',
         },
       })) as { id: string }
       profileId = profile.id
+      await recordHostMethod(
+        page,
+        { port: backend.port, token: backend.token },
+        hostKeyFingerprint(fixture.knownHosts),
+        'script',
+      )
     } finally {
       wire.close()
     }

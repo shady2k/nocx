@@ -36,7 +36,13 @@ import path from 'node:path'
 
 import { appReadyForInput, test, expect, resolveBackend, type Page } from './harness'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  startSshd,
+  rpc,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
@@ -84,9 +90,11 @@ async function wire(page: Page, home: string): Promise<Wired> {
       user: 'e2e',
       keyPath: fixture.userKey,
       keepaliveInterval: 2000,
-      desiredMode: 'script',
     },
   })
+  // The method is the HOST's (ADR-727g63tr decision 1): recorded for the
+  // machine this profile reaches, not carried on the profile.
+  await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'script')
   return { fixture, proxy, profileId: created.id, profileName }
 }
 

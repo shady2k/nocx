@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -47,9 +46,6 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/vault"
-	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -370,7 +366,9 @@ func submitCommand(t *testing.T, conn *websocket.Conn, sid, command string) {
 // deliberate differences: the session registry spawns REAL local shells (a
 // stub pty has no process for the lease to kill), and the server runs under
 // the named lease config. The content store is real — the ledger assertion
-// (which bound ended the run) is read back from it.
+// (which bound ended the run) is read back from it. Like the ask harness it
+// keeps NO vault: none of these tests holds or seals a secret, and the
+// production KDF is the price of standing one up (nocx-oalo1.11.3).
 type runLeaseHarness struct {
 	t      *testing.T
 	ws     *WSServer
@@ -398,20 +396,6 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	docStore := storage.NewDocumentStore(dir)
-	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
-	if err != nil {
-		t.Fatalf("vault.NewRegistry: %v", err)
-	}
-	logger := slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger)
-	if err != nil {
-		t.Fatalf("vault.New: %v", err)
-	}
-	t.Cleanup(v.Close)
-	if _, setupErr := v.Setup(t.Context(), vault.SetupRequest{Passphrase: "test"}); setupErr != nil {
-		t.Fatalf("vault Setup: %v", setupErr)
-	}
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	key := make([]byte, 32)
 	for i := range key {
@@ -434,8 +418,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	_, transportLogger := logtest.New(t)
 	ws := NewWSServer(transportLogger, newRegWithReal(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
-		WithCredentialStore(v), WithVaultLifecycle(v),
-		WithAgentKnownMaterial(adapterKnownMaterial(v)),
+		WithCredentialStore(newTestStore()), WithAgentKnownMaterial(noKnownMaterial{}),
 		WithContentDB(db),
 		WithAssistantClient(client),
 		WithAgentHarness("scripted", router),

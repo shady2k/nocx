@@ -210,7 +210,7 @@ func (j *paneJourney) openSSH(t *testing.T, mode string) error {
 			// names, and this process is the party that checks it.
 			AuthorizedEndpoint: j.srv.addr,
 			ConnectionName:     "pane publish journey",
-			DesiredMode:        mode,
+			IntegrationMode:    mode,
 			Shell:              "bash",
 			RemoteInstaller:    j.carrier,
 		},
@@ -247,7 +247,7 @@ func (j *paneJourney) openSSHInteractive(t *testing.T, mode string, requester ss
 			// names, and this process is the party that checks it.
 			AuthorizedEndpoint: j.srv.addr,
 			ConnectionName:     "pane publish journey",
-			DesiredMode:        mode,
+			IntegrationMode:    mode,
 			Shell:              "bash",
 			RemoteInstaller:    j.carrier,
 		},
@@ -280,7 +280,7 @@ func (j *paneJourney) openSSHWithKey(t *testing.T, mode string, secrets credenti
 			// names, and this process is the party that checks it.
 			AuthorizedEndpoint: j.srv.addr,
 			ConnectionName:     "pane key journey",
-			DesiredMode:        mode,
+			IntegrationMode:    mode,
 			Shell:              "bash",
 			RemoteInstaller:    j.carrier,
 		},

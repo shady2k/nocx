@@ -73,7 +73,13 @@ import path from 'node:path'
 
 import { appReadyForInput, test, expect, resolveBackend, type Page } from './harness'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  startSshd,
+  rpc,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
@@ -204,7 +210,7 @@ async function wire(page: Page, home: string): Promise<Wired> {
   // Unique per run: the stand's store persists across runs in this home, and a
   // stale profile would dial a relay that no longer exists. This spec's
   // subject is the silent-death reconnect, not the connect-time ask
-  // (ADR-0069) — desiredMode is declared explicitly as script so the
+  // (ADR-0069) — script is recorded for the HOST so the
   // connection is never asked.
   const profileName = `e2e-reconnect-${Date.now()}`
   const created = await rpc<{ id: string }>(page, endpoint, 'profiles.create', {
@@ -216,9 +222,9 @@ async function wire(page: Page, home: string): Promise<Wired> {
       user: 'e2e',
       keyPath: fixture.userKey,
       keepaliveInterval: KEEPALIVE_INTERVAL_MS,
-      desiredMode: 'script',
     },
   })
+  await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'script')
   return { fixture, proxy, profileId: created.id, profileName }
 }
 
@@ -331,7 +337,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     generation: number
     open: {
       sessionId: string
-      desiredMode: string
+      integrationMode: string
       awaitsIntegration: boolean
       cwd: string
       workspaceId: string
@@ -423,7 +429,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     await expect.poll(() => opened.length).toBeGreaterThan(0)
     const replacement = opened.at(-1)!
     expect(replacement.generation).toBeGreaterThan(0)
-    expect(replacement.open.desiredMode).toBe('script')
+    expect(replacement.open.integrationMode).toBe('script')
     expect(replacement.open.awaitsIntegration).toBe(true)
     expect(replacement.open.cwd).not.toBe('')
     expect(replacement.open.workspaceId).not.toBe('')

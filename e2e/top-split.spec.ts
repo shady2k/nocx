@@ -47,7 +47,13 @@ import path from 'node:path'
 
 import type { Page } from '@playwright/test'
 import { test, expect, promptReady, clickIntoEditor, resolveBackend } from './harness'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  startSshd,
+  rpc,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 
 /** The program's interval, and the bound on waiting for its last repaint. A
@@ -236,10 +242,10 @@ test('a full-screen program repainting the primary screen keeps one block locall
   await expectOneBlockAcrossRepaints(page)
 })
 
-for (const desiredMode of ['script', 'helper'] as const) {
+for (const hostMode of ['script', 'helper'] as const) {
   for (const scenario of ['top', 'history', 'clear'] as const) {
-    if (desiredMode === 'script' && scenario !== 'top') continue
-    test(`${scenario === 'top' ? 'a full-screen program repainting the primary screen keeps one block' : `history-first primary CSI H and EL repaint${scenario === 'clear' ? ' after clear' : ''}`} over ssh ${desiredMode} (nocx-peg8e.1.1)`, async ({
+    if (hostMode === 'script' && scenario !== 'top') continue
+    test(`${scenario === 'top' ? 'a full-screen program repainting the primary screen keeps one block' : `history-first primary CSI H and EL repaint${scenario === 'clear' ? ' after clear' : ''}`} over ssh ${hostMode} (nocx-peg8e.1.1)`, async ({
       page,
     }) => {
       test.setTimeout(300_000)
@@ -265,12 +271,17 @@ for (const desiredMode of ['script', 'helper'] as const) {
             port: fixture.port,
             user: fixture.user,
             keyPath: fixture.userKey,
-            // Keep the original piped-carrier control and exercise the remote
-            // helper too: the script-only control did not cover that PTY owner.
-            desiredMode,
           },
         })
         createdId = created.id
+        // Only script is recorded here. The helper case deliberately leaves the
+        // host unanswered so the connect-time ask below is what answers it:
+        // that answer records the method AND the machine's consent, and it is
+        // the behaviour that case exists to cover (ADR-727g63tr decision 1
+        // moved the answer from the profile to the host).
+        if (hostMode === 'script') {
+          await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'script')
+        }
         await page.keyboard.press('Control+Shift+P')
         const search = page.locator('.quick-connect__search input')
         await expect(search).toBeVisible({ timeout: 30_000 })
@@ -279,7 +290,7 @@ for (const desiredMode of ['script', 'helper'] as const) {
           timeout: 30_000,
         })
         await page.keyboard.press('Enter')
-        if (desiredMode === 'helper') {
+        if (hostMode === 'helper') {
           const helperAsk = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
           await expect(helperAsk).toBeVisible({ timeout: 30_000 })
           await helperAsk.getByRole('radio', { name: 'Helper' }).click()

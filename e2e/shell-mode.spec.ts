@@ -1,10 +1,10 @@
 import { appReadyForInput, test, expect, resolveBackend } from './harness'
+import { hostKeyFingerprint, recordHostMethod, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import type { Page } from './harness'
 
 // ── Shell-mode happy path (nocx-4t37.2) ───────────────────────────────────
 // The epic's acceptance: a user who has never read the docs lands on a plain
@@ -110,38 +110,6 @@ function trustHostKey(fixture: Fixture): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
 
-/** Call one JSON-RPC method over the real backend socket, as the app does. */
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
-}
-
 test('an SSH connection comes up integrated and its commands become blocks', async ({ page }) => {
   test.setTimeout(90_000)
   const fixture = startSshd()
@@ -161,13 +129,12 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
 
     // Seed the connection the way Settings would: a profile pointing at the
     // fixture. This spec's subject is block detection, not the connect-time
-    // ask (ADR-0069) — desiredMode is declared explicitly as script so the
-    // connection is never asked, rather than left at the hardcoded auto
-    // default. The name is unique per run: the nocx-server store persists
+    // ask (ADR-0069) — script is recorded for the HOST so the connection is
+    // never asked, rather than left at auto (ADR-727g63tr decision 1). The name is unique per run: the nocx-server store persists
     // across runs in this home, and a stale profile from an earlier run
     // would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
-    const created = await rpc<{ id: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+    const created = await rpc<{ id: string }>(page, wsInfo, 'profiles.create', {
       type: 'ssh',
       name: profileName,
       options: {
@@ -175,10 +142,13 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        desiredMode: 'script',
       },
     })
     createdId = created.id
+    // The method is the HOST's (ADR-727g63tr decision 1): script is an answer,
+    // so this open needs no connect-time ask and the spec measures what it says
+    // it measures — an SSH connection that comes up integrated.
+    await recordHostMethod(page, wsInfo, hostKeyFingerprint(fixture.knownHosts), 'script')
 
     // Open the connection through quick connect: the palette's host search
     // reaches a saved profile and Enter opens it DIRECTLY (no vault
@@ -256,7 +226,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     // boundary, where nothing in either file points at the other (nocx-8rda).
     try {
       const info = await resolveBackend(page)
-      if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
+      if (createdId) await rpc(page, info, 'profiles.delete', { id: createdId })
     } catch {
       // A cleanup that throws would replace the real failure with its own.
     }

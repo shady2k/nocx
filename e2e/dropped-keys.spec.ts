@@ -12,7 +12,7 @@
  *
  * # What this asserts, and where it reads it
  *
- * A markerless session (`desiredMode: 'raw'`, no OSC 133, so the grid is the
+ * A markerless session (the host recorded at raw, no OSC 133, so the grid is the
  * input surface and the composer never takes the keys), a shell prompt on
  * screen, and then ONE line typed at full speed — `page.keyboard.type` with no
  * delay — followed by Enter. The fixture's own record of what the pty accepted
@@ -34,7 +34,13 @@ import path from 'node:path'
 import type { Page } from '@playwright/test'
 import { test, expect, appReadyForInput, resolveBackend } from './harness'
 import { readStand } from './stand'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 
 const PANE = '.pane.active'
 const LIVE = `${PANE} .terminal-live-container`
@@ -88,12 +94,13 @@ async function openMarkerlessPane(
       port: fixture.port,
       user: fixture.user,
       keyPath: fixture.userKey,
-      // No integration: the shell emits no prompt mark, the grid is the input
-      // surface, and every key is its own intent — the mode the report is about.
-      desiredMode: 'raw',
     },
   })
   createdId = created.id
+  // No integration: the shell emits no prompt mark, the grid is the input
+  // surface, and every key is its own intent — the mode the report is about.
+  // It belongs to the HOST (ADR-727g63tr decision 1), so it is recorded there.
+  await recordHostMethod(page, info, hostKeyFingerprint(fixture.knownHosts), 'raw')
   await page.keyboard.press('Control+Shift+P')
   const search = page.locator('.quick-connect__search input')
   await expect(search).toBeVisible({ timeout: 30_000 })

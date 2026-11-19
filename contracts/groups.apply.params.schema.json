@@ -72,9 +72,6 @@
           "agentForward": {
             "type": "boolean"
           },
-          "desiredMode": {
-            "type": "string"
-          },
           "portDiscovery": {
             "type": "string"
           },

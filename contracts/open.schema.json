@@ -11,7 +11,7 @@
     "sessionEpoch",
     "workspaceId",
     "cwd",
-    "desiredMode",
+    "integrationMode",
     "effectiveSize",
     "parent",
     "awaitsIntegration"
@@ -39,8 +39,8 @@
       "description": "Starting working directory of the session's shell, with the home directory abbreviated to ~.",
       "type": "string"
     },
-    "desiredMode": {
-      "description": "The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. auto (the default — ADR-0033) means the user has not answered: it wraps and installs the scripts exactly as script does (N3), and additionally permits the helper to be OFFERED where a surface reaches for it (D8). script is that same answer given explicitly, and is never upgraded. raw alone adds nothing. helper is the explicit choice of the deployed binary, and integrates as well — the tiers are additive, so allowing the binary never withholds the scripts (§5.2). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.",
+    "integrationMode": {
+      "description": "The integration method the HOST keeps (ADR-727g63tr decision 1), read by the open path from the record by the fingerprint its dial observed: the value the tab's capability control starts from. auto (ADR-0033) means nobody has answered for this host — it wraps and installs the scripts exactly as script does (N3), and additionally permits the helper to be OFFERED where a surface reaches for it (D8); it is also every local session's answer, and a remote one whose open never reached a dial. script is that same answer given explicitly, and is never upgraded. raw alone adds nothing. helper is the explicit choice of the deployed binary, and integrates as well — the tiers are additive, so allowing the binary never withholds the scripts (§5.2). A saved connection has no copy of this value. The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.",
       "type": "string",
       "enum": ["auto", "raw", "script", "helper"]
     },

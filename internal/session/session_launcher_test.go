@@ -225,9 +225,9 @@ func TestAdoptedRemoteSession_CarriesTheLauncherAndTheMode(t *testing.T) {
 	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonNone}, Config{
 		Host: "example.com",
 		Remote: &ssh.ConnectConfig{
-			RemoteLauncher: launcher,
-			DesiredMode:    "raw",
-			Shell:          ssh.ShellZsh,
+			RemoteLauncher:  launcher,
+			IntegrationMode: "raw",
+			Shell:           ssh.ShellZsh,
 		},
 	})
 
@@ -235,8 +235,8 @@ func TestAdoptedRemoteSession_CarriesTheLauncherAndTheMode(t *testing.T) {
 	if cfg.RemoteLauncher == nil {
 		t.Error("ConnectConfig.RemoteLauncher is nil: the wired launcher did not reach the session's options")
 	}
-	if cfg.DesiredMode != "raw" {
-		t.Errorf("ConnectConfig.DesiredMode = %q, want raw", cfg.DesiredMode)
+	if cfg.IntegrationMode != "raw" {
+		t.Errorf("ConnectConfig.IntegrationMode = %q, want raw", cfg.IntegrationMode)
 	}
 	if cfg.Shell != ssh.ShellZsh {
 		t.Errorf("ConnectConfig.Shell = %q, want the pinned %q", cfg.Shell, ssh.ShellZsh)

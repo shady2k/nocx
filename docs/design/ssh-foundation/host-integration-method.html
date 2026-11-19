@@ -1,0 +1,2386 @@
+<!doctype html>
+<html lang="en" data-theme="graphite"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nocx — Integration method on the host (nocx-oalo1.11.2)</title>
+<!-- Product CSS copied verbatim from frontend/src/styles at abed46baa: themes/graphite, kit components, surfaces/connections. -->
+<style>
+/* ===== themes_graphite.css ===== */
+/* ── Graphite theme — nocx's default: neutral near-black surfaces, the terminal
+   screen's reference palette (owner review 2026-09-15), with Tokyo Night's
+   ANSI accents. ADR-0013 §2. All colour literals live here and only here. */
+
+/* Graphite is the default theme, so it is the one file allowed a bare
+   `:root` block — what applies before `data-theme` is set, and if bootstrap
+   ever fails to set it. The attribute selector is written `:root[data-theme=…]`
+   (specificity 0,2,0) rather than `[data-theme=…]` (0,1,0) so that every
+   attribute-scoped theme outranks this default whatever order the files are
+   imported in. Import order deciding which theme wins is how a missing
+   @import passed for a working theme switch (nocx-u7wq.2). */
+:root,
+:root[data-theme='graphite'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #111316;
+
+  --color-chrome: #17191d;
+  --color-chrome-rail: #1b1e23;
+
+  --color-terminal-chrome: #1a1d22;
+  /* A filled control resting ON the terminal-chrome card — the composer's
+     Run segment and submit button: one step from the card toward the text,
+     so it reads as a control in every theme, dark or light. */
+  --color-control-fill: #23272e;
+  --color-surface-sunken: #181b20;
+  --color-tab-active: #252a35;
+  --color-surface: #1a1d22;
+  --color-surface-hover: #23272e;
+  --color-surface-raised: #30353e;
+  --color-text: #d8dce5;
+  --color-text-muted: #aeb5c1;
+  --color-text-dim: #9ba4b3;
+  --color-border: #626d82;
+  /* Hairline between regions — rail, tab bar, panel edges. Split from
+     --color-border because the two answer different questions: a control
+     outline has to be findable (WCAG 1.4.11, 3:1 against the canvas), a
+     divider only has to be a seam. Raising border to meet 3:1 dragged every
+     divider up with it and the shell looked wireframed. */
+  --color-divider: #292f39;
+  --color-accent: #7aa2f7;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #9ece6a;
+  --color-warning: #e0af68;
+  --color-danger: #f7768e;
+  /* The failed row's ground (spec 2026-09-14 §3.3). A solid per-theme value,
+     never a color-mix of danger into the ground — ADR-0013 §3.1 measured those.
+     Chosen as the smallest step from --terminal-background that a person can see
+     (ΔL* ≥ 2) while text and the danger status word keep 4.5:1 on it; the test
+     in theme-catalogue.test.ts holds every theme to the same numbers. */
+  --color-danger-surface: #231f2a;
+  --color-accent-secondary: #9d7cd8;
+  --color-error: #ff6b6b;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ──
+     These are the values that were declared as --nocx-mono / --nocx-ui until
+     cc92306 renamed every usage and dropped the declarations, which put the
+     whole app in the UA serif fallback (nocx-u7wq.1). */
+  --font-family-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-family-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3 proposed deriving these centrally with color-mix(). The
+     palette does not cooperate: measured during nocx-xrrl.2, not one of the
+     six matches its derivation. surface-hover is DARKER than surface, so no
+     percentage of white reaches it; success-hover is off by 17 in red; and
+     danger-hover and warning-hover are translucent overlays, not solid
+     colours, which is a different rendering model rather than a different
+     shade. See ADR-0013 §3.1. */
+  --color-accent-hover: #89b4fa;
+  --color-accent-active: #89b4fa;
+  --color-accent-disabled: rgba(122, 162, 247, 0.6);
+  --color-surface-hover: #23272e;
+  --color-surface-active: #292f39;
+  --color-surface-disabled: rgba(31, 35, 53, 0.7);
+  --color-success-hover: #b9d870;
+  --color-danger-hover: rgba(247, 118, 142, 0.1);
+  --color-warning-hover: rgba(224, 175, 104, 0.1);
+  --color-focus-ring: rgba(122, 162, 247, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(122, 162, 247, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     Lifted verbatim from the literal object that lived in
+     the theme's terminal palette, which is declared by these variables
+     until now. The adapter in nocx-xrrl.5 reads them from here, so this
+     file is the single source of terminal colour as well as UI colour —
+     which is the point of the token layer.
+
+     ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
+     algorithmic in the terminal itself: those are content, not theme.
+
+     The normal colours 1-7 are Graphite's own, and they are deeper than the
+     bright ones on purpose (nocx-zg3k3.22). A 16-colour program paints
+     BACKGROUNDS with them — mc's panels are blue under light gray, its cursor
+     row cyan under black — and Tokyo Night's accents, which this theme used
+     for both halves, made blue and cyan two light periwinkles: the cursor row
+     disappeared into the panel. The bright colours 9-15 keep those accents,
+     which is where text that wants to be light asks for it. Floors in
+     theme-catalogue.test.ts. */
+  --terminal-background: #111316;
+  --terminal-foreground: #d8dce5;
+  --terminal-cursor: #d8dce5;
+  --terminal-cursor-accent: #111316;
+  --terminal-selection: #364a82;
+
+  --terminal-ansi-0: #111316;
+  --terminal-ansi-1: #d9485f;
+  --terminal-ansi-2: #5fae4a;
+  --terminal-ansi-3: #d19a3d;
+  --terminal-ansi-4: #2b64c8;
+  --terminal-ansi-5: #9a5fd8;
+  --terminal-ansi-6: #2ab0c8;
+  --terminal-ansi-7: #c0c6cf;
+  --terminal-ansi-8: #414868;
+  --terminal-ansi-9: #f7768e;
+  --terminal-ansi-10: #9ece6a;
+  --terminal-ansi-11: #e0af68;
+  --terminal-ansi-12: #7aa2f7;
+  --terminal-ansi-13: #bb9af7;
+  --terminal-ansi-14: #7dcfff;
+  --terminal-ansi-15: #d8dce5;
+
+  /* ── The workspace palette (nocx-2mipw) ────────────────────────────────
+     Nine hues a user picks from to identify a workspace. They are repeated
+     IDENTICALLY in every theme on purpose, and that is the opposite of what
+     an accent does: a tab's colour follows the theme, because a tab decorated
+     under one theme must still read under another; a workspace's colour is
+     the identity of a container the person made, and an identity that changed
+     when you switched theme would not be one — no more than its name would
+     change. A theme whose ground makes one of these unreadable is free to
+     override that one here, which is exactly why they live per-theme rather
+     than in a single shared file. */
+  --ws-grey: #8b949e;
+  --ws-blue: #4c8dff;
+  --ws-cyan: #39c5cf;
+  --ws-green: #3fb950;
+  --ws-yellow: #d29922;
+  --ws-orange: #f0883e;
+  --ws-red: #f85149;
+  --ws-pink: #f778ba;
+  --ws-purple: #a371f7;
+}
+/* ===== components_stack.css ===== */
+/* Stack — vertical rhythm for kit controls.
+   One source of truth for the gap between stacked components.
+   Section and PageSection delegate their content gap to this. */
+
+.ui-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.ui-stack[data-gap='default'] {
+  gap: var(--space-4);
+}
+
+.ui-stack[data-gap='loose'] {
+  gap: var(--space-6);
+}
+
+/* A Stack is a flex column, so every child stretches to its width by default —
+   which is right for a field and wrong for a button. It made "Import" and
+   "Decrypt and Import" page-wide slabs on the export page while "Export
+   Configuration", which happened not to sit in a Stack, was button-sized. A
+   button sizes to its label wherever it is. */
+.ui-stack > .ui-button {
+  align-self: flex-start;
+}
+
+/* ── Divided variant ────────────────────────────────────────────────────
+   Row padding + hairline between children. The selector uses
+   `:not(.st-vis-hidden) ~ :not(.st-vis-hidden)` so the first visible child
+   after hidden siblings still gets a separator, and filtering away a row
+   removes its divider without leaving a gap. */
+
+.ui-stack[data-divided='true'] > * {
+  padding: var(--space-3) 0;
+}
+
+.ui-stack[data-divided='true'] > :not(.st-vis-hidden) ~ :not(.st-vis-hidden) {
+  border-top: 1px solid var(--color-divider);
+}
+
+/* ── Dense variant ──────────────────────────────────────────────────────
+   A list you scan, not a form you read: the gap goes away entirely and the
+   divided row padding halves. Control-to-control rhythm and record-to-record
+   rhythm are different problems, and applying the first to the second spends
+   a narrow rail's whole height on air (nocx-wzc4.10). */
+
+.ui-stack[data-dense='true'] {
+  gap: 0;
+}
+
+.ui-stack[data-divided='true'][data-dense='true'] > * {
+  padding: var(--space-2) 0;
+}
+/* ===== components_field.css ===== */
+/* Field — the form row wrapper, its label, description, error and horizontal variant.
+   Moved verbatim from kit.css by T1 (nocx-v0ai). T11 (nocx-vsf4) keeps `class` on this
+   structural container but bounds it to layout and placement only. */
+
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 0;
+}
+
+.ui-field label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+.ui-field-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  margin: 0;
+}
+
+.ui-field-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+  margin: 2px 0 0;
+}
+
+/* A horizontal field reads label-left, control-right — the control hugs the
+   right edge and the label takes the space that is left.
+   It was the other way round: a 180px label column and a control column with
+   `flex: 1 1 auto`. On a 850px-wide surface that squeezed every description
+   into 180px — the OSC 52 one wrapped to ten lines — while a 120px select sat
+   at the start of a 660px column, leaving ~540px of dead space in every row.
+   The measure cap keeps descriptions readable instead of letting them run the
+   full width of a maximised window. */
+.ui-field-horizontal {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.ui-field-horizontal .ui-field-label-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 64ch;
+}
+
+.ui-field-horizontal .ui-field-control-col {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* ── Label prominence ────────────────────────────────────────────────────
+   A settings row is not a form field: the label IS the setting and the control is
+   the answer to it, so it carries the row rather than captioning it. That look was
+   declared by settings.css on `.ui-field label`, competing with the rule above and
+   winning by specificity — two stylesheets owning one property (nocx-etu2). */
+
+.ui-field[data-label='primary'] > label,
+.ui-field[data-label='primary'] .ui-field-label-col label {
+  display: block;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: var(--color-text);
+}
+/* ===== components_text-field.css ===== */
+/* TextField — composes Field for label, description, error, and required marker.
+   Only the input-specific styles live here; Field owns layout and label/error/desc.
+
+   Two identities with different duties (§3.1): `ui-text-field` wraps the whole
+   control; `ui-text-field__input` is the text/number/password element that carries
+   the appearance. Neither is inferred from the other. */
+
+.ui-text-field {
+  min-width: 0;
+}
+
+.ui-text-field__control {
+  position: relative;
+  min-width: 0;
+}
+
+.ui-text-field__input {
+  height: var(--control-height-md);
+  padding: 0 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  outline: none;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ui-text-field__control[data-trailing='true'] .ui-text-field__input {
+  padding-right: 84px;
+}
+
+.ui-text-field__control[data-action='true'] .ui-text-field__input {
+  padding-right: 40px;
+}
+
+.ui-text-field__control[data-trailing='true'][data-action='true'] .ui-text-field__input {
+  padding-right: 124px;
+}
+
+/* A unit is not a trailing slot. 84px is the room two icon buttons need,
+   and lending it to a three-letter word made the value sit a long way from
+   it and the box wider than it had any reason to be — and, because the
+   width was then content-driven, made "days" and "MiB" fields different
+   widths in the same column. A unit gets its own reserve and the control
+   gets one width, so a column of number fields is a column. */
+.ui-text-field__control[data-unit='true'] .ui-text-field__input {
+  width: var(--control-width-number);
+  padding-right: 40px;
+}
+
+/* ── The ink layer: marked spans of the value ─────────────────────────────
+   The same characters as the input, in the same font at the same offset,
+   painted on top of it while the input keeps the caret and every gesture.
+   Two rules keep the two layers from drifting: the metrics below are the
+   input's own (font, size, padding, height), and a mark changes COLOUR only —
+   never padding, never a border box that would take horizontal space, because
+   one extra pixel of width puts every character after it somewhere the caret
+   is not. */
+.ui-text-field__ink {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The input under it keeps its ground and its border and gives up only its
+   glyphs; the caret is coloured back explicitly, because `color: transparent`
+   would otherwise take it too and the field would look dead while being
+   typed into. */
+.ui-text-field__control[data-ink='true'] .ui-text-field__input {
+  color: transparent;
+  caret-color: var(--color-text);
+}
+
+/* A reference reads as ours: the accent, at the badge's own strength, so a
+   `{{variable}}` in a URL and a variable named anywhere else in the product
+   are the same colour. */
+.ui-text-field__mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--color-accent), transparent 80%);
+  color: var(--color-accent);
+}
+
+/* A reference to a SECRET wears the vault's own colour — the one the secret
+   chip uses everywhere else in the product — so "this stands for something I
+   cannot read here" is the same colour wherever a person meets it. It cannot
+   wear the chip's LOCK: the ink layer holds the same characters as the input
+   in the same places, and a glyph would put every character after it
+   somewhere the caret is not. Colour is the whole of what this layer may
+   change. */
+.ui-text-field__mark[data-tone='secret'] {
+  background: color-mix(in srgb, var(--color-accent-secondary), transparent 78%);
+  color: var(--color-accent-secondary);
+}
+
+/* And a reference NOTHING ANSWERS is the warning tone — the same one a badge
+   uses to say "this will not do what it looks like". It is a different colour
+   AND, through the field's own title, a different sentence: a reader who
+   cannot separate the two hues still gets the fact (WCAG 1.4.1). */
+.ui-text-field__mark[data-tone='unknown'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 80%);
+  color: var(--color-warning);
+}
+
+/* A mark that answers a click takes the pointer for its own span — the rest
+   of the ink stays inert so the field keeps the caret. */
+.ui-text-field__mark[data-interactive='true'] {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.ui-text-field__mark[data-interactive='true']:hover {
+  text-decoration: underline;
+}
+
+.ui-text-field__trailing {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ui-text-field__input:focus {
+  border-color: var(--color-accent);
+}
+
+.ui-text-field__input::placeholder {
+  color: var(--color-text-dim);
+}
+
+/* WebKit's stepper is drawn by the platform and comes out as a white block on a
+   dark field. The value is typed, not stepped, in every place we use it. */
+
+.ui-text-field__input[type='number'] {
+  appearance: textfield;
+}
+
+.ui-text-field__input[type='number']::-webkit-inner-spin-button,
+.ui-text-field__input[type='number']::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.ui-text-field__input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Multiline (textarea) variant — overrides input-only sizing while keeping
+   the shared appearance identity (`ui-text-field__input`). The textarea grows
+   with content in supporting browsers and scrolls otherwise. */
+
+.ui-text-field[data-multiline='true'] .ui-text-field__input {
+  height: auto;
+  padding: 8px;
+  resize: vertical;
+  overflow: auto;
+  line-height: 1.5;
+  white-space: pre;
+  min-height: calc(var(--control-height-md) * 2);
+  field-sizing: content;
+}
+
+/* The prose variant of the textarea. `white-space: pre` above is right for
+   the material a person PASTES — a private key wrapped to the box reads as a
+   different key — and wrong for the prose a person WRITES, which has no
+   lines of its own and would otherwise sit behind a horizontal scrollbar.
+   One property, one variant, declared by the caller. */
+.ui-text-field[data-multiline='true'][data-wrap='true'] .ui-text-field__input {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* The unit suffix of a number field — inside the control, so the number and
+   its unit read (and copy) as one thing. Positioned like the trailing slot;
+   the input's padding comes from data-trailing. */
+.ui-text-field__unit {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+  pointer-events: none;
+}
+
+/* The caption slot beneath the control — a number field's allowed range,
+   smaller than the description (--font-size-2xs vs --font-size-sm), always
+   visible, quiet. The error replaces the caption in this same slot, so the
+   field's height never changes when a value goes out of range.
+
+   It is taken OUT OF FLOW, and that is the whole point rather than a
+   detail. A settings control is sized by its content, so a caption left in
+   flow makes the field as wide as the longest thing the caption might ever
+   say: the same field measured 176px under "0 – 3650 days" and stretched
+   under "Kept until the size limit is reached", so the box moved when the
+   value changed. Out of flow it can neither widen the field nor, if it ever
+   wrapped, make it taller — the field reserves exactly one line for it, and
+   a caption longer than the control simply extends away from the edge it is
+   aligned to. */
+/* DESCENDANT, not child: a field with a label wraps its control in `.ui-field`,
+   so the slot is a grandchild there and a child only on the bare settings
+   control. Matched as a child, a labelled field reserved nothing and its
+   absolutely-positioned caption resolved against whatever ancestor happened to
+   be positioned — which is why the caption slot could not be used for a
+   labelled field's validation message until now (nocx-n26p1). `.ui-text-field`
+   is the field's own box either way, so it is the right thing to anchor to and
+   the right thing to reserve the strip on. */
+.ui-text-field:has(.ui-text-field__caption) {
+  position: relative;
+  padding-bottom: calc(var(--font-size-2xs) * 1.4 + 2px);
+}
+
+.ui-text-field__caption {
+  position: absolute;
+  top: 100%;
+  margin: 0;
+  transform: translateY(calc(-1 * (var(--font-size-2xs) * 1.4 + 2px) + 2px));
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+
+.ui-text-field__caption[data-align='start'] {
+  left: 0;
+}
+
+.ui-text-field__caption[data-tone='error'] {
+  color: var(--color-danger);
+}
+
+/* The caption follows the column, not the field: where the controls are
+   pinned to the right of a row (the settings screen), a start-aligned
+   caption leaves a ragged right edge down the section. Out of flow, that is
+   the edge it is anchored to — so a caption wider than the control grows
+   leftwards, into the empty gutter, instead of pushing the control. */
+.ui-text-field__caption[data-align='end'] {
+  right: 0;
+  text-align: right;
+}
+/* ===== components_select.css ===== */
+/* Select — native <select> with `appearance: none` on the closed control (ADR-0014).
+   Rewritten from the `.kit-scope` ancestor onto `.ui-select` by T6 (nocx-6913). The
+   element rendered `props.class ?? ''` and nothing of its own, so a Select outside the
+   one scoped subtree was native platform chrome. */
+
+.ui-select {
+  appearance: none;
+  height: var(--control-height-md);
+  padding: 0 28px 0 8px;
+  background: var(--color-surface-raised)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a9b1d6' fill='none' stroke-width='1.5'/%3E%3C/svg%3E")
+    no-repeat right 8px center;
+  background-size: 10px 6px;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.ui-select:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.ui-select option {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.ui-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* ===== components_button.css ===== */
+/* Button — action affordance.
+   Base class: `.ui-button`. Variance: `data-variant` (default | primary |
+   danger | ghost) and `data-size` (sm | md).
+
+   Declarations moved from the old `.ui-btn-*` classes (T14, nocx-c2t6).
+   All variants share `font: inherit; cursor: pointer; font-size;
+   white-space: nowrap` via the base rule; `border-radius` is the base's sm
+   except the ghost variant, which is the "row in a list" register and owns
+   the row radius (md) itself — never per consumer (nocx-dgsp).
+
+   Before → after (property list for the verification gate):
+     .ui-btn-secondary → .ui-button[data-variant="default"]
+     .ui-btn-primary   → .ui-button[data-variant="primary"]
+     .ui-btn-danger    → .ui-button[data-variant="danger"]
+     ─ (nonexistent)   → .ui-button:disabled  (new — was dead button.kit-scope:disabled)
+     .ui-btn-close     → deleted (IconButton owns this now)
+   No declarations were dropped; all moved to the appropriate variant or the base. */
+
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: var(--control-radius-sm);
+}
+
+/* An icon inside a labelled Button is part of the button, not free-form
+   content. Without a kit-owned size an SVG uses its intrinsic viewport and can
+   expand to the width of the row. IconButton owns the icon-only case. */
+.ui-button > svg,
+.ui-button__label > svg {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+}
+
+/* ── Default (neutral) — today's secondary, renamed (§3.6 vocabulary) ── */
+
+.ui-button[data-variant='default'] {
+  padding: 0 10px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.ui-button[data-variant='default']:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+/* ── Primary (accent-filled) ────────────────────────────────────────── */
+
+.ui-button[data-variant='primary'] {
+  padding: 0 12px;
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  border: none;
+  font-weight: 500;
+}
+
+.ui-button[data-variant='primary']:hover {
+  background: var(--color-accent-hover);
+}
+
+/* ── Danger (danger outline) ─────────────────────────────────────────── */
+
+.ui-button[data-variant='danger'] {
+  padding: 0 8px;
+  background: transparent;
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.ui-button[data-variant='danger']:hover {
+  background: color-mix(in srgb, var(--color-danger), transparent 90%);
+}
+
+/* ── Height follows `data-size`, for every variant (nocx-9bpeq.21 round 2)
+   ──────────────────────────────────────────────────────────────────────
+   No attribute is `md` — `--control-height-md`, 32px — the SAME convention
+   `createButton`/`Button.tsx` already use to OMIT the attribute for the
+   common case (`local.size && local.size !== 'md'` is what earns it); an
+   explicit `sm` below is `--control-height-xs`, 22px, unchanged from today.
+
+   Ghost already followed this (`:not([data-size])`, further down); every
+   other sized variant instead carried its OWN literal or token —
+   `--control-height-sm` on default, a bare `24px` on primary and danger,
+   nothing at all on dashed — so `data-size` did nothing for any of them.
+   The running command block's Stop button (scrollback/blocks.ts, `variant:
+   'default'`, no size) rendered at 24px instead of the mockup pass's 32px
+   target (decision record 2026-09-15 §1.7), which is what surfaced this:
+   `data-size='sm'` had never actually been exercised on primary, danger or
+   dashed to notice they ignored it too.
+
+   `:not([data-size])` rather than folding `height` into each variant's own
+   rule above: `[data-size='sm']` below is then a SEPARATE, mutually
+   exclusive match — the two rules can never tie on specificity, and neither
+   depends on declaration order (the reason ghost's own comment gives).
+
+   `:not([data-secondary])` is the one exception TO that: `[data-secondary=
+   'true']` (bottom of file) is a taller, two-line auto-height mode a
+   consumer can combine with ANY of these variants (agent-approval-prompt.tsx
+   pairs it with default, primary AND danger, all sizeless) — and unguarded,
+   this rule's higher specificity (three attribute-level selectors against
+   secondary's two) would have overridden its `height: auto` and collapsed
+   the second line. Workspace (a full-height rail badge) has no sm/md
+   concept and keeps its own `height: 100%`. */
+.ui-button[data-variant='default']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='primary']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='danger']:not([data-size]):not([data-secondary]),
+.ui-button[data-variant='dashed']:not([data-size]):not([data-secondary]) {
+  height: var(--control-height-md);
+}
+
+/* ── Size sm (for inline/chrome uses like quick-connect) ─────────────── */
+
+.ui-button[data-size='sm'] {
+  height: var(--control-height-xs);
+  padding: 0 8px;
+  font-size: var(--font-size-2xs);
+}
+
+/* ── Truncate — the button yields to its row (nocx-9bpeq.7) ────────────
+   `text-overflow` applies to a block container's own inline content; inside
+   the base rule's inline-flex the label is an anonymous flex item and would
+   hard-clip mid-glyph. So a truncating button is inline-block, with the line
+   box as tall as the control so the label stays centred. Defined for the
+   small size, the only consumer; its row places the width. */
+.ui-button[data-size='sm'][data-truncate='true'] {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
+  line-height: var(--control-height-xs);
+  /* The line box IS the height here, so no block padding: ghost's own
+     `padding: var(--space-2) 10px` comes later at equal specificity and would
+     push the label 8px down inside an `overflow: hidden` 22px box — the Ask
+     composer's model and grant chips read cut in half (owner, 2026-09-15). */
+  padding-block: 0;
+}
+
+/* ── Disabled — was dead code as button.kit-scope:disabled (§3.6) ───── */
+
+.ui-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Ghost — a button that reads as a row in a list ─────────────────────
+   Every consumer is a row, a foot control, or a row-adjacent action: the
+   settings rail's nav rows, the vertical Tabs rows, the row-list's add
+   control, the connections row's Test/Connect actions, the vault page's
+   Download, the footprint empty state's Refresh. It arrived here because T14
+   first replaced it with a RAW <button> — which satisfies "no class passed
+   to Button" by abandoning the kit altogether, the exact defect this
+   migration exists to end. A genuinely different look is a variant, and this
+   is what naming it looks like.
+
+   The radius is the ROW register's (`--control-radius-md`, one step up from
+   the default control's sm): the settings rail's rows align with the search
+   field above them, and a row register reads the same everywhere — a
+   consumer-named selector in the component file would be the coupling this
+   variant exists to prevent. */
+
+.ui-button[data-variant='ghost'] {
+  justify-content: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  border-radius: var(--control-radius-md);
+
+  /* Ghost had no padding of its own, and the only consumer supplied one from
+     settings.css — so a ghost Button anywhere else would have had a hit area
+     the size of its text. The variant was incomplete rather than customised,
+     which is what rule 3 firing on it revealed (T20, nocx-zhjx). Moved
+     verbatim from the settings nav rule. */
+  padding: var(--space-2) 10px;
+}
+
+/* AND ITS HEIGHT IS A TOKEN, like every other variant's. Ghost was the one
+   whose height came from its padding plus whatever line-height the inherited
+   font happened to have — about 32.5px, which is not any control height we
+   declare. A row that sizes itself to its tallest child then cannot be given
+   a floor: the API crumbs declared `--control-height-md` as theirs and still
+   grew by sixteen pixels the moment a request opened and put a ghost in it,
+   because the ghost was taller than the tallest control the row believed it
+   could hold.
+   `:not([data-size])` and not a bare rule: `[data-size='sm']` is declared
+   ABOVE this and would lose to it on source order, which would silently
+   inflate every small ghost in the product. */
+.ui-button[data-variant='ghost']:not([data-size]) {
+  height: var(--control-height-md);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.ui-button[data-variant='ghost']:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* ── Workspace — a full-height coloured badge in the tab strip ─────────
+   The feature supplies `--ws-colour`; the kit owns the control's paint and
+   keeps its hit area at the full 38px strip height. Mixing with chrome keeps
+   the foreground readable across both dark and light themes. */
+.ui-button[data-variant='workspace'] {
+  align-self: stretch;
+  height: 100%;
+  justify-content: flex-start;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--ws-colour) 48%, var(--color-chrome));
+  border: none;
+  border-radius: 7px;
+  color: var(--color-text);
+  font: inherit;
+}
+
+.ui-button[data-variant='workspace']:hover {
+  background: color-mix(in srgb, var(--ws-colour) 64%, var(--color-chrome));
+  color: var(--color-text);
+}
+
+/* ── Selected ────────────────────────────────────────────────────────────
+   Two registers, one per variant family:
+
+   Non-ghost (default/primary/danger): the accent fill that was always there
+   — `selected` on those variants keeps its exact old contract; today no
+   non-ghost Button uses it, but the prop's meaning must not silently change
+   for a variant this change does not touch.
+
+   Ghost — the current choice in a list: a neutral plate with normal text and
+   a weight bump, the register the tab strip (.nocx-tab: --color-tab-active,
+   text) and the row lists (.ui-collection-row: surface plate, no accent)
+   already speak. The accent stays, but in a narrow channel: a 2px marker on
+   the leading edge, the same idiom icon-button.css' data-rail-indicator
+   uses — never the fill that used to flood the row and invert its text.
+
+   The ghost plate token is deliberately the TAB'S, not the ghost hover
+   token: selected and hover sit adjacent in the rail, and a shared plate
+   would make the two states indistinguishable. The marker and the weight
+   are the second and third separations on top of the token (nocx-dgsp). */
+
+.ui-button:not([data-variant='ghost'])[aria-selected='true'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  font-weight: 500;
+}
+
+.ui-button:not([data-variant='ghost'])[aria-selected='true']:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-canvas);
+}
+
+/* A badge riding inside a selected non-ghost button cannot keep its own
+   palette — warning orange on the accent fill was unreadable. */
+.ui-button:not([data-variant='ghost'])[aria-selected='true'] .ui-badge {
+  background: color-mix(in srgb, var(--color-canvas), transparent 75%);
+  color: var(--color-canvas);
+}
+
+/* Workspace keeps its own colour when it is the current navigation choice;
+   the general selected rule above must not turn it into an accent button. */
+.ui-button[data-variant='workspace'][aria-selected='true'] {
+  background: color-mix(in srgb, var(--ws-colour) 58%, var(--color-chrome));
+  color: var(--color-text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px var(--ws-colour);
+  border-radius: 7px 0 0 7px;
+}
+
+.ui-button[data-variant='workspace'][aria-selected='true']:hover {
+  background: color-mix(in srgb, var(--ws-colour) 64%, var(--color-chrome));
+  color: var(--color-text);
+}
+
+.ui-button[data-variant='ghost'][aria-selected='true'] {
+  position: relative;
+  background: var(--color-tab-active);
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+/* A selected row stays selected under the pointer — the plate holds, like
+   the tab strip's (hover is for rows that are not current). */
+.ui-button[data-variant='ghost'][aria-selected='true']:hover {
+  background: var(--color-tab-active);
+  color: var(--color-text);
+}
+
+.ui-button[data-variant='ghost'][aria-selected='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-accent);
+}
+
+/* ── dashed — the empty slot where one more is made ──────────────────────
+
+   An outline that is not yet filled. It sits beside real things — cards, the
+   columns of a board — and must not be counted among them, which a solid
+   border or a filled ground would make it. Dashed is the one convention that
+   reads as "the next one goes here" without pretending to be a one. */
+
+.ui-button[data-variant='dashed'] {
+  border: 1px dashed var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.ui-button[data-variant='dashed']:hover:not(:disabled) {
+  border-color: var(--color-text-dim);
+  color: var(--color-text);
+}
+
+/* ── Secondary line — a quieter explanation under the action ────────────
+   The secondary line is allowed to wrap inside a constrained action cell;
+   coverage must stay readable rather than overflow or disappear. */
+.ui-button[data-secondary='true'] {
+  flex-direction: column;
+  align-items: flex-start;
+  height: auto;
+  min-height: var(--control-height-sm);
+  padding-block: 4px;
+  white-space: normal;
+}
+
+.ui-button__label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.ui-button__secondary {
+  font-size: var(--font-size-2xs);
+  font-weight: 400;
+  line-height: 1.2;
+  opacity: 0.8;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ── Mono — the composer's hint register (owner review 2026-09-15) ───────
+   The context row's controls in the same face, size and ink as the key hints
+   under the draft (composer-frame.css). After ghost and sm (equal
+   specificity) so its face, size and colour win. */
+.ui-button[data-mono='true'] {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+.ui-button[data-mono='true']:hover:not(:disabled) {
+  color: var(--color-text-muted);
+}
+/* ===== components_tabs.css ===== */
+/* Tabs — the section rail and the selected section's panel.
+   Identity family: .ui-tabs and the __list/__tab/__panel parts it renders.
+   Not related to .nocx-tab, which is the terminal's tab chrome. */
+
+.ui-tabs {
+  display: flex;
+  /* A flex child of a bounded parent must be allowed to shrink below its
+     content, or the panel pushes the dialog past its max-height instead of
+     scrolling inside it. */
+  min-height: 0;
+  /* And the same on the other axis, which went unsaid for a year and cost
+     nocx-kdawd. Measured, not deduced: with a long line in the API body
+     editor, `.ui-tabs` reported client=496 scroll=566 with `min-width: auto`
+     while every element below it — the panel, the panels grid, the editor —
+     already said 0. A panel that cannot shrink hands its width upwards, so
+     the scrollbar appeared under the whole request column and the editor,
+     which clips and whose own scroller was ready to move, never got the
+     chance. */
+  min-width: 0;
+  /* The distance from the divider to the section's content. Was
+     `var(--space-5)`, which is not a token — the scale is 1,2,3,4,6,8,12 — and
+     an undefined custom property makes the declaration invalid at computed
+     time, so `gap` fell back to `normal` (zero) and the labels sat against the
+     rule. It fails silently: no console warning, no lint. */
+  gap: var(--space-4);
+}
+
+.ui-tabs[data-orientation='vertical'] {
+  flex-direction: row;
+}
+
+.ui-tabs[data-orientation='horizontal'] {
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ── The rail ─────────────────────────────────────────────────────────── */
+
+.ui-tabs__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+  /* More sections than the box is tall is the rail's problem, not the
+     container's. */
+  overflow-y: auto;
+}
+
+.ui-tabs[data-orientation='vertical'] .ui-tabs__list {
+  /* Wide enough for a two-word section name without wrapping, narrow enough
+     that the panel keeps the width that actually holds the form. */
+  width: 9.5rem;
+  border-right: 1px solid var(--color-divider);
+  /* Only on the divider side: the rail's rows start at the container's content
+     edge, aligned with whatever titles it. The left inset tried earlier was
+     the wrong fix for the wrong problem — what looked like a missing gap was
+     the broken `gap` above, on the other side of the rule. */
+  padding-right: var(--space-3);
+}
+
+.ui-tabs[data-orientation='horizontal'] .ui-tabs__list {
+  flex-direction: row;
+  padding-bottom: var(--space-2);
+  /* The tabs give way before the section's controls do, and they scroll
+     rather than wrap: a wrapped tab row changes the bar's HEIGHT, which moves
+     everything under it every time a control appears. `flex` overrides the
+     base `0 0 auto` for this orientation only — the settings rail is vertical
+     and still may not shrink. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* The row that holds the tablist and the section's own control. The rule
+   under the tabs belongs to the ROW, not to the list, so it runs the whole
+   width whether or not there is a control at the end of it. */
+.ui-tabs__bar {
+  display: contents;
+}
+
+.ui-tabs[data-orientation='horizontal'] .ui-tabs__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+  /* The bar may be narrower than the tabs and the section's controls put
+     together, and when it is, the LIST is what moves (below). Without this it
+     is the bar that grows: measured in a 496px request column, `__list` (350)
+     plus `__actions` (204) reported scrollWidth 566 with `min-width: auto`,
+     and the overflow travelled up until the request column drew a scrollbar
+     under the whole surface. What that looked like was a body editor whose
+     long line moved the pane — which is where nocx-kdawd was hunted twice
+     before this was measured. */
+  min-width: 0;
+}
+
+.ui-tabs__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  /* Shrinkable too, so a narrow column takes it out of both rather than
+     pushing the surface sideways. */
+  min-width: 0;
+}
+
+/* AND WHAT A SURFACE PUTS IN THERE. A slot's contents usually arrive wrapped
+   in a plain div, and a plain div is a flex item with `min-width: auto`, so it
+   refuses to shrink below its content and hands the overflow back to the bar.
+   Measured on the request form's mode picker, which used to sit here: with the
+   bar and the actions both at 0 the row still reported 522 in a 496 box, and
+   the 26px were the select inside its wrapper. That picker has since moved
+   into the panel it governs (nocx-n9npi) and these two rules stay, because the
+   shape is the slot's and not that caller's. The kit says it here once, rather
+   than every surface remembering to say it about every wrapper. */
+.ui-tabs__actions > * {
+  min-width: 0;
+}
+
+/* A native <select> takes its INTRINSIC width — the longest option — and
+   `min-width: 0` does not touch that: measured, that select sat at 204px
+   inside a wrapper that had already shrunk to 178 and hung 26px past the
+   bar's right edge, which is the whole of the overflow the request column
+   was scrolling. `max-width` is what binds an intrinsic width to its box, and
+   `.api-request__controls` carries the same pair for the same reason. */
+.ui-tabs__actions .ui-select {
+  max-width: 100%;
+}
+
+/* How a rail row sits, and nothing about how it looks — a selected Button's
+   fill, its hover and its weight all live in button.css. The same division the
+   settings rail keeps.
+
+   `display: flex` is load-bearing rather than tidy: a <button> is inline-block,
+   so `justify-content` alone does nothing and the UA's own centring wins. The
+   labels sat centred in the rail for exactly that reason. */
+.ui-tabs[data-orientation='vertical'] .ui-tabs__list > .ui-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* ── Status indicator ────────────────────────────────────────────────── */
+
+/* The dot is the kit's StatusDot (`status-dot.css`). It moved out of this file
+   when the Vault store list needed the same marker outside a tab — two
+   stylesheets drawing one dot is the thing the per-component split exists to
+   prevent. Tabs decides only that a row may carry one. */
+
+/* ── The panel ────────────────────────────────────────────────────────── */
+
+/* The box is the ACTIVE section's size, not the tallest's: the inactive
+   panels are `display: none` (the component marks them `hidden`), so they
+   contribute no height and the cell never sees them. The section switch
+   therefore changes the box's height, and the Dialog that owns this panel
+   animates that change — the footer moves, but visibly and predictably
+   rather than teleporting, which is what the old fixed cell bought.
+
+   `visibility: hidden` was chosen here once precisely BECAUSE it keeps
+   contributing size while removing the panel from the tab order and the
+   accessibility tree. That reasoning is inverted now: the inactive panels
+   must stop contributing size, and `hidden`/`display: none` does that AND
+   the tab-order and accessibility-tree removal. */
+.ui-tabs__panels {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  /* No max-height. The cell takes the active section's height and stops
+     there; the only thing that bounds it is the dialog panel's own
+     viewport-relative max-height, so a section scrolls when it genuinely
+     does not fit on screen and never merely because a number said so.
+     A cap was tried and removed: at 24rem it scrolled the tallest section in
+     a 1000px window with room to spare, which is the worse of the two costs. */
+}
+
+.ui-tabs__panel {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* The component sets `hidden` on inactive panels; this makes the result
+   explicit in the author sheet so a future `display` rule on the panel
+   cannot silently resurrect them (the UA's `[hidden]` rule loses to any
+   author `display` declaration). */
+.ui-tabs__panel:not([data-active]) {
+  display: none;
+}
+
+/* The panel is a scroll container, so it is focusable (tabIndex=0) and needs a
+   visible ring like anything else that takes focus. base.css owns the ring
+   itself; this only keeps it from being clipped by the scroll box. */
+.ui-tabs__panel:focus-visible {
+  outline-offset: -2px;
+}
+/* ===== components_checkbox.css ===== */
+/* Checkbox — the label row, the box, and the switch variant.
+   Rewritten from the `.kit-scope` ancestor onto the component's own identities by T7
+   (nocx-b0oi). Neither the label nor the input had a class of its own, so every boolean
+   in the app rendered as native platform chrome — a 12px system box with the text
+   jammed against it — unless it happened to sit inside the one scoped subtree.
+
+   Two identities, different duties (§3.1): `ui-checkbox` is the row and owns the
+   layout, the gap and the cursor; `ui-checkbox__control` is the box and owns its
+   border, its checked mark and its disabled state. The switch is a variant of this
+   primitive rather than a separate one — same contract, different shape — and it is
+   selected by `data-variant`, not by a class the caller has to remember. */
+
+/* No font-size on the row on purpose: the label inherits its surroundings, so a
+   checkbox in the settings rail matches the nav beside it and one in a form matches
+   the form. Pinning it to --font-size-md made the rail's "Modified" filter two steps
+   larger than every other line in the same column. */
+.ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+/* `appearance: none` takes the platform look away and everything below puts ours back. */
+.ui-checkbox__control {
+  appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.ui-checkbox__control:hover {
+  border-color: var(--color-accent);
+}
+
+.ui-checkbox__control:focus {
+  border-color: var(--color-accent);
+}
+
+.ui-checkbox__control:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* The tick is drawn rather than typed: a glyph would inherit the surrounding font and
+   shift with it. */
+.ui-checkbox__control:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid var(--color-canvas);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.ui-checkbox__control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Switch variant ─────────────────────────────────────────────────────────
+   The settings affordance, for a change that applies immediately. The checkbox
+   stays the filter and selection affordance. */
+
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control {
+  width: var(--control-width-switch);
+  height: 20px;
+  border-radius: var(--control-radius-full);
+  background: var(--color-surface-sunken);
+}
+
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  transform: none;
+  transition:
+    transform 0.14s ease,
+    background 0.14s ease;
+}
+
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.ui-checkbox[data-variant='switch'] .ui-checkbox__control:checked::after {
+  transform: translateX(14px);
+  background: var(--color-canvas);
+}
+/* ===== components_badge.css ===== */
+/* Badge — one base shape + tone overrides.
+   Per §3.1: class="ui-badge" on the element, data-tone for variance.
+   Font-size uses --font-size-2xs, the scale token for the "smaller than body"
+   register that nocx-pp3y.2 established. */
+
+.ui-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--control-radius-sm);
+  font-size: var(--font-size-2xs);
+  font-weight: 500;
+  line-height: 1.4;
+  /* A badge is a chip: ONE line, whatever it holds. Without this a long
+     value wraps inside the pill — a branch called
+     `fix/e2e-files-reveal-and-container` rendered as a three-line block in
+     the Git panel's header, and a commit's ref badges stacked four lines
+     deep and tripled the height of their row (nocx-uf0p). Wrapping is not a
+     graceful degrade here: the shape stops reading as a chip at all. It
+     clips to its container instead, and the caller keeps the full value on
+     a title where it needs one. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* inline-block + overflow:hidden aligns its overflow edge to the text
+     baseline, which drops the chip relative to neighbouring text; bottom
+     alignment keeps it sitting on the line it is part of. */
+  vertical-align: bottom;
+}
+
+/* `neutral` is the DEFAULT tone and it had no rule at all — three tones painted a
+   background and the fourth, the one you get by writing `<Badge>`, painted
+   nothing. It rendered as bare text with 6px of padding either side, which reads
+   as a stray gap rather than as a chip, and left the component's default state
+   as the only one that did not look like a badge. A default that has to be
+   overridden to work is the kit failing to constrain (nocx-fmoz). */
+.ui-badge[data-tone='neutral'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text-dim);
+}
+
+.ui-badge[data-tone='info'] {
+  background: color-mix(in srgb, var(--color-accent), transparent 80%);
+  color: var(--color-accent);
+}
+
+.ui-badge[data-tone='warning'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 80%);
+  color: var(--color-warning);
+}
+/* `success` arrived with the Vault diagnostics, where "Ready" and "Not ready"
+   sit in the same column and the reader is scanning for the difference. Warning
+   and danger both read as "look here"; without a green there was no tone that
+   reads as "nothing to do", so a healthy store had to be drawn as neutral and
+   looked indistinguishable from a value with no opinion. */
+.ui-badge[data-tone='success'] {
+  background: color-mix(in srgb, var(--color-success), transparent 80%);
+  color: var(--color-success);
+}
+
+.ui-badge[data-tone='danger'] {
+  background: color-mix(in srgb, var(--color-danger), transparent 80%);
+  color: var(--color-danger);
+}
+
+/* Solid badges are for compact counts over changing surfaces: the accent is
+   opaque, the canvas token keeps its text readable in every theme, and the
+   ring separates the chip from its host. A host with a different background
+   sets --badge-ring-color; the rail token is the safe default. */
+.ui-badge[data-variant='solid'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  box-shadow: 0 0 0 2px var(--badge-ring-color, var(--color-chrome-rail));
+}
+
+/* The chip yields to its row (nocx-wzc4.9): never wraps, and ellipsizes at
+   its own box edge. `min-width: 0` is what lets a flex row shrink the chip
+   below its content width; `max-width: 100%` is the no-wrap companion. */
+.ui-badge[data-truncate='true'] {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ===== components_dialog.css ===== */
+/* ── Overlay core: dialog and future custom overlays ───────────────────
+   Owned by the overlay-core module (nocx-vxqj.5).
+   See ADR-0014 and the overlay/ directory for component logic. */
+
+/* ── Native <dialog> base styling ──────────────────────────────────── */
+
+/* Reset the UA stylesheet so our theming takes full effect. */
+dialog.nocx-dialog {
+  /* Remove the browser's default backdrop colour — we set it via ::backdrop. */
+  background: none;
+  border: none;
+  padding: 0;
+  /* The browser top layer is outside any stacking context. This ensures
+     the dialog surface itself isn't draggable in a Wails webview. */
+  --wails-draggable: no-drag;
+}
+
+/* ── Backdrop: the scrim behind a modal dialog ──────────────────────────
+     ADR-0014: "::backdrop theming — styled via ADR-0013's token variables."
+     Uses --color-scrim from tokens.css, defined in themes/tokyo-night.css. */
+dialog.nocx-dialog::backdrop {
+  background: var(--color-scrim);
+}
+
+/* ── Dialog inner surface ────────────────────────────────────────────── */
+
+.nocx-dialog__panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-lg, 8px);
+  padding: var(--space-6, 24px);
+  /* A DEFINITE width, not a cap. A `<dialog>` is `width: fit-content`, so with
+     only a max-width the panel shrank to whatever its body happened to need —
+     and a body with sections then resized the dialog every time the user
+     changed section: 356px on one, the full 560 on the next, with the footer
+     buttons moving out from under the pointer reaching for them. The size prop
+     names the width; the content never gets a say. */
+  width: 480px;
+  max-width: calc(100vw - var(--space-6, 24px) * 2);
+  color: var(--color-text);
+  /* The panel is the boundary, and it enforces it rather than trusting the
+     content to stay inside. A child that names a width or a height larger than
+     the panel allows is clamped here; before this, such a child simply hung out
+     past the border and the panel looked broken. Flex column is what makes the
+     vertical half real: a shrinkable child with its own `min-height: 0` scroll
+     region gives up space instead of overflowing. */
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--space-6, 24px) * 2);
+  overflow: hidden;
+  /* Height changes — a section switch, a control revealing fields — are
+     animated so the footer moves visibly instead of teleporting out from
+     under the pointer reaching for it. Dialog measures and pins the height
+     (see dialog.tsx), and this transition runs the change; the reduced-motion
+     override sits below, next to the other components' (toast.css,
+     prompt.css). The panel must stay bounded by its max-height at every point
+     of the animation: both the pin and the target come from measured heights,
+     which CSS clamps to the max-height. */
+  transition: height 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nocx-dialog__panel {
+    transition: none;
+  }
+}
+
+.nocx-dialog__panel > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* ── Dialog body ──────────────────────────────────────────────────────────
+   The rhythm between a body's blocks, and the scroll region for a body taller
+   than the panel. `min-height: 0` is what lets a flex child shrink below its
+   content and scroll rather than push the panel past its max-height. */
+.nocx-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* While the panel is mid-transition it is pinned to the height it is leaving,
+   so a body sized for the height it is arriving at overflows and shows a
+   scrollbar for the duration. Suppressing it is not cosmetic: a bar that
+   appears and vanishes inside 180ms is the part of the movement the eye
+   reliably catches, and it reads as a glitch. It returns when the panel
+   settles, because the attribute is removed then and the rule above is all
+   that is left. */
+.nocx-dialog__panel[data-animating] .nocx-dialog__body {
+  overflow-y: hidden;
+}
+
+.nocx-dialog__body > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Section's bottom margin is a page rule — it separates one section from the
+   next down a scrolling surface. Inside a dialog the body owns that distance,
+   and keeping both stacked 32px of margin on top of the body's own gap. */
+.nocx-dialog__body > .ui-section {
+  margin-bottom: 0;
+}
+
+/* The palette width — wide enough to read a host and its label on one line.
+   The number here is the ONLY declaration of it: quick-connect.css used to carry
+   a 512px content width derived from an earlier 560px panel, and when this line
+   moved to 640 the palette kept sitting at 512 with 80px of dead space beside it
+   (nocx-kudf). Content fills this box; it does not restate it. */
+.nocx-dialog__panel[data-size='lg'] {
+  width: 640px;
+}
+
+/* Full-page readers use the available viewport rather than the dialog's
+   ordinary content width. */
+.nocx-dialog__panel[data-size='full'] {
+  width: calc(100vw - var(--space-6, 24px) - var(--space-6, 24px));
+  height: calc(100vh - var(--space-6, 24px) - var(--space-6, 24px));
+  max-width: calc(100vw - var(--space-6, 24px) - var(--space-6, 24px));
+  max-height: calc(100vh - var(--space-6, 24px) - var(--space-6, 24px));
+}
+
+/* The heading row keeps the universal dismiss affordance visible even for a
+   title-less dialog. Footer Cancel buttons remain the caller's explicit action. */
+.nocx-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-bottom: var(--space-3, 12px);
+  min-width: 0;
+}
+
+.nocx-dialog__header > .nocx-dialog__title {
+  min-width: 0;
+  margin: 0;
+}
+
+.nocx-dialog__close {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.nocx-dialog__title {
+  font-size: var(--font-size-lg, 16px);
+  font-weight: 600;
+  margin: 0 0 var(--space-3, 12px);
+  color: var(--color-text);
+}
+
+.nocx-dialog__message {
+  font-size: var(--font-size-md, 14px);
+  line-height: 1.5;
+  margin: 0;
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The distance from the body to the actions belongs here, not to whatever the
+   body's last block happens to be. It used to be the confirm message's own
+   bottom margin, which meant a dialog whose body was a form had no separation
+   at all except the one Section's page margin happened to give it. */
+.nocx-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-6, 24px);
+  flex: 0 0 auto;
+}
+/* ===== components_toast.css ===== */
+/* Toast — the screen-level notification area and the notifications in it.
+   One identity family: `ui-toast-host` and the `ui-toast` items it renders.
+
+   The host is `position: fixed` and `pointer-events: none` so an empty
+   notification area costs nothing: no space in the layout, and no invisible
+   rectangle over the bottom-right corner of whatever surface is open. The
+   toasts themselves take pointer events back — they have a close button. */
+
+.ui-toast-host {
+  position: fixed;
+  /* Past the activity bar, not merely inside the viewport: the rail is at the
+     window's trailing edge and its bottom zone holds global actions — the API
+     workbench and Settings — and a `danger` toast is sticky, so an overlap is
+     not a flicker but two buttons unreachable until somebody dismisses it.
+
+     The panel is deliberately NOT cleared as well: it collapses and it
+     resizes, and a toast over it is no worse than a toast over a pane. The
+     rail is the surface that is always present and always holds global
+     actions (nocx-u5zoc). */
+  right: calc(var(--space-4) + var(--activity-bar-width));
+  bottom: var(--space-4);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  pointer-events: none;
+  max-width: min(560px, calc(100vw - var(--space-8)));
+}
+
+/* The level tints the whole card rather than painting a stripe down one edge.
+   The first version had a 3px left border, and inside a rounded card it read as
+   a separate bar sitting behind the toast rather than as part of it. The tint is
+   `color-mix` against the raised surface at a low percentage, so the card still
+   sits in the theme instead of becoming a coloured slab; the border and the icon
+   carry the rest of the statement. */
+.ui-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  /* On the toast, not on the host: the host aligns its children to the right
+     edge, so a min-width there widens the invisible column and leaves the card
+     hugging its text. A one-clause message at 420px read as a tooltip rather
+     than as the app telling you something. */
+  min-width: 340px;
+  box-sizing: border-box;
+  padding: var(--space-4);
+  padding-right: var(--space-3);
+  color: var(--color-text);
+  border: 1px solid var(--toast-edge);
+  border-radius: var(--control-radius-lg);
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, white, transparent 96%),
+      color-mix(in srgb, black, transparent 97%)
+    ),
+    color-mix(in srgb, var(--toast-accent) 10%, var(--color-surface-raised));
+  /* Two shadows, not one: a tight contact shadow that seats the card on the
+     surface and a wide soft one that lifts it off the page. A single blur does
+     one or the other. */
+  box-shadow:
+    0 1px 2px color-mix(in srgb, black, transparent 80%),
+    0 8px 24px color-mix(in srgb, black, transparent 65%);
+  animation: ui-toast-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+/* One variable pair per level; every rule above reads them, so a new level is
+   two declarations rather than a copy of the card. */
+.ui-toast[data-level='info'] {
+  --toast-accent: var(--color-accent);
+  --toast-edge: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+.ui-toast[data-level='success'] {
+  --toast-accent: var(--color-success);
+  --toast-edge: color-mix(in srgb, var(--color-success) 35%, transparent);
+}
+
+.ui-toast[data-level='warning'] {
+  --toast-accent: var(--color-warning);
+  --toast-edge: color-mix(in srgb, var(--color-warning) 40%, transparent);
+}
+
+.ui-toast[data-level='danger'] {
+  --toast-accent: var(--color-danger);
+  --toast-edge: color-mix(in srgb, var(--color-danger) 45%, transparent);
+}
+
+/* The glyph sits in a tinted disc so it reads as a badge rather than as a letter
+   that happens to be coloured, and so it holds its weight against the message
+   text next to it. */
+.ui-toast__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--control-radius-full);
+  background: color-mix(in srgb, var(--toast-accent) 20%, transparent);
+  color: var(--toast-accent);
+}
+
+.ui-toast__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ui-toast__message {
+  flex: 1;
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  /* Optical centring against the icon disc: the first line of text and the
+     glyph share a baseline instead of the text starting a pixel high. */
+  padding-top: 3px;
+  /* A backend error can arrive as one unbroken token (a path, a base64 blob).
+     Without this it widens the toast past its max and clips. */
+  overflow-wrap: anywhere;
+}
+
+/* A link a toast carries reads as part of the message, in the accent, with
+   the same break-anywhere discipline: a URL the caller cannot shorten is a
+   long token (nocx-1ebrs.54). */
+.ui-toast__link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* The measure a long-running toast reports, under its message: the kit's bar
+   taking the room, and the caller's figure beside it at a fixed size so the
+   bar does not resize as the digits grow (nocx-vh2hr.1.25). The bar is
+   ProgressBar's, not a second bar drawn here — a toast places the measure and
+   never paints it. */
+.ui-toast__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.ui-toast__progress .ui-progress-bar {
+  flex: 1;
+}
+
+.ui-toast__figure {
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  /* The figure is read as a number, so its digits keep one width while the
+     value grows and the bar beside it does not twitch. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The actions sit in their own row-capable block after the message: they are
+   the answer the toast asks for, so they are not squeezed onto the message's
+   baseline. Buttons are the kit's own; this places them and nothing else. */
+.ui-toast__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-1);
+}
+
+/* The close button recedes until the toast is under the pointer. It is always
+   reachable — opacity, not display — but it is not competing with the message
+   for attention on a toast that will dismiss itself anyway. */
+.ui-toast .ui-icon-button {
+  flex: 0 0 auto;
+  opacity: 0.5;
+  transition: opacity 120ms ease;
+}
+
+.ui-toast:hover .ui-icon-button,
+.ui-toast .ui-icon-button:focus-visible {
+  opacity: 1;
+}
+
+@keyframes ui-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-toast {
+    animation: none;
+  }
+
+  .ui-toast .ui-icon-button {
+    transition: none;
+  }
+}
+/* ===== surfaces_connections.css ===== */
+/* Connections surface — connection manager, credential forms.
+   Owned by nocx-vxqj.8 (kit baselines to zero). */
+
+.cm-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cm-root > .ui-toolbar {
+  flex: 0 0 auto;
+}
+
+.cm-tip {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+
+/* Explanatory line under a dialog's controls. Was only ever styled inside the
+   group form, so the same element read as body text in the quick-connect and
+   import dialogs. No font-size: text inside a dialog is body text. */
+.cm-hint {
+  color: var(--color-text-muted);
+  margin: var(--space-2) 0 0;
+}
+
+/* Three lines held open whatever the chosen source says. Without it the dialog
+   grew and shrank as the user moved down the radio list, walking the buttons
+   out from under the pointer that was reaching for them. */
+.cm-import-hint {
+  min-height: calc(3 * 1.5em);
+}
+
+.cm-credential-card {
+  padding: 8px;
+  background: var(--color-surface-raised);
+  border-radius: var(--control-radius-md);
+}
+
+.cm-credential-card strong {
+  font-weight: 600;
+}
+
+.cm-credential-card small {
+  color: var(--color-text-muted);
+}
+
+.secret-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.secret-description {
+  color: var(--color-text-muted);
+}
+
+.secret-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.password-generator-output {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.password-generator-output > .ui-text-field {
+  flex: 1 1 auto;
+}
+
+.password-generator-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.password-generator-settings {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-4);
+}
+
+.password-generator-settings > .ui-text-field {
+  width: 96px;
+  flex: 0 0 auto;
+}
+
+.password-generator-settings > .password-generator-options {
+  flex: 1 1 auto;
+  padding-bottom: calc((var(--control-height-md) - 1em) / 2);
+}
+
+/* ── Search bar in toolbar ──────────────────────────────────────────────── */
+
+/* The filter takes the bar's free width up to a readable cap; the actions
+   cluster is pushed to the trailing edge by the auto margin. Placement only —
+   neither rule touches how the kit draws either component. */
+.cm-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 260px;
+  min-width: 180px;
+  max-width: 420px;
+}
+
+.cm-search > .ui-search-field {
+  flex: 1 1 auto;
+}
+
+.cm-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+/* ── Connection list (full width) ───────────────────────────────────────── */
+
+.cm-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+/* ── Connection row ─────────────────────────────────────────────────────── */
+/* The row itself is the kit's RecordRow (nocx-pp3y.3): the title / kind
+   badge / meta / status grammar the composite owns. The name/meta families
+   this surface used to declare (.cm-item-name / .cm-item-meta / the
+   .cm-session-* indicator) are gone — a surface declaring its own
+   row-grammar class now fails lint-fixtures/check-row-grammar.mjs. */
+
+/* ── Group headers ───────────────────────────────────────────────────────── */
+
+/* Uppercase and letter-spaced, which reads well as a band across the list —
+   but at the body size and in the body colour. It was also shrunk to sm and
+   muted, and those two are what made it look like chrome rather than like the
+   name of a record the user created and can rename. */
+.cm-group-header {
+  font-weight: 600;
+  color: var(--color-text);
+  padding: 8px 12px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Form inside dialog ─────────────────────────────────────────────────── */
+
+.cm-form {
+  max-width: 600px;
+}
+
+.cm-form-section {
+  margin: 8px 0;
+}
+
+.cm-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cm-check-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.cm-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ── Provenance display ──────────────────────────────────────────────────
+   Each editable field shows where its effective value came from.
+   "overridden here" appears when the field has been modified. */
+
+.cm-field-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.cm-field-row > :first-child {
+  flex: 1;
+}
+
+.cm-provenance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-top: 4px;
+}
+
+.cm-provenance-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.cm-provenance-overridden {
+  color: var(--color-accent);
+  font-style: italic;
+}
+
+/* ── Stored forwards editor (spec §8, D5) ────────────────────────────────
+   The row is a placement grid for the EditableRowList's caller fields;
+   appearance stays the kit's. */
+
+.cm-forward-row {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr) minmax(0, 4fr) minmax(0, 7fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.cm-provenance-link {
+  color: var(--color-accent);
+  text-decoration: none;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.cm-provenance-link:hover {
+  color: var(--color-accent-hover);
+}
+
+/* ── Group header actions ───────────────────────────────────────────────── */
+
+.cm-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Chevron rotation when the group is collapsed. The toggle is a kit
+   IconButton; the surface places it and reads the parent's data-collapsed
+   attribute to rotate the icon — no kit repaint. */
+.cm-group-header .ui-icon-button {
+  transition: transform 0.15s ease;
+}
+.cm-group-header[data-collapsed='true'] .ui-icon-button {
+  transform: rotate(-90deg);
+}
+.cm-group-name {
+  font-weight: 500;
+}
+
+.cm-group-empty {
+  margin: 0;
+  padding: 2px 12px 8px;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.cm-group-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* ── Group form inside dialog ────────────────────────────────────────────── */
+
+/* The name above, the rail and its pane in the middle, the blast radius pinned
+   below. The middle is the only part allowed to shrink and scroll. */
+.cm-group-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+.cm-group-form > .ui-tabs {
+  flex: 1 1 auto;
+}
+
+.cm-group-impact {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--color-divider);
+  padding-top: var(--space-3);
+}
+
+.cm-group-form .cm-hint {
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-4);
+}
+
+/* ── Impact / blast radius preview ──────────────────────────────────────── */
+
+.cm-impact {
+  margin: var(--space-4) 0;
+}
+
+.cm-impact-none {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.cm-impact-count {
+  margin: 0 0 var(--space-3);
+  font-weight: 500;
+}
+
+.cm-impact-dangerous {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.cm-impact-danger-badge {
+  background: color-mix(in srgb, var(--color-danger), transparent 85%);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--control-radius-sm);
+  padding: var(--space-3);
+  margin: var(--space-3) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+.cm-impact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.cm-impact-row {
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.cm-impact-row:last-child {
+  border-bottom: none;
+}
+
+.cm-impact-profile {
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  font-weight: 500;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.cm-impact-diffs {
+  padding: var(--space-2) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.cm-impact-diff {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+}
+
+.cm-impact-diff-dangerous {
+  font-weight: 500;
+}
+
+/* ── Danger confirmation checkbox ───────────────────────────────────────── */
+
+.cm-danger-confirm {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-danger);
+}
+
+/* ── Delete impact ──────────────────────────────────────────────────────── */
+
+/* No font-size. This is what the user is being asked to agree to, and it was
+   set a step below body text — the smallest type on screen carrying the most
+   consequential question. */
+.cm-delete-impact {
+  color: var(--color-text);
+}
+
+.cm-delete-impact p {
+  margin: var(--space-2) 0;
+}
+
+/* The backend's rationale for the action it chose — supporting detail under the
+   sentence the user is actually agreeing to. */
+.cm-delete-reason {
+  color: var(--color-text-muted);
+}
+</style></head><body>
+<style>
+/* ── Mock frame only. Everything inside .nocx-dialog__panel is the product's own
+   classes and CSS (graphite theme, kit components, connections surface), copied
+   verbatim from frontend/src/styles at abed46baa. Nothing below repaints a kit
+   component; it only lays the frames out on one page. */
+body { margin: 0; background: var(--color-canvas); color: var(--color-text);
+  font-family: var(--font-family-ui); font-size: var(--font-size-md); line-height: 1.5; }
+.mock-page { max-width: 1480px; margin: 0 auto; padding: 32px 24px 64px; }
+.mock-page > h1 { font-size: 22px; margin: 0 0 4px; }
+.mock-lede { color: var(--color-text-muted); max-width: 90ch; margin: 0 0 24px; }
+.mock-grid { display: flex; flex-wrap: wrap; gap: 32px 40px; align-items: flex-start; }
+.mock-frame { display: flex; flex-direction: column; gap: 12px; }
+.mock-frame > h2 { font-size: 15px; margin: 0; }
+.mock-frame > h2 small { color: var(--color-text-muted); font-weight: 400; }
+.mock-note { width: 640px; max-width: 100%; color: var(--color-text-muted); font-size: var(--font-size-sm); margin: 0; }
+.mock-note code, .mock-keys code { font-family: var(--font-family-mono); font-size: 12px; color: var(--color-text); }
+.mock-keys { width: 640px; max-width: 100%; border-collapse: collapse; font-size: var(--font-size-sm); }
+.mock-keys td { border-top: 1px solid var(--color-border); padding: 4px 8px 4px 0; vertical-align: top; }
+.mock-keys td:first-child { white-space: nowrap; }
+/* The dialog is shown in place, not in the top layer. */
+.mock-frame .nocx-dialog__panel { position: relative; max-height: none; }
+.mock-frame[data-narrow] .nocx-dialog__panel { width: 312px; padding: var(--space-4, 16px); }
+.mock-toast-slot .ui-toast-host { position: static; inset: auto; transform: none; display: flex; justify-content: center; }
+.mock-toast-slot { width: 640px; max-width: 100%; }
+.mock-diff { width: 640px; max-width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.mock-diff ul { margin: 4px 0 0; padding-left: 18px; }
+.mock-del { text-decoration: line-through; color: var(--color-error); }
+.mock-dim { color: var(--color-text-dim); }
+</style>
+
+<div class="mock-page">
+  <h1>Integration method on the host — connection editor</h1>
+  <p class="mock-lede">
+    Task <code>nocx-oalo1.11.2</code>, Auto copy revision ALX-204 (2026-11-17), following the architect's ALX-18 decision at 13:49:11Z. ADR-727g63tr decision 1: the method (<code>auto</code>,
+    <code>script</code>, <code>raw</code>, <code>helper</code>) belongs to the host, keyed by host-key
+    fingerprint, and the connection editor reads and writes that record. The field stays where it is
+    today — the <b>Advanced</b> section, after <b>Port discovery</b> — and is built from the same kit
+    parts it is built from now: <code>Field</code> (label, <code>description</code>, <code>error</code>),
+    <code>Select</code> (<code>disabled</code>), a <code>cm-hint</code> line and a ghost
+    <code>Button</code>. No new component. Every frame below is the product's own CSS.
+  </p>
+
+  <div class="mock-grid">
+
+  <!-- ═════════════ 1. Known host ═════════════ -->
+  <section class="mock-frame">
+    <h2>1. Host known <small>— the field works, and says whose it is</small></h2>
+    <div class="nocx-dialog__panel" data-size="lg">
+      <div class="nocx-dialog__header"><h2 class="nocx-dialog__title">Edit Connection: prod-db</h2></div>
+      <div class="nocx-dialog__body">
+        <div class="cm-form">
+          <div class="ui-tabs" data-orientation="vertical">
+            <div class="ui-tabs__bar"><div class="ui-tabs__list" role="tablist" aria-orientation="vertical">
+              <button class="ui-button" data-variant="ghost" role="tab">General</button>
+              <button class="ui-button" data-variant="ghost" role="tab">Authentication</button>
+              <button class="ui-button" data-variant="ghost" role="tab" aria-selected="true">Advanced</button>
+              <button class="ui-button" data-variant="ghost" role="tab">Forwards</button>
+            </div><div class="ui-tabs__actions"></div></div>
+            <div class="ui-tabs__panels"><div class="ui-tabs__panel" data-active="true">
+              <div class="ui-stack" data-gap="default">
+                <div class="cm-field-row"><div class="ui-text-field"><div class="ui-field" data-label="secondary"><label>Keepalive interval (ms)</label><div class="ui-text-field__control"><input class="ui-text-field__input" type="number" value="15000"></div></div></div></div>
+                <div class="cm-field-row"><div class="ui-text-field"><div class="ui-field" data-label="secondary"><label>Ready timeout (ms)</label><div class="ui-text-field__control"><input class="ui-text-field__input" type="number" value="20000"></div></div></div></div>
+                <div class="ui-field" data-label="secondary"><label>Jump server</label><div class="cm-field-row"><select class="ui-select"><option>— None —</option></select></div></div>
+                <div class="ui-field" data-label="secondary"><label>Port discovery</label><div class="cm-field-row"><select class="ui-select"><option>— Inherited —</option></select></div></div>
+                <div class="ui-field" data-label="secondary">
+                  <label for="m1">Integration method</label>
+                  <div class="cm-field-row">
+                    <select class="ui-select" id="m1" data-mock="dirty">
+                      <option value="auto" selected>Auto — nocx chooses at connect</option>
+                      <option value="script">Script — scripts only, never the helper</option>
+                      <option value="raw">Raw — no integration</option>
+                      <option value="helper">Helper — deploy the nocx binary</option>
+                    </select>
+                  </div>
+                  <p class="ui-field-desc" id="m1-owner">Set for the machine db-01.internal, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
+                </div>
+                <p class="cm-hint" id="m1-auto" data-mock-show="auto">nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</p>
+                <p class="cm-hint" data-mock-show="helper" hidden>The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.</p>
+                <p class="cm-hint" data-mock-show="changed" hidden>Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</p>
+                <div class="cm-check-group">
+                  <label class="ui-checkbox" data-variant="checkbox"><input class="ui-checkbox__control" type="checkbox"><span>Agent forward</span></label>
+                  <label class="ui-checkbox" data-variant="checkbox"><input class="ui-checkbox__control" type="checkbox"><span>Can be used as jump server</span></label>
+                </div>
+              </div>
+            </div></div>
+          </div>
+        </div>
+      </div>
+      <div class="nocx-dialog__actions">
+        <button class="ui-button" data-variant="primary">Save Connection</button>
+        <button class="ui-button" data-variant="danger">Delete Connection</button>
+        <button class="ui-button" data-variant="default">Cancel</button>
+      </div>
+    </div>
+    <p class="mock-note"><b>Try it:</b> the stored choice starts at <i>Auto</i>. Its explanation stays visible even
+      without a change; it describes policy, not a read of this machine's consent. Choosing another method
+      hides it. The existing <code>helperHint</code> appears for <i>Helper</i>, and the change hint appears only
+      while the choice differs from what is stored. Nothing is written until <b>Save Connection</b>;
+      <b>Cancel</b> discards the choice like every other field in the editor.</p>
+    <table class="mock-keys">
+      <tr><td><code>connections.editor.fieldIntegrationMethod</code></td><td>Integration method <span class="mock-dim">— replaces <code>fieldDeliveryMode</code> “Delivery mode”; the connect-time ask already says “Integration method”, so the product has one name</span></td></tr>
+      <tr><td><code>connections.mode.hostAuto</code></td><td>Auto — nocx chooses at connect <span class="mock-dim">— replaces the misleading promise of a question; a missing method is not missing machine consent</span></td></tr>
+      <tr><td><code>connections.editor.methodAutoHint</code> (new)</td><td>nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</td></tr>
+      <tr><td><code>connections.mode.desiredScript/Raw/Helper</code></td><td>unchanged</td></tr>
+      <tr><td><code>connections.editor.methodHostDescHead</code></td><td>Set for the machine</td></tr>
+      <tr><td><code>connections.editor.methodHostDescTail</code></td><td>, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh. <span class="mock-dim">— composed as Head + “ {host}” + Tail, the host as stored in this connection</span></td></tr>
+      <tr><td><code>connections.editor.methodChangeHint</code></td><td>Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</td></tr>
+    </table>
+  </section>
+
+  <!-- ═════════════ 2. Unknown host ═════════════ -->
+  <section class="mock-frame">
+    <h2>2. Host not known yet <small>— shown, disabled, says when it becomes settable</small></h2>
+    <div class="nocx-dialog__panel" data-size="lg">
+      <div class="nocx-dialog__header"><h2 class="nocx-dialog__title">New Connection</h2></div>
+      <div class="nocx-dialog__body"><div class="cm-form"><div class="ui-stack" data-gap="default">
+        <div class="ui-field" data-label="secondary"><label>Port discovery</label><div class="cm-field-row"><select class="ui-select"><option>— Inherited —</option></select></div></div>
+        <div class="ui-field" data-label="secondary">
+          <label for="m2">Integration method</label>
+          <div class="cm-field-row"><select class="ui-select" id="m2" disabled><option>Auto — nocx chooses at connect</option></select></div>
+          <p class="ui-field-desc">Connect to this machine before changing its integration method here.</p>
+        </div>
+      </div></div></div>
+      <div class="nocx-dialog__actions">
+        <button class="ui-button" data-variant="primary">Create Connection</button>
+        <button class="ui-button" data-variant="default">Cancel</button>
+      </div>
+    </div>
+    <p class="mock-note"><b>When:</b> a new connection; a saved one that has never connected; a host whose key
+      was replaced (a new fingerprint is a new record). The method cannot be chosen in advance: there is no
+      fingerprint to write it under, and nocx never writes under a guessed key. The select shows the
+      effective value (<i>Auto</i>) rather than disappearing, so the field is where a person looks for it.</p>
+    <p class="mock-note"><b>Variant 2b — address edited in the draft.</b> The field belongs to the address this
+      connection has <i>saved</i>. While the draft's Host or Port differ from the saved ones, the same disabled
+      select shows <i>Auto</i>, with the description below instead; after Save it resolves the new address
+      (frame 1 if that machine is known, frame 2 otherwise).</p>
+    <table class="mock-keys">
+      <tr><td><code>connections.editor.methodUnknownHost</code></td><td>Connect to this machine before changing its integration method here. <span class="mock-dim">— no promise of a question: a new profile is not necessarily a new machine</span></td></tr>
+      <tr><td><code>connections.editor.methodAddressChanged</code></td><td>Save the connection to see the method for the new address.</td></tr>
+    </table>
+  </section>
+
+  <!-- ═════════════ 3. Loading / read failed ═════════════ -->
+  <section class="mock-frame">
+    <h2>3. Loading, and the record could not be read</h2>
+    <div class="nocx-dialog__panel" data-size="lg">
+      <div class="nocx-dialog__body"><div class="cm-form"><div class="ui-stack" data-gap="default">
+        <div class="ui-field" data-label="secondary">
+          <label for="m3">Integration method</label>
+          <div class="cm-field-row"><select class="ui-select" id="m3" disabled><option>Loading…</option></select></div>
+        </div>
+        <div class="ui-field" data-label="secondary">
+          <label for="m3b">Integration method</label>
+          <div class="cm-field-row">
+            <select class="ui-select" id="m3b" disabled aria-invalid="true"><option>Auto — nocx chooses at connect</option></select>
+            <button class="ui-button" data-variant="ghost">Retry</button>
+          </div>
+          <p class="ui-field-error" role="alert">Could not read this machine's method: settings store is locked</p>
+        </div>
+      </div></div></div>
+    </div>
+    <p class="mock-note"><b>Loading</b> — the lookup starts when the editor opens; until it answers the select is
+      disabled with the placeholder. No spinner: it is a local read and normally faster than the eye.</p>
+    <p class="mock-note"><b>Read failed</b> — disabled, the backend's reason under the field, <b>Retry</b> beside
+      it (re-reads only). Save stays available: a connection's other fields do not depend on this read, and Save
+      does not write the method while it is unread. Never shown as a silent <i>Auto</i>.</p>
+    <table class="mock-keys">
+      <tr><td><code>connections.editor.methodLoading</code></td><td>Loading…</td></tr>
+      <tr><td><code>connections.editor.methodReadFailedHead</code></td><td>Could not read this machine's method: <span class="mock-dim">+ “ {reason}”, no full stop (kit: messages are fragments)</span></td></tr>
+      <tr><td><code>connections.editor.methodRetry</code></td><td>Retry <span class="mock-dim">— per-surface key, as <code>files.retry</code>, <code>git.retry</code></span></td></tr>
+    </table>
+  </section>
+
+  <!-- ═════════════ 4. Write failed ═════════════ -->
+  <section class="mock-frame">
+    <h2>4. Saved, but the method was not <small>— a split outcome said out loud</small></h2>
+    <div class="nocx-dialog__panel" data-size="lg">
+      <div class="nocx-dialog__header"><h2 class="nocx-dialog__title">Edit Connection: prod-db</h2></div>
+      <div class="nocx-dialog__body"><div class="cm-form"><div class="ui-stack" data-gap="default">
+        <div class="ui-field" data-label="secondary">
+          <label for="m4">Integration method</label>
+          <div class="cm-field-row"><select class="ui-select" id="m4" aria-invalid="true"><option>Helper — deploy the nocx binary</option></select></div>
+          <p class="ui-field-desc">Set for the machine db-01.internal, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
+          <p class="ui-field-error" role="alert">Not saved: settings store is read-only</p>
+        </div>
+        <p class="cm-hint">Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</p>
+      </div></div></div>
+      <div class="nocx-dialog__actions">
+        <button class="ui-button" data-variant="primary">Save Connection</button>
+        <button class="ui-button" data-variant="danger">Delete Connection</button>
+        <button class="ui-button" data-variant="default">Cancel</button>
+      </div>
+    </div>
+    <div class="mock-toast-slot"><div class="ui-toast-host" role="status"><div class="ui-toast" data-level="warning">
+      <span class="ui-toast__icon" aria-hidden="true">⚠</span>
+      <span class="ui-toast__message">The connection was saved, but the integration method for db-01.internal was not: settings store is read-only. Save Connection to retry.</span>
+    </div></div></div>
+    <p class="mock-note"><b>Order on Save:</b> the profile first, then the host record. If the profile fails —
+      the existing “Could not save the connection:” toast, nothing else is written. If the profile is saved and
+      the host record is not, the dialog <b>stays open</b> (instead of closing as on success), switches to
+      <b>Advanced</b>, keeps the chosen value, puts the reason under the field and focuses the select; the toast
+      names both halves. Save Connection retries. Same shape as the existing password-binding split
+      (<code>connections.password.bindingFailedHead/Tail</code>). Save with only the method changed still writes
+      the method — it is a change like any other.</p>
+    <table class="mock-keys">
+      <tr><td><code>connections.toasts.methodSaveFailedHead</code></td><td>The connection was saved, but the integration method for <span class="mock-dim">— then “ {host}”, Mid, “{reason}”, Tail</span></td></tr>
+      <tr><td><code>connections.toasts.methodSaveFailedMid</code></td><td> was not: </td></tr>
+      <tr><td><code>connections.toasts.methodSaveFailedTail</code></td><td>. Save Connection to retry.</td></tr>
+      <tr><td><code>connections.editor.methodNotSavedHead</code></td><td>Not saved: <span class="mock-dim">+ “{reason}”</span></td></tr>
+    </table>
+  </section>
+
+  <!-- ═════════════ 5. Narrow ═════════════ -->
+  <section class="mock-frame" data-narrow>
+    <h2>5. Narrow window <small>— 360 px</small></h2>
+    <div class="nocx-dialog__panel" data-size="lg">
+      <div class="nocx-dialog__body"><div class="cm-form"><div class="ui-stack" data-gap="default">
+        <div class="ui-field" data-label="secondary">
+          <label for="m5">Integration method</label>
+          <div class="cm-field-row"><select class="ui-select" id="m5" aria-describedby="m5-owner m5-auto"><option>Auto — nocx chooses at connect</option></select></div>
+          <p class="ui-field-desc" id="m5-owner" style="overflow-wrap:anywhere">Set for the machine build-runner-eu-west-3a-0042.ci.internal.example.com, not for this connection: every tab to it opens this way, from any saved connection or a typed ssh.</p>
+        </div>
+        <p class="cm-hint" id="m5-auto">nocx chooses the integration method when you connect. It asks only if this machine has no recorded answer. If the machine has already allowed the helper, it continues to use it without asking again. Auto clears only the saved method, not the machine's permission.</p>
+        <p class="cm-hint">Applies when you save. New tabs to this machine open with it; a shell already open keeps its method until you reopen it.</p>
+      </div></div></div>
+    </div>
+    <p class="mock-note" style="width:312px">The dialog clamps to the viewport (kit). The select takes the full row and
+      its option text is cut by the native control; the description wraps. A long host name has no break
+      opportunity, so <code>.ui-field-desc</code> needs <code>overflow-wrap: anywhere</code> — a kit change in
+      <code>styles/components/field.css</code>, not a repaint here (shown inline in this frame only).</p>
+  </section>
+
+  <!-- ═════════════ 6. Group defaults ═════════════ -->
+  <section class="mock-frame">
+    <h2>6. Group defaults lose the field</h2>
+    <div class="mock-diff">
+      <div><b>Group → Advanced defaults, now</b>
+        <ul><li>Keepalive interval (ms)</li><li>Ready timeout (ms)</li><li>Agent forward</li><li>Port discovery</li><li class="mock-del">Delivery mode</li></ul></div>
+      <div><b>Impact summary labels</b>
+        <ul><li>keepalive interval</li><li>ready timeout</li><li>agent forwarding</li><li>port discovery</li><li class="mock-del">delivery mode</li></ul></div>
+    </div>
+    <p class="mock-note">A group cannot hold a default for something that is not a connection's. The row goes from
+      <code>advancedDefaults()</code> and <code>fieldLabel()</code>, with keys
+      <code>connections.group.fieldDeliveryMode</code>, <code>connections.impact.fieldDeliveryMode</code> and
+      <code>connections.editor.fieldDeliveryMode</code>; the <code>— Inherited —</code> placeholder goes from the
+      editor's select too — a host always has a method.</p>
+  </section>
+
+  <!-- ═════════════ 7. Outside the editor ═════════════ -->
+  <section class="mock-frame">
+    <h2>7. Copy outside the editor that now lies</h2>
+    <p class="mock-note">The connect-time ask (<code>host-key-dialog.tsx</code>) says <i>“The method is saved on the
+      connection…”</i>. After this stage that is false. Replace with:</p>
+    <p class="mock-note" style="color:var(--color-text)">“Choose how nocx integrates with this machine. The method is
+      saved for the machine — every tab to it, from any saved connection or a typed ssh, opens this way — and
+      permission to deploy nocx’s helper here is remembered with it, so this is asked once.”</p>
+    <p class="mock-note">and keep its last sentence <i>“Change your mind later from the connection’s settings.”</i> —
+      true for a saved connection; for a typed ssh see the open question in the hand-off.</p>
+  </section>
+
+  </div>
+</div>
+
+<script>
+// Frame 1 only: Auto explains policy even when unchanged; the save hint is separate.
+(function () {
+  var sel = document.querySelector('select[data-mock="dirty"]');
+  var stored = sel.value;
+  var auto = document.querySelector('[data-mock-show="auto"]');
+  var helper = document.querySelector('[data-mock-show="helper"]');
+  var changed = document.querySelector('[data-mock-show="changed"]');
+  function sync() {
+    auto.hidden = sel.value !== 'auto';
+    sel.setAttribute('aria-describedby', auto.hidden ? 'm1-owner' : 'm1-owner m1-auto');
+    helper.hidden = sel.value !== 'helper';
+    changed.hidden = sel.value === stored;
+  }
+  sel.addEventListener('change', sync);
+  sync();
+})();
+</script>
+</body></html>

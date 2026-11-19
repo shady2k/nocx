@@ -54,8 +54,8 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/panedriver"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -82,6 +82,8 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 	consentStore, installStore := testConsentStores(t)
 	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	remote.registry = stand.registry
+	remote.modes = stand.modes
+	remote.hostKeys = stand.hostKeys
 	return openSeam{
 		hosted: &hostedOpeners{local: stand.opener, remote: remote},
 		routes: stand.routes,
@@ -90,10 +92,7 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 
 // paneDestination asks the far host for the password the vault holds.
 //
-// DesiredRaw is this test's starting state and not a product claim: the fixture
-// serves no remote forward, so an integrated pane could not keep a lifecycle
-// channel. What the count is about is the DIAL, and both modes dial the same way
-// — the probe and the spawn, on one pooled connection.
+// The fixture's credentials and destination are shared by the open and probe.
 func paneDestination(srv *pwSSHServer, secrets credential.Resolver) *ssh.ConnectConfig {
 	return &ssh.ConnectConfig{
 		User:               filesFixtureUser,
@@ -102,7 +101,6 @@ func paneDestination(srv *pwSSHServer, secrets credential.Resolver) *ssh.Connect
 		Secrets:            secrets,
 		SecretID:           filesFixtureSecret,
 		AuthorizedEndpoint: srv.addr,
-		DesiredMode:        string(profile.DesiredRaw),
 	}
 }
 
@@ -200,6 +198,51 @@ func TestOnePaneCostsTheFarHostOneAuthentication(t *testing.T) {
 		srv.connCount(), srv.subsystemsSeen())
 }
 
+// A saved connection without a vault secret must retain the editor's raw
+// choice even though the non-interactive probe cannot authenticate. The fixture
+// accepts shell requests but rejects launch exec, so an accidental auto/script
+// open cannot pass merely by authenticating successfully.
+func TestOpenPath_SavedConnectionWithoutASecretKeepsRecordedRaw(t *testing.T) {
+	srv := startPasswordSSHServer(t)
+	stand := startFilesStand(t, srv, nil)
+	recordFixtureMode(t, stand, srv, hostmode.Raw)
+	seam := openSeamOver(t, stand)
+
+	asker := newDirectHostAsker(openPasswordFixturePassword)
+	stand.prompts.set(asker)
+	cfg := session.Config{
+		Kind:      session.KindRemote,
+		Host:      srv.addr,
+		ProfileID: "ssh:saved-without-secret",
+		PaneID:    "pane-saved-without-secret",
+		Cols:      80, Rows: 24,
+		Remote: &ssh.ConnectConfig{
+			User:               filesFixtureUser,
+			AuthMode:           "password",
+			ConnectionName:     "Saved without a password",
+			AuthorizedEndpoint: srv.addr,
+			PasswordRequester:  asker,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	openPanes(t, ctx, seam, cfg, "claim-saved-without-secret")
+	if got := cfg.Remote.IntegrationMode; got != string(hostmode.Raw) {
+		t.Fatalf("open mode = %q, want the editor's recorded raw despite the password-only probe", got)
+	}
+	asker.awaitAsk(t, 1)
+	if got := asker.count(); got != 1 {
+		t.Fatalf("the person was asked %d time(s), want exactly 1", got)
+	}
+	if got := asker.asked()[0].Connection; got != cfg.Remote.ConnectionName {
+		t.Errorf("password ask names connection %q, want %q", got, cfg.Remote.ConnectionName)
+	}
+	if attempts := srv.authAttempts(); len(attempts) != 1 || attempts[0] != openPasswordFixturePassword {
+		t.Fatalf("server password attempts = %v, want only the interactive answer", attempts)
+	}
+}
+
 // TestASecondPaneOnADifferentDestinationAuthenticatesSeparately is the paired
 // case, and it is what keeps the criterion above from being satisfied by a
 // mechanism that shares too much: a pooled connection is keyed by the
@@ -287,8 +330,8 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	stand.opener.paneConns = panedriver.New("consent-pane", nil)
 	seam := openSeamOver(t, stand)
 	seam.hosted.remote.source = stubArtifacts(t)
+	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, secrets, "pane-consent")
-	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	opened, selected, err := seam.hosted.OpenHosted(ctx, cfg, "claim-consent")
@@ -298,7 +341,7 @@ func TestAConsentRefusalReleasesTheProvisionalConnection(t *testing.T) {
 	}
 	waittest.WaitForTimeout(t, "the probe-only connection to close after consent refusal", 5*time.Second,
 		func() bool { return srv.liveConns() == 0 })
-	cfg.Remote.DesiredMode = string(profile.DesiredRaw)
+	recordFixtureMode(t, stand, srv, hostmode.Raw)
 	openPanes(t, ctx, seam, cfg, "claim-answered")
 	if got := srv.connCount(); got != 2 {
 		t.Fatalf("authenticated %d connections, want probe-only open plus answered open", got)
@@ -326,8 +369,8 @@ func TestACancelledConsentOpenStillReleasesItsConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	seam.hosted.remote.source = cancellingConsentArtifacts{ArtifactSource: stubArtifacts(t), cancel: cancel}
+	recordFixtureMode(t, stand, srv, hostmode.Helper)
 	cfg := paneConfig(srv, &askRecorder{value: openPasswordFixturePassword}, "pane-cancelled-consent")
-	cfg.Remote.DesiredMode = string(profile.DesiredHelper)
 	_, _, err := seam.hosted.OpenHosted(ctx, cfg, "claim-cancelled-consent")
 	var ask *transport.ErrHelperConsentNeeded
 	if !errors.As(err, &ask) || ctx.Err() == nil {

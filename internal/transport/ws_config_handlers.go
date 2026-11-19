@@ -91,7 +91,7 @@ const (
 	// ("secrow:" + 32 hex, vault.RowFor). The resolver is the authority on
 	// whether a handle resolves; this is the wire bound before resolution.
 	maxSecretRowRunes = 128
-	// maxEnumRunes bounds the closed-set option fields (auth, desiredMode,
+	// maxEnumRunes bounds the closed-set option fields (auth,
 	// helperConsent, portDiscovery, behaviorOnSessionEnd) and the profile
 	// type. Their value sets are short literals. An unrecognised value is
 	// deliberately NOT refused here — resolution falls back to the default
@@ -189,7 +189,7 @@ func boundedRunes(field string, s string, bound int) string {
 }
 
 // boundedOptionalRunes bounds an optional string-typed field (the stored
-// options use typed pointers: *AuthMode, *DesiredMode, ...). A nil pointer
+// options use typed pointers: *AuthMode, *PortDiscovery, ...). A nil pointer
 // is an unset field and always passes.
 func boundedOptionalRunes[T ~string](field string, v *T, bound int) string {
 	if v == nil {
@@ -284,9 +284,6 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 		}
 	}
 	if msg := boundedOptionalRunes("options.auth", o.Auth, maxEnumRunes); msg != "" {
-		return msg
-	}
-	if msg := boundedOptionalRunes("options.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedOptionalRunes("options.helperConsent", o.HelperConsent, maxEnumRunes); msg != "" {
@@ -456,7 +453,7 @@ func validatePatchRaw(raw json.RawMessage) string {
 					return msg
 				}
 			}
-		case "options.auth", "options.desiredMode", "options.helperConsent",
+		case "options.auth", "options.helperConsent",
 			"options.portDiscovery", "options.behaviorOnSessionEnd":
 			if s, ok := v.(string); ok {
 				if msg := boundedRunes(path, s, maxEnumRunes); msg != "" {
@@ -522,9 +519,6 @@ func validateSparseDefaults(d *profile.ProfileDefaults) string {
 		}
 	}
 	if msg := boundedOptionalRunes("defaults.auth", o.Auth, maxEnumRunes); msg != "" {
-		return msg
-	}
-	if msg := boundedOptionalRunes("defaults.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedOptionalRunes("defaults.portDiscovery", o.PortDiscovery, maxEnumRunes); msg != "" {
@@ -2216,14 +2210,24 @@ func (s *WSServer) configSpecs(configGate, configVault control.Admission, config
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		// connections.setIntegrationMethod (ADR-0069) writes the connect-time
-		// ask's answer through the SAME configOp profiles.patch uses — never a
-		// second owner of desiredMode — and grants the helper's machine
-		// consent when the chosen method is helper. Registered here, under
-		// the config domain gate, rather than in seamSpecs: unlike
-		// connections.trustHostKey it can write the profile store.
+		// ask's answer into the host record and grants the helper's machine
+		// consent when the chosen method is helper. Registered here, under the
+		// config domain gate, because both stores are config.
 		regResponder(configSub, catalog.OpConnectionsSetIntegrationMethod, params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
-			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
+			h := integrationMethodHandlers{granter: s.helperConsentWriter, modes: s.hostModes, r: r, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
+		// The connection editor's read and write of the HOST's integration
+		// method (ADR-727g63tr decision 1). The write records the method and
+		// nothing else: choosing helper here is not the machine's consent, which
+		// stays the connect-time ask's question (ADR-0105, ADR-0068).
+		regResponder(configSub, catalog.OpConnectionsHostMode, params(validateHostModeReadRaw), func(r Responder) handlerFunc {
+			h := hostModeHandlers{resolver: s.resolver, index: s.hostKeyIndex, modes: s.hostModes, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleHostMode(ctx, req) }
+		}),
+		regResponder(configSub, catalog.OpConnectionsSetHostMode, params(validateHostModeWriteRaw), func(r Responder) handlerFunc {
+			h := hostModeHandlers{resolver: s.resolver, index: s.hostKeyIndex, modes: s.hostModes, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetHostMode(ctx, req) }
 		}),
 		// Role choices are kept per agent through the config operation.
 		// roles.list and roles.assign ride the same config operation

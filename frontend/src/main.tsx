@@ -1,5 +1,6 @@
 import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { decideIntegrationMethod } from './integration-method-decision'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
@@ -137,7 +138,7 @@ import {
   HelperConsentAskQueue,
   type HelperConsentAskRequest,
 } from './host-key-controller'
-import { HostKeyDialog, AgentApprovalDialog, type IntegrationMethod } from './host-key-dialog'
+import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
@@ -496,40 +497,6 @@ function main(): void {
       showToast({
         level: 'danger',
         message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
-        duration: 0,
-      })
-    } finally {
-      setHelperConsentAskBusy(false)
-    }
-  }
-
-  // decideIntegrationMethod answers the connect-time ask with a chosen
-  // method (ADR-0069): written through the SAME RPC the editor's Delivery
-  // mode field ultimately reaches (connections.setIntegrationMethod ->
-  // profiles.patch's desiredMode), plus the machine's helper grant when the
-  // method is helper. The chosen method rides the settled promise so
-  // terminal-content.ts can carry it on the retried open for a hand-typed
-  // connection, which has nothing else to persist it to.
-  const decideIntegrationMethod = async (
-    request: HelperConsentAskRequest,
-    method: IntegrationMethod,
-  ) => {
-    setHelperConsentAskBusy(true)
-    try {
-      await profileClient.setIntegrationMethod(
-        request.evidence.fingerprint,
-        method,
-        request.evidence.host,
-        request.evidence.profileId,
-      )
-      helperConsentAsks.settleMatchingQueued(request, method)
-      helperConsentAsks.settle(request, method)
-    } catch (err) {
-      showToast({
-        level: 'danger',
-        message: `Could not save the connection method for ${request.evidence.host}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
         duration: 0,
       })
     } finally {
@@ -2069,10 +2036,20 @@ function main(): void {
           {(request) => (
             <HostKeyDialog
               evidence={request.evidence.hostKey}
-              helperAsk={{ fingerprint: request.evidence.fingerprint }}
+              helperAsk={{
+                fingerprint: request.evidence.fingerprint,
+                profileId: request.evidence.profileId,
+              }}
               busy={helperConsentAskBusy()}
               onAcceptHostKey={() => void acceptHelperAskHostKey(request)}
-              onChooseMethod={(method) => void decideIntegrationMethod(request, method)}
+              onChooseMethod={(method) =>
+                void decideIntegrationMethod(request, method, {
+                  profileClient,
+                  helperConsentAsks,
+                  setHelperConsentAskBusy,
+                  showToast,
+                })
+              }
               onClose={() => helperConsentAsks.settle(request, null)}
             />
           )}

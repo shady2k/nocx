@@ -140,7 +140,6 @@ test.describe('a typed agent starts where its pane is', () => {
           port: fixture.port,
           user: 'e2e',
           keyPath: fixture.userKey,
-          desiredMode: 'helper',
         },
       })
       await page.keyboard.press('Control+Shift+P')

@@ -141,20 +141,28 @@ type BackupProfile struct {
 // BackupSSHOptions mirrors the current presence-aware SSH options without
 // credential references or secret material.
 type BackupSSHOptions struct {
-	Host              string                    `json:"host,omitempty"`
-	Port              int                       `json:"port,omitempty"`
-	User              string                    `json:"user,omitempty"`
-	Auth              profile.AuthMode          `json:"auth,omitempty"`
-	KeyPath           string                    `json:"keyPath,omitempty"`
-	KeepaliveInterval int                       `json:"keepaliveInterval,omitempty"`
-	ReadyTimeout      int                       `json:"readyTimeout,omitempty"`
-	JumpHost          string                    `json:"jumpHost,omitempty"`
-	AgentForward      bool                      `json:"agentForward,omitempty"`
-	DesiredMode       profile.DesiredMode       `json:"desiredMode,omitempty"`
-	HelperConsent     profile.HelperConsent     `json:"helperConsent,omitempty"`
-	PortDiscovery     profile.PortDiscoveryMode `json:"portDiscovery,omitempty"`
-	Forwards          []profile.ForwardSpec     `json:"forwards,omitempty"`
-	CanBeJumpServer   bool                      `json:"canBeJumpServer,omitempty"`
+	Host              string           `json:"host,omitempty"`
+	Port              int              `json:"port,omitempty"`
+	User              string           `json:"user,omitempty"`
+	Auth              profile.AuthMode `json:"auth,omitempty"`
+	KeyPath           string           `json:"keyPath,omitempty"`
+	KeepaliveInterval int              `json:"keepaliveInterval,omitempty"`
+	ReadyTimeout      int              `json:"readyTimeout,omitempty"`
+	JumpHost          string           `json:"jumpHost,omitempty"`
+	AgentForward      bool             `json:"agentForward,omitempty"`
+	// LegacyMode is READ AND NOTHING ELSE: a backup written before the
+	// integration method became the HOST's (ADR-727g63tr decision 1) carries
+	// `desiredMode` on a connection's options, and a restore has nowhere to put
+	// it — the host record is keyed by a fingerprint a backup does not carry.
+	// The field exists so that document still parses (the decoder refuses
+	// unknown fields, and "your old backup is invalid" is a worse answer than
+	// dropping a value nothing reads). It is never written back: omitempty
+	// drops an empty value, and nothing ever sets it.
+	LegacyMode      string                    `json:"desiredMode,omitempty"`
+	HelperConsent   profile.HelperConsent     `json:"helperConsent,omitempty"`
+	PortDiscovery   profile.PortDiscoveryMode `json:"portDiscovery,omitempty"`
+	Forwards        []profile.ForwardSpec     `json:"forwards,omitempty"`
+	CanBeJumpServer bool                      `json:"canBeJumpServer,omitempty"`
 }
 
 // ── Group DTO ─────────────────────────────────────────────────────────────

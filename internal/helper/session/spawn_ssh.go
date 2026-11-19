@@ -58,8 +58,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -105,8 +105,8 @@ func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
 //
 // The order is the whole of the failure story:
 //
-//  1. decide whether this session integrates, from the mode axis's own
-//     predicate (profile.DesiredMode.DeliversScripts) — `raw` and an
+//  1. decide whether this session integrates, from the mode's own
+//     predicate (hostmode.Mode.DeliversScripts) — `raw` and an
 //     unrecognised mode both answer no, and a session that does not integrate
 //     gets a plain login shell rather than a launcher that would block on a
 //     frame nobody sends;
@@ -136,7 +136,7 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 	// integrate is the mode axis's own answer, asked of the one predicate that
 	// owns it. `raw` refuses integration outright; an unrecognised mode fails
 	// closed there too, so a caller cannot invent its way into a launcher.
-	if profile.DesiredMode(req.Mode).DeliversScripts() {
+	if hostmode.Mode(req.Mode).DeliversScripts() {
 		// THE FAR SIDE'S CARRIERS COME FIRST, and that ordering is the
 		// contract rather than tidiness: the launcher names the lifecycle port
 		// and the tool socket path, and neither exists until the far side has

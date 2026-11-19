@@ -24,12 +24,12 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/panedriver"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -143,7 +143,7 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 	resolverConfig := &ssh.ConnectConfig{
 		User: fx.user, AuthMode: "publickey", Secrets: key,
 		KeySecretID: liveFixtureKeyRef, AuthorizedEndpoint: fx.addr,
-		DesiredMode: string(profile.DesiredHelper), Shell: ssh.ShellBash,
+		IntegrationMode: string(hostmode.Helper), Shell: ssh.ShellBash,
 	}
 	ws := transport.NewWSServer(sshLog, registry,
 		transport.WithProfileResolver(liveHostedCwdResolver{host: fx.addr, config: resolverConfig}),

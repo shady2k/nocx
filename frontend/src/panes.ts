@@ -90,9 +90,9 @@ import {
   TerminalContent,
   type HostKeyErrorEvidence,
   type HelperConsentAskEvidence,
+  type HelperConsentAnswer,
   type PaneIdentity,
 } from './terminal-content'
-import type { IntegrationMethod } from './host-key-dialog'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource } from './where/branch-source'
 import type { OutputRecordingSource } from './integration/status'
@@ -969,14 +969,15 @@ export class PaneManager {
    *  retries the same open. */
   onHostKeyError?: (evidence: HostKeyErrorEvidence, signal: AbortSignal) => Promise<boolean>
   /** Called when an SSH connection needs a person's choice of integration
-   *  method for this destination before it may proceed (ADR-0069's
-   *  connect-time ask). Resolves with the chosen method once it was
-   *  written; the content then retries the same open. null means declined
-   *  or cancelled. */
+   *  method for this HOST before it may proceed (ADR-0069's connect-time ask;
+   *  the mode is the host's since ADR-727g63tr decision 1). Resolves with the
+   *  chosen method — plus a sentence when the backend could not remember it —
+   *  and the content then retries the same open, putting the sentence in the
+   *  pane's head. null means declined or cancelled. */
   onHelperConsentAsk?: (
     ask: HelperConsentAskEvidence,
     signal: AbortSignal,
-  ) => Promise<IntegrationMethod | null>
+  ) => Promise<HelperConsentAnswer | null>
   /** The strip's "show all workspaces" button was pressed. Wired by main.tsx
    *  to the overview controller's `open` — the surface's lifetime belongs to
    *  the composition root, and a PaneManager that owned an overlay would be

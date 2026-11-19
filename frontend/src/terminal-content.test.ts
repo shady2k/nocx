@@ -15,6 +15,8 @@
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { decideIntegrationMethod } from './integration-method-decision'
+import { HelperConsentAskQueue } from './host-key-controller'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -34,7 +36,7 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMMAND_BLOCK_SURFACE_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
-import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import type { HelperConsentAskEvidence, PaneIdentity, PaneScreenReading } from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
@@ -112,7 +114,7 @@ import {
 } from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
-import type { ActionFacts, DesiredMode } from './capability'
+import type { ActionFacts, HostMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
@@ -925,7 +927,6 @@ describe('SSH open host-key recovery', () => {
           ...routeEvidence,
           storedFingerprint: undefined,
           changed: false,
-          profileId: 'ssh:test:1',
         },
         expect.any(AbortSignal),
       )
@@ -977,11 +978,14 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
             host: 'db.example.com:22',
             fingerprint: 'SHA256:trusted',
             helperAsk: true,
+            // The ask names the connection it belongs to, so the dialog can
+            // say where the answer can be changed later (frame 7).
+            profileId: 'ssh:test:1',
           },
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'script' })
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -998,8 +1002,8 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         {
           host: 'db.example.com:22',
           fingerprint: 'SHA256:trusted',
-          hostKey: null,
           profileId: 'ssh:test:1',
+          hostKey: null,
         },
         expect.any(AbortSignal),
       )
@@ -1036,7 +1040,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('helper')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'helper' })
     const onHostKeyError = vi.fn()
     const client = makeClient({ openSSHSession })
 
@@ -1061,9 +1065,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
             storedFingerprint: undefined,
             key: 'a2V5',
             changed: false,
-            profileId: 'ssh:test:1',
           },
-          profileId: 'ssh:test:1',
         },
         expect.any(AbortSignal),
       )
@@ -1111,11 +1113,71 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     }
   })
 
-  // A hand-typed ssh with no saved connection has nowhere to keep the
-  // answer — connections.setIntegrationMethod writes nothing for it to
-  // persist — so the retry itself must carry the chosen method, for this
-  // session alone (ADR-0069's own words).
-  it('a hand-typed connection with no saved profile carries the chosen method on the retried open', async () => {
+  // ASSERTION 4's VISIBLE HALF (ADR-727g63tr decision 1). The host's record
+  // could not be written: the backend kept the answer for this run and said so,
+  // the renderer's answer carries that sentence, and the pane's head is where a
+  // statement about a host belongs — a toast fades whether or not the fact
+  // still holds, and a silent failure is the soft degrade AGENTS.md forbids.
+  for (const hostRecordSaved of [false, true]) {
+    it(`uses the decision result in the head and reopens without another ask (saved=${hostRecordSaved})`, async () => {
+      const openSSHSession = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new RpcError('method required', -32603, {
+            host: 'db.example.com:22',
+            fingerprint: 'SHA256:trusted',
+            helperAsk: true,
+          }),
+        )
+        .mockImplementation(() => Promise.resolve(makeSession()))
+      const setIntegrationMethod = vi.fn().mockResolvedValue({
+        fingerprint: 'SHA256:trusted',
+        method: 'script',
+        hostRecordSaved,
+      })
+      const queue = new HelperConsentAskQueue((request) => {
+        if (request)
+          void decideIntegrationMethod(request, 'script', {
+            helperConsentAsks: queue,
+            profileClient: { setIntegrationMethod },
+            setHelperConsentAskBusy: vi.fn(),
+            showToast: vi.fn(),
+          })
+      })
+      const onHelperConsentAsk = vi.fn((evidence: HelperConsentAskEvidence, signal: AbortSignal) =>
+        queue.request(evidence, signal),
+      )
+      const client = makeClient({ openSSHSession })
+      const options = {
+        ssh: { profileId: 'ssh:test:1', host: 'db.example.com' },
+        hooks: { onHelperConsentAsk },
+      }
+      const first = await mountTerminal(makeClipboard(), options, client)
+      try {
+        expect(openSSHSession).toHaveBeenCalledTimes(2)
+        const note = `The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.`
+        if (hostRecordSaved) expect(first.tab.pane.textContent).not.toContain(note)
+        else await vi.waitFor(() => expect(first.tab.pane.textContent).toContain(note))
+        const second = await mountTerminal(makeClipboard(), options, client)
+        try {
+          expect(openSSHSession).toHaveBeenCalledTimes(3)
+          expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+          expect(setIntegrationMethod).toHaveBeenCalledTimes(1)
+        } finally {
+          second.teardown()
+        }
+      } finally {
+        first.teardown()
+      }
+    })
+  }
+
+  // THE RETRY CARRIES NO METHOD (ADR-727g63tr decision 1). The answer was
+  // recorded for the HOST by the fingerprint the ask named, so the second open
+  // reads the same record the first would have — there is no per-connection or
+  // per-open copy left to carry, and a parameter that carried one would be a
+  // second place the choice lives.
+  it('a hand-typed connection retries the same open, with the host record holding the answer', async () => {
     const openSSHSessionByHost = vi
       .fn()
       .mockRejectedValueOnce(
@@ -1130,7 +1192,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         ),
       )
       .mockResolvedValueOnce(makeSession())
-    const onHelperConsentAsk = vi.fn().mockResolvedValue('script')
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'script' })
     const client = makeClient({ openSSHSessionByHost })
 
     const { teardown } = await mountTerminal(
@@ -1143,10 +1205,9 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     )
     try {
       expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
-      // First attempt: no override, since nothing has been answered yet.
-      expect(openSSHSessionByHost.mock.calls[0][4]).toBeUndefined()
-      // Retry: the method just chosen rides this open alone.
-      expect(openSSHSessionByHost.mock.calls[1][4]).toBe('script')
+      expect(openSSHSessionByHost.mock.calls[1][0]).toEqual(openSSHSessionByHost.mock.calls[0][0])
+      expect(openSSHSessionByHost.mock.calls[1][1]).toBe('db.example.com')
+      expect(JSON.stringify(openSSHSessionByHost.mock.calls[1][0])).not.toContain('desiredMode')
     } finally {
       teardown()
     }
@@ -2761,10 +2822,10 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   /** A client whose SSH open session carries the given destination mode.
    *  The refusal reason no longer rides the ack (nocx-dvql) — it arrives on
    *  session.integrationChanged, which the integration tests drive. */
-  const clientWithPolicy = (desiredMode: DesiredMode): ClientFake => {
+  const clientWithPolicy = (integrationMode: HostMode): ClientFake => {
     const client = makeClient({
       openSSHSession: vi.fn(() => {
-        const s = makeSession({ desiredMode })
+        const s = makeSession({ integrationMode })
         client._sessions.push(s)
         return Promise.resolve(s)
       }),
@@ -25630,7 +25691,6 @@ describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
           _host: string,
           _user: string | undefined,
           _anchor: unknown,
-          _mode: string | undefined,
           watch?: (call: {
             id: number
             method: string

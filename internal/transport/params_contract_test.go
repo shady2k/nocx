@@ -172,7 +172,20 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"connections.setIntegrationMethod": {
 			[]byte(`{"fingerprint":"SHA256:abc","method":"raw"}`),
-			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","profileId":"ssh-1","method":"helper"}`),
+			[]byte(`{"fingerprint":"SHA256:abc","host":"host.example.com:22","method":"helper"}`),
+		},
+		// The connection editor's read and write of the host's integration
+		// method (ADR-727g63tr decision 1). Auto is a valid WRITE because it
+		// means "ask me again" — the absence of a record, not a fourth value —
+		// and it is the whole answer a read can give for a host whose key
+		// nobody has trusted.
+		"connections.hostMode": {
+			[]byte(`{"profileId":"ssh-1"}`),
+		},
+		"connections.setHostMode": {
+			[]byte(`{"profileId":"ssh-1","mode":"auto"}`),
+			[]byte(`{"profileId":"ssh-1","mode":"raw"}`),
+			[]byte(`{"profileId":"ssh-1","mode":"helper"}`),
 		},
 		"dialog.openDirectory": {
 			[]byte(`{}`),

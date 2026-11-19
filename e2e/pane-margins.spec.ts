@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test, expect, clickIntoEditor, promptReady, resolveBackend } from './harness'
 import type { Page } from '@playwright/test'
-import { startSshd, rpc } from './sshd-fixture'
+import { hostKeyFingerprint, recordHostMethod, startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 
 /** Sub-pixel rounding and the remainder of an integer column count. */
@@ -348,12 +348,13 @@ test('a plain ssh shell keeps every edge too', async ({ page }) => {
         port: fixture.port,
         user: fixture.user,
         keyPath: fixture.userKey,
-        // No integration is requested at all: the session is conventional by
-        // design, which is the markerless mode this case is about.
-        desiredMode: 'raw',
       },
     })
     createdId = created.id
+    // No integration is requested at all: the session is conventional by
+    // design, which is the markerless mode this case is about. The method is
+    // the HOST's (ADR-727g63tr decision 1).
+    await recordHostMethod(page, wsInfo, hostKeyFingerprint(fixture.knownHosts), 'raw')
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible()

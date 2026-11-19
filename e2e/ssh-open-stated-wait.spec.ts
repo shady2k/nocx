@@ -43,7 +43,13 @@ import {
   type BackendEndpoint,
   type Page,
 } from './harness'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
@@ -217,13 +223,13 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
         port: second.port,
         user: second.user,
         keyPath: second.userKey,
-        // Script is the default destination mode and needs no connect-time
-        // ask, so this open is the one a person gets without answering
-        // anything: it must still name its first prompt.
-        desiredMode: 'script',
       },
     })
     secondProfileId = secondProfile.id ?? null
+    // Script is an ANSWER — the host answered, so this open needs no
+    // connect-time ask and is the one a person gets without answering
+    // anything. The answer is the HOST's (ADR-727g63tr decision 1).
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(second.knownHosts), 'script')
     await openProfile(page, secondName)
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 120_000 })
     await promptReady(page)
@@ -303,10 +309,10 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
         port: second.port,
         user: 'e2e-later',
         keyPath: second.userKey,
-        desiredMode: 'script',
       },
     })
     thirdProfileId = thirdProfile.id ?? null
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(second.knownHosts), 'script')
     await openProfile(page, thirdName)
     await expect
       .poll(

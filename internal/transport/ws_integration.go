@@ -41,9 +41,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -310,7 +310,7 @@ func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.C
 	// the gate said yes and the reporter said no. A configured
 	// RemoteCommand is refused in every mode, so a reason outranks the
 	// mode.
-	requested := profile.DesiredMode(desiredModeForAck(cfg.Remote)).DeliversScripts()
+	requested := hostmode.Mode(integrationModeForAck(cfg.Remote)).DeliversScripts()
 	if reason == ssh.ReasonNone && !requested {
 		return
 	}

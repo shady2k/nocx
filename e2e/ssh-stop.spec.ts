@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import type { Page } from './harness'
+import { rpc } from './sshd-fixture'
 
 const TAB = '.nocx-tab'
 const LOCAL_HOME = process.env.NOCX_E2E_HOME_DIR || path.resolve(__dirname, '..', '.e2e', 'home')
@@ -113,37 +113,6 @@ function trustHostKey(fixture: RemoteFixture): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
 
-async function rpc<T>(
-  page: Page,
-  port: number,
-  token: string,
-  method: string,
-  params: unknown,
-): Promise<T> {
-  return page.evaluate(
-    ({ port, token, method, params }) =>
-      new Promise<T>((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
-        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 10_000)
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }))
-        }
-        ws.onmessage = (ev: MessageEvent) => {
-          const msg = JSON.parse(String(ev.data)) as { result?: T; error?: { message?: string } }
-          clearTimeout(timer)
-          ws.close()
-          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
-          else resolve(msg.result as T)
-        }
-        ws.onerror = () => {
-          clearTimeout(timer)
-          reject(new Error(`${method}: websocket error`))
-        }
-      }),
-    { port, token, method, params },
-  )
-}
-
 // Both integration methods that give a pane blocks. Helper runs the shell
 // under the far helper, which can name the host's foreground group; Script
 // runs it under the local helper's ssh client, which cannot, and Stop there
@@ -162,7 +131,7 @@ for (const method of ['Helper', 'Script'] as const) {
       await appReadyForInput(page)
       const wsInfo = await resolveBackend(page)
       const profileName = `e2e-ssh-stop-${Date.now()}`
-      await rpc(page, wsInfo.port, wsInfo.token, 'profiles.create', {
+      await rpc(page, wsInfo, 'profiles.create', {
         type: 'ssh',
         name: profileName,
         options: {

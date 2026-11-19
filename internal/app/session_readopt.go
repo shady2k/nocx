@@ -41,7 +41,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -229,21 +228,29 @@ func pipeOpenedAt(mine *client.SessionEntry, fallback time.Time) time.Time {
 // hosts that were fine.
 const readoptAttemptTimeout = 15 * time.Second
 
-// readoptConsentRefusal is why a carried-over session's machine was not asked
-// about it, in the two words the resolver actually answered.
-//
-// UNANSWERED IS NOT THE SAME AS DECLINED, and since ADR-0105 a connection whose
-// delivery mode is `helper` can be either: a machine nobody has answered for
-// resolves to ConsentRequired rather than to the helper, so a restart after an
-// upgrade meets sessions whose machine has simply never been asked. The old
-// sentence — "this machine no longer consents" — would have said the opposite
-// of what happened to every one of them.
+// readoptConsentRefusal reports only the machine's consent decision. The
+// host's integration method governs new openings and helper panels, not a live
+// shell being re-adopted (ADR-727g63tr §1).
 func readoptConsentRefusal(outcome Outcome, host string) string {
 	if outcome == ConsentRequired {
 		return "nocx has not been told whether it may use its helper on " + host +
 			" — reconnect that connection to be asked"
 	}
 	return "this machine no longer consents to the nocx helper"
+}
+
+// readoptMachineConsent is shared by staging and live re-adoption so they make
+// the same machine-keyed decision. Empty fingerprints retain the existing
+// behavior: there is no machine consent lookup to perform.
+func readoptMachineConsent(reg *helperRegistry, p content.PendingSession) string {
+	if reg == nil || reg.consent == nil || p.Fingerprint == "" {
+		return ""
+	}
+	resolver := newResolver(withStore(reg.consent), withHelperArtifactAvailable(true))
+	if got := resolver.forMachine(Machine{Fingerprint: p.Fingerprint}); got != DesiredHelper {
+		return readoptConsentRefusal(got, p.Host)
+	}
+	return ""
 }
 
 // Readopt is one attempt for one carried-over session.
@@ -265,11 +272,8 @@ func (rp *readoptPass) stageReadopt(ctx context.Context, p content.PendingSessio
 	if account := accountFromOptions(opts); host != p.Host || account != p.Account {
 		return fmt.Errorf("the saved connection no longer resolves to the host and account holding this session")
 	}
-	if rp.registry.consent != nil && p.Fingerprint != "" {
-		resolver := newResolver(withStore(rp.registry.consent), withHelperArtifactAvailable(true))
-		if got := resolver.Resolve(Machine{Fingerprint: p.Fingerprint, Mode: profile.DesiredMode(cfg.DesiredMode)}); got != DesiredHelper {
-			return errors.New(readoptConsentRefusal(got, p.Host))
-		}
+	if refusal := readoptMachineConsent(rp.registry, p); refusal != "" {
+		return errors.New(refusal)
 	}
 	f := &sessionFactory{
 		reg: rp.registry, sid: session.ID(p.SessionID), host: p.Host, account: p.Account,
@@ -345,23 +349,8 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	// channel to a machine is the act consent governs (ADR-0034, ADR-0068),
 	// and a person who withdrew it between two runs must not have one
 	// opened silently.
-	if rp.registry.consent != nil && p.Fingerprint != "" {
-		resolver := newResolver(
-			withStore(rp.registry.consent),
-			// The artifact is not consulted and nothing is installed: this
-			// path connects to a helper the machine is ALREADY running. What
-			// is being asked is the machine's own decision, so the input
-			// that decides it is supplied as satisfied and the answer comes
-			// from the store.
-			withHelperArtifactAvailable(true),
-		)
-		if got := resolver.Resolve(Machine{
-			Fingerprint: p.Fingerprint,
-			Mode:        profile.DesiredMode(cfg.DesiredMode),
-		}); got != DesiredHelper {
-			return nil, fmt.Errorf("%s, so %s was not asked about its sessions",
-				readoptConsentRefusal(got, p.Host), p.Host)
-		}
+	if refusal := readoptMachineConsent(rp.registry, p); refusal != "" {
+		return nil, fmt.Errorf("%s, so %s was not asked about its sessions", refusal, p.Host)
 	}
 
 	// The install is rebuilt from the two facts the durable route KEPT —

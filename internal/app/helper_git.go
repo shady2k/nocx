@@ -197,7 +197,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 				host:    sess.Host(),
 				account: accountFromOptions(sess.SSHOptions()),
 				fp:      sess.HostKeyFingerprint(),
-				opts:    sess.SSHOptions(),
+				opts:    append(append([]ssh.ConnectOption(nil), sess.SSHOptions()...), ssh.WithHostKeyPin(sess.HostKeyFingerprint())),
 				install: installed,
 			}}
 		default:

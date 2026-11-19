@@ -328,7 +328,17 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 	if err != nil {
 		return nil, err
 	}
+	var admit func(*ssh.PooledConn) error
+	if fingerprint != "" {
+		admit = func(pooled *ssh.PooledConn) error {
+			if pooled.Fingerprint() != fingerprint {
+				return &ssh.ErrHostKeyPinMismatch{Fingerprint: pooled.Fingerprint(), Expected: fingerprint}
+			}
+			return nil
+		}
+	}
 	lease, err := s.client.Acquire(ctx, ssh.PooledSpec{
+		Admit:    admit,
 		Host:     ep.Host,
 		Port:     ep.Port,
 		User:     ep.User,
@@ -359,15 +369,6 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 		// them); saying so is better than a nil dereference one call later.
 		lease.Release()
 		return nil, fmt.Errorf("%w: this connection's carrier offers no channels", errNoChannelCarrier)
-	}
-	// Acquire may join a warm connection without running HostKeyCallback.
-	// Check the acquired transport too, releasing only this caller's reference.
-	if fingerprint != "" && pooled.Fingerprint() != fingerprint {
-		lease.Release()
-		return nil, &proto.Refusal{
-			Code:    proto.ErrCodeHostKeyPinMismatch,
-			Message: "the acquired connection does not match the approved host key",
-		}
 	}
 	held := &pooledConn{lease: lease, pool: pooled}
 	// THE ONE READER the supervisor's state has until the wire carries it
@@ -718,6 +719,13 @@ func identityKey(id proto.SSHIdentity) string {
 // transport failure would leave a person staring at "could not open a channel"
 // while the sheet they needed was never raised.
 func classifyChannelError(err error) error {
+	var pinned *ssh.ErrHostKeyPinMismatch
+	if errors.As(err, &pinned) {
+		return &proto.Refusal{
+			Code: proto.ErrCodeHostKeyPinMismatch, Message: pinned.Error(),
+			Details: hostKeyEvidence(pinned.Addr, pinned.Addr, pinned.KeyAlgo, pinned.Key, pinned.Fingerprint, pinned.Expected),
+		}
+	}
 	var refusal *proto.Refusal
 	if errors.As(err, &refusal) {
 		return refusal

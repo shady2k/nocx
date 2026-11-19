@@ -134,6 +134,15 @@ func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
 		Material:      spec,
 		ProbeInterval: spec.ProbeInterval,
 	}
+	if spec.Admit != nil {
+		plan.Admit = func(link hostconn.Link) error {
+			pooled, ok := Pooled(link)
+			if !ok {
+				return errors.New("sshconn: admission requires a pooled connection")
+			}
+			return spec.Admit(pooled)
+		}
+	}
 	if spec.HoldsPlainShell {
 		plan.Holds = hostconn.HoldsPlainShell
 	}
@@ -234,6 +243,10 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 // attempt may. That split is the design's own (§5.3: "Only network-class
 // failures retry").
 func dialFailure(err error) hostconn.Event {
+	var pinned *ssh.ErrHostKeyPinMismatch
+	if errors.As(err, &pinned) {
+		return hostconn.Event{Kind: hostconn.Refused, Cause: hostconn.CauseHostKeyChanged}
+	}
 	var changed *ssh.ErrHostKeyMismatch
 	if errors.As(err, &changed) {
 		return hostconn.Event{Kind: hostconn.Refused, Cause: hostconn.CauseHostKeyChanged}

@@ -315,10 +315,9 @@ func validateShellSpec(spec ShellSpec) error {
 func pinnedHostKey(inner gossh.HostKeyCallback, want string) gossh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
 		if got := gossh.FingerprintSHA256(key); got != want {
-			return &proto.Refusal{
-				Code:    proto.ErrCodeHostKeyPinMismatch,
-				Message: "the host key does not match the approved fingerprint",
-				Details: hostKeyEvidence(hostname, hostname, key.Type(), key.Marshal(), got, want),
+			return &ssh.ErrHostKeyPinMismatch{
+				Addr: hostname, KeyAlgo: key.Type(), Key: key.Marshal(),
+				Fingerprint: got, Expected: want,
 			}
 		}
 		return inner(hostname, remote, key)

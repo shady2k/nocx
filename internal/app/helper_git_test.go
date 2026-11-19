@@ -307,6 +307,7 @@ func (f *fakeLaneConn) closeCount() int {
 type laneRequest struct {
 	machine    proto.Machine
 	generation proto.GenerationID
+	pin        string
 }
 
 // fakeLaneProvider hands out a fresh scripted lane per LaneConn call and
@@ -374,7 +375,11 @@ func (p *fakeLaneProvider) awaitClosedPeers(t *testing.T) {
 	}
 }
 
-func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto.Machine, generation proto.GenerationID, _ ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto.Machine, generation proto.GenerationID, opts ...ssh.ConnectOption) (helperclient.HelperConn, error) {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	if p.laneErr != nil {
 		return nil, p.laneErr
 	}
@@ -389,7 +394,7 @@ func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto
 	c.startErr = p.startErr
 	p.mu.Lock()
 	p.conns = append(p.conns, c)
-	p.request = append(p.request, laneRequest{machine: machine, generation: generation})
+	p.request = append(p.request, laneRequest{machine: machine, generation: generation, pin: cfg.HostKeyFingerprint})
 	p.mu.Unlock()
 	return c, nil
 }

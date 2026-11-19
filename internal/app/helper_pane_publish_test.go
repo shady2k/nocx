@@ -65,13 +65,19 @@ type paneInstaller struct {
 	mu      sync.Mutex
 	hosts   []string
 	pending []int
+	pins    []string
 }
 
 var _ ssh.RemoteInstaller = (*paneInstaller)(nil)
 
-func (p *paneInstaller) EnsureInstalledRemote(_ context.Context, host string, _ ...ssh.ConnectOption) error {
+func (p *paneInstaller) EnsureInstalledRemote(_ context.Context, host string, opts ...ssh.ConnectOption) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	p.pins = append(p.pins, cfg.HostKeyFingerprint)
 	p.hosts = append(p.hosts, host)
 	p.pending = append(p.pending, p.daemon.spawned())
 	return p.err

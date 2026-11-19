@@ -76,3 +76,10 @@ func TestSSHOptions_CarryAgentForward(t *testing.T) {
 		t.Error("AgentForward = false, want true — the profile's agent-forwarding switch is discarded")
 	}
 }
+
+func TestSSHOptions_CarryHostKeyPin(t *testing.T) {
+	got := applied(t, &ssh.ConnectConfig{HostKeyFingerprint: "SHA256:approved"})
+	if got.HostKeyFingerprint != "SHA256:approved" {
+		t.Fatalf("HostKeyFingerprint = %q, want approved pin", got.HostKeyFingerprint)
+	}
+}

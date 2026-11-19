@@ -62,6 +62,19 @@ reason they are separate Go types: before the correction of 2026-08-31 "the sess
 meant the coordinator-owned PTY channel, so the channel's death was the session's death,
 and conflating the two is exactly what makes a replacing coordinator delete live work.
 
+## Host-key pins and protocol 29
+
+`ssh.lease.params`, `ssh.open.params` and `ssh.lane.params` carry an optional
+`hostKeyFingerprint`: the previously accepted host key that acquisition must
+match. Empty or omitted retains ordinary known_hosts verification. The
+`host-key-pin-mismatch` refusal reports an acquired connection with a different
+key, not an invitation to trust it.
+
+The number moves from 28 to 29 because these frozen params reject unknown
+fields. Both peers must agree at hello before sending the new shape. This is
+the helper/coordinator protocol only; helper schemas are excluded from the
+window/coordinator surface fingerprint, whose version is unchanged.
+
 ## What is deliberately not here
 
 - **The data plane.** AD-1 governs this wire as it governs the WebSocket: raw PTY bytes

@@ -48,7 +48,7 @@ export async function decideIntegrationMethod(
           )
         : t(
             'connections.helperAsk.notSaved',
-            'The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.',
+            'The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use the previously saved method (or Auto if none) and any permission already saved for this machine.',
           )
     }
   } catch {

@@ -310,21 +310,15 @@ func validateShellSpec(spec ShellSpec) error {
 // and not the first, and refusing on the pinned value is what keeps the two
 // from having to be trusted as one.
 //
-// It returns internal/ssh's own mismatch type on purpose: classifyChannelError
-// rebuilds the coordinator's typed error from it, so the caller sees
-// `host-key-changed` with the two fingerprints — the same answer a changed key
-// from known_hosts produces, because from the caller's side it is the same
-// fact.
+// A pin refusal is distinct from known_hosts rejection: the caller may retry a
+// raw shell without the integration pin, but may never skip ordinary host trust.
 func pinnedHostKey(inner gossh.HostKeyCallback, want string) gossh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key gossh.PublicKey) error {
 		if got := gossh.FingerprintSHA256(key); got != want {
-			return &ssh.ErrHostKeyMismatch{
-				Addr:           hostname,
-				KnownHostsAddr: hostname,
-				KeyAlgo:        key.Type(),
-				Fingerprint:    got,
-				Expected:       want,
-				Key:            key.Marshal(),
+			return &proto.Refusal{
+				Code:    proto.ErrCodeHostKeyPinMismatch,
+				Message: "the host key does not match the approved fingerprint",
+				Details: hostKeyEvidence(hostname, hostname, key.Type(), key.Marshal(), got, want),
 			}
 		}
 		return inner(hostname, remote, key)

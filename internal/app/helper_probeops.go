@@ -134,6 +134,7 @@ func (p *helperProbes) acquire(ctx context.Context, host string, opts ...ssh.Con
 		return nil, err
 	}
 	lease, err := helper.AcquireProbeLease(ctx, proto.LeaseParams{
+		HostKeyFingerprint: hostKeyPinFromOptions(opts),
 		// The resolved destination, converted by the ONE conversion
 		// (ssh.WireDestination): the address, the account, the credential
 		// reference and the ROUTE. A probe of a host behind a jump host runs
@@ -153,6 +154,14 @@ func (p *helperProbes) acquire(ctx context.Context, host string, opts ...ssh.Con
 		return nil, translateProbeRefusal(host, err)
 	}
 	return &helperProbeLease{lease: lease}, nil
+}
+
+func hostKeyPinFromOptions(opts []ssh.ConnectOption) string {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg.HostKeyFingerprint
 }
 
 // Lease answers discovery's Connector: one lease per target, held for as long
@@ -358,6 +367,8 @@ func translateProbeRefusal(host string, err error) error {
 		return fmt.Errorf("ssh: probe lease for %s: %w", host, err)
 	}
 	switch refusal.Code {
+	case proto.ErrCodeHostKeyPinMismatch:
+		return fmt.Errorf("ssh: probe lease for %s: %w", host, err)
 	case string(proto.ProbeHostKeyUnknown):
 		if ev, ok := decodeHostKeyEvidence(refusal.Details); ok {
 			return &ssh.ErrUnknownHostKey{

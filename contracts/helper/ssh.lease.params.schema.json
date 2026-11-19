@@ -11,6 +11,10 @@
       "description": "What to connect to and what to authenticate as.",
       "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
     },
+    "hostKeyFingerprint": {
+      "description": "The previously accepted host key fingerprint this acquisition must match. Omitted or empty leaves verification to the ordinary known_hosts policy.",
+      "type": "string"
+    },
     "acceptOnTrust": {
       "description": "The coordinator's answer to 'may a host key this host has never presented be recorded', carried exactly as probe.params carries it: the helper may not decide that for itself, and the decision travels with the call that started the handshake. False is the ordinary value and produces the host-key-unknown refusal below.",
       "type": "boolean"

@@ -117,6 +117,10 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 	if err != nil {
 		t.Fatalf("serving this machine's endpoint at %s: %v", dir, err)
 	}
+	sshSpawner := helpersession.SSHSpawner(scripted)
+	if candidate, ok := spawner.(helpersession.SSHSpawner); ok {
+		sshSpawner = candidate
+	}
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(generation),
 		Spawner:    spawner,
@@ -124,7 +128,7 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 		// `spawn-ssh` on this endpoint is refused as unavailable, so no test
 		// built here can open an ssh pane for this machine's daemon to hold —
 		// which is the shape the pane-screen owner must answer for.
-		SSHSpawner: scripted,
+		SSHSpawner: sshSpawner,
 		Log:        discardLogger(t),
 	})
 	// The daemon ends with the test, so the sessions it holds do too

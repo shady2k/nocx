@@ -431,7 +431,8 @@ func probeHelperPlatformHeld(ctx context.Context, host string, opts []ssh.Connec
 // install lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
 func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
-	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source, platform)
+	opts := append(append([]ssh.ConnectOption(nil), sess.SSHOptions()...), ssh.WithHostKeyPin(sess.HostKeyFingerprint()))
+	return installHelperAt(context.Background(), sess.Host(), opts, lanes, source, platform)
 }
 
 func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (installedHelper, error) {
@@ -1149,6 +1150,7 @@ func offeredHostKeyFingerprint(err error) string {
 // would be a second answer to "what did the probe say", and on a host whose
 // answer is expensive to obtain that second answer is another login.
 func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, claim string, opts []ssh.ConnectOption, platform deploy.Platform, fingerprint string) (transport.HostedSessionOpen, bool, error) {
+	opts = append(append([]ssh.ConnectOption(nil), opts...), ssh.WithHostKeyPin(fingerprint))
 	endInstall := diagnostics.Stage(ctx, diagnostics.StageInstall)
 	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
 	endInstall(err)

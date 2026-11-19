@@ -334,6 +334,7 @@ type fakeLaneProvider struct {
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
+	installPin  string
 	// inflate, when set, is the install's decompression seam; nil refuses it, so
 	// every test that is not about the optimisation installs the plain way
 	// (nocx-evj4b.1.3).
@@ -412,7 +413,12 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 	return &fakeProbeConn{uname: uname, fingerprint: p.fingerprint}, nil
 }
 
-func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	p.installPin = cfg.HostKeyFingerprint
 	if p.installFail != nil {
 		return nil, p.installFail
 	}

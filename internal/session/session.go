@@ -963,6 +963,9 @@ func kindName(k Kind) string {
 // reported.
 func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	var opts []ssh.ConnectOption
+	if cfg.HostKeyFingerprint != "" {
+		opts = append(opts, ssh.WithHostKeyPin(cfg.HostKeyFingerprint))
+	}
 	if cfg.User != "" {
 		opts = append(opts, ssh.WithUser(cfg.User))
 	}

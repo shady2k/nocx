@@ -170,3 +170,11 @@ func TestAHostKeyRefusalWithNoEvidenceIsStillARefusal(t *testing.T) {
 		t.Fatal("translate returned nil")
 	}
 }
+
+func TestHostKeyTrustRefusalsNeverTriggerPinFallback(t *testing.T) {
+	for _, code := range []string{string(proto.ProbeHostKeyUnknown), string(proto.ProbeHostKeyChanged)} {
+		if hostKeyPinMismatch(refusalWith(code, nil)) {
+			t.Fatalf("trust refusal %q triggered raw retry", code)
+		}
+	}
+}

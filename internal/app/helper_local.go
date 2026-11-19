@@ -1115,18 +1115,27 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// machine") and what the shared pool key (AD-4) exists for.
 	var authenticatedFingerprint string
 	var integrationReason ssh.RefusalReason
-	if remote := cfg.Remote; remote != nil && (o.modes != nil ||
+	if refusal, _ := ctx.Value(sshIntegrationRefusalKey{}).(error); hostKeyPinMismatch(refusal) {
+		// The approved install met a different host. Do not re-read that host's
+		// method and turn this same open back into an integration attempt.
+		cfg.Remote.IntegrationMode = string(hostmode.Raw)
+		cfg.Remote.HostKeyFingerprint = ""
+		integrationReason = ssh.ReasonHostKeyUnconfirmed
+	}
+	if remote := cfg.Remote; integrationReason == ssh.ReasonNone && remote != nil && (o.modes != nil ||
 		(remote.RemoteInstaller != nil && hostmode.Mode(remote.IntegrationMode).DeliversScripts())) {
 		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
 		hold, herr := o.holdConnection(ctx, target)
 		endHold(herr)
+		if herr == nil {
+			authenticatedFingerprint = hold.Fingerprint()
+		}
 		if o.modes != nil {
 			// Only an authenticated lease identifies the host whose mode may
 			// authorise publication and launch. A failed hold or missing key
 			// must not reuse another acceptable key's answer.
 			mode := hostmode.Raw
 			if herr == nil && hold.Fingerprint() != "" {
-				authenticatedFingerprint = hold.Fingerprint()
 				mode = hostModeFor(o.modes, authenticatedFingerprint)
 			} else {
 				integrationReason = ssh.ReasonHostKeyUnconfirmed
@@ -1177,9 +1186,17 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// vocabulary in internal/shellintegration is what crosses.
 	publishFailure := shellintegration.PublishFailureNone
 	endPublish := diagnostics.Stage(ctx, diagnostics.StagePublish)
+	cfg.Remote.HostKeyFingerprint = authenticatedFingerprint
 	perr := o.publishForPane(ctx, cfg)
 	endPublish(perr)
 	if perr != nil {
+		if hostKeyPinMismatch(perr) {
+			authenticatedFingerprint = ""
+			cfg.Remote.HostKeyFingerprint = ""
+			cfg.Remote.IntegrationMode = string(hostmode.Raw)
+			integrationReason = ssh.ReasonHostKeyUnconfirmed
+			spawn.lifecycle = nil
+		}
 		// AND A FAILED PUBLISH NEVER COSTS A SECOND AUTHENTICATION.
 		//
 		// A publish that failed on a connection which is UP — the far side
@@ -1293,6 +1310,19 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		params.Lifecycle = life
 		return spawn.client.SpawnSSH(ctx, params)
 	})
+	if err != nil && params.HostKeyFingerprint != "" && hostKeyPinMismatch(err) {
+		// The new key may be trusted, but it has not authorised this integration.
+		params.HostKeyFingerprint = ""
+		params.IntegrationMode = proto.SSHMode(hostmode.Raw)
+		params.Lifecycle = nil
+		cfg.Remote.HostKeyFingerprint = ""
+		cfg.Remote.IntegrationMode = string(hostmode.Raw)
+		spawn.lifecycle = nil
+		integrationReason = ssh.ReasonHostKeyUnconfirmed
+		res, err = spawn.run(ctx, cfg, func(ctx context.Context, _ *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+			return spawn.client.SpawnSSH(ctx, params)
+		})
+	}
 	if err != nil {
 		// A pane open that hit an unrecorded or changed host key is the
 		// coordinator's own accept-on-first-use flow waiting to be asked, not
@@ -2089,6 +2119,10 @@ func (o *localHelperOpener) bindSSHConnection(ctx context.Context, cfg session.C
 	return binding, nil
 }
 
+// sshIntegrationRefusalKey carries only this open's refused fingerprint decision.
+// It must not persist: a new Connect action may authenticate and decide anew.
+type sshIntegrationRefusalKey struct{}
+
 // hostedOpeners is the one seam the transport asks, and the only thing in the
 // composition root that knows a destination has two possible helpers.
 //
@@ -2160,6 +2194,9 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 	}
 	opened, hold, selected, err := h.remote.openHoldingLease(ctx, cfg, claim)
 	defer hold.release()
+	if hostKeyPinMismatch(err) {
+		return h.local.OpenHosted(context.WithValue(ctx, sshIntegrationRefusalKey{}, err), cfg, claim)
+	}
 	if selected {
 		// A consent refusal created no shell. Its probe-only connection must
 		// not outlive the open while the person decides; the answered retry

@@ -551,7 +551,7 @@ func TestSpawnSSHRefusesByNameWithAPairedSuccess(t *testing.T) {
 	})
 
 	t.Run("a pinned fingerprint that does not match", func(t *testing.T) {
-		run(t, string(proto.ProbeHostKeyChanged), func(p *proto.SSHSpawnParams, _ *sshCoordinator) func() {
+		run(t, proto.ErrCodeHostKeyPinMismatch, func(p *proto.SSHSpawnParams, _ *sshCoordinator) func() {
 			// The caller's OWN expectation, enforced before anything is
 			// authenticated: the coordinator's verdict says the key is the
 			// recorded one and the request pinned another value, so the two
@@ -594,8 +594,8 @@ func TestTheHostKeyRefusalCarriesTheEvidenceItRefusedOn(t *testing.T) {
 	p.HostKeyFingerprint = "SHA256:not-the-key-this-host-presents"
 
 	_, err := stand.spawn(t, p)
-	if got := refusalCode(err); got != string(proto.ProbeHostKeyChanged) {
-		t.Fatalf("answered %v (code %q), want host-key-changed", err, got)
+	if got := refusalCode(err); got != proto.ErrCodeHostKeyPinMismatch {
+		t.Fatalf("answered %v (code %q), want host-key-pin-mismatch", err, got)
 	}
 	details := refusalDetails(err)
 	if len(details) == 0 {

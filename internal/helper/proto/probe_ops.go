@@ -103,6 +103,9 @@ const (
 // and holds the binding.
 type LeaseParams struct {
 	Destination SSHDestination `json:"destination"`
+	// HostKeyFingerprint pins this acquisition to a previously accepted host key.
+	// Empty leaves verification to the ordinary known_hosts policy.
+	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
 	// AcceptOnTrust is the coordinator's answer to "may a host key this host
 	// has never presented be recorded", carried exactly as `probe` carries it:
 	// the helper may not decide that for itself. False is the ordinary value

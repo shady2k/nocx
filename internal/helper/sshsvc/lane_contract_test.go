@@ -31,7 +31,9 @@ func TestTheLaneContractHoldsOverTheWire(t *testing.T) {
 		password: "pw", verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
 	})
 
-	lane, err := stand.client.OpenLane(t.Context(), laneParams(t, f))
+	params := laneParams(t, f)
+	params.HostKeyFingerprint = f.hostKeyFingerprint()
+	lane, err := stand.client.OpenLane(t.Context(), params)
 	if err != nil {
 		t.Fatalf("open lane: %v", err)
 	}

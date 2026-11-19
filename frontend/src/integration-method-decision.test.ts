@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { decideIntegrationMethod } from './integration-method-decision'
 import { HelperConsentAskQueue, type HelperConsentAskRequest } from './host-key-controller'
 import { RpcError } from './dispatcher'
+import { setActiveLocale } from './i18n/locale-model'
 
 const evidence = { host: 'host.example:22', fingerprint: 'SHA256:abc', hostKey: null }
-const note = `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.`
+const note = `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use the previously saved method (or Auto if none) and any permission already saved for this machine.`
 
 function setup() {
   let active: HelperConsentAskRequest | null = null
@@ -28,17 +29,36 @@ function setup() {
 }
 
 describe('decideIntegrationMethod', () => {
+  afterEach(() => setActiveLocale('en'))
+
+  it('explains the previously saved method and permission after restart in Russian', async () => {
+    setActiveLocale('ru')
+    const state = setup()
+    const setIntegrationMethod = vi.fn().mockResolvedValue({
+      ...evidence,
+      method: 'script',
+      hostRecordSaved: false,
+      helperConsentSaved: false,
+    })
+    await decideIntegrationMethod(state.request, 'script', {
+      ...state,
+      profileClient: { setIntegrationMethod },
+    })
+    expect(await state.answer).toEqual({
+      method: 'script',
+      note: 'Метод действует для этой машины, но он не сохранён. После перезапуска nocx использует ранее сохранённый метод (или Auto, если его нет) и ранее сохранённое разрешение для этой машины.',
+    })
+  })
+
   for (const hostRecordSaved of [false, true]) {
     it(`settles active and queued asks when hostRecordSaved is ${hostRecordSaved}`, async () => {
       const state = setup()
-      const setIntegrationMethod = vi
-        .fn()
-        .mockResolvedValue({
-          ...evidence,
-          method: 'script',
-          hostRecordSaved,
-          helperConsentSaved: false,
-        })
+      const setIntegrationMethod = vi.fn().mockResolvedValue({
+        ...evidence,
+        method: 'script',
+        hostRecordSaved,
+        helperConsentSaved: false,
+      })
       await decideIntegrationMethod(state.request, 'script', {
         ...state,
         profileClient: { setIntegrationMethod },

@@ -384,4 +384,8 @@ package proto
 // that stops a reconnect from becoming a second shell on a stalled connection.
 // Two peers that disagree refuse each other at hello in both directions, which
 // is what makes the number the whole of the compatibility story.
-const Version = "28"
+// Version 29 adds hostKeyFingerprint to the frozen ssh.lease, ssh.open and
+// ssh.lane params, and the host-key-pin-mismatch refusal for an acquired connection
+// whose key differs from the caller's accepted key. A 28-helper rejects the
+// new params under additionalProperties:false, so peers must fence at hello.
+const Version = "29"

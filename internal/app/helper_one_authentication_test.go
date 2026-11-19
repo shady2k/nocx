@@ -83,7 +83,6 @@ func openSeamOver(t *testing.T, stand *filesStand) openSeam {
 	_, remote := helperGitFactory(stand.routes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
 	remote.registry = stand.registry
 	remote.modes = stand.modes
-	remote.hostKeys = stand.hostKeys
 	return openSeam{
 		hosted: &hostedOpeners{local: stand.opener, remote: remote},
 		routes: stand.routes,

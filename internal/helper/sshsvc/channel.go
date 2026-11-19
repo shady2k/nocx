@@ -266,7 +266,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
 func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*pooledConn, remoteEnd, error) {
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, p.HostKeyFingerprint, false, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -359,6 +359,15 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 		// them); saying so is better than a nil dereference one call later.
 		lease.Release()
 		return nil, fmt.Errorf("%w: this connection's carrier offers no channels", errNoChannelCarrier)
+	}
+	// Acquire may join a warm connection without running HostKeyCallback.
+	// Check the acquired transport too, releasing only this caller's reference.
+	if fingerprint != "" && pooled.Fingerprint() != fingerprint {
+		lease.Release()
+		return nil, &proto.Refusal{
+			Code:    proto.ErrCodeHostKeyPinMismatch,
+			Message: "the acquired connection does not match the approved host key",
+		}
 	}
 	held := &pooledConn{lease: lease, pool: pooled}
 	// THE ONE READER the supervisor's state has until the wire carries it

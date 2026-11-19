@@ -797,7 +797,10 @@ type ChannelTarget struct {
 // OpenChannelParams asks the helper for one proxied channel.
 type OpenChannelParams struct {
 	Destination SSHDestination `json:"destination"`
-	Kind        ChannelKind    `json:"kind"`
+	// HostKeyFingerprint pins this acquisition to a previously accepted host key.
+	// Empty leaves verification to the ordinary known_hosts policy.
+	HostKeyFingerprint string      `json:"hostKeyFingerprint,omitempty"`
+	Kind               ChannelKind `json:"kind"`
 	// Target is where a direct-tcpip channel connects, on the far side's
 	// network. Required for ChannelDirectTCPIP and absent for every other
 	// kind, which the helper checks rather than tolerates: a target on an
@@ -859,7 +862,10 @@ type Machine struct {
 // rather than a tidy omission — see OpLane.
 type LaneParams struct {
 	Destination SSHDestination `json:"destination"`
-	Machine     Machine        `json:"machine"`
+	// HostKeyFingerprint pins bridge execution to the accepted install host.
+	// Empty leaves verification to the ordinary known_hosts policy.
+	HostKeyFingerprint string  `json:"hostKeyFingerprint,omitempty"`
+	Machine            Machine `json:"machine"`
 	// Generation is the content hash the installer wrote (D7, D21): the
 	// install is content-addressed and the generation IS the build, so naming
 	// it is what stops a lane from reaching a DIFFERENT generation's sessions
@@ -1093,6 +1099,9 @@ const (
 	// host will not serve that channel — and the sentence the helper fails
 	// with keeps the distinction for whoever reads the error.
 	ErrCodeChannelRefused = "channel_refused"
+	// ErrCodeHostKeyPinMismatch means the acquired connection does not match
+	// the host key the caller previously accepted. It is not a trust prompt.
+	ErrCodeHostKeyPinMismatch = "host-key-pin-mismatch"
 )
 
 // # The codes an OPEN ends in, and why they are the probe's own spellings

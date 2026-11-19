@@ -678,10 +678,7 @@ type helperRegistry struct {
 	// and it is a different question from consent beside it. Nil (a test
 	// double, or a build that wired none) reads every host as auto — not yet
 	// answered — which is the ask.
-	modes    *hostmode.Store
-	hostKeys interface {
-		KnownHostsFingerprintsFor(context.Context, string, *ssh.ConnectConfig) ([]string, error)
-	}
+	modes     *hostmode.Store
 	registry  *session.Reg
 	lifecycle lifecyclechannel.Kernel
 	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
@@ -1032,15 +1029,10 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 			fingerprint = offeredHostKeyFingerprint(err)
 		}
 		mode = hostModeFor(r.modes, fingerprint)
-		if fingerprint == "" && r.hostKeys != nil {
-			if fingerprints, keyErr := r.hostKeys.KnownHostsFingerprintsFor(ctx, cfg.Host, cfg.Remote); keyErr == nil {
-				for _, known := range fingerprints {
-					if recorded, ok := r.modes.Lookup(known); ok {
-						mode = recorded
-						break
-					}
-				}
-			}
+		if fingerprint == "" {
+			// known_hosts lists acceptable keys, not the key this connection
+			// authenticated. Defer delivery until the local opener has a lease.
+			mode = hostmode.Raw
 		}
 		cfg.Remote.IntegrationMode = string(mode)
 		return transport.HostedSessionOpen{}, hold, false, nil

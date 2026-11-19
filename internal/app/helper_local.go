@@ -398,6 +398,9 @@ type localHelperOpener struct {
 	// not carry (nocx-y6fh7 items 5, 6). Nil is a legitimate wiring for a
 	// test that exercises no consumer of HostKeyFingerprint.
 	hostKeys *hostKeyObserver
+	// modes is the same host record the registry reads, resolved again from
+	// the authenticated lease before this opener makes any remote changes.
+	modes *hostmode.Store
 
 	mu sync.Mutex
 	// installed is what App.Start put on this machine, and dir is the
@@ -1032,13 +1035,6 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// facts are written by different statements in different files.
 		return hostedSpawnResult{}, errors.New("open an ssh pane on this machine's helper: the config carries no destination")
 	}
-	// A raw shell is deliberately launched without the integration script, so
-	// it cannot authenticate the lifecycle channel. Ask the mode's owner before
-	// hostedSpawn creates an adapter or launch; local sessions retain their
-	// existing default and never pass through this route.
-	if !hostmode.Mode(cfg.Remote.IntegrationMode).DeliversScripts() {
-		spawn.lifecycle = nil
-	}
 	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
 	if err != nil {
 		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
@@ -1108,11 +1104,23 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// connection — which is what this file's own header and
 	// helper_publish.go's already claim happens ("one authentication for one
 	// machine") and what the shared pool key (AD-4) exists for.
-	if remote := cfg.Remote; remote != nil && remote.RemoteInstaller != nil &&
-		hostmode.Mode(remote.IntegrationMode).DeliversScripts() {
+	var authenticatedFingerprint string
+	if remote := cfg.Remote; remote != nil && (o.modes != nil ||
+		(remote.RemoteInstaller != nil && hostmode.Mode(remote.IntegrationMode).DeliversScripts())) {
 		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
 		hold, herr := o.holdConnection(ctx, target)
 		endHold(herr)
+		if o.modes != nil {
+			// Only an authenticated lease identifies the host whose mode may
+			// authorise publication and launch. A failed hold or missing key
+			// must not reuse another acceptable key's answer.
+			mode := hostmode.Raw
+			if herr == nil && hold.Fingerprint() != "" {
+				authenticatedFingerprint = hold.Fingerprint()
+				mode = hostModeFor(o.modes, authenticatedFingerprint)
+			}
+			remote.IntegrationMode = string(mode)
+		}
 		if herr != nil {
 			// A DEFINITIVE REJECTION IS THE ANSWER, NOT A SETBACK
 			// (nocx-1ebrs.18). The hold is an optimisation, so every failure
@@ -1137,6 +1145,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		} else {
 			defer func() { _ = hold.Close() }()
 		}
+	}
+	// A raw shell cannot authenticate the integration lifecycle channel.
+	if !hostmode.Mode(cfg.Remote.IntegrationMode).DeliversScripts() {
+		spawn.lifecycle = nil
 	}
 	// WHAT THE PERSON IS TOLD WHEN THE COPY DID NOT LAND (nocx-1kejz.4).
 	//
@@ -1206,6 +1218,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// round 3: the publish's own destination was the one that reached a
 		// person first, and it had no such stamp until this moved here).
 		Destination: ssh.WireDestination(target),
+		// Refuse a replacement connection presenting a different key.
+		HostKeyFingerprint: authenticatedFingerprint,
 		// The two facts the far launcher is built for, read off the config the
 		// registry accepted rather than off the caller's spec: the shell pin a
 		// profile may carry (nocx-pu4.1) and the integration mode the host

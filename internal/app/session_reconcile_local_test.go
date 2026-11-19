@@ -110,7 +110,7 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 // scripted is also the counter `spawned()` reads, so a caller with a spawner
 // of its own passes the one it delegates to; it is never nil on this path.
 func startLocalEndpointWith(t *testing.T, dir, generation string,
-	spawner helpersession.Spawner, scripted *scriptedSpawner,
+	spawner helpersession.Spawner, scripted *scriptedSpawner, extra ...host.Service,
 ) *fakeLocalEndpoint {
 	t.Helper()
 	ln, err := endpoint.Listen(dir, proto.GenerationID(generation))
@@ -155,6 +155,9 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 			h := host.New(conn, conn, generation, "instance-1", discardLogger(t))
 			h.Register(hostsvc.New(localgit.NewFactory()))
 			h.Register(svc)
+			for _, service := range extra {
+				h.Register(service)
+			}
 			release := svc.Bind(h)
 			defer release()
 			_ = h.Serve(ctx)

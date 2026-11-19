@@ -96,6 +96,14 @@ type Client interface {
 	// shell exists (design §5.5, §5.6): the supervisor is the one party that
 	// knows, and a watcher holds no reference and closes nothing.
 	WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func()
+	// ConnectionFacts answers every connection this helper's supervisors hold,
+	// in the table's own stable order. It is how the `connections` op answers a
+	// coordinator that restarted (design §5.10, scenario 7).
+	ConnectionFacts() []hostconn.Facts
+	// WatchConnections registers fn for every connection this helper holds and
+	// every one it creates afterwards, starting with each existing connection's
+	// current observation. It answers the function that ends the subscription.
+	WatchConnections(fn func(hostconn.Facts)) func()
 	// Disconnect implements the explicit wire disconnect operation. Pane
 	// reconnection uses RegisterReconnect to register the attempt atomically.
 	Disconnect(key connkey.Key) bool
@@ -166,7 +174,27 @@ type Service struct {
 	// and not one per pane: panes share a connection, and duplicates would be
 	// the same fact sent twice to one coordinator.
 	connectionWatches map[connectionWatchKey]*connectionWatch
-	paneHolds         map[paneHoldKey]paneHold
+	// connectionsWatches is one subscription per COORDINATOR CONNECTION to the
+	// whole connection table, started by the `connections` op (nocx-oalo1.6.2).
+	// A coordinator that holds it needs no per-connection subscription: the
+	// table covers every connection including the ones created later, and a
+	// second subscription would put one observation on the wire twice. It ends
+	// the same way — a failed write — and that failure releases every hold this
+	// coordinator had, because nobody is listening at all.
+	connectionsWatches map[*host.Host]*connectionWatch
+	paneHolds          map[paneHoldKey]paneHold
+	// destinations are the RESOLVED destinations this helper was asked to
+	// acquire, keyed by the connection id they derive. They are kept because a
+	// coordinator that restarted must redial what it finds and the connection id
+	// is a digest: a digest names a connection and cannot be turned back into an
+	// address, an account and a credential reference.
+	//
+	// The bound is the supervisor table's, and for the same reason: a supervisor
+	// lives for the life of the process, one per connection a person caused, so
+	// this map holds exactly as many entries as `connections` can report. It is
+	// written where a destination is TURNED INTO a connection — the same place
+	// the key is derived — so there is no second derivation to disagree with.
+	destinations map[string]proto.SSHDestination
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -193,7 +221,7 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection, proto.OpDisconnect, proto.OpReconnect, proto.OpReleaseConnection}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection, proto.OpConnections, proto.OpDisconnect, proto.OpReconnect, proto.OpReleaseConnection}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
 	ops = append(ops, s.laneOps()...)
 	return append(ops, s.toolSocketOps()...)
 }
@@ -207,6 +235,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ProbeParams{})
 	case proto.OpConnection:
 		return host.SchemaFor(proto.ConnectionParams{})
+	case proto.OpConnections:
+		return host.SchemaFor(proto.ConnectionsParams{})
 	case proto.OpReconnect:
 		return host.SchemaFor(proto.ReconnectParams{})
 	case proto.OpReleaseConnection:
@@ -290,6 +320,8 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.connection(ctx, p)
+	case proto.OpConnections:
+		return s.connections(ctx)
 	case proto.OpReconnect:
 		var p proto.ReconnectParams
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -298,7 +330,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := validateDestinationAddress(p.Destination); err != nil {
 			return nil, err
 		}
-		if err := s.client.RegisterReconnect(connectionKey(p.Destination), p.ExpectedSeq); err != nil {
+		if err := s.client.RegisterReconnect(s.rememberDestination(p.Destination), p.ExpectedSeq); err != nil {
 			return nil, err
 		}
 		return proto.ReconnectResult{Registered: true}, nil

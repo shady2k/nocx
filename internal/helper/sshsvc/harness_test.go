@@ -1242,14 +1242,23 @@ func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 // waiting for it (design §10, nocx-oalo1.4.3). A nil clock is the process's.
 func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock hostconn.Clock) *stand {
 	t.Helper()
+	return newDaemon(t, logger, clock).connect(t, c)
+}
 
-	helperEnd, coordEnd := net.Pipe()
-	s := &stand{
-		connEvents: make(chan proto.ConnectionStateEvent, 256),
-		toHelper:   &recorder{Conn: helperEnd},
-		toCoord:    &recorder{Conn: coordEnd},
-		served:     make(chan struct{}),
-	}
+// daemon is the helper PROCESS's half of the stand: the ssh client, the
+// supervisor table above it and the one service that answers every coordinator.
+// A stand owns one, and a test that needs TWO coordinators on one helper — the
+// shape D12 describes and the one a restart produces — connects each of them to
+// the same daemon.
+type daemon struct {
+	carrier *sshconn.Carrier
+	service *sshsvc.Service
+	wake    *hostconntest.WakeSource
+}
+
+// newDaemon builds the helper's half on an injected clock.
+func newDaemon(t *testing.T, logger *slog.Logger, clock hostconn.Clock) *daemon {
+	t.Helper()
 	// The dialer is the REAL one: DialAuth is the seam the daemon's client
 	// offers, and a probe tested against a fake dialer would be a probe tested
 	// against nothing.
@@ -1262,12 +1271,29 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 	if clock == nil {
 		clock = hostconn.RealClock{}
 	}
-	s.wake = hostconntest.NewWakeSource(clock)
-	s.carrier = sshconn.NewWithOptions(realClient, log.NewSlogAdapter(logger), sshconn.Options{
+	d := &daemon{wake: hostconntest.NewWakeSource(clock)}
+	d.carrier = sshconn.NewWithOptions(realClient, log.NewSlogAdapter(logger), sshconn.Options{
 		Clock: clock,
-		Wake:  s.wake,
+		Wake:  d.wake,
 	})
-	s.service = sshsvc.New(s.carrier, logger)
+	d.service = sshsvc.New(d.carrier, logger)
+	return d
+}
+
+// connect serves one more coordinator connection on this daemon.
+func (d *daemon) connect(t *testing.T, c *coordinator) *stand {
+	t.Helper()
+
+	helperEnd, coordEnd := net.Pipe()
+	s := &stand{
+		connEvents: make(chan proto.ConnectionStateEvent, 256),
+		toHelper:   &recorder{Conn: helperEnd},
+		toCoord:    &recorder{Conn: coordEnd},
+		served:     make(chan struct{}),
+		carrier:    d.carrier,
+		service:    d.service,
+		wake:       d.wake,
+	}
 	s.helper = host.New(s.toHelper, s.toHelper, testHash, "instance-1", discardLogger())
 	s.helper.Register(s.service)
 

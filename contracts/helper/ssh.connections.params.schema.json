@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.connections.params.schema.json",
+  "title": "HelperSSHConnectionsParams",
+  "description": "Params of the ssh service's connections op (nocx-oalo1.6.2). It carries NOTHING, and that is the declaration rather than a placeholder: the question is 'what does this helper hold for the coordinator asking', and the coordinator is a property of the connection the request arrived on (D12), not of a field. additionalProperties:false with no properties is what makes the emptiness exact — a payload carrying a field is a caller that believes it is asking a narrower question, and accepting it silently would answer a different one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

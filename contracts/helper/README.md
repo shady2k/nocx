@@ -610,6 +610,67 @@ so the next generation inherits a truthful statement.
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.
 
+## What landed with `nocx-oalo1.6.2`, and why `Version` moved to 30
+
+The **connection table**, and the **link generation** each observation carries.
+
+`connections` is one forward op with no params. It subscribes the coordinator
+that asks to EVERY connection this helper's supervisors hold — the ones that
+exist now, in its answer, and the ones it creates later, as they appear — and it
+answers each of them as the same observation `connection-state` carries, plus
+the two facts a coordinator that restarted cannot do without: the resolved
+`destination` the connection was acquired for, and the `hostKeyFingerprint` its
+current link was verified against.
+
+Both halves have one reason, and it is design §5.10's seventh scenario. A
+coordinator's entries — the far helper's per-connection decision, the host's
+mode, the person's consent — are rebuilt after a restart from what the local
+helper holds, "a zero-pane one included", and nothing is read from disk. Before
+this op the helper told a coordinator only about connections some pane had named
+through `connection`, so a connection no pane rides (a tunnel, a probe lease, the
+far helper's own lane) could not be reported at all; and a connection id is a
+digest over the account, the credential principal and the route, so it names a
+connection without ever describing one. The id is not a destination, and the
+fingerprint is not derivable from it.
+
+`generation` is a required field on every `connection-state` observation, and it
+names which of the supervisor's LINKS the observation is about, counting from
+one. It is on the wire because the receiving side cannot derive it: a reader is
+given the newest observation and refuses any that is not newer, so a
+`reconnecting` overtaken by `connected` arrives as ONE `connected` — the same
+bytes whether the transport survived the stall or was replaced under it. A
+coordinator that must drop what belongs to a link it has lost (a far helper's
+answer, an attempt's result) needs the number the answer was taken against, and
+the supervisor is the only party holding the link.
+
+Two decisions worth naming rather than leaving to a reader:
+
+- **The list entry's observation is the event type by `$ref`, not a copy.** One
+  declaration, so a receiver folds a list entry and a live event with one
+  function; a second shape for one state is the defect AD-8 names.
+- **The subscription is one per coordinator connection, not one per connection.**
+  It covers connections the helper has not created yet, which is the window a
+  tunnel that appears a second after the answer would otherwise fall into. A
+  failed write on it releases every hold that coordinator had — because the
+  subscription covered every connection — while a failed write on a single
+  connection's subscription releases only the holds riding that connection. The
+  difference is not tidiness: releasing another connection's hold ends a
+  connection a person's pane is still riding, and the pane is then told it lost
+  something it did not.
+
+The number moved because of the FIELD rather than the op, and the distinction is
+the freeze's own. The op is the half that degrades: a 29-helper answers
+`unknown_op`, which a coordinator reads as "this machine's helper is older than
+this app", and it keeps the entries its own panes rebuilt. The field does not
+degrade: a 29-coordinator's `connection-state` schema is
+`additionalProperties: false`, so an observation carrying `generation` is
+REJECTED — it would lose every connection state it has, not the one fact it did
+not ask for. Two peers that disagree refuse each other at hello in both
+directions, which is what makes the number the whole of the compatibility story.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.
+
 ## What landed with `nocx-oalo1.5.4`, and why `Version` moved to 28
 
 The **reconnect's two halves**: the `disconnect` op and a `reconnect` field on

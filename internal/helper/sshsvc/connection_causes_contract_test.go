@@ -21,7 +21,7 @@ func TestConnectionStateContractRejectsImpossibleCauses(t *testing.T) {
 				if state == "reconnecting" {
 					attempt = `,"attempt":1`
 				}
-				raw := []byte(fmt.Sprintf(`{"connectionId":"connection","seq":1,"state":%q,"stateMs":0,"cause":%q%s}`, state, cause, attempt))
+				raw := []byte(fmt.Sprintf(`{"connectionId":"connection","seq":1,"generation":1,"state":%q,"stateMs":0,"cause":%q%s}`, state, cause, attempt))
 				err := validateHelperJSON(schema, raw)
 				if (err == nil) != causes[cause] {
 					t.Fatalf("state %s cause %s: validation=%v, allowed=%v", state, cause, err, causes[cause])

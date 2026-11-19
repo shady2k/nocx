@@ -316,6 +316,12 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // every other caller passes zero and nil, which is a no-op through
 // ArmKeepalive's own guard and never claims the connection's one prober.
 func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, holdsPlainShell bool, probeInterval time.Duration) (*pooledConn, error) {
+	// THE DESTINATION IS KEPT WHERE THE CONNECTION IS MADE, which is the one
+	// funnel every holder goes through (a shell, a lane, a forward, a lease, a
+	// probe op). A coordinator that restarted must redial what it finds, and a
+	// connection id is a digest over the account, the credential principal and
+	// the route — it names a connection and cannot be turned back into one.
+	s.rememberDestination(d)
 	ep := endpointOf(d)
 	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
 	if err != nil {

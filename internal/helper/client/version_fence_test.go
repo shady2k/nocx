@@ -6,9 +6,11 @@ package client_test
 // a shared shape is the half of a wire change that cannot be added politely:
 // both ends are `additionalProperties: false`, so a peer that does not know the
 // field does not ignore it, and a peer that knows it cannot tell an older
-// answer from a malformed one. `proto.Version` therefore moved to 23, and this
-// file is the evidence that the numbers on either side of this one refuse each
-// other rather than decode a shape they do not know.
+// answer from a malformed one. `proto.Version` therefore moves with every such
+// change — it is 30 now, for the connection table and the link generation each
+// connection observation carries (nocx-oalo1.6.2) — and this file is the
+// evidence that the numbers on either side of a bump refuse each other rather
+// than decode a shape they do not know.
 //
 // The two peers below are deliberately NOT the same as this build's: one speaks
 // the previous generation's number, and one is this build's real host fed the
@@ -36,13 +38,12 @@ import (
 // previousGeneration is the protocol version this bump fences off — the one
 // immediately before it, which is the pair a person meets: a helper installed
 // before this app. It is a literal because that is the fact being asserted.
-const previousGeneration = "25"
+const previousGeneration = "29"
 
-// olderProtocolGeneration is a generation two bumps back (the frame-set bump
-// before the keepalive type was removed). It is here as well so the fence is
-// pinned for a peer that is not merely one version behind: the refusal must
-// not depend on the distance.
-const olderProtocolGeneration = "22"
+// olderProtocolGeneration is a generation several bumps back, kept as a
+// literal for the same reason: the fence must not depend on the distance
+// between the two numbers.
+const olderProtocolGeneration = "26"
 
 // previousHelperPeer answers a hello the way a helper SPEAKING version does: it
 // compares what arrived with its own number, and where the two disagree it
@@ -88,8 +89,8 @@ func previousHelperPeer(version string, received chan<- string) func(io.Reader, 
 }
 
 // TestThisBuildsCoordinatorAndThePreviousHelperRefuseEachOtherAtHello is the
-// direction a person meets first: the coordinator is this build's (26), and
-// the helper on the host is the previous generation (25). The helper says
+// direction a person meets first: the coordinator is this build's (30), and
+// the helper on the host is the previous generation (29). The helper says
 // nothing on stdout and exits 42; the coordinator answers ErrVersionMismatch,
 // which is a state the product renders ("this machine's helper is older than
 // this app") rather than a generic launch failure. The OLDER generation is
@@ -114,7 +115,7 @@ func TestThisBuildsCoordinatorAndThePreviousHelperRefuseEachOtherAtHello(t *test
 	}
 }
 
-// TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello is the reverse
+// TestAPreviousCoordinatorAndThisBuildsHelperRefuseEachOtherAtHello is the reverse
 // pair, and it drives the REAL host: the hello is the one a
 // previous-generation coordinator sends, written by hand because the client is
 // this build's and sends this build's number. The helper refuses it and writes
@@ -146,7 +147,7 @@ func TestThePreviousCoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *test
 	}
 }
 
-// TestA23CoordinatorRefusesAHelloOKThatNamesAnotherGeneration closes the third
+// TestThisBuildsCoordinatorRefusesAHelloOKThatNamesAnotherGeneration closes the third
 // corner. The coordinator's own handshake has two version-bearing halves and
 // both are checked: the SENTINEL line spells the protocol version, so a helper
 // of another generation never matches it and is classified by its exit status

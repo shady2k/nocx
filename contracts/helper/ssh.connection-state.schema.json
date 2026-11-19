@@ -8,7 +8,7 @@
       "description": "A dial in progress, at one of its stages.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs", "stage"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation", "stage"],
       "properties": {
         "state": {
           "type": "string",
@@ -26,6 +26,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -54,7 +59,7 @@
       "description": "A step that cannot continue without a person, and the no-progress clock stops here.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs", "person"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation", "person"],
       "properties": {
         "state": {
           "type": "string",
@@ -72,6 +77,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -108,7 +118,7 @@
       "description": "A usable connection, signed in and answering.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation"],
       "properties": {
         "state": {
           "type": "string",
@@ -126,6 +136,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -149,7 +164,7 @@
       "description": "A connection that has not answered and has not been shown to be gone.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation"],
       "properties": {
         "state": {
           "type": "string",
@@ -167,6 +182,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -194,7 +214,7 @@
       "description": "A connection whose transport ended while somebody still held it. The cause decides whether the backend retries by itself.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs", "attempt", "cause"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation", "attempt", "cause"],
       "properties": {
         "state": {
           "type": "string",
@@ -212,6 +232,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -245,7 +270,7 @@
       "description": "The far side refused in a way no retry changes.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs", "cause"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation", "cause"],
       "properties": {
         "state": {
           "type": "string",
@@ -263,6 +288,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },
@@ -291,7 +321,7 @@
       "description": "The rest state: nobody holds the connection, or the policy ended it.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["connectionId", "seq", "state", "stateMs", "cause"],
+      "required": ["connectionId", "seq", "state", "stateMs", "generation", "cause"],
       "properties": {
         "state": {
           "type": "string",
@@ -309,6 +339,11 @@
         },
         "stateMs": {
           "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "description": "Which of the supervisor's links this observation is about, counting from one: it moves when a link is retired and when a new one is admitted, and it stands still for every other transition — a stall and its recovery are one transport. Zero means the observation was taken before this connection ever had a link. It is on the wire because it cannot be derived here: a `reconnecting` overtaken by `connected` arrives as one `connected`, so a coordinator that must drop what belongs to a link it has lost would otherwise be guessing.",
           "type": "integer",
           "minimum": 0
         },

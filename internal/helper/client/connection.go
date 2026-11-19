@@ -32,6 +32,27 @@ func (c *Client) ConnectionID(ctx context.Context, destination proto.SSHDestinat
 	return result.ConnectionID, nil
 }
 
+// Connections asks the helper for every connection it holds, and subscribes this
+// coordinator to the ones that appear afterwards (nocx-oalo1.6.2; design §5.10,
+// scenario 7).
+//
+// The helper's answer is the table at the moment of the request; later
+// observations arrive through OnConnectionEvent, because the op also installs
+// the subscription. A caller that replaces a coordinator's process calls this
+// BEFORE it re-binds any pane: the entries it rebuilds include the connections
+// no pane rides, which nothing else can tell it about.
+//
+// A helper that does not answer the op is older than this app; the error is the
+// ordinary `unknown_op` refusal, and a caller reads it the way it reads one on
+// any other op — this machine's helper predates the table.
+func (c *Client) Connections(ctx context.Context) ([]proto.ConnectionSummary, error) {
+	var result proto.ConnectionsResult
+	if err := c.Call(ctx, proto.ServiceSSH, proto.OpConnections, proto.ConnectionsParams{}, &result); err != nil {
+		return nil, err
+	}
+	return result.Connections, nil
+}
+
 // Disconnect closes the connection a destination rides, if the helper holds one,
 // and reports whether it did. It is the reconnect's first move (design §5.3).
 func (c *Client) Disconnect(ctx context.Context, destination proto.SSHDestination) (bool, error) {

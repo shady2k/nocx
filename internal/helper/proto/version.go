@@ -388,4 +388,22 @@ package proto
 // ssh.lane params, and the host-key-pin-mismatch refusal for an acquired connection
 // whose key differs from the caller's accepted key. A 28-helper rejects the
 // new params under additionalProperties:false, so peers must fence at hello.
-const Version = "29"
+//
+// This is 30 rather than 29 because the wire grew the CONNECTION TABLE
+// (nocx-oalo1.6.2): the `connections` op, which subscribes a coordinator to
+// every connection this helper holds and answers them as a list, and a
+// `generation` field on the connection observation, which says which LINK the
+// observation is about.
+//
+// The op is the half that degrades — a 29-helper answers `unknown_op`, which a
+// coordinator reads as "this machine's helper is older than this app", and a
+// coordinator that has just restarted keeps the entries its panes rebuilt and
+// loses the ones nothing was watching. The FIELD is the half that does not: a
+// 29-coordinator is handed an event whose `additionalProperties: false` forbids
+// `generation` and refuses it, which would cost it every connection state it
+// has, not the one fact it did not ask for. A field on a frozen shape is the
+// half that must be fenced at hello, so the number moves; and the generation is
+// not derivable on the receiving side (a `reconnecting` overtaken by
+// `connected` reads as one `connected`), which is why the field has to exist at
+// all.
+const Version = "30"

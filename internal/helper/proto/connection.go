@@ -45,6 +45,25 @@ const OpConnection = "connection"
 // sends to a coordinator that is not already holding a stream.
 const EventConnectionState = "connection-state"
 
+// OpConnections subscribes the coordinator to EVERY connection this helper
+// holds and answers the ones that exist now.
+//
+// IT IS NOT A WIDER `connection`, and the difference is what a coordinator that
+// restarted needs. `connection` names one destination, so a coordinator
+// receives events only about the connections its own panes asked for — and a
+// connection nobody's pane rides (a tunnel, a probe lease, the far helper's own
+// lane) is invisible to it even though the helper is still holding it. Design
+// §5.10's seventh scenario is that restart: what the coordinator rebuilds its
+// entries from has to be the helper's whole connection table, and it has to
+// arrive without a destination to ask about.
+//
+// The subscription is per coordinator CONNECTION, like `connection-state`'s own
+// deliveries, so a helper serving several coordinators (D12) tells each of them
+// only what it holds for them. The answer carries the same observation the
+// event stream does, so a receiver folds the list and the stream with one
+// function.
+const OpConnections = "connections"
+
 // OpDisconnect closes the connection a destination rides, if this helper has
 // one, and answers whether it did.
 //
@@ -124,6 +143,25 @@ type ConnectionStateEvent struct {
 	// supervisor; a receiver drops anything not greater than the last sequence
 	// it applied, which is how a late event for an old epoch is refused.
 	Seq uint64 `json:"seq"`
+	// Generation is which of the supervisor's LINKS this observation is about,
+	// counting from one.
+	//
+	// IT IS ON THE WIRE BECAUSE IT CANNOT BE DERIVED, and this is the field's
+	// whole justification. A coordinator is handed the observations it reads,
+	// and the driver refuses any that is not newer — so a `reconnecting` that
+	// was followed by `connected` before the coordinator read arrives as ONE
+	// `connected`. "The state came back" is then the same fact whether the
+	// transport survived the stall or was replaced under it, and a coordinator
+	// that must drop what belongs to a link it has lost (a far helper's answer,
+	// an attempt's result) would drop it by guessing. The supervisor is the
+	// only party holding the link, so the number travels from there.
+	//
+	// It moves when a link is retired and when a new one is admitted, and it
+	// stands still for every other transition: a stall and its recovery are one
+	// transport. Zero has one meaning — an observation taken before this
+	// connection ever had a link — and a receiver that needs a link's identity
+	// treats it as "none yet" rather than as a number.
+	Generation uint64 `json:"generation"`
 	// State is one of Connection*'s closed set.
 	State string `json:"state"`
 	// Stage is where an opening is: resolve, tcp, ssh-version, key-exchange,
@@ -158,6 +196,48 @@ type ConnectionStateEvent struct {
 	// Slow is the backend's GRADE of that measurement, with hysteresis; see
 	// hostconn.GradeRoundTrip. Slow without a measurement never happens.
 	Slow bool `json:"slow,omitempty"`
+}
+
+// ConnectionsParams asks for the connection table, and asks to be kept current
+// about it. It carries nothing: the answer is "what this helper holds for THIS
+// coordinator", and the coordinator is a property of the connection the request
+// arrived on (D12), not of a field.
+type ConnectionsParams struct{}
+
+// ConnectionsResult is the connection table this coordinator now watches.
+//
+// Connections is never null on the wire: an empty table is `[]`, because a
+// decoder distinguishing "this helper holds nothing" from "no answer" needs the
+// empty array to arrive as one — and a coordinator that read a missing list as
+// "nothing" would rebuild nothing after a restart and never notice.
+type ConnectionsResult struct {
+	Connections []ConnectionSummary `json:"connections"`
+}
+
+// ConnectionSummary is one connection in that table: the same observation the
+// event stream carries, plus the two facts a stream does not need to repeat.
+//
+// The observation is the EVENT TYPE and not a second shape for the same state,
+// so a receiver folds a list entry and a live event with one function (AD-8).
+// What it adds is what a coordinator rebuilding its entries needs and what an
+// event cannot carry: the destination the connection was acquired for, and the
+// host key its current link was verified against. Both are absent when this
+// helper does not know them — a connection named by a reconnect before anything
+// dialled has a destination and no key, and one whose destination predates this
+// bookkeeping has neither.
+type ConnectionSummary struct {
+	Connection ConnectionStateEvent `json:"connection"`
+	// Destination is the RESOLVED destination this connection was acquired for,
+	// exactly as the op that acquired it carried it. It is what a coordinator
+	// that restarted redials or re-uses, and it cannot be re-derived from the
+	// connection id: the id is a digest over the account, the credential
+	// principal and the route, and a digest is not a destination.
+	Destination *SSHDestination `json:"destination,omitempty"`
+	// HostKeyFingerprint is the SHA256 fingerprint of the host key the current
+	// link was verified against. The host's mode and the person's consent are
+	// both keyed by it (ADR-0034, ADR-727g63tr), so a coordinator that
+	// restarted cannot rebuild an entry without it.
+	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
 }
 
 // OpReconnect registers one supervisor-owned reconnect; progress is an event.

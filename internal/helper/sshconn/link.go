@@ -81,6 +81,22 @@ func newLink(pool *ssh.PooledConn, look func(ctx context.Context, done func()) e
 // Done is closed when the transport has ended.
 func (l *link) Done() <-chan struct{} { return l.done }
 
+// HostKeyFingerprint is the key the far side presented when this link was
+// verified. It is the machine's identity rather than the link's secret — the
+// server publishes it in its own handshake — and it is what a coordinator keys a
+// host's mode and a person's consent by (ADR-0034, ADR-727g63tr).
+//
+// It is here rather than on the plan because the plan is what the coordinator
+// ASKED for and this is what the host ANSWERED: only the party holding the
+// transport knows which key the handshake settled on, and a supervisor's facts
+// say so through this method (hostconn.Supervisor's optional capability).
+func (l *link) HostKeyFingerprint() string {
+	if l == nil || l.pool == nil {
+		return ""
+	}
+	return l.pool.Fingerprint()
+}
+
 // Dead reports whether the transport has ended, answered by the pool's own
 // marker: the library sets it when it closes the socket, inside its teardown
 // and before Wait returns, so admission never has to wait for this file's

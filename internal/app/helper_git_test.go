@@ -418,11 +418,43 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 	return &fakeProbeConn{uname: uname, fingerprint: p.fingerprint}, nil
 }
 
+func TestFakeLaneProviderConcurrentInstallLeasesShareOneFilesystem(t *testing.T) {
+	const callers = 32
+	provider := &fakeLaneProvider{}
+	start := make(chan struct{})
+	leases := make(chan ssh.HelperInstallConn, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Go(func() {
+			<-start
+			lease, err := provider.HelperInstallConn(t.Context(), "host.example", ssh.WithHostKeyPin("SHA256:approved"))
+			if err != nil {
+				t.Errorf("install lease: %v", err)
+				return
+			}
+			leases <- lease
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(leases)
+	for lease := range leases {
+		if lease != provider.install {
+			t.Error("concurrent install leases used different remote filesystems")
+		}
+	}
+	if provider.installPin != "SHA256:approved" {
+		t.Errorf("install pin = %q, want approved host key", provider.installPin)
+	}
+}
+
 func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	var cfg ssh.ConnectConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.installPin = cfg.HostKeyFingerprint
 	if p.installFail != nil {
 		return nil, p.installFail

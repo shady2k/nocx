@@ -813,6 +813,12 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 
 		s.mu.Lock()
 		if err != nil {
+			// Before the first lease, the first failed dial owns recovery.
+			// Once a lease is issued, only another admitted holder may
+			// replace its reconnect plan.
+			if s.planContext == nil {
+				s.plan, s.planContext = plan, context.WithoutCancel(ctx)
+			}
 			s.dialing = nil
 			close(flight)
 			// The carrier has already said what kind of failure this was

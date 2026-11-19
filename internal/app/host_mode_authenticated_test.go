@@ -60,7 +60,11 @@ func TestHostModeUsesAuthenticatedLeaseBeforePublishing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer opened.Session.Close()
+			defer func() {
+				if closeErr := opened.Session.Close(); closeErr != nil {
+					t.Errorf("close session: %v", closeErr)
+				}
+			}()
 			hosts, _ := installer.calls()
 			wantMode := proto.SSHMode(hostmode.Raw)
 			wantPublishes := 0
@@ -119,7 +123,11 @@ func TestHostModeFailedLeaseDeliversNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	if hosts, _ := installer.calls(); len(hosts) != 0 {
 		t.Fatalf("failed lease published for %v", hosts)
 	}
@@ -162,7 +170,11 @@ func TestHostKeyMismatchDuringSpawnRetriesOnlyRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	requests := spawner.sshSpawns()
 	if len(requests) != 2 {
 		t.Fatalf("requests = %d", len(requests))
@@ -199,7 +211,11 @@ func TestReopenedHostRecordUsesAuthenticatedKeyNotPriorMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	if hosts, _ := installer.calls(); len(hosts) != 0 {
 		t.Fatalf("published using prior host record: %v", hosts)
 	}
@@ -226,7 +242,11 @@ func TestHostKeyMismatchDuringPublishOpensRawPane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	request := spawner.sshSpawns()[0]
 	if request.Mode != proto.SSHMode(hostmode.Raw) || request.HostKeyFingerprint != "" || request.Lifecycle != nil {
 		t.Errorf("unsafe fallback: %+v", request)

@@ -31,7 +31,11 @@ func TestHostKeyPinRefusedWarmLeaseDoesNotReplaceRetainedPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer holder.Close()
+	defer func() {
+		if closeErr := holder.Close(); closeErr != nil {
+			t.Errorf("close lease: %v", closeErr)
+		}
+	}()
 	key := ssh.PooledSpec{Host: d.Host, Port: d.Port, User: d.User, Identity: wantRef}.Key()
 	release := s.carrier.RetainConnection(key, "auto")
 	defer release()
@@ -59,7 +63,11 @@ func TestHostKeyPinRefusedWarmLeaseDoesNotReplaceRetainedPlan(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer next.Close()
+				defer func() {
+					if closeErr := next.Close(); closeErr != nil {
+						t.Errorf("close lease: %v", closeErr)
+					}
+				}()
 				if f.connections() != 2 {
 					t.Fatalf("connections = %d, want 2", f.connections())
 				}
@@ -80,7 +88,11 @@ func TestHostKeyPinColdRefusalPreservesManualReconnectPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer holder.Close()
+	defer func() {
+		if closeErr := holder.Close(); closeErr != nil {
+			t.Errorf("close lease: %v", closeErr)
+		}
+	}()
 	key := ssh.PooledSpec{Host: d.Host, Port: d.Port, User: d.User, Identity: wantRef}.Key()
 	release := s.carrier.RetainConnection(key, "manual")
 	defer release()

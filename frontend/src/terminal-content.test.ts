@@ -1163,7 +1163,7 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
         const note =
           method === 'helper'
             ? `The helper method is in force for this host, but the host’s method was not saved. Permission to deploy the helper was saved and can be reused after a restart without asking again.`
-            : `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.`
+            : `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use the previously saved method (or Auto if none) and any permission already saved for this machine.`
         if (hostRecordSaved) expect(first.tab.pane.textContent).not.toContain(note)
         else await vi.waitFor(() => expect(first.tab.pane.textContent).toContain(note))
         const second = await mountTerminal(makeClipboard(), options, client)

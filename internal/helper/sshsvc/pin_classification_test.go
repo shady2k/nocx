@@ -38,7 +38,6 @@ func TestHostKeyPinHandshakeIsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -55,7 +54,12 @@ func TestHostKeyPinHandshakeIsTerminal(t *testing.T) {
 			_ = conn.Close()
 		}
 	}()
-	defer func() { _ = listener.Close(); <-done }()
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Errorf("close listener: %v", closeErr)
+		}
+		<-done
+	}()
 	host, portText, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)

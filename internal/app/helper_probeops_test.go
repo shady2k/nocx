@@ -279,7 +279,11 @@ func TestHelperProbeLeaseCarriesHostKeyPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Close()
+	defer func() {
+		if closeErr := lease.Close(); closeErr != nil {
+			t.Errorf("close probe lease: %v", closeErr)
+		}
+	}()
 	if helper.asked[0].HostKeyFingerprint != "SHA256:approved" {
 		t.Fatalf("pin = %q", helper.asked[0].HostKeyFingerprint)
 	}

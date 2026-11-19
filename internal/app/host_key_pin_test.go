@@ -97,7 +97,11 @@ func pinWireStand(t *testing.T, service *pinWireService) (*paneStand, *sshOverHe
 	daemon := startLocalEndpointWith(t, dir, stand.daemon.generation, spawner, spawner, service)
 	stand.opener.dir = daemon.dir
 	stand.daemon = daemon
-	return stand, &sshOverHelper{local: stand.opener, resolve: stand.opener.sshTargets.(*ssh.RealClient)}
+	resolver, ok := stand.opener.sshTargets.(*ssh.RealClient)
+	if !ok {
+		t.Fatalf("SSH target resolver = %T, want *ssh.RealClient", stand.opener.sshTargets)
+	}
+	return stand, &sshOverHelper{local: stand.opener, resolve: resolver}
 }
 
 func TestSFTPChannelCarriesApprovedHostKeyPin(t *testing.T) {
@@ -125,7 +129,11 @@ func TestBrokenConnectionBetweenHoldAndPublishWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	if len(service.leases) != 2 || service.leases[1].HostKeyFingerprint != "SHA256:script" {
 		t.Fatalf("publish lease pin lost: %+v", service.leases)
 	}
@@ -150,7 +158,11 @@ func TestHelperInstallMismatchOpensRawWithoutReusingHostMode(t *testing.T) {
 	if err != nil || !selected {
 		t.Fatalf("selected=%v err=%v", selected, err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	if hosts, _ := installer.calls(); len(hosts) != 0 {
 		t.Fatalf("published after refused install: %v", hosts)
 	}
@@ -175,7 +187,11 @@ func TestOneOpenPinsHomeAndSFTPBeforeReplacementFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Session.Close()
+	defer func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
+		}
+	}()
 	if len(service.leases) != 2 || service.leases[0].HostKeyFingerprint != "" || service.leases[1].HostKeyFingerprint != "SHA256:script" {
 		t.Fatalf("lease pins: %+v", service.leases)
 	}

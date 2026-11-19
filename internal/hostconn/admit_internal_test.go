@@ -16,7 +16,8 @@ func TestAdmitRefusalLeavesWarmSupervisorUntouched(t *testing.T) {
 	l.probeEvery.Store(int64(time.Minute))
 	before := s.state
 	refused := errors.New("caller refused")
-	p := Plan{Material: "B", Holds: HoldsPlainShell, ProbeInterval: time.Second,
+	p := Plan{
+		Material: "B", Holds: HoldsPlainShell, ProbeInterval: time.Second,
 		Admit: func(got Link) error {
 			if got != link {
 				t.Fatal("admission inspected another transport")
@@ -49,7 +50,8 @@ func TestAdmitColdDialFailurePreservesHeldPlan(t *testing.T) {
 	s, l, _ := closingStand(t)
 	s.live = nil
 	s.state = State{Kind: Reconnecting}
-	original := context.WithValue(context.Background(), struct{}{}, "A")
+	type contextKey struct{}
+	original := context.WithValue(context.Background(), contextKey{}, "A")
 	s.plan, s.planContext = Plan{Material: "A"}, original
 	refused := errors.New("handshake refused")
 	s.carrier = admissionCarrier{err: refused}
@@ -89,7 +91,8 @@ func TestAdmitSuccessfulWarmLeaseOwnsReconnectPlan(t *testing.T) {
 	s, l, link := closingStand(t)
 	s.plan = Plan{Material: "A"}
 	checked := false
-	ctx := context.WithValue(context.Background(), struct{}{}, "B")
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "B")
 	lease, err := s.Acquire(ctx, Plan{Material: "B", Holds: HoldsPlainShell, ProbeInterval: time.Second, Admit: func(got Link) error {
 		checked = got == link && l.holders == 1 && l.plainShells == 0 && s.plan.Material == "A"
 		return nil

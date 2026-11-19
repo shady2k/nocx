@@ -287,7 +287,7 @@ func TestTheGenerationRidesTheEventAndMovesWithTheLinkNotTheStage(t *testing.T) 
 
 	// AND A NEW LINK: the transport is closed under its holder — the
 	// reconnect's first move — and the shell's next acquire dials afresh.
-	if _, err := stand.client.Disconnect(ctx, destination); err != nil {
+	if _, err = stand.client.Disconnect(ctx, destination); err != nil {
 		t.Fatalf("disconnect: %v", err)
 	}
 	waittest.WaitFor(t, "the reconnecting observation", func() bool {

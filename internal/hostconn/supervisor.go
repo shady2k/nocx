@@ -13,6 +13,7 @@ package hostconn
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,6 +106,22 @@ type Facts struct {
 	// reader can refuse an observation older than the last one it applied.
 	Key Key
 	Seq uint64
+	// Generation is which LINK this observation is about, counting the
+	// supervisor's links from one.
+	//
+	// IT IS ON THE OBSERVATION AND NOT DERIVED FROM THE TRANSITIONS, and that is
+	// the whole of why it exists: a reader is handed the newest observation and
+	// nothing else, so a `reconnecting` that was followed by `connected` before
+	// it read arrives as one `connected` — the same fact whether the transport
+	// survived the stall or was replaced under it. A coordinator that must drop
+	// what belongs to a link it has lost (a far helper's answer, an attempt's
+	// result) needs the number the answer was taken against, and only the party
+	// holding the link can say it.
+	//
+	// It moves when a link is retired and when a new one is admitted, and it
+	// stands still for every other transition: a stall and its recovery are one
+	// transport.
+	Generation uint64
 	// State is the machine's point, with an empty Opening stage resolved to
 	// the first stage an attempt reaches.
 	State State
@@ -119,6 +136,16 @@ type Facts struct {
 	// PlainShells is how many shells would end if this connection closed: its
 	// own and those on every connection dialled through it.
 	PlainShells int
+	// HostKeyFingerprint is the SHA256 fingerprint of the host key the CURRENT
+	// link was verified against, empty while there is no link.
+	//
+	// It rides the facts because a coordinator that restarts must rebuild what
+	// it keeps per connection — the host's mode and the person's consent are
+	// both keyed by this value (ADR-0034, ADR-727g63tr) — and because the
+	// supervisor's link is the only place a verified key exists at all. It
+	// names the machine, never a secret: a fingerprint is what the server
+	// publishes in its own handshake.
+	HostKeyFingerprint string
 	// Measured reports whether a probe has answered on this connection, and
 	// RoundTrip and Slow are that measurement and its grade.
 	Measured  bool
@@ -231,7 +258,10 @@ func (s *Supervisor) factsLocked() Facts {
 		// is a shape the wire does not admit.
 		state.Stage = StageResolve
 	}
-	f := Facts{Key: s.key, Seq: s.seq, State: state, PlainShells: s.plainShellsLocked()}
+	f := Facts{
+		Key: s.key, Seq: s.seq, Generation: s.generation, State: state,
+		PlainShells: s.plainShellsLocked(), HostKeyFingerprint: s.hostKeyFingerprintLocked(),
+	}
 	if s.stateSince != 0 {
 		f.StateFor = time.Duration(now - s.stateSince)
 	}
@@ -241,6 +271,37 @@ func (s *Supervisor) factsLocked() Facts {
 	}
 	f.Measured, f.RoundTrip, f.Slow = s.haveObs, s.lastObs.RoundTrip, s.slow
 	return f
+}
+
+// hostKeyFingerprintLocked is the key the current link was verified against.
+//
+// THE FINGERPRINT IS THE LINK'S AND NOT THE SUPERVISOR'S, so it is read off the
+// link rather than stored: a carrier that has no host key (an in-memory one in a
+// test) says nothing, and a link that is being replaced must not keep vouching
+// for the key of the transport it replaced. The capability is asserted rather
+// than declared on Link because not every carrier has a host key at all — a
+// plain `ssh` process, or the harness's memory link — and a Link method every
+// implementation must answer with "" would be a vocabulary for an absence.
+//
+// Called with the mutex held.
+func (s *Supervisor) hostKeyFingerprintLocked() string {
+	if s.live == nil {
+		return ""
+	}
+	if fingerprinted, ok := s.live.link.(interface{ HostKeyFingerprint() string }); ok {
+		return fingerprinted.HostKeyFingerprint()
+	}
+	return ""
+}
+
+// Facts answers the connection's current observation. It is the same value a
+// subscription is handed, without holding one — the reader here is a
+// coordinator rebuilding its entries from the connection table rather than
+// waiting for something to change (nocx-oalo1.6.2).
+func (s *Supervisor) Facts() Facts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.factsLocked()
 }
 
 // lookAnswered records that a look-only dial answered, for the stall in
@@ -270,6 +331,12 @@ type Manager struct {
 	attempt AttemptRunner
 	mu      sync.Mutex
 	sups    map[Key]*Supervisor
+	// allWatchers are the readers of the WHOLE table — the coordinator that
+	// asked for every connection (nocx-oalo1.6.2). They are here rather than in
+	// a second registry because the supervisor table is the connection table:
+	// one map, one place a new connection must be announced, and no way for the
+	// two to disagree about which connections exist.
+	allWatchers map[*connectionsWatcher]struct{}
 }
 
 // Option configures a Manager.
@@ -375,16 +442,140 @@ func (m *Manager) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 // why it outlives every transport the key ever carried.
 func (m *Manager) Supervisor(key Key) *Supervisor {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	sup := m.sups[key]
-	if sup == nil {
-		sup = &Supervisor{
-			key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m,
-			changed: make(chan struct{}), attemptRunner: m.attempt,
-		}
-		m.sups[key] = sup
+	if sup != nil {
+		m.mu.Unlock()
+		return sup
+	}
+	sup = &Supervisor{
+		key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m,
+		changed: make(chan struct{}), attemptRunner: m.attempt,
+	}
+	m.sups[key] = sup
+	watchers := make([]*connectionsWatcher, 0, len(m.allWatchers))
+	for w := range m.allWatchers {
+		watchers = append(watchers, w)
+	}
+	m.mu.Unlock()
+	// OUTSIDE THE MANAGER'S MUTEX, because the subscription delivers the new
+	// connection's current observation on the spot and the reader it delivers to
+	// is free to come back here — a dial that answers its first stage by asking
+	// another connection's supervisor would otherwise deadlock the registry.
+	for _, w := range watchers {
+		w.attach(sup)
 	}
 	return sup
+}
+
+// Supervisors answers every connection this manager holds, one entry per
+// supervisor, in a stable order (by the connection's public id).
+//
+// IT IS THE CONNECTION TABLE, which is the supervisor's and not the pool's: a
+// pool entry exists only while it carries a transport, and what a coordinator
+// that restarts must learn about is exactly the connections that exist without
+// one of its panes (design §5.10, scenario 7). The order is the id's so two
+// answers to the same question are the same document.
+func (m *Manager) Supervisors() []*Supervisor {
+	m.mu.Lock()
+	out := make([]*Supervisor, 0, len(m.sups))
+	for _, sup := range m.sups {
+		out = append(out, sup)
+	}
+	m.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].key.ID() < out[j].key.ID() })
+	return out
+}
+
+// WatchConnections registers fn for every connection this manager holds and for
+// every one it creates afterwards, delivering each existing connection's
+// current observation before it returns.
+//
+// IT IS ONE SUBSCRIPTION FOR THE WHOLE TABLE, and the delivery is per connection
+// on that connection's own goroutine — the same path Watch gives a pane — so a
+// slow reader of one connection does not delay the others and the supervisor is
+// never called under the manager's mutex. The barrier is Watch's own: after
+// WatchConnections returns, the reader has the state every connection is in,
+// which is what lets the op that asks for this answer the list it just
+// subscribed to from the same facts.
+func (m *Manager) WatchConnections(fn func(Facts)) (stop func()) {
+	if fn == nil {
+		return func() {}
+	}
+	w := &connectionsWatcher{fn: fn, subs: make(map[*Supervisor]func())}
+	m.mu.Lock()
+	if m.allWatchers == nil {
+		m.allWatchers = make(map[*connectionsWatcher]struct{})
+	}
+	m.allWatchers[w] = struct{}{}
+	current := make([]*Supervisor, 0, len(m.sups))
+	for _, sup := range m.sups {
+		current = append(current, sup)
+	}
+	m.mu.Unlock()
+	for _, sup := range current {
+		w.attach(sup)
+	}
+	return func() {
+		m.mu.Lock()
+		delete(m.allWatchers, w)
+		m.mu.Unlock()
+		w.stop()
+	}
+}
+
+// connectionsWatcher is one reader of the whole table. attach is idempotent per
+// supervisor, and a stop that races an attachment ends the subscription it just
+// installed rather than leaving it behind.
+type connectionsWatcher struct {
+	mu   sync.Mutex
+	fn   func(Facts)
+	subs map[*Supervisor]func()
+	done bool
+}
+
+func (w *connectionsWatcher) attach(sup *Supervisor) {
+	w.mu.Lock()
+	if w.done {
+		w.mu.Unlock()
+		return
+	}
+	if _, ok := w.subs[sup]; ok {
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+	// Watch delivers the current observation synchronously, so this must be
+	// called with no lock held: the reader runs here.
+	leave := sup.Watch(func(f Facts) {
+		w.mu.Lock()
+		done := w.done
+		w.mu.Unlock()
+		if !done {
+			w.fn(f)
+		}
+	})
+	w.mu.Lock()
+	if w.done {
+		w.mu.Unlock()
+		leave()
+		return
+	}
+	w.subs[sup] = leave
+	w.mu.Unlock()
+}
+
+func (w *connectionsWatcher) stop() {
+	w.mu.Lock()
+	w.done = true
+	leaves := make([]func(), 0, len(w.subs))
+	for _, leave := range w.subs {
+		leaves = append(leaves, leave)
+	}
+	w.subs = map[*Supervisor]func(){}
+	w.mu.Unlock()
+	for _, leave := range leaves {
+		leave()
+	}
 }
 
 // Supervisor is one connection's life and state.

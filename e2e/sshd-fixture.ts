@@ -55,6 +55,17 @@ export interface SshdFixture {
   /** A known_hosts line for the host key this spawn minted. */
   knownHosts: string
   /**
+   * The gate this fixture watches for a kill cue: writing a new string there
+   * SIGKILLs the helper daemon installed under its account, with the SSH
+   * transport untouched, and the fixture answers with `HELPERKILLED=<pid>` per
+   * process signalled and `HELPERKILLDONE=<n>`.
+   *
+   * It is `killFarHelper`'s business in `far-helper-faults.ts`, which is where
+   * the protocol is stated and where a spec should look; this field is only the
+   * path the far side announced.
+   */
+  helperKillFile: string
+  /**
    * Every machine-readable line the server has printed so far, in arrival
    * order — the handshake lines above and everything after READY.
    *
@@ -135,6 +146,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
   let userKey = ''
   let rsaKey = ''
   let knownHosts = ''
+  let helperKillFile = ''
   const lines: string[] = []
   // A line can split across pipe chunks; hold the partial tail so READY is
   // never missed (the same hazard nocxify-journey.spec.ts records).
@@ -155,6 +167,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
       if (trimmed.startsWith('USERKEY=')) userKey = trimmed.slice(8)
       if (trimmed.startsWith('RSAKEY=')) rsaKey = trimmed.slice(7)
       if (trimmed.startsWith('KNOWNHOSTS=')) knownHosts = trimmed.slice(11)
+      if (trimmed.startsWith('HELPERKILL=')) helperKillFile = trimmed.slice(11)
       if (trimmed === 'READY' && addr && userKey && knownHosts) {
         clearTimeout(timer)
         const [host, port] = addr.split(':')
@@ -168,6 +181,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
           // no RSA key", which is every caller that predates `-rsa-key`.
           rsaKey: rsaKey === '' ? undefined : rsaKey,
           knownHosts,
+          helperKillFile,
           lines: () => lines,
         })
       }

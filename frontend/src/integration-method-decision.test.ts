@@ -4,7 +4,7 @@ import { HelperConsentAskQueue, type HelperConsentAskRequest } from './host-key-
 import { RpcError } from './dispatcher'
 
 const evidence = { host: 'host.example:22', fingerprint: 'SHA256:abc', hostKey: null }
-const note = `The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.`
+const note = `The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.`
 
 function setup() {
   let active: HelperConsentAskRequest | null = null
@@ -33,7 +33,12 @@ describe('decideIntegrationMethod', () => {
       const state = setup()
       const setIntegrationMethod = vi
         .fn()
-        .mockResolvedValue({ ...evidence, method: 'script', hostRecordSaved })
+        .mockResolvedValue({
+          ...evidence,
+          method: 'script',
+          hostRecordSaved,
+          helperConsentSaved: false,
+        })
       await decideIntegrationMethod(state.request, 'script', {
         ...state,
         profileClient: { setIntegrationMethod },
@@ -52,6 +57,27 @@ describe('decideIntegrationMethod', () => {
       expect(state.showToast).not.toHaveBeenCalled()
     })
   }
+
+  it('reports durable helper consent separately from a mode that was not saved', async () => {
+    const state = setup()
+    const setIntegrationMethod = vi.fn().mockResolvedValue({
+      ...evidence,
+      method: 'helper',
+      hostRecordSaved: false,
+      helperConsentSaved: true,
+    })
+    await decideIntegrationMethod(state.request, 'helper', {
+      ...state,
+      profileClient: { setIntegrationMethod },
+    })
+    const expected = {
+      method: 'helper',
+      note: 'The helper method is in force for this host, but the host’s method was not saved. Permission to deploy the helper was saved and can be reused after a restart without asking again.',
+    }
+    expect(await state.answer).toEqual(expected)
+    expect(await state.queuedAnswer).toEqual(expected)
+    expect(state.showToast).not.toHaveBeenCalled()
+  })
 
   it('leaves the ask open and clears busy on any RPC failure without exposing RPC text', async () => {
     const state = setup()

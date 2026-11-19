@@ -1981,7 +1981,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // The answer's own sentence, which the pane head shows when the host record
   // could not be written — the method is in force for this run either way.
   'connections.helperAsk.notSaved':
-    'The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.',
+    'The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.',
+  'connections.helperAsk.methodNotSavedConsentSaved':
+    'The helper method is in force for this host, but the host’s method was not saved. Permission to deploy the helper was saved and can be reused after a restart without asking again.',
   'connections.helperAsk.applyFailed':
     'Could not apply the integration method for {host}. The choice was not saved.',
   'connections.import.sshConfigPath': 'SSH config ({path})',

@@ -14,7 +14,11 @@
  */
 export interface ConnectionsSetIntegrationMethodResult {
   /**
-   * Whether the host record was saved. False means the answer applies only until restart.
+   * Whether this answer saved permission to deploy the helper. True for a successful helper choice, even if the host method could not be saved; false for raw or script, which do not change consent.
+   */
+  helperConsentSaved: boolean
+  /**
+   * Whether the chosen host method was saved. False means the method is retained only for this run; a separately saved helper grant can still be reused after restart.
    */
   hostRecordSaved: boolean
   /**

@@ -5,10 +5,14 @@
   "description": "Result of the connections.setIntegrationMethod JSON-RPC method: which fingerprint was answered, with which method — so the renderer's retry of the open is keyed on the identity the backend actually wrote rather than its own copy of the request. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["fingerprint", "method", "hostRecordSaved"],
+  "required": ["fingerprint", "method", "hostRecordSaved", "helperConsentSaved"],
   "properties": {
+    "helperConsentSaved": {
+      "description": "Whether this answer saved permission to deploy the helper. True for a successful helper choice, even if the host method could not be saved; false for raw or script, which do not change consent.",
+      "type": "boolean"
+    },
     "hostRecordSaved": {
-      "description": "Whether the host record was saved. False means the answer applies only until restart.",
+      "description": "Whether the chosen host method was saved. False means the method is retained only for this run; a separately saved helper grant can still be reused after restart.",
       "type": "boolean"
     },
     "fingerprint": {

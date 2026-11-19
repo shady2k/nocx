@@ -1534,9 +1534,10 @@ func TestConnectionsSetIntegrationMethod_DTOConformsToContract(t *testing.T) {
 		for _, saved := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/saved=%t", method, saved), func(t *testing.T) {
 				dto := integrationMethodResult{
-					Fingerprint:     "SHA256:abc",
-					Method:          method,
-					HostRecordSaved: saved,
+					Fingerprint:        "SHA256:abc",
+					Method:             method,
+					HostRecordSaved:    saved,
+					HelperConsentSaved: method == "helper",
 				}
 				raw, err := json.Marshal(dto)
 				if err != nil {
@@ -1576,10 +1577,14 @@ func TestConnectionsSetIntegrationMethod_OverTheWireConformsToContract(t *testin
 			}
 			validateJSON(t, schema, envelope.Result, "connections.setIntegrationMethod result over the wire")
 			var result struct {
-				HostRecordSaved *bool `json:"hostRecordSaved"`
+				HostRecordSaved    *bool `json:"hostRecordSaved"`
+				HelperConsentSaved *bool `json:"helperConsentSaved"`
 			}
 			if err := json.Unmarshal(envelope.Result, &result); err != nil {
 				t.Fatal(err)
+			}
+			if result.HelperConsentSaved == nil || !*result.HelperConsentSaved {
+				t.Fatalf("want helperConsentSaved=true: %s", resp)
 			}
 			if result.HostRecordSaved == nil || *result.HostRecordSaved != saved {
 				t.Fatalf("want hostRecordSaved=%t: %s", saved, resp)

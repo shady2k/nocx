@@ -17,9 +17,10 @@ interface IntegrationMethodDecisionDependencies {
  * plus the machine's helper grant when the method is helper. THE ANSWER
  * STANDS WHETHER OR NOT IT COULD BE SAVED, because the open that asked goes
  * on with it — a write the backend could not persist comes back as a result
- * with hostRecordSaved false, and the pane head says the host will be asked
- * again after a restart. Any other failure never applied the answer: the ask
- * stays open for another try and a toast reports it without backend text.
+ * with separate hostRecordSaved and helperConsentSaved outcomes. The pane
+ * head explains that a durable grant can outlive an unsaved method. Any other
+ * failure never applied the answer: the ask stays open for another try and a
+ * toast reports it without backend text.
  */
 export async function decideIntegrationMethod(
   request: HelperConsentAskRequest,
@@ -40,10 +41,15 @@ export async function decideIntegrationMethod(
       request.evidence.host,
     )
     if (result.hostRecordSaved === false) {
-      note = t(
-        'connections.helperAsk.notSaved',
-        'The method is in force for this host, but the host’s record was not saved, so nocx will ask again after a restart.',
-      )
+      note = result.helperConsentSaved
+        ? t(
+            'connections.helperAsk.methodNotSavedConsentSaved',
+            'The helper method is in force for this host, but the host’s method was not saved. Permission to deploy the helper was saved and can be reused after a restart without asking again.',
+          )
+        : t(
+            'connections.helperAsk.notSaved',
+            'The method is in force for this host, but the host’s method was not saved. After a restart, nocx will use Auto and any permission already saved for this machine.',
+          )
     }
   } catch {
     showToast({

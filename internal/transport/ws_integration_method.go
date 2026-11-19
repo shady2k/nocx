@@ -74,10 +74,13 @@ type integrationMethodParams struct {
 // integrationMethodResult confirms which fingerprint was answered, with which
 // method — so the renderer's retry is keyed on the identity the backend
 // actually acted on rather than trusting its own copy of the request back.
+// Mode persistence and a helper grant are separate outcomes: a durable grant
+// may outlive an unsaved mode and be reused by auto after a restart.
 type integrationMethodResult struct {
-	Fingerprint     string `json:"fingerprint"`
-	Method          string `json:"method"`
-	HostRecordSaved bool   `json:"hostRecordSaved"`
+	Fingerprint        string `json:"fingerprint"`
+	Method             string `json:"method"`
+	HostRecordSaved    bool   `json:"hostRecordSaved"`
+	HelperConsentSaved bool   `json:"helperConsentSaved"`
 }
 
 type integrationMethodHandlers struct {
@@ -91,7 +94,7 @@ type integrationMethodHandlers struct {
 // connect-time ask.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.setIntegrationMethod","params":{"fingerprint":"SHA256:MKEj…","host":"1.2.3.4:22","profileId":"ssh-1","method":"script"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","hostRecordSaved":true}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…","method":"script","hostRecordSaved":true,"helperConsentSaved":false}}
 func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	var params integrationMethodParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -134,7 +137,7 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 
 	// A failed host-record write still applies the answer for this run.
 	// This is success with hostRecordSaved=false, so the renderer can retry
-	// the open and explain that the host will ask again after restart.
+	// the open and explain the separate mode and grant outcomes.
 	if recordErr != nil {
 		// The detail is the developer's (a document store that could not
 		// write); the person gets the sentence that tells them what it means
@@ -144,9 +147,10 @@ func (h integrationMethodHandlers) handle(ctx context.Context, req jsonrpcReques
 	}
 
 	_ = h.r.TryResult(req.ID, mustMarshal(integrationMethodResult{
-		Fingerprint:     params.Fingerprint,
-		Method:          params.Method,
-		HostRecordSaved: recordErr == nil,
+		Fingerprint:        params.Fingerprint,
+		Method:             params.Method,
+		HostRecordSaved:    recordErr == nil,
+		HelperConsentSaved: mode == hostmode.Helper,
 	}))
 }
 

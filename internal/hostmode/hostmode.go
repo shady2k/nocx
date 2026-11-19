@@ -131,6 +131,12 @@ type Store struct {
 	mu     sync.Mutex
 	modes  map[string]Mode
 	loaded bool
+	// watchers are the parties told about a change: the far helper's registry
+	// is the first (ADR-727g63tr decision 2's decision revision), and the map
+	// is keyed by a minted id because a caller may subscribe twice with two
+	// closures over the same state.
+	watchers    map[uint64]func()
+	nextWatcher uint64
 }
 
 // NewStore creates a store persisting under docName in docStore. Callers MUST
@@ -193,21 +199,35 @@ func (s *Store) record(fingerprint string, mode Mode, durable bool) error {
 		return fmt.Errorf("host mode: %q is not an integration method", mode)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.loadLocked()
+	previous, recorded := s.modes[fingerprint]
 	next := make(map[string]Mode, len(s.modes)+1)
 	for k, v := range s.modes {
 		next[k] = v
 	}
 	next[fingerprint] = mode
 	werr := s.writeDoc(next)
+	changed := !recorded || previous != mode
 	if werr != nil {
 		if !durable {
 			s.modes = next
 		}
+		watchers := s.watchersLocked()
+		s.mu.Unlock()
+		// A durable write that failed changed nothing; a non-durable one kept
+		// the answer for this run and that IS the change the subscribers need
+		// to see.
+		if changed && !durable {
+			notify(watchers)
+		}
 		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, werr)
 	}
 	s.modes = next
+	watchers := s.watchersLocked()
+	s.mu.Unlock()
+	if changed {
+		notify(watchers)
+	}
 	return nil
 }
 
@@ -229,24 +249,87 @@ func (s *Store) PersistMany(fingerprints []string, mode Mode) error {
 		}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.loadLocked()
 	next := make(map[string]Mode, len(s.modes)+len(fingerprints))
 	for k, v := range s.modes {
 		next[k] = v
 	}
+	changed := false
 	for _, fp := range fingerprints {
+		previous, recorded := next[fp]
 		if mode == Auto {
+			if recorded {
+				changed = true
+			}
 			delete(next, fp)
-		} else {
-			next[fp] = mode
+			continue
 		}
+		if !recorded || previous != mode {
+			changed = true
+		}
+		next[fp] = mode
 	}
 	if err := s.writeDoc(next); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("%w: %s: %v", ErrNotSaved, s.docName, err)
 	}
 	s.modes = next
+	watchers := s.watchersLocked()
+	s.mu.Unlock()
+	if changed {
+		notify(watchers)
+	}
 	return nil
+}
+
+// Watch registers fn to be called after every change this store records: a
+// mode set, a mode replaced, a record removed, and an answer that could not be
+// persisted but was kept for this run. It answers the function that ends the
+// subscription; calling that twice is harmless.
+//
+// THE CALLBACK IS MADE OUTSIDE THE STORE'S LOCK, and that is load-bearing: the
+// far helper's registry re-reads the mode from this store in the callback, so a
+// notification made under the mutex would deadlock the party the notification
+// exists for.
+func (s *Store) Watch(fn func()) (stop func()) {
+	if s == nil || fn == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	if s.watchers == nil {
+		s.watchers = make(map[uint64]func())
+	}
+	s.nextWatcher++
+	id := s.nextWatcher
+	s.watchers[id] = fn
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.watchers, id)
+			s.mu.Unlock()
+		})
+	}
+}
+
+// watchersLocked snapshots the subscribers so the notification can run after
+// the lock is released. Called with the mutex held.
+func (s *Store) watchersLocked() []func() {
+	if len(s.watchers) == 0 {
+		return nil
+	}
+	out := make([]func(), 0, len(s.watchers))
+	for _, fn := range s.watchers {
+		out = append(out, fn)
+	}
+	return out
+}
+
+func notify(watchers []func()) {
+	for _, fn := range watchers {
+		fn()
+	}
 }
 
 // writeDoc persists the whole set atomically (storage.DocumentStore's

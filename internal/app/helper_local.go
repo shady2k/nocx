@@ -44,10 +44,12 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/diagnostics"
+	"github.com/shady2k/nocx/internal/farhelper"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -401,6 +403,11 @@ type localHelperOpener struct {
 	// modes is the same host record the registry reads, resolved again from
 	// the authenticated lease before this opener makes any remote changes.
 	modes *hostmode.Store
+	// farConnections is the connection source internal/farhelper reads: this
+	// opener is where a pane learns its connection id and the resolved
+	// destination, and the helper's per-connection events are where the state
+	// arrives. Nil is a legitimate wiring for a test and then nothing is fed.
+	farConnections *farHelperConnections
 
 	mu sync.Mutex
 	// installed is what App.Start put on this machine, and dir is the
@@ -1187,6 +1194,13 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	publishFailure := shellintegration.PublishFailureNone
 	endPublish := diagnostics.Stage(ctx, diagnostics.StagePublish)
 	cfg.Remote.HostKeyFingerprint = authenticatedFingerprint
+	if o.farConnections != nil && authenticatedFingerprint != "" {
+		o.farConnections.Observe(farhelper.Connection{
+			ID:                 connectionID,
+			Destination:        ssh.WireDestination(target),
+			HostKeyFingerprint: authenticatedFingerprint,
+		})
+	}
 	perr := o.publishForPane(ctx, cfg)
 	endPublish(perr)
 	if perr != nil {
@@ -1689,6 +1703,7 @@ func (o *localHelperOpener) reattachedConn(sid session.ID) (localSessionConn, bo
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
 	installed, dir, existing, reverse, paneConns := o.installed, o.dir, o.client, o.reverse, o.paneConns
+	farConns := o.farConnections
 	installFailure := o.installFailure
 	o.mu.Unlock()
 
@@ -1733,6 +1748,9 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		OnConnectionEvent: func(source string, ev proto.ConnectionStateEvent) {
 			if paneConns != nil {
 				paneConns.ApplyFrom(source, ev)
+			}
+			if farConns != nil {
+				farConns.Apply(source, ev)
 			}
 		},
 	})
@@ -2110,6 +2128,22 @@ func (o *localHelperOpener) bindSSHConnection(ctx context.Context, cfg session.C
 	id, err := client.BindConnection(ctx, ssh.WireDestination(target), cfg.PaneID, policy)
 	if err != nil {
 		return sshPaneBinding{}, fmt.Errorf("name the ssh pane's connection: %w", err)
+	}
+	// THE CONNECTION AND THE DESTINATION TOGETHER, which is the pair the far
+	// helper's decision is keyed by. The fingerprint is the pin the open was
+	// built with when it has one; the authenticated value arrives a few lines
+	// later in openSSH and updates this same entry.
+	if o.farConnections != nil {
+		fingerprint := ""
+		if cfg.Remote != nil {
+			fingerprint = hostKeyPinFromOptions(session.SSHOptionsFromConfig(cfg.Remote))
+		}
+		o.farConnections.Observe(farhelper.Connection{
+			ID:                 id,
+			Destination:        ssh.WireDestination(target),
+			HostKeyFingerprint: fingerprint,
+			State:              hostconn.Opening,
+		})
 	}
 	binding := sshPaneBinding{client: client, connectionID: id}
 	if driver := o.paneConnections(); driver != nil {

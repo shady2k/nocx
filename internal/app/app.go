@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
@@ -171,6 +172,11 @@ type App struct {
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
 	helperRegistry *helperRegistry
+	// farHelpers is the per-connection far-helper axis (ADR-727g63tr
+	// decision 2): the background decision, the client Git and Files will
+	// share, and the redial policy. Held here because Shutdown must close it
+	// before the local helper's connection it rides.
+	farHelpers *farhelper.Registry
 	// helperArtifacts is where the helper binaries come from. It is held
 	// rather than reached for because THIS MACHINE is one of the hosts they
 	// are installed on (L1): the remote path takes it through the registry,
@@ -1034,6 +1040,34 @@ func New(opts ...Option) (*App, error) {
 	helperReg.tools = overHelper
 	helperReg.modes = hostModes
 	helperReg.registry = sess
+	// THE FAR HELPER'S AXIS (ADR-727g63tr decision 2). One registry for the
+	// process, deciding per connection in the background; it publishes nothing
+	// yet (stage C carries the axis on pane.connection), and it owns the far
+	// helper client Git and Files will share. Its connection source is fed by
+	// the two places the coordinator learns about a connection: the pane's
+	// bind and the helper's connection-state events.
+	farConns := newFarHelperConnections()
+	localOpener.farConnections = farConns
+	farHelpers := farhelper.New(farhelper.Config{
+		Connections: farConns,
+		Modes:       hostModes,
+		Consents:    helperConsent,
+		Probe:       &farHelperProbe{local: localOpener, source: helperartifacts.DefaultSource},
+		Install:     &farHelperInstall{local: localOpener, over: overHelper, source: helperartifacts.DefaultSource},
+		Dial:        &farHelperDial{over: overHelper, log: slogger},
+		Log:         log.NewSlogAdapter(slogger),
+	})
+	// The axis is a backend fact a surface will draw in stage C; until then it
+	// is at least visible in the log, which is the same rule every soft degrade
+	// here follows: a state nobody can read is a state nobody can debug.
+	farAxisLog := log.WithLogger(context.Background(), log.NewSlogAdapter(slogger))
+	farHelpers.Watch(func(connectionID string, status farhelper.Status) {
+		log.From(farAxisLog).Debug("far helper axis changed",
+			"connection", connectionID,
+			"state", status.State,
+			"reason", status.Reason,
+			"action", status.Action)
+	})
 	localOpener.registry = sess
 	// The one seam the transport asks for every destination. hostedOpeners is
 	// a dispatch and nothing else: this machine's opener answers for a local
@@ -1618,7 +1652,7 @@ func New(opts ...Option) (*App, error) {
 		// closes every live helper channel on a machine before
 		// shell.footprint.helperUninstall removes its install directory —
 		// no helper may be running out of a directory being deleted.
-		transport.WithHelperChannelCloser(helperReg),
+		transport.WithHelperChannelCloser(farHelperCloser{far: farHelpers, reg: helperReg}),
 		// The helper-removal capability (remote-helper design D25):
 		// *ssh.RealClient satisfies transport.RemoteHelperUninstaller
 		// without an adapter — the signatures are identical. The
@@ -2811,6 +2845,7 @@ func New(opts ...Option) (*App, error) {
 		workerClose:             workerClose,
 		checkoutSweeper:         checkoutSweeper,
 		helperRegistry:          helperReg,
+		farHelpers:              farHelpers,
 		helperArtifacts:         localHelperArtifacts(o),
 		localHelper:             localOpener,
 		sessionReconciler:       sessionReconciler,
@@ -3473,6 +3508,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	// coordinator leaving, not the sessions ending.
 	if a.toolSurfaceCloser != nil {
 		a.toolSurfaceCloser.Close()
+	}
+	// The far helper's clients ride the local helper's connection, so they
+	// close before it does.
+	if a.farHelpers != nil {
+		a.farHelpers.Close()
 	}
 	if a.localHelper != nil {
 		a.localHelper.close()

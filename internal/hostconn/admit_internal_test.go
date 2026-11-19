@@ -42,8 +42,10 @@ type admissionCarrier struct {
 	err  error
 }
 
-func (admissionCarrier) Name() string                                          { return "admission" }
-func (admissionCarrier) Capabilities() Capabilities                            { return Capabilities{} }
+func (admissionCarrier) Name() string { return "admission" }
+
+func (admissionCarrier) Capabilities() Capabilities { return Capabilities{} }
+
 func (c admissionCarrier) Dial(context.Context, Plan, EventSink) (Link, error) { return c.link, c.err }
 
 func TestAdmitColdDialFailurePreservesHeldPlan(t *testing.T) {

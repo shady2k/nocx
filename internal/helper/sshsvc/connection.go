@@ -66,7 +66,7 @@ func (s *Service) connection(ctx context.Context, p proto.ConnectionParams) (pro
 	if err := validateIdentity(p.Destination.Identity); err != nil {
 		return proto.ConnectionResult{}, err
 	}
-	key := connectionKey(p.Destination)
+	key := s.rememberDestination(p.Destination)
 	if conn, _ := host.ConnectionFrom(ctx).(*host.Host); conn != nil {
 		s.ensureConnectionWatch(conn, key)
 		if p.PaneID != "" {
@@ -74,6 +74,46 @@ func (s *Service) connection(ctx context.Context, p proto.ConnectionParams) (pro
 		}
 	}
 	return proto.ConnectionResult{ConnectionID: key.ID()}, nil
+}
+
+// connections answers every connection this helper holds, and subscribes this
+// coordinator to the ones that appear later (nocx-oalo1.6.2; design §5.10,
+// scenario 7).
+//
+// THE ANSWER AND THE SUBSCRIPTION ARE ONE ACT, and that is what makes a restart
+// race-free: the list is read from the same table the subscription was installed
+// on, so a connection that appears between the two is not lost — it is announced
+// by the subscription — and one that appears before it is in the list. A caller
+// that forgot to subscribe, or subscribed a moment later, would have a window in
+// which a tunnel appeared and was never reported.
+func (s *Service) connections(ctx context.Context) (proto.ConnectionsResult, error) {
+	conn, _ := host.ConnectionFrom(ctx).(*host.Host)
+	if conn == nil {
+		return proto.ConnectionsResult{}, errNoAuthChannel
+	}
+	s.ensureConnectionsWatch(conn)
+	facts := s.client.ConnectionFacts()
+	out := proto.ConnectionsResult{Connections: make([]proto.ConnectionSummary, 0, len(facts))}
+	for _, f := range facts {
+		summary := proto.ConnectionSummary{
+			Connection:         connectionEvent(f),
+			HostKeyFingerprint: f.HostKeyFingerprint,
+		}
+		if destination, known := s.destinationOf(f.Key.ID()); known {
+			summary.Destination = &destination
+		}
+		out.Connections = append(out.Connections, summary)
+	}
+	return out, nil
+}
+
+// destinationOf is the resolved destination this helper was asked to acquire a
+// connection for, if it was ever asked with one.
+func (s *Service) destinationOf(connectionID string) (proto.SSHDestination, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	destination, ok := s.destinations[connectionID]
+	return destination, ok
 }
 
 // connectionWatchKey identifies one observation subscription: the coordinator
@@ -119,6 +159,13 @@ func (w *connectionWatch) close() func() {
 func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 	k := connectionWatchKey{host: conn, connection: key.ID()}
 	s.mu.Lock()
+	if s.connectionsWatches[conn] != nil {
+		// THIS COORDINATOR ALREADY READS THE WHOLE TABLE, which covers every
+		// connection including the ones created later. A second subscription for
+		// this one would put each observation on the wire twice.
+		s.mu.Unlock()
+		return
+	}
 	if s.connectionWatches == nil {
 		s.connectionWatches = make(map[connectionWatchKey]*connectionWatch)
 	}
@@ -134,25 +181,72 @@ func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
 	s.mu.Unlock()
 
 	stop := s.client.WatchConnection(key, func(f hostconn.Facts) {
-		err := conn.SendNotification(proto.Notification{
-			Service: proto.ServiceSSH,
-			Event:   proto.EventConnectionState,
-			Params:  connectionEvent(f),
-		})
-		if err == nil {
-			return
+		if err := s.sendConnectionEvent(conn, f); err != nil {
+			s.log.Debug("ssh: a connection observation could not be sent",
+				"connection", key.ID(), "error", err)
+			s.forgetConnectionWatch(k, holder)
 		}
-		s.log.Debug("ssh: a connection observation could not be sent",
-			"connection", key.ID(), "error", err)
-		s.forgetConnectionWatch(k, holder)
 	})
 	holder.set(stop)
 	close(holder.ready)
 }
 
+// ensureConnectionsWatch starts this coordinator's subscription to EVERY
+// connection this helper holds, if it has none — the `connections` op's other
+// half (nocx-oalo1.6.2).
+//
+// ONE SUBSCRIPTION PER COORDINATOR CONNECTION, not one per connection: the
+// manager's table announces connections it creates later, which is the whole
+// point — a tunnel that appears a second after the answer must not need a second
+// request to be visible.
+func (s *Service) ensureConnectionsWatch(conn *host.Host) {
+	s.mu.Lock()
+	if s.connectionsWatches == nil {
+		s.connectionsWatches = make(map[*host.Host]*connectionWatch)
+	}
+	if existing, ok := s.connectionsWatches[conn]; ok {
+		s.mu.Unlock()
+		<-existing.ready
+		return
+	}
+	holder := &connectionWatch{ready: make(chan struct{})}
+	s.connectionsWatches[conn] = holder
+	s.mu.Unlock()
+
+	stop := s.client.WatchConnections(func(f hostconn.Facts) {
+		if err := s.sendConnectionEvent(conn, f); err != nil {
+			s.log.Debug("ssh: a connection observation could not be sent",
+				"connection", f.Key.ID(), "error", err)
+			s.forgetConnectionsWatch(conn, holder)
+		}
+	})
+	holder.set(stop)
+	close(holder.ready)
+}
+
+// sendConnectionEvent puts one observation on this coordinator's wire, and
+// answers the write's error. One function for both subscriptions, because a
+// wire that refuses one refuses the other: the frame is the same frame.
+func (s *Service) sendConnectionEvent(conn *host.Host, f hostconn.Facts) error {
+	return conn.SendNotification(proto.Notification{
+		Service: proto.ServiceSSH,
+		Event:   proto.EventConnectionState,
+		Params:  connectionEvent(f),
+	})
+}
+
 // forgetConnectionWatch ends and removes one subscription, if it is still the
 // one installed (a failed write races nothing, but a replacement must not be
 // stopped by its predecessor's error).
+//
+// IT RELEASES ONLY THE HOLDS RIDING THIS CONNECTION, and that is the whole
+// difference a failed write makes. A pane's hold is its interest in ONE
+// connection; releasing a hold on another connection because this one's event
+// could not be written would end a connection a person's pane is still riding —
+// and the driver then reads `ended`, drops the pane's binding and reports a
+// connection the person never lost. What a failed write does say is that nobody
+// is listening for THIS connection, which is exactly the set of holds this
+// subscription covered.
 func (s *Service) forgetConnectionWatch(k connectionWatchKey, holder *connectionWatch) {
 	s.mu.Lock()
 	if s.connectionWatches[k] != holder {
@@ -162,7 +256,7 @@ func (s *Service) forgetConnectionWatch(k connectionWatchKey, holder *connection
 	delete(s.connectionWatches, k)
 	var releases []func()
 	for pane, held := range s.paneHolds {
-		if pane.host == k.host {
+		if pane.host == k.host && held.key.ID() == k.connection {
 			releases = append(releases, held.release)
 			delete(s.paneHolds, pane)
 		}
@@ -170,6 +264,51 @@ func (s *Service) forgetConnectionWatch(k connectionWatchKey, holder *connection
 	s.mu.Unlock()
 	for _, release := range releases {
 		release()
+	}
+	if stop := holder.close(); stop != nil {
+		stop()
+	}
+}
+
+// forgetConnectionsWatch ends this coordinator's subscription to the whole
+// table, when it is still the one installed.
+//
+// IT RELEASES EVERYTHING THAT COORDINATOR HELD, and unlike a per-connection
+// failure that is the honest reading rather than a broad one: the subscription
+// covered every connection, so a write that fails is a coordinator that is gone,
+// and nothing it asked for has a reader. The per-connection watches it also has
+// (installed before this op, when a helper was older than the table) end with
+// it: they write to the same connection that just refused.
+func (s *Service) forgetConnectionsWatch(conn *host.Host, holder *connectionWatch) {
+	s.mu.Lock()
+	if s.connectionsWatches[conn] != holder {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.connectionsWatches, conn)
+	var releases []func()
+	for pane, held := range s.paneHolds {
+		if pane.host == conn {
+			releases = append(releases, held.release)
+			delete(s.paneHolds, pane)
+		}
+	}
+	var stops []func()
+	for k, watch := range s.connectionWatches {
+		if k.host != conn {
+			continue
+		}
+		delete(s.connectionWatches, k)
+		if stop := watch.close(); stop != nil {
+			stops = append(stops, stop)
+		}
+	}
+	s.mu.Unlock()
+	for _, release := range releases {
+		release()
+	}
+	for _, stop := range stops {
+		stop()
 	}
 	if stop := holder.close(); stop != nil {
 		stop()
@@ -190,11 +329,31 @@ func (s *Service) disconnect(p proto.DisconnectParams) (proto.DisconnectResult, 
 	if err := validateIdentity(p.Destination.Identity); err != nil {
 		return proto.DisconnectResult{}, err
 	}
-	key := connectionKey(p.Destination)
+	key := s.rememberDestination(p.Destination)
 	return proto.DisconnectResult{
 		ConnectionID: key.ID(),
 		Closed:       s.client.Disconnect(key),
 	}, nil
+}
+
+// rememberDestination derives the connection key a destination's dial will use
+// and keeps the destination under it, so the `connections` op can answer a
+// coordinator that restarted with something it can redial.
+//
+// IT ANSWERS THE KEY, so every caller that needs one gets it from here and the
+// derivation has exactly one spelling. Recording happens where the key is
+// derived rather than in a store of its own: a destination that reached a
+// connection and one that reached the table are the same destination, and a
+// second call site for the record would be a second chance to forget.
+func (s *Service) rememberDestination(d proto.SSHDestination) connkey.Key {
+	key := connectionKey(d)
+	s.mu.Lock()
+	if s.destinations == nil {
+		s.destinations = make(map[string]proto.SSHDestination)
+	}
+	s.destinations[key.ID()] = d
+	s.mu.Unlock()
+	return key
 }
 
 // connectionKey derives the pool/supervisor identity a destination's dial will
@@ -225,6 +384,7 @@ func connectionEvent(f hostconn.Facts) proto.ConnectionStateEvent {
 	ev := proto.ConnectionStateEvent{
 		ConnectionID: f.Key.ID(),
 		Seq:          f.Seq,
+		Generation:   f.Generation,
 		State:        f.State.Kind.String(),
 		StateMs:      f.StateFor.Milliseconds(),
 		PlainShells:  f.PlainShells,
@@ -311,6 +471,12 @@ func (s *Service) ConnectionClosed(conn *host.Host) {
 			if watch.stop != nil {
 				stops = append(stops, watch.stop)
 			}
+		}
+	}
+	if watch, ok := s.connectionsWatches[conn]; ok {
+		delete(s.connectionsWatches, conn)
+		if stop := watch.close(); stop != nil {
+			stops = append(stops, stop)
 		}
 	}
 	for key, hold := range s.paneHolds {

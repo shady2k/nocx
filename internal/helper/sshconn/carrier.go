@@ -117,6 +117,35 @@ func (c *Carrier) WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func
 	return c.conns.Supervisor(key).Watch(fn)
 }
 
+// ConnectionFacts answers every connection this helper's supervisors hold, in
+// the table's own stable order.
+//
+// It is the connection TABLE and not the pool's: a pool entry exists only while
+// it carries a transport, and what a coordinator that restarted must learn about
+// is exactly the connections that exist without one of its panes (design §5.10,
+// scenario 7).
+func (c *Carrier) ConnectionFacts() []hostconn.Facts {
+	supers := c.conns.Supervisors()
+	out := make([]hostconn.Facts, 0, len(supers))
+	for _, sup := range supers {
+		out = append(out, sup.Facts())
+	}
+	return out
+}
+
+// WatchConnections registers fn for every connection this helper holds and every
+// one it creates afterwards, delivering each existing connection's current
+// observation before it returns.
+//
+// One subscription for the whole table rather than one per connection: the
+// coordinator that asks for it is asking "what do you hold for me", and a
+// subscription per connection would have to be renewed as connections appear —
+// which is the window a connection created a second after the answer would be
+// lost in.
+func (c *Carrier) WatchConnections(fn func(hostconn.Facts)) func() {
+	return c.conns.WatchConnections(fn)
+}
+
 // Disconnect implements the explicit ssh.disconnect operation. Manual pane
 // reconnection instead uses RegisterReconnect, which closes and registers atomically.
 func (c *Carrier) Disconnect(key connkey.Key) bool {

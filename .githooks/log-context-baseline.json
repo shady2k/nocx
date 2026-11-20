@@ -828,6 +828,11 @@
       "text": "return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}"
     },
     {
+      "file": "internal/helper/sshsvc/channel.go",
+      "line": 731,
+      "text": "Code: proto.ErrCodeHostKeyPinMismatch, Message: pinned.Error(),"
+    },
+    {
       "file": "internal/helper/sshsvc/forward.go",
       "line": 271,
       "text": "f.finish(s, \"the helper could not write to the coordinator: \"+err.Error())"

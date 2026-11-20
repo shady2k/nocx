@@ -1,6 +1,6 @@
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import ts from 'typescript'
@@ -29,6 +29,15 @@ const { helperKillAnswer, killFarHelper } = await import(
 interface FakeHost {
   helperKillFile: string
   lines(): readonly string[]
+}
+
+/** A directory of this test's own, removed when the test ends. `killFarHelper`
+ *  publishes its cue beside the gate, so without this every run of a test
+ *  that touches one would leave that directory in the machine's temp. */
+function tempDir(t: TestContext): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  return dir
 }
 
 /** A fixture-shaped host: the printed lines are a live array, exactly as
@@ -85,8 +94,8 @@ test('a cue that killed nothing answers with its own count and failure', () => {
   })
 })
 
-test('killFarHelper arms the gate and answers the far host’s cue', async () => {
-  const host = fakeHost(mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-')))
+test('killFarHelper arms the gate and answers the far host’s cue', async (t) => {
+  const host = fakeHost(tempDir(t))
   const stop = fakeFarHost(host, () => [4100])
   try {
     assert.deepEqual(await killFarHelper(host), [4100])
@@ -95,8 +104,8 @@ test('killFarHelper arms the gate and answers the far host’s cue', async () =>
   }
 })
 
-test('a second kill is a second cue, with its own answer', async () => {
-  const host = fakeHost(mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-')))
+test('a second kill is a second cue, with its own answer', async (t) => {
+  const host = fakeHost(tempDir(t))
   let next = 4200
   const stop = fakeFarHost(host, () => [next++])
   try {
@@ -107,8 +116,8 @@ test('a second kill is a second cue, with its own answer', async () => {
   }
 })
 
-test('a cue is published beside the gate and renamed onto it, never truncated in place', async () => {
-  const host = fakeHost(mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-')))
+test('a cue is published beside the gate and renamed onto it, never truncated in place', async (t) => {
+  const host = fakeHost(tempDir(t))
   const stop = fakeFarHost(host, () => [4300])
   const real = writeFileSync
   const written: string[] = []
@@ -136,8 +145,8 @@ test('a cue is published beside the gate and renamed onto it, never truncated in
   assert.match(readFileSync(host.helperKillFile, 'utf8'), /^kill-/)
 })
 
-test('a far host that found nothing to kill is a failure, not a silent success', async () => {
-  const host = fakeHost(mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-')))
+test('a far host that found nothing to kill is a failure, not a silent success', async (t) => {
+  const host = fakeHost(tempDir(t))
   const stop = fakeFarHost(host, () => [])
   try {
     await assert.rejects(killFarHelper(host), /found no helper daemon to kill/)
@@ -146,7 +155,7 @@ test('a far host that found nothing to kill is a failure, not a silent success',
   }
 })
 
-test('a fixture that announced no gate path cannot be asked to kill anything', async () => {
-  const host = fakeHost(mkdtempSync(path.join(tmpdir(), 'nocx-far-helper-')), false)
+test('a fixture that announced no gate path cannot be asked to kill anything', async (t) => {
+  const host = fakeHost(tempDir(t), false)
   await assert.rejects(killFarHelper(host), /announced no HELPERKILL path/)
 })

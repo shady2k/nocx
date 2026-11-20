@@ -65,7 +65,9 @@ func TestMain(m *testing.M) {
 		// The fixture itself: the flags are this binary's own argv, and run()
 		// parses them exactly as main() does.
 		if err := run(); err != nil {
-			os.Stderr.WriteString("e2e-sshd: " + err.Error() + "\n")
+			// The exit status carries the failure; a diagnostic that could
+			// not be written has nowhere else to go.
+			_, _ = os.Stderr.WriteString("e2e-sshd: " + err.Error() + "\n")
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -307,9 +309,14 @@ func TestFixture_KillsOnCueAndSaysSoOnItsOwnStdout(t *testing.T) {
 
 	// os.Args[0] is this test binary, and fixtureModeEnv makes TestMain call
 	// run() — the function main() calls — with these flags.
+	//
+	// TMPDIR is its own because run() mints the users' private keys under
+	// os.TempDir() (writePrivateKey): left inherited, every run of this test
+	// would leave them in the machine's temp directory. A directory of the
+	// test's own is removed with the test.
 	//nolint:gosec // this test's own binary, in fixture mode, by this test's decision
 	cmd := exec.Command(os.Args[0], "-helper-kill-dir", gateDir)
-	cmd.Env = append(os.Environ(), fixtureModeEnv+"=1", "HOME="+home)
+	cmd.Env = append(os.Environ(), fixtureModeEnv+"=1", "HOME="+home, "TMPDIR="+t.TempDir())
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

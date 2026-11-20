@@ -188,9 +188,9 @@ type Connection struct {
 	// Slow is the transport's quality grade. C9 forbids installing while it is
 	// true.
 	Slow bool
-	// Shells is how many shells are open on the connection. C9 forbids
-	// installing before the first one: a connection opened only for a probe or
-	// a tunnel is not a reason to write to somebody's host.
+	// Shells is PlainShells: C9 gates writing the helper until a sound
+	// transport has a shell. A completed install is read-only and may be used
+	// without a shell.
 	Shells int
 	// Seq orders observations of one connection. Zero means the source has no
 	// ordering to offer, and the observation is applied as the newest.
@@ -232,6 +232,8 @@ type Prober interface {
 // Installer writes the helper artifact for the probed platform and answers
 // where it landed and which build it is.
 type Installer interface {
+	// Find is read-only and is not gated by C9; only a required upload is gated.
+	Find(ctx context.Context, target Target, platform Platform) (Installed, bool, error)
 	Install(ctx context.Context, target Target, platform Platform) (Installed, error)
 }
 

@@ -271,11 +271,25 @@ func InstalledBinary(dir string) string {
 // The verification read itself stays, exactly once, where the bytes are
 // unproven: immediately after this call wrote them and BEFORE the marker.
 //
-// Nothing in the layout is a claim about a PROCESS. There is no pid file and
-// no lock: a complete install says the bytes are there, never that a helper is
-// running from them, so an install followed by a start that fails is still
-// exactly as reusable as one followed by a start that succeeds. Liveness has
-// one authority and it is the endpoint socket.
+// Find reports the completed install for this artifact without modifying the remote filesystem.
+func Find(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform) (binaryPath, contentHash string, found bool, err error) {
+	_, contentHash, err = src.Artifact(p)
+	if err != nil {
+		return "", "", false, err
+	}
+	if err = ctx.Err(); err != nil {
+		return "", "", false, err
+	}
+	dir := installDir(home, p, contentHash)
+	binaryPath = InstalledPath(home, p, contentHash)
+	found, err = isComplete(fs, dir)
+	if err != nil {
+		return "", "", false, err
+	}
+	return binaryPath, contentHash, found, nil
+}
+
+// Ensure writes the artifact if Find did not find a complete install.
 func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform, progress Progress, opts ...Option) (binaryPath, contentHash string, err error) {
 	var options installOptions
 	for _, opt := range opts {
@@ -283,17 +297,7 @@ func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p
 	}
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperInstall)
 	defer scope.Complete()
-	data, contentHash, err := src.Artifact(p)
-	if err != nil {
-		return "", "", err
-	}
-	if err = ctx.Err(); err != nil {
-		return "", "", err
-	}
-	dir := installDir(home, p, contentHash)
-	binary := InstalledPath(home, p, contentHash)
-
-	complete, err := isComplete(fs, dir)
+	binary, contentHash, complete, err := Find(ctx, fs, src, home, p)
 	if err != nil {
 		return "", "", err
 	}
@@ -307,6 +311,11 @@ func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p
 		return "", "", err
 	}
 
+	data, contentHash, err := src.Artifact(p)
+	if err != nil {
+		return "", "", err
+	}
+	dir := installDir(home, p, contentHash)
 	// Incomplete: absent or partial (no marker). Remove whatever is there and
 	// reinstall once — the D6 reinstall.
 	if err = removeTree(fs, dir); err != nil {

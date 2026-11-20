@@ -207,7 +207,7 @@ func (e *entry) readInputsLocked() {
 // step reads the record the fingerprint keys.
 func (e *entry) apply(c Connection) {
 	e.mu.Lock()
-	if c.Seq != 0 && e.conn.Seq != 0 && c.Seq <= e.conn.Seq {
+	if c.Seq != 0 && e.conn.Seq != 0 && c.Seq <= e.conn.Seq && c.HostKeyFingerprint == e.conn.HostKeyFingerprint {
 		e.mu.Unlock()
 		return
 	}
@@ -441,9 +441,15 @@ func inputVerdict(mode hostmode.Mode, consentKnown bool, answer consent.Answer) 
 	case hostmode.Helper:
 		// The one mode that may carry the helper; consent decides below.
 	case hostmode.Auto:
-		// Not an answer: the ask writes the record, and this package never
-		// asks (ADR-0068).
-		return ReasonConsentPending, ActionNone, false
+		// Auto delegates mode choice to the recorded consent, matching
+		// consent.forMachine: a granted answer enables the helper.
+		if !consentKnown {
+			return ReasonConsentPending, ActionNone, false
+		}
+		if answer != consent.Granted {
+			return ReasonConsentDenied, ActionNone, false
+		}
+		return "", ActionNone, true
 	default:
 		// An unrecognised record fails closed, as hostmode.Mode's own gate
 		// does: nothing is written to a host whose answer nobody understands.
@@ -480,6 +486,10 @@ func (e *entry) plan() (bool, time.Duration) {
 	if !e.connectedLocked() || e.phase == phaseServing {
 		return false, 0
 	}
+	now := time.Duration(e.r.cfg.Clock.Now())
+	if e.nextAttemptAt != 0 && now < e.nextAttemptAt {
+		return false, e.nextAttemptAt - now
+	}
 	if e.installed == nil {
 		// The probe is not gated by C9; only the install is. A probe already
 		// answered for this generation and revision is reused, so a shut gate
@@ -491,10 +501,6 @@ func (e *entry) plan() (bool, time.Duration) {
 			return true, 0
 		}
 		return true, 0
-	}
-	now := time.Duration(e.r.cfg.Clock.Now())
-	if e.nextAttemptAt != 0 && now < e.nextAttemptAt {
-		return false, e.nextAttemptAt - now
 	}
 	return true, 0
 }
@@ -536,6 +542,26 @@ func (e *entry) probeAndInstall(generation, rev uint64) {
 		return
 	}
 	if !e.checkInputs(rev) || !e.stillCurrent(generation, rev) {
+		return
+	}
+	installed, found, err := e.r.cfg.Install.Find(workCtx, target, platform)
+	if err != nil {
+		e.finishReadError(generation, rev)
+		return
+	}
+	if !e.checkInputs(rev) || !e.stillCurrent(generation, rev) {
+		return
+	}
+	if found {
+		e.mu.Lock()
+		if e.phase != phaseAbsent && !e.frozen && e.conn.Generation == generation && e.rev == rev && e.connectedLocked() {
+			e.platform = &platform
+			e.probedGen = generation
+			e.probedRev = rev
+			e.installed = &installed
+		}
+		e.mu.Unlock()
+		e.notify()
 		return
 	}
 	e.mu.Lock()
@@ -674,6 +700,20 @@ func (e *entry) clientLost(peer *client.Client) {
 	e.notify()
 }
 
+func (e *entry) finishReadError(generation, rev uint64) {
+	if !e.stillCurrent(generation, rev) {
+		return
+	}
+	e.mu.Lock()
+	if e.ctx.Err() == nil && e.conn.Generation == generation && e.rev == rev && e.connectedLocked() {
+		e.phase = phaseDeciding
+		e.nextAttemptAt = time.Duration(e.r.cfg.Clock.Now()) + redialDelay(e.attempt)
+		e.attempt++
+	}
+	e.mu.Unlock()
+	e.notify()
+}
+
 func (e *entry) finishProbeError(generation, rev uint64, err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
@@ -718,6 +758,10 @@ func (e *entry) finishDialError(generation, rev uint64, err error) {
 	served := e.everServed
 	e.mu.Unlock()
 	if !current {
+		return
+	}
+	if served {
+		e.markBroken()
 		return
 	}
 	switch {

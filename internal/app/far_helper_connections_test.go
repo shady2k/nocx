@@ -347,3 +347,43 @@ func dialInProcessHelper(t *testing.T, logger *slog.Logger, service helperhost.S
 	})
 	return client
 }
+
+func TestReviewAuthenticatedFingerprintReachesTheRegistry(t *testing.T) {
+	source := newFarHelperConnections()
+	var observed farhelper.Connection
+	source.Watch(func(c farhelper.Connection) { observed = c })
+	// bind without a pin, then the authenticated connection event, then the
+	// open path's Observe carrying the verified host key.
+	source.Observe(farhelper.Connection{ID: "review", Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, State: hostconn.Opening})
+	source.Apply("", proto.ConnectionStateEvent{ConnectionID: "review", Seq: 1, Generation: 1, State: proto.ConnectionConnected})
+	source.Observe(farhelper.Connection{ID: "review", Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, HostKeyFingerprint: "SHA256:x"})
+	if observed.HostKeyFingerprint != "SHA256:x" || observed.Seq != 1 || observed.State != hostconn.Connected {
+		t.Fatalf("registry observation = %+v, want authenticated fingerprint on connected seq 1", observed)
+	}
+}
+
+func TestFarHelperEndedEventCannotBeResurrectedByOlderCallback(t *testing.T) {
+	source := newFarHelperConnections()
+	source.Observe(farhelper.Connection{ID: "race", Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, State: hostconn.Opening})
+	source.Apply("", proto.ConnectionStateEvent{ConnectionID: "race", Seq: 6, Generation: 2, State: proto.ConnectionEnded})
+	source.Apply("", proto.ConnectionStateEvent{ConnectionID: "race", Seq: 5, Generation: 2, State: proto.ConnectionConnected})
+	if got := farHelperListed(source)["race"]; got.State != hostconn.Ended || got.Seq != 6 {
+		t.Fatalf("race record = %+v, want ended seq 6", got)
+	}
+}
+
+func TestFarHelperCloserUnfreezesOnSessionCloseFailure(t *testing.T) {
+	source := newFarHelperConnections()
+	source.Observe(farhelper.Connection{ID: "d25", Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, HostKeyFingerprint: "SHA256:d25", State: hostconn.Connected, Generation: 1})
+	registry := farhelper.New(farhelper.Config{Connections: source, Log: farHelperTestLogger(t)})
+	defer registry.Close()
+	helperReg := &helperRegistry{closing: map[string]struct{}{"SHA256:d25": {}}}
+	closer := farHelperCloser{far: registry, reg: helperReg}
+	if err := closer.CloseHelpersFor(context.Background(), "SHA256:d25"); err == nil {
+		t.Fatal("expected close-in-progress error")
+	}
+	status, ok := registry.Axis("d25")
+	if !ok || status.Reason == farhelper.ReasonHelperLost {
+		t.Fatalf("axis remained frozen after failed close: %+v", status)
+	}
+}

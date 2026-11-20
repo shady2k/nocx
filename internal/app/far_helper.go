@@ -84,6 +84,36 @@ type farHelperInstall struct {
 	source deploy.ArtifactSource
 }
 
+func (i *farHelperInstall) Find(ctx context.Context, target farhelper.Target, platform farhelper.Platform) (farhelper.Installed, bool, error) {
+	stream, err := i.over.openChannelFor(ctx, proto.OpenChannelParams{
+		HostKeyFingerprint: target.HostKeyFingerprint,
+		Destination:        target.Destination,
+		Kind:               proto.ChannelSFTP,
+		AcceptOnTrust:      false,
+	})
+	if err != nil {
+		return farhelper.Installed{}, false, classifyFarHelperRefusal(err)
+	}
+	conn, err := ssh.NewHelperInstallConn(ctx, stream)
+	if err != nil {
+		_ = stream.Close()
+		return farhelper.Installed{}, false, fmt.Errorf("install channel: %w", classifyFarHelperRefusal(err))
+	}
+	defer func() { _ = conn.Close() }()
+	home, err := conn.Home()
+	if err != nil {
+		return farhelper.Installed{}, false, fmt.Errorf("remote home: %w", err)
+	}
+	binary, hash, found, err := deploy.Find(ctx, installFS{conn}, i.source, home, deploy.Platform{GOOS: platform.GOOS, GOARCH: platform.GOARCH})
+	if err != nil {
+		return farhelper.Installed{}, false, classifyFarHelperRefusal(err)
+	}
+	if !found {
+		return farhelper.Installed{}, false, nil
+	}
+	return farhelper.Installed{Dir: path.Dir(binary), Generation: hash}, true, nil
+}
+
 func (i *farHelperInstall) Install(ctx context.Context, target farhelper.Target, platform farhelper.Platform) (farhelper.Installed, error) {
 	stream, err := i.over.openChannelFor(ctx, proto.OpenChannelParams{
 		HostKeyFingerprint: target.HostKeyFingerprint,
@@ -277,6 +307,7 @@ func (h *sshOverHelper) openLaneFor(ctx context.Context, params proto.LaneParams
 // helper that held them is gone, and a decision that kept riding its client
 // would serve a dead transport.
 type farHelperConnections struct {
+	dispatch sync.Mutex
 	mu       sync.Mutex
 	conns    map[string]farhelper.Connection
 	watchers map[uint64]func(farhelper.Connection)
@@ -312,6 +343,8 @@ func (f *farHelperConnections) Sync(ctx context.Context, table farHelperTable) e
 	if f == nil || table == nil {
 		return nil
 	}
+	f.dispatch.Lock()
+	defer f.dispatch.Unlock()
 	f.adoptInstance(table.InstanceID())
 	summaries, err := table.Connections(ctx)
 	if err != nil {
@@ -423,6 +456,8 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 	if f == nil || c.ID == "" {
 		return
 	}
+	f.dispatch.Lock()
+	defer f.dispatch.Unlock()
 	f.mu.Lock()
 	if previous, known := f.conns[c.ID]; known {
 		if c.Destination.Host != "" {
@@ -451,6 +486,8 @@ func (f *farHelperConnections) Apply(source string, ev proto.ConnectionStateEven
 	if f == nil || ev.ConnectionID == "" {
 		return
 	}
+	f.dispatch.Lock()
+	defer f.dispatch.Unlock()
 	if !f.acceptInstance(source) {
 		return
 	}
@@ -629,7 +666,11 @@ type farHelperCloser struct {
 
 func (c farHelperCloser) CloseHelpersFor(ctx context.Context, fingerprint string) error {
 	c.far.CloseFor(fingerprint)
-	return c.reg.CloseHelpersFor(ctx, fingerprint)
+	if err := c.reg.CloseHelpersFor(ctx, fingerprint); err != nil {
+		c.far.FinishFor(fingerprint)
+		return err
+	}
+	return nil
 }
 
 func (c farHelperCloser) FinishHelpersFor(fingerprint string) {

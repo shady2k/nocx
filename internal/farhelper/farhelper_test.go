@@ -254,6 +254,9 @@ func (p *fakeProber) count() int {
 
 type fakeInstaller struct {
 	mu           sync.Mutex
+	findCalls    int
+	found        bool
+	findErr      error
 	calls        int
 	result       farhelper.Installed
 	err          error
@@ -270,6 +273,13 @@ func newFakeInstaller() *fakeInstaller {
 		entered:  make(chan struct{}, 64),
 		finished: make(chan struct{}, 64),
 	}
+}
+
+func (i *fakeInstaller) Find(context.Context, farhelper.Target, farhelper.Platform) (farhelper.Installed, bool, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.findCalls++
+	return i.result, i.found, i.findErr
 }
 
 func (i *fakeInstaller) Install(ctx context.Context, target farhelper.Target, _ farhelper.Platform) (farhelper.Installed, error) {
@@ -298,6 +308,12 @@ func (i *fakeInstaller) count() int {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.calls
+}
+
+func (i *fakeInstaller) findCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.findCalls
 }
 
 func (i *fakeInstaller) installedTargets() []farhelper.Target {
@@ -1152,4 +1168,58 @@ func TestModeAndConsentReturningToHelperDecideAgain(t *testing.T) {
 		h.consents.Set(machine, consent.Granted)
 		h.want("c1", farhelper.StateServing, "", farhelper.ActionNone)
 	})
+}
+
+func TestABuildAlreadyOnTheHostServesWithoutAShell(t *testing.T) {
+	for _, slow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow=%v", slow), func(t *testing.T) {
+			h := newHarness(t)
+			h.granted(machine)
+			h.install.found = true
+			c := connected("installed", 1)
+			c.Shells = 0
+			c.Slow = slow
+			h.conns.Put(c)
+			h.want("installed", farhelper.StateServing, "", farhelper.ActionNone)
+			if got := h.install.count(); got != 0 {
+				t.Fatalf("Install calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAFindErrorDoesNotInstall(t *testing.T) {
+	h := newHarness(t)
+	h.granted(machine)
+	h.install.findErr = errors.New("read failed")
+	h.conns.Put(connected("find-error", 1))
+	waittest.WaitFor(t, "Find attempted", func() bool { return h.install.findCount() > 0 })
+	status, ok := h.reg.Axis("find-error")
+	if !ok || status.State == farhelper.StateUnavailable && status.Reason == farhelper.ReasonInstallFailed {
+		t.Fatalf("Find failure became install failure: %+v", status)
+	}
+	if h.install.count() != 0 {
+		t.Fatalf("Install calls = %d, want 0", h.install.count())
+	}
+}
+
+func TestReviewFailedHelloAfterServingRedials(t *testing.T) {
+	h := newHarness(t)
+	h.granted(machine)
+	h.conns.Put(connected("failed-hello", 1))
+	h.want("failed-hello", farhelper.StateServing, "", farhelper.ActionNone)
+	peer := h.dial.lastPeer(t)
+	peer.Lose()
+	h.want("failed-hello", farhelper.StateUnavailable, farhelper.ReasonHelperLost, farhelper.ActionRefresh)
+	h.dial.mu.Lock()
+	h.dial.err = fmt.Errorf("%w: sentinel", farhelper.ErrExecForbidden)
+	h.dial.mu.Unlock()
+	h.clock.Advance(time.Second)
+	waittest.WaitFor(t, "failed redial", func() bool { return h.dial.count() == 2 })
+	select {
+	case <-h.dial.returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed hello did not return")
+	}
+	h.want("failed-hello", farhelper.StateUnavailable, farhelper.ReasonHelperLost, farhelper.ActionRefresh)
 }

@@ -96,30 +96,6 @@
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
       "symbol": "mutationFailureMessage",
-      "target": "includes:\"belongs to session\"",
-      "count": 1,
-      "reason": "the Git panel picks a sentence, and a retry, by matching a refusal's prose. nocx-oalo1.6 replaces the whole mapper with the backend's answer"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "includes:\"cannot amend\"",
-      "count": 1,
-      "reason": "one of the Git panel's prose-matched refusals: nothing to amend. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "includes:\"conflicted\"",
-      "count": 1,
-      "reason": "one of the Git panel's prose-matched refusals: an unresolved merge. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
       "target": "includes:\"disconnected\"",
       "count": 1,
       "reason": "the Git panel's connection-loss sentence, matched from an error's prose. nocx-oalo1.6: the panel draws the backend's answer, and nocx-oalo1.5 gives it one condition to draw"
@@ -128,25 +104,9 @@
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
       "symbol": "mutationFailureMessage",
-      "target": "includes:\"handle released\"",
-      "count": 1,
-      "reason": "one of the Git panel's prose-matched refusals: the repository's handle was released. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
       "target": "includes:\"not available\"",
       "count": 1,
       "reason": "one of the Git panel's prose-matched refusals. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "includes:\"nothing is staged\"",
-      "count": 1,
-      "reason": "one of the Git panel's prose-matched refusals, and the one a person can act on. nocx-oalo1.6 replaces it with a typed refusal"
     },
     {
       "rule": "nocx/no-error-text-match",

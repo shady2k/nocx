@@ -115,9 +115,15 @@ interface GitBinding {
   toplevel: string
 }
 
-/** A rejected mutation's account — rendered inline, never a silent no-op. */
-interface GitMutationError {
+/** A rejected mutation's account — rendered inline, never a silent no-op.
+ *  `message` is the backend's own words (git's output, or the domain error's
+ *  sentence); `reason` is the typed refusal the wire carried beside them
+ *  (contracts/git.error.schema.json) and is what the panel decides by. Null
+ *  when the failure carried no reason at all — an invocation failure, a lost
+ *  socket, a bare -32602 — which is a different fact from any refusal. */
+export interface GitMutationError {
   message: string
+  reason: GitError['reason'] | null
 }
 
 /** A failed commit's account: git's own output (D11) and whether the
@@ -277,13 +283,30 @@ interface ScopeCtx {
   epoch: number
 }
 
+/** The typed reason a git error payload carries (contracts/git.error.schema.json),
+ *  or null when the payload is not one. Shape first: a bare code is never the
+ *  answer, because -32602 is shared by every request-shaped refusal and an
+ *  invocation failure (-32603) carries no data at all. */
+function gitErrorReasonOf(data: unknown): GitError['reason'] | null {
+  if (typeof data !== 'object' || data === null) return null
+  return (data as Partial<GitError>).reason ?? null
+}
+
+/** The typed reason a failed git call carried, or null when it carried none.
+ *  This is what the panel decides a refusal's sentence by (nocx-oalo1.6.3):
+ *  the message rides beside it as prose and decides nothing. */
+function gitErrorReason(e: unknown): GitError['reason'] | null {
+  if (!(e instanceof RpcError)) return null
+  return gitErrorReasonOf(e.data)
+}
+
 /** unknownBinding — the wire's -32602 mapped by the git transport from
  *  git.ErrUnknownBinding (ws_git.go). The answer to "the binding is
  *  gone", and the trigger for re-resolving through git.open.
  *
  *  The code alone cannot say that: six distinct domain refusals share
  *  -32602 (gitErrorCode maps them all to invalid-params), so the transport
- *  now carries data.reason on the wire (contracts/git.error.schema.json,
+ *  carries data.reason on the wire (contracts/git.error.schema.json,
  *  nocx-bpqil) and THIS is the only reason the store re-resolves on. A
  *  conflicted stage-all, an amend on an unborn branch or a nothing-to-
  *  commit refusal is a repository state a person should read — re-opening
@@ -294,16 +317,7 @@ function isUnknownBinding(e: unknown): boolean {
   // The discriminator is the schema-declared vocabulary
   // (contracts/git.error.schema.json): only the fixed reason separates an
   // unknown binding from the other five refusals that share the code.
-  return isGitErrorReason(e.data, 'unknown-binding')
-}
-
-/** True when `data` is a git error payload (contracts/git.error.schema.json)
- *  carrying exactly the given reason: the payload is checked by shape, then
- *  the fixed reason discriminates. */
-function isGitErrorReason(data: unknown, reason: GitError['reason']): boolean {
-  if (typeof data !== 'object' || data === null) return false
-  const d = data as GitError
-  return d.reason === reason
+  return gitErrorReasonOf(e.data) === 'unknown-binding'
 }
 
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
@@ -1050,7 +1064,7 @@ export function createGitStore(
     // "stage succeeds, the status that follows it fails"): the panel says
     // the view is stale rather than reverting the row.
     setStatusStale(true)
-    setMutationError({ message: messageOf(e) })
+    setMutationError({ message: messageOf(e), reason: gitErrorReason(e) })
     finishMutationPoll(ctx)
   }
 

@@ -799,6 +799,50 @@ describe('row actions', () => {
     )
   })
 
+  it('the refusal sentence is chosen by the typed reason, not by the message text (nocx-oalo1.6.3)', async () => {
+    // The message deliberately carries none of the words the old mapper
+    // matched. The wire's reason is the discriminator
+    // (contracts/git.error.schema.json), so the backend's own prose may
+    // change without changing what the person is told.
+    const stage = vi
+      .fn()
+      .mockRejectedValue(new RpcError('git: refused', -32602, { reason: 'conflicted' }))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made while a merge conflict is unresolved.',
+    )
+  })
+
+  it('a message that reads like a refusal is not decoded without a typed reason (nocx-oalo1.6.3)', async () => {
+    // The reverse of the test above: prose alone decides nothing. A failure
+    // that carries no reason (an invocation failure, -32603) reaches the
+    // open sentence with the backend's words in it, rather than being
+    // guessed at from the text.
+    const stage = vi.fn().mockRejectedValue(new Error('git: nothing is staged to commit'))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made (git: nothing is staged to commit).',
+    )
+  })
+
   it('a rejected commit appends the raw reason — the open sentence never swallows it', async () => {
     const commit = vi.fn().mockRejectedValue(new RpcError('index.lock exists', -32603))
     const services = fakeServices({

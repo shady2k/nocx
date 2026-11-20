@@ -177,7 +177,18 @@ package coordinator
 // wrapper whose cancel leaves that interval open, so the number moves and the
 // launcher replaces it. The wire the helper speaks is untouched: what moved is
 // what the shells do with a cancel.
-const ProtocolVersion = 42
+//
+// 43 (nocx-oalo1.6.2; nocx-pd55v, over main's 42): the far helper's axis reaches
+// the window. pane.connection carries it as a REQUIRED
+// helper{state, reason, action}, and connection.helperRefresh is the one action
+// on it — it redials a helper already installed and never installs, and it is
+// answered only for the frame whose helper offered that action, at that frame's
+// epoch. A window built against 42 neither reads the member nor knows the
+// method, so it must not pair with this coordinator. The branch was written
+// against 41 and took 42 for itself; main took 42 first for the embedded
+// integration's wrapper (ADR-0104), so this is the MERGED surface one above it
+// and the golden below is written over the merged tree.
+const ProtocolVersion = 43
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

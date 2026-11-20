@@ -7,6 +7,8 @@ package panedriver_test
 // the two refusals that keep a pane's state from moving backwards.
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -498,5 +500,255 @@ func TestOlderOpeningFailureCannotSettleNewerOpening(t *testing.T) {
 	d.FailOpening("pane-1", newer)
 	if out.last().Transport.State != proto.ConnectionEnded {
 		t.Fatal("current failure did not settle opening")
+	}
+}
+
+// ── the far helper's axis on the connection ────────────────────────────────
+
+// helperAxisAhead is what a source answers before anything has been decided.
+func helperAxisAhead(connectionID string) panedriver.Helper {
+	return panedriver.Helper{State: panedriver.HelperStarting, Action: panedriver.HelperActionNone}
+}
+
+// fakeHelper is the axis source a test drives: it holds one status per
+// connection and reports every later write to its watchers, which is exactly
+// the contract internal/farhelper.Registry offers.
+type fakeHelper struct {
+	mu       sync.Mutex
+	axes     map[string]panedriver.Helper
+	watchers map[uint64]func(string, panedriver.Helper)
+	next     uint64
+	asks     []string
+	refresh  error
+}
+
+func newFakeHelper() *fakeHelper {
+	return &fakeHelper{
+		axes:     make(map[string]panedriver.Helper),
+		watchers: make(map[uint64]func(string, panedriver.Helper)),
+	}
+}
+
+func (f *fakeHelper) Axis(connectionID string) (panedriver.Helper, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	helper, ok := f.axes[connectionID]
+	return helper, ok
+}
+
+func (f *fakeHelper) Watch(fn func(string, panedriver.Helper)) func() {
+	f.mu.Lock()
+	f.next++
+	id := f.next
+	f.watchers[id] = fn
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		delete(f.watchers, id)
+		f.mu.Unlock()
+	}
+}
+
+func (f *fakeHelper) Refresh(_ context.Context, connectionID string) error {
+	f.mu.Lock()
+	f.asks = append(f.asks, connectionID)
+	err := f.refresh
+	f.mu.Unlock()
+	return err
+}
+
+// put stores a status and reports it, exactly as a registry publish does.
+func (f *fakeHelper) put(connectionID string, helper panedriver.Helper) {
+	f.mu.Lock()
+	f.axes[connectionID] = helper
+	watchers := make([]func(string, panedriver.Helper), 0, len(f.watchers))
+	for _, watcher := range f.watchers {
+		watchers = append(watchers, watcher)
+	}
+	f.mu.Unlock()
+	for _, watcher := range watchers {
+		watcher(connectionID, helper)
+	}
+}
+
+func (f *fakeHelper) refreshAsks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asks...)
+}
+
+// TestAPaneIsToldTheHelperAxisTheConnectionHas: the helper member is required on
+// every pane.connection, so a pane bound before anybody decided must carry the
+// axis's own starting state rather than an absent object.
+func TestAPaneIsToldTheHelperAxisTheConnectionHas(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	source.put("conn-a", panedriver.Helper{
+		State: panedriver.HelperUnavailable, Reason: "mode-raw", Action: panedriver.HelperActionHostSettings,
+	})
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+
+	snap := out.last()
+	if snap.Helper.State != panedriver.HelperUnavailable ||
+		snap.Helper.Reason != "mode-raw" ||
+		snap.Helper.Action != panedriver.HelperActionHostSettings {
+		t.Fatalf("helper = %+v, want unavailable(mode-raw, host-settings)", snap.Helper)
+	}
+}
+
+func TestAPaneWithNoHelperSourceStillCarriesAStartingAxis(t *testing.T) {
+	d, out := newDriver(t)
+	d.Bind("pane-1", "conn-a")
+	snap := out.last()
+	if snap.Helper != helperAxisAhead("conn-a") {
+		t.Fatalf("helper = %+v, want starting/none", snap.Helper)
+	}
+}
+
+// TestAnAxisChangeReachesEveryPaneOnTheConnection: the axis is the
+// connection's, so one helper-lost is one observation per pane riding it and
+// none for a pane on another connection. Every one of them gets its own epoch.
+func TestAnAxisChangeReachesEveryPaneOnTheConnection(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+	d.Bind("pane-2", "conn-a")
+	d.Bind("pane-3", "conn-b")
+	first := map[string]uint64{}
+	for _, snap := range out.all() {
+		first[snap.PaneID] = snap.ConnectionEpoch
+	}
+	before := len(out.all())
+
+	lost := panedriver.Helper{
+		State: panedriver.HelperUnavailable, Reason: "helper-lost", Action: panedriver.HelperActionRefresh,
+	}
+	source.put("conn-a", lost)
+
+	fresh := out.all()[before:]
+	if len(fresh) != 2 {
+		t.Fatalf("%d snapshot(s) after one axis change, want two panes", len(fresh))
+	}
+	seen := map[string]bool{}
+	for _, snap := range fresh {
+		seen[snap.PaneID] = true
+		if snap.Helper != lost {
+			t.Fatalf("pane %s helper = %+v, want %+v", snap.PaneID, snap.Helper, lost)
+		}
+		if snap.ConnectionEpoch <= first[snap.PaneID] {
+			t.Fatalf("pane %s epoch = %d, want newer than %d", snap.PaneID, snap.ConnectionEpoch, first[snap.PaneID])
+		}
+	}
+	if !seen["pane-1"] || !seen["pane-2"] || seen["pane-3"] {
+		t.Fatalf("axis change reached %v, want pane-1 and pane-2 only", seen)
+	}
+}
+
+// TestAPaneBoundBeforeTheSourceIsToldOnceItArrives: the source is installed
+// after a pane can already exist — in the composition root it is not, but the
+// interface does not require the order, and a pane left at `starting` for ever
+// would be a fact nobody published.
+func TestAPaneBoundBeforeTheSourceIsToldOnceItArrives(t *testing.T) {
+	d, out := newDriver(t)
+	d.Bind("pane-1", "conn-a")
+	if out.last().Helper.State != panedriver.HelperStarting {
+		t.Fatalf("bind without a source = %+v, want starting", out.last().Helper)
+	}
+	source := newFakeHelper()
+	serving := panedriver.Helper{State: panedriver.HelperServing, Action: panedriver.HelperActionNone}
+	source.axes["conn-a"] = serving
+	d.SetHelperSource(source)
+	if got := out.last().Helper; got != serving {
+		t.Fatalf("after the source arrived = %+v, want %+v", got, serving)
+	}
+}
+
+// TestAnUnchangedAxisCostsNoFrame: a status that is already what the pane was
+// told is not an observation.
+func TestAnUnchangedAxisCostsNoFrame(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	serving := panedriver.Helper{State: panedriver.HelperServing, Action: panedriver.HelperActionNone}
+	source.put("conn-a", serving)
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+	before := len(out.all())
+
+	source.put("conn-a", serving)
+	if got := len(out.all()); got != before {
+		t.Fatalf("%d snapshot(s) for an unchanged axis, want %d", got, before)
+	}
+}
+
+// TestRefreshIsOfferedOnlyForHelperLost is the action's own rule
+// (ADR-727g63tr decision 2): refresh redials a helper that was serving and is
+// gone, and it is never offered for an absent decision.
+func TestRefreshIsOfferedOnlyForHelperLost(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+
+	for _, helper := range []panedriver.Helper{
+		{State: panedriver.HelperServing, Action: panedriver.HelperActionNone},
+		{State: panedriver.HelperUnavailable, Reason: "install-failed", Action: panedriver.HelperActionNone},
+		{State: panedriver.HelperUnavailable, Reason: "mode-raw", Action: panedriver.HelperActionHostSettings},
+		{State: panedriver.HelperPaused, Reason: "connection", Action: panedriver.HelperActionNone},
+	} {
+		source.put("conn-a", helper)
+		err := d.RefreshHelper(context.Background(), "pane-1", out.last().ConnectionEpoch)
+		if !errors.Is(err, panedriver.ErrNoHelperRefresh) {
+			t.Fatalf("refresh on %+v = %v, want ErrNoHelperRefresh", helper, err)
+		}
+	}
+	if got := source.refreshAsks(); len(got) != 0 {
+		t.Fatalf("refusals asked the source to refresh %v", got)
+	}
+}
+
+func TestRefreshRedialsTheConnectionsHelper(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+	lost := panedriver.Helper{
+		State: panedriver.HelperUnavailable, Reason: "helper-lost", Action: panedriver.HelperActionRefresh,
+	}
+	source.put("conn-a", lost)
+
+	err := d.RefreshHelper(context.Background(), "pane-1", out.last().ConnectionEpoch)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := source.refreshAsks(); len(got) != 1 || got[0] != "conn-a" {
+		t.Fatalf("refreshes = %v, want one for conn-a", got)
+	}
+}
+
+func TestRefreshRefusesAStaleEpoch(t *testing.T) {
+	d, out := newDriver(t)
+	source := newFakeHelper()
+	d.SetHelperSource(source)
+	d.Bind("pane-1", "conn-a")
+	source.put("conn-a", panedriver.Helper{
+		State: panedriver.HelperUnavailable, Reason: "helper-lost", Action: panedriver.HelperActionRefresh,
+	})
+	stale := out.last().ConnectionEpoch
+	// A second observation of the same connection moves the pane's epoch, so
+	// the press names a frame the person is no longer looking at.
+	source.put("conn-a", panedriver.Helper{
+		State: panedriver.HelperServing, Action: panedriver.HelperActionNone,
+	})
+	if out.last().ConnectionEpoch == stale {
+		t.Fatal("the second observation did not move the epoch")
+	}
+	err := d.RefreshHelper(context.Background(), "pane-1", stale)
+	if !errors.Is(err, panedriver.ErrStaleEpoch) {
+		t.Fatalf("stale refresh = %v, want ErrStaleEpoch", err)
+	}
+	if got := source.refreshAsks(); len(got) != 0 {
+		t.Fatalf("a stale press asked the source to refresh %v", got)
 	}
 }

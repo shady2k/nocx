@@ -740,6 +740,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"paneId":"pane-1","connectionEpoch":1}`),
 			[]byte(`{"paneId":"pane-1","connectionEpoch":9007199254740993}`),
 		},
+		// The far helper's refresh press names the same two facts: the pane
+		// whose observation offered it and that observation's epoch
+		// (ADR-727g63tr decision 2).
+		"connection.helperRefresh": {
+			[]byte(`{"paneId":"pane-1","connectionEpoch":1}`),
+			[]byte(`{"paneId":"pane-1","connectionEpoch":9007199254740993}`),
+		},
 		"panes.close": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006"}`),
 		},

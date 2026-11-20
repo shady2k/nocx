@@ -37,6 +37,7 @@ import (
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -691,4 +692,51 @@ func (c farHelperCloser) CloseHelpersFor(ctx context.Context, fingerprint string
 func (c farHelperCloser) FinishHelpersFor(fingerprint string) {
 	c.reg.FinishHelpersFor(fingerprint)
 	c.far.FinishFor(fingerprint)
+}
+
+// paneHelperAxis adapts internal/farhelper's per-connection axis to the source
+// panedriver declares. The direction is deliberate: panedriver must not import
+// the party that decides the axis (design §5.10, "panedriver reads the axis
+// through an interface it declares"), and the composition root is where the
+// two neutral shapes meet (AD-8).
+type paneHelperAxis struct {
+	reg *farhelper.Registry
+}
+
+func (a paneHelperAxis) Axis(connectionID string) (panedriver.Helper, bool) {
+	if a.reg == nil {
+		return panedriver.Helper{}, false
+	}
+	status, ok := a.reg.Axis(connectionID)
+	if !ok {
+		return panedriver.Helper{}, false
+	}
+	return paneHelperOf(status), true
+}
+
+func (a paneHelperAxis) Watch(fn func(connectionID string, helper panedriver.Helper)) func() {
+	if a.reg == nil {
+		return func() {}
+	}
+	return a.reg.Watch(func(connectionID string, status farhelper.Status) {
+		fn(connectionID, paneHelperOf(status))
+	})
+}
+
+// Refresh is the one action the axis offers. The registry decides whether it
+// applies — it redials only a helper it has installed — so this adapter adds
+// no rule of its own.
+func (a paneHelperAxis) Refresh(ctx context.Context, connectionID string) error {
+	if a.reg == nil {
+		return &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	return a.reg.Refresh(ctx, connectionID)
+}
+
+func paneHelperOf(status farhelper.Status) panedriver.Helper {
+	return panedriver.Helper{
+		State:  panedriver.HelperState(status.State),
+		Reason: string(status.Reason),
+		Action: string(status.Action),
+	}
 }

@@ -1117,6 +1117,20 @@ var methodDeclarations = []Declaration{
 		within(10000, BasisRead, "read: a reconnect that produced no shell must release the session it retired, like the open's own rollback"),
 		MergeNone, nil,
 		"Reconnecting your pane", RowPastWait, ExpiredOutcomeUnknown),
+	// THE FAR HELPER'S ONE ACTION (ADR-727g63tr decision 2): redial the helper
+	// already installed, never install one. The frame's offer is checked here,
+	// the redial is the background decision's, and the axis reports its result
+	// on pane.connection, so the call itself changes nothing a replay could
+	// duplicate.
+	decl("connection.helperRefresh", KindMethod, OwnerRequest,
+		[]Phase{ph("run", []Resource{{Kind: ResourceSession, Name: "", Mode: ModeKey}}, []Domain{DomainSession, DomainHelper, DomainSSH})},
+		d(personTurnMillis, BasisRead, personTurnBasis),
+		d(5000, BasisRead, "read: validates the pane's own refresh offer and wakes the far helper's redial; the dial and its hello continue on pane.connection after the RPC answers"),
+		none(),
+		none(),
+		none(),
+		MergeNone, nil,
+		"Refreshing the helper connection", RowNever, ExpiredNotStarted),
 	decl("operation.outcome", KindMethod, OwnerRequest,
 		[]Phase{ph("read", []Resource{}, []Domain{DomainServer})},
 		d(personTurnMillis, BasisRead, personTurnBasis),

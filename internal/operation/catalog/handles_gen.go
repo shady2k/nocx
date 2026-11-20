@@ -57,6 +57,7 @@ var (
 	OpBackupSaveToFile                = methodHandle("backup.saveToFile")
 	OpCheckoutsStatus                 = methodHandle("checkouts.status")
 	OpClose                           = methodHandle("close")
+	OpConnectionHelperRefresh         = methodHandle("connection.helperRefresh")
 	OpConnectionsHostMode             = methodHandle("connections.hostMode")
 	OpConnectionsPasswordResolved     = methodHandle("connections.passwordResolved")
 	OpConnectionsSetHostMode          = methodHandle("connections.setHostMode")

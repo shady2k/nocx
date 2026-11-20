@@ -30,6 +30,7 @@ func paneConnectionStates() map[string]PaneConnection {
 			ConnectionID:    "conn-1",
 			ConnectionEpoch: epoch,
 			InstanceID:      "instance-1",
+			Helper:          PaneConnectionHelper{State: "starting", Action: "none"},
 			Transport:       PaneConnectionTransport{State: state, StateMs: 10},
 			Attempt:         PaneConnectionAttempt{Shown: "none", Candidate: "none"},
 			ObservedAt:      "2026-11-14T07:00:00Z",
@@ -103,6 +104,110 @@ func TestPaneConnectionDTOConformsToContract(t *testing.T) {
 		raw, _ := json.Marshal(p)
 		if err := validateJSONErr(schema, raw); err == nil {
 			t.Fatal("the schema admitted connected without plainShells")
+		}
+	})
+}
+
+// TestPaneConnectionHelperConformsToContract pins the axis this stage adds to
+// every pane (ADR-727g63tr decision 2): the four states, the closed reason set
+// and the one action each admits. The helper object is REQUIRED on every
+// observation, and a shape the schema could not have sent is refused rather
+// than published.
+func TestPaneConnectionHelperConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "pane.connection.schema.json")
+	states := map[string]PaneConnectionHelper{
+		"starting": {State: "starting", Action: "none"},
+		"serving":  {State: "serving", Action: "none"},
+		"paused":   {State: "paused", Reason: "connection", Action: "none"},
+		"mode-raw": {State: "unavailable", Reason: "mode-raw", Action: "host-settings"},
+		"mode-script": {
+			State: "unavailable", Reason: "mode-script", Action: "host-settings",
+		},
+		"helper-lost": {
+			State: "unavailable", Reason: "helper-lost", Action: "refresh",
+		},
+		"helper-lost-frozen": {
+			State: "unavailable", Reason: "helper-lost", Action: "none",
+		},
+		"consent-pending": {
+			State: "unavailable", Reason: "consent-pending", Action: "none",
+		},
+		"consent-denied": {
+			State: "unavailable", Reason: "consent-denied", Action: "none",
+		},
+		"unsupported-platform": {
+			State: "unavailable", Reason: "unsupported-platform", Action: "none",
+		},
+		"install-failed": {
+			State: "unavailable", Reason: "install-failed", Action: "none",
+		},
+		"exec-forbidden": {
+			State: "unavailable", Reason: "exec-forbidden", Action: "none",
+		},
+		"version-mismatch": {
+			State: "unavailable", Reason: "version-mismatch", Action: "none",
+		},
+		"connection": {
+			State: "unavailable", Reason: "connection", Action: "none",
+		},
+	}
+	for name, helper := range states {
+		t.Run(name, func(t *testing.T) {
+			p := paneConnectionStates()["opening"]
+			p.Helper = helper
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "helper "+name)
+		})
+	}
+
+	t.Run("refresh is offered only for helper-lost", func(t *testing.T) {
+		for _, helper := range []PaneConnectionHelper{
+			{State: "unavailable", Reason: "install-failed", Action: "refresh"},
+			{State: "unavailable", Reason: "mode-raw", Action: "refresh"},
+			{State: "serving", Action: "refresh"},
+			{State: "paused", Reason: "connection", Action: "refresh"},
+		} {
+			p := paneConnectionStates()["opening"]
+			p.Helper = helper
+			raw, _ := json.Marshal(p)
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the schema admitted refresh on %+v", helper)
+			}
+		}
+	})
+	t.Run("each state carries exactly its own fields", func(t *testing.T) {
+		bad := []PaneConnectionHelper{
+			{State: "starting", Reason: "helper-lost", Action: "none"},
+			{State: "serving", Reason: "connection", Action: "none"},
+			{State: "unavailable", Action: "none"},
+			{State: "paused", Reason: "helper-lost", Action: "none"},
+			{State: "unavailable", Reason: "no-such-reason", Action: "none"},
+			{State: "unavailable", Reason: "mode-raw", Action: "none"},
+			{State: "serving", Action: ""},
+			{State: "", Action: "none"},
+		}
+		for _, helper := range bad {
+			p := paneConnectionStates()["opening"]
+			p.Helper = helper
+			raw, _ := json.Marshal(p)
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the schema admitted %+v", helper)
+			}
+		}
+	})
+	t.Run("the object is required", func(t *testing.T) {
+		raw, _ := json.Marshal(paneConnectionStates()["opening"])
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, "helper")
+		without, _ := json.Marshal(fields)
+		if err := validateJSONErr(schema, without); err == nil {
+			t.Fatal("the schema admitted a pane.connection with no helper")
 		}
 	})
 }

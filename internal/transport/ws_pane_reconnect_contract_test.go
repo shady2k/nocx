@@ -38,7 +38,7 @@ func TestPaneReconnect_OverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	wc := soleWSConn(t, ws)
 	ws.bindPane(helperOpenPane, wc, newConnState(), openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "p", Cols: 80, Rows: 24})
-	payload := PaneConnection{Generation: 1, PaneID: helperOpenPane, ConnectionEpoch: 1, ConnectionSequence: 7, Reconnect: &PaneConnectionReconnect{EndsShells: 1}}
+	payload := PaneConnection{Generation: 1, PaneID: helperOpenPane, ConnectionEpoch: 1, ConnectionSequence: 7, Helper: PaneConnectionHelper{State: "serving", Action: "none"}, Reconnect: &PaneConnectionReconnect{EndsShells: 1}}
 	ws.PublishPaneConnection(payload)
 	resp := vaultCall(t, conn, "pane.reconnect", map[string]any{"paneId": helperOpenPane, "connectionEpoch": 1}, 1)
 	if resp.Error != nil {

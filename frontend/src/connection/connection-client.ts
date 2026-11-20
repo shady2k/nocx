@@ -26,6 +26,7 @@ import type {
   WSClient,
 } from '../ipc'
 import type { PaneReconnect } from '../generated/pane.reconnect'
+import type { ConnectionHelperRefreshResult } from '../generated/connection.helperRefresh'
 
 /** The `paneId` an open names, when the pane's row exists. Absent is the
  *  ordinary state of a pane the chain has not registered yet. */
@@ -95,6 +96,34 @@ export class ConnectionClient {
    * A press carrying anything else is about a state the person is no longer
    * looking at, and the backend refuses it with `stale connectionEpoch`.
    */
+  /**
+   * The person's one action on the far HELPER axis: redial a helper that was
+   * serving and is gone (ADR-727g63tr decision 2).
+   *
+   * The press is the same shape as the reconnect's — the pane and the epoch of
+   * the observation whose button was pressed — and the answer is an
+   * acknowledgement, `{connectionId, refreshed}`. The redial and its hello are
+   * observed on pane.connection; this call waits for neither and never
+   * installs. It draws nothing yet: the surface that offers the button is a
+   * later stage, and this is the one typed way it will press it.
+   */
+  async refreshHelper(paneId: string, connectionEpoch: number): Promise<string> {
+    const result = await this.client.dispatcher.call<ConnectionHelperRefreshResult>(
+      'connection.helperRefresh',
+      { paneId, connectionEpoch },
+    )
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      typeof result.connectionId !== 'string' ||
+      result.connectionId === '' ||
+      result.refreshed !== true
+    ) {
+      throw new Error('nocx: connection.helperRefresh did not accept the refresh')
+    }
+    return result.connectionId
+  }
+
   async reconnectPane(paneId: string, connectionEpoch: number): Promise<void> {
     const result = await this.client.dispatcher.call<PaneReconnect>('pane.reconnect', {
       paneId,

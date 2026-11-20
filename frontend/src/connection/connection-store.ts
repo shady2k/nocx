@@ -65,6 +65,15 @@ const FAILED_CAUSES = [
 const ENDED_CAUSES = ['released', 'silence', 'tainted', 'lost-link'] as const
 const SHOWN = ['none', 'integrated', 'plain'] as const
 const CANDIDATE = ['trying', 'ready', 'failed', 'none'] as const
+const HELPER_DECIDED_REASONS = [
+  'consent-pending',
+  'consent-denied',
+  'unsupported-platform',
+  'install-failed',
+  'exec-forbidden',
+  'version-mismatch',
+  'connection',
+] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -97,8 +106,8 @@ function isEnum<T extends string>(value: unknown, values: readonly T[]): value i
  * FORBIDS: a connected connection carrying a stage is not a shape this
  * renderer may draw, and a malformed notification is dropped rather than
  * coerced into the branch written last. The fields with no branch of their own
- * (paneId, connectionId, epoch, attempt, observedAt, quality, reconnect) are
- * checked once.
+ * (paneId, connectionId, epoch, attempt, observedAt, quality, reconnect,
+ * helper) are checked once.
  */
 export function parsePaneConnection(value: unknown): PaneConnection | null {
   if (!isRecord(value)) return null
@@ -115,6 +124,7 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
       'attempt',
       'reconnect',
       'shellFailure',
+      'helper',
       'observedAt',
     ])
   ) {
@@ -128,6 +138,7 @@ export function parsePaneConnection(value: unknown): PaneConnection | null {
   if (!isString(value.observedAt) || Number.isNaN(Date.parse(value.observedAt))) return null
   if (!parseAttempt(value.attempt)) return null
   if (!parseQuality(value.quality)) return null
+  if (!parseHelper(value.helper)) return null
   if (!parseReconnect(value.reconnect)) return null
   if (!parseShellFailure(value.shellFailure)) return null
   if (!parseTransport(value.transport)) return null
@@ -154,6 +165,35 @@ function parseReconnect(value: unknown): boolean {
   if (value === undefined) return true
   if (!isRecord(value) || !onlyKeys(value, ['endsShells'])) return false
   return isNonNegativeInteger(value.endsShells)
+}
+
+/** The far helper axis, restated branch by branch: each state admits exactly
+ *  its own fields and the ones the ADR gives it. Refresh never appears on a
+ *  decision a button cannot change (ADR-727g63tr decision 2). */
+function parseHelper(value: unknown): boolean {
+  if (!isRecord(value) || !isString(value.state)) return false
+  switch (value.state) {
+    case 'starting':
+    case 'serving':
+      return onlyKeys(value, ['state', 'action']) && value.action === 'none'
+    case 'paused':
+      return (
+        onlyKeys(value, ['state', 'reason', 'action']) &&
+        value.reason === 'connection' &&
+        value.action === 'none'
+      )
+    case 'unavailable':
+      if (!onlyKeys(value, ['state', 'reason', 'action'])) return false
+      if (value.reason === 'mode-raw' || value.reason === 'mode-script') {
+        return value.action === 'host-settings'
+      }
+      if (value.reason === 'helper-lost') {
+        return value.action === 'refresh' || value.action === 'none'
+      }
+      return isEnum(value.reason, HELPER_DECIDED_REASONS) && value.action === 'none'
+    default:
+      return false
+  }
 }
 
 function parseShellFailure(value: unknown): boolean {

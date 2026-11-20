@@ -16,6 +16,45 @@ export type PaneConnection = {
   [k: string]: unknown
 } & {
   /**
+   * Whether the far helper serves this connection, and if not, why and what a person can do about it (ADR-727g63tr decision 2). It is a fact of the CONNECTION and is published on every pane riding it, so two panes on one host can never disagree. The object is required on every observation: a decision that has not finished yet is `starting`, never an absent member. `reason` is a closed set and is absent while starting or serving. `action` is the one thing a surface may offer and it never installs or accepts anything (ADR-0068): host-settings opens the host record's mode; refresh redials a helper that was serving and is gone and is offered for helper-lost alone.
+   */
+  helper:
+    | {
+        state: 'starting'
+        action: 'none'
+      }
+    | {
+        state: 'serving'
+        action: 'none'
+      }
+    | {
+        state: 'paused'
+        reason: 'connection'
+        action: 'none'
+      }
+    | {
+        state: 'unavailable'
+        reason: 'mode-raw' | 'mode-script'
+        action: 'host-settings'
+      }
+    | {
+        state: 'unavailable'
+        reason: 'helper-lost'
+        action: 'refresh' | 'none'
+      }
+    | {
+        state: 'unavailable'
+        reason:
+          | 'consent-pending'
+          | 'consent-denied'
+          | 'unsupported-platform'
+          | 'install-failed'
+          | 'exec-forbidden'
+          | 'version-mismatch'
+          | 'connection'
+        action: 'none'
+      }
+  /**
    * The driver's binding generation, shared with pane.opened; older opening results and failures do not apply to a newer binding.
    */
   generation: number

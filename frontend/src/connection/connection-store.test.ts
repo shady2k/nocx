@@ -41,6 +41,7 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     connectionEpoch: 1,
     generation: 1,
     instanceId: 'instance-1',
+    helper: { state: 'starting', action: 'none' },
     transport: { state: 'opening', stage: 'tcp', stateMs: 1200 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
     observedAt: '2026-11-14T00:00:00Z',
@@ -120,6 +121,42 @@ describe('parsePaneConnection', () => {
     ]
     for (const transport of branches) {
       expect(parsePaneConnection(observation({ transport })), transport.state).not.toBeNull()
+    }
+  })
+
+  it('accepts every helper branch the contract declares', () => {
+    const branches: PaneConnection['helper'][] = [
+      { state: 'starting', action: 'none' },
+      { state: 'serving', action: 'none' },
+      { state: 'paused', reason: 'connection', action: 'none' },
+      { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+      { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      { state: 'unavailable', reason: 'helper-lost', action: 'none' },
+      { state: 'unavailable', reason: 'consent-pending', action: 'none' },
+      { state: 'unavailable', reason: 'install-failed', action: 'none' },
+      { state: 'unavailable', reason: 'version-mismatch', action: 'none' },
+      { state: 'unavailable', reason: 'connection', action: 'none' },
+    ]
+    for (const helper of branches) {
+      expect(parsePaneConnection(observation({ helper })), JSON.stringify(helper)).not.toBeNull()
+    }
+  })
+
+  it('refuses a helper shape the contract could not have sent', () => {
+    const bad: unknown[] = [
+      { state: 'starting', action: 'none', reason: 'connection' },
+      { state: 'serving', action: 'refresh' },
+      { state: 'paused', reason: 'helper-lost', action: 'none' },
+      { state: 'unavailable', action: 'none' },
+      { state: 'unavailable', reason: 'mode-raw', action: 'none' },
+      { state: 'unavailable', reason: 'install-failed', action: 'refresh' },
+      { state: 'unavailable', reason: 'no-such-reason', action: 'none' },
+      { action: 'none' },
+      undefined,
+    ]
+    for (const helper of bad) {
+      expect(parsePaneConnection({ ...observation(), helper }), JSON.stringify(helper)).toBeNull()
     }
   })
 

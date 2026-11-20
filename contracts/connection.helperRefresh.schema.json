@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connection.helperRefresh.schema.json",
+  "title": "ConnectionHelperRefreshResult",
+  "description": "Acknowledges that the far helper's owner accepted a refresh press. The redial and its hello continue on pane.connection as the axis changes; this RPC does not wait for them and never installs. `refreshed` is true because a refusal is an error, never a result with a false flag.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["connectionId", "refreshed"],
+  "properties": {
+    "connectionId": {
+      "description": "The connection whose helper is being redialled. It is the id the pane's observation carried, shared by every pane riding the connection.",
+      "type": "string",
+      "minLength": 1
+    },
+    "refreshed": {
+      "description": "The request was accepted. It says nothing about the redial's outcome; the axis reports serving, helper-lost or another reason as it happens.",
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

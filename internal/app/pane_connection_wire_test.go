@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ func TestPaneConnection_OverTheWireConformsToContract(t *testing.T) {
 	proxy := sshtest.NewFaultProxy(t, srv.addr)
 	srv.addr = proxy.Addr()
 	driver := panedriver.New("wire-instance", nil)
+	axis := newWireHelperAxis()
+	driver.SetHelperSource(axis)
 	journey := startPaneJourneyWithSecrets(t, srv, &askRecorder{value: openPasswordFixturePassword}, func(source string, ev proto.ConnectionStateEvent) { driver.ApplyFrom(source, ev) })
 	opener := journey.opener
 	opener.paneConns = driver
@@ -51,6 +54,7 @@ func TestPaneConnection_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadAppContractSchema(t, "pane.connection.schema.json")
 	seenOpening, seenSession := false, false
 	var oldSession string
+	var connectionID string
 	for !seenSession {
 		raw := waitForNotification(t, conn, "pane.connection")
 		validateAppContract(t, schema, raw, "real helper connection")
@@ -65,11 +69,67 @@ func TestPaneConnection_OverTheWireConformsToContract(t *testing.T) {
 		seenSession = got.Transport.State == "connected" && got.SessionID != ""
 		if seenSession {
 			oldSession = got.SessionID
+			connectionID = got.ConnectionID
 		}
 	}
 	if !seenOpening {
 		t.Fatal("real open did not publish its opening stages")
 	}
+
+	// THE FAR HELPER'S AXIS AND ITS ONE ACTION, off the real socket: a helper
+	// that was serving and is gone reaches every notification, and the press
+	// that redials it is answered by the composition root's own policy.
+	helperSchema := loadAppContractSchema(t, "connection.helperRefresh.schema.json")
+	axis.put(connectionID, panedriver.Helper{
+		State: panedriver.HelperServing, Action: panedriver.HelperActionNone,
+	})
+	for {
+		raw := waitForNotification(t, conn, "pane.connection")
+		validateAppContract(t, schema, raw, "helper serving")
+		var got transport.PaneConnection
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Helper.State == "serving" {
+			break
+		}
+	}
+	axis.put(connectionID, panedriver.Helper{
+		State: panedriver.HelperUnavailable, Reason: "helper-lost", Action: panedriver.HelperActionRefresh,
+	})
+	var lostEpoch uint64
+	for lostEpoch == 0 {
+		raw := waitForNotification(t, conn, "pane.connection")
+		validateAppContract(t, schema, raw, "helper lost")
+		var got transport.PaneConnection
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Helper.State == "unavailable" && got.Helper.Reason == "helper-lost" && got.Helper.Action == "refresh" {
+			lostEpoch = got.ConnectionEpoch
+		}
+	}
+	refresh := callAppWS(t, conn, "connection.helperRefresh", map[string]any{
+		"paneId": pane, "connectionEpoch": lostEpoch,
+	}, 7)
+	if refresh.Error != nil {
+		t.Fatalf("helper refresh: %+v", refresh.Error)
+	}
+	validateAppContract(t, helperSchema, refresh.Result, "helper refresh registration")
+	var refreshed struct {
+		ConnectionID string `json:"connectionId"`
+		Refreshed    bool   `json:"refreshed"`
+	}
+	if err := json.Unmarshal(refresh.Result, &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.ConnectionID != connectionID || !refreshed.Refreshed {
+		t.Fatalf("refresh result = %+v, want %s", refreshed, connectionID)
+	}
+	if got := axis.refreshed(); len(got) != 1 || got[0] != connectionID {
+		t.Fatalf("refreshes = %v, want one for %s", got, connectionID)
+	}
+
 	// A real reset reaches the helper supervisor, its subscription and the
 	// pane offer. Pressing the wire action must create a different shell.
 	proxy.Reset()
@@ -156,4 +216,68 @@ func waitForNotification(t *testing.T, conn *websocket.Conn, method string) json
 		}
 		return envelope.Params
 	}
+}
+
+// wireHelperAxis is the far helper's axis, driven by the test. It is the
+// panedriver.HelperSource seam the composition root adapts, stood in here so
+// the test can make an axis change and watch the real socket carry it.
+type wireHelperAxis struct {
+	mu       sync.Mutex
+	axes     map[string]panedriver.Helper
+	watchers map[uint64]func(string, panedriver.Helper)
+	next     uint64
+	asks     []string
+}
+
+func newWireHelperAxis() *wireHelperAxis {
+	return &wireHelperAxis{
+		axes:     make(map[string]panedriver.Helper),
+		watchers: make(map[uint64]func(string, panedriver.Helper)),
+	}
+}
+
+func (a *wireHelperAxis) put(connectionID string, helper panedriver.Helper) {
+	a.mu.Lock()
+	a.axes[connectionID] = helper
+	watchers := make([]func(string, panedriver.Helper), 0, len(a.watchers))
+	for _, watcher := range a.watchers {
+		watchers = append(watchers, watcher)
+	}
+	a.mu.Unlock()
+	for _, watcher := range watchers {
+		watcher(connectionID, helper)
+	}
+}
+
+func (a *wireHelperAxis) Axis(connectionID string) (panedriver.Helper, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	helper, ok := a.axes[connectionID]
+	return helper, ok
+}
+
+func (a *wireHelperAxis) Watch(fn func(string, panedriver.Helper)) func() {
+	a.mu.Lock()
+	a.next++
+	id := a.next
+	a.watchers[id] = fn
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		delete(a.watchers, id)
+		a.mu.Unlock()
+	}
+}
+
+func (a *wireHelperAxis) Refresh(_ context.Context, connectionID string) error {
+	a.mu.Lock()
+	a.asks = append(a.asks, connectionID)
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *wireHelperAxis) refreshed() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.asks...)
 }

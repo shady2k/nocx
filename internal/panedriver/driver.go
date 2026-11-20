@@ -66,6 +66,63 @@ type Reconnect struct {
 	EndsShells int
 }
 
+// HelperState is the far helper axis as pane.connection carries it: the
+// backend's fold of the transport and the far helper's own decision
+// (ADR-727g63tr decision 2). The renderer draws this value and derives
+// nothing, which is why it is a type here rather than a pair of booleans.
+type HelperState string
+
+const (
+	HelperStarting    HelperState = "starting"
+	HelperServing     HelperState = "serving"
+	HelperUnavailable HelperState = "unavailable"
+	HelperPaused      HelperState = "paused"
+)
+
+// The actions a surface may offer. None is the ordinary value; host-settings
+// opens the host record's mode; refresh redials a helper that was serving and
+// is gone, and never installs one.
+const (
+	HelperActionNone         = "none"
+	HelperActionHostSettings = "host-settings"
+	HelperActionRefresh      = "refresh"
+)
+
+// Helper is one reading of the axis. Reason is empty while starting or
+// serving, and Action is always one of the three above.
+type Helper struct {
+	State  HelperState
+	Reason string
+	Action string
+}
+
+// HelperSource is the far helper axis this package reads. It is declared here,
+// in this package's own neutral terms, because panedriver maps a pane to a
+// connection and must not depend on the party that decides the axis
+// (ADR-8; design §5.10: "panedriver reads the axis through an interface it
+// declares"). The composition root adapts internal/farhelper to it.
+//
+// Axis answers the current reading of one connection, and Watch reports every
+// later one. Refresh asks the owner to redial the helper already installed;
+// it never installs, and the owner refuses it when no refresh is offered.
+type HelperSource interface {
+	Axis(connectionID string) (Helper, bool)
+	Watch(fn func(connectionID string, helper Helper)) (stop func())
+	Refresh(ctx context.Context, connectionID string) error
+}
+
+// normalizeHelper makes a reading expressible on the wire: an absent state is
+// the starting axis, and an absent action is none.
+func normalizeHelper(h Helper) Helper {
+	if h.State == "" {
+		h.State = HelperStarting
+	}
+	if h.Action == "" {
+		h.Action = HelperActionNone
+	}
+	return h
+}
+
 // The refusals a press can meet, each a different sentence for the surface that
 // sent it (the transport maps them to wire refusals).
 var (
@@ -79,6 +136,9 @@ var (
 	ErrNoOffer = errors.New("panedriver: no reconnect is offered for this pane")
 	// ErrReconnecting is a second press while one reconnect is running.
 	ErrReconnecting = errors.New("panedriver: a reconnect is already running for this pane")
+	// ErrNoHelperRefresh means no refresh is offered on this observation: the
+	// helper is not lost, or the axis is a decision no button changes.
+	ErrNoHelperRefresh = errors.New("panedriver: no helper refresh is offered for this pane")
 )
 
 // Attempt is the open order's state. Until the open order lands every member is
@@ -111,7 +171,10 @@ type Snapshot struct {
 	Attempt            Attempt
 	// Reconnect is present exactly when the backend offers the person the
 	// action on this observation.
-	Reconnect  *Reconnect
+	Reconnect *Reconnect
+	// Helper is the connection's far helper axis. It is always expressible:
+	// an axis nobody has decided yet is starting, never an absent member.
+	Helper     Helper
 	ObservedAt time.Time
 }
 
@@ -140,6 +203,13 @@ type Driver struct {
 	// action replaces shells after the connection supervisor restores transport.
 	action         func(context.Context, string, uint64) error
 	nextGeneration uint64
+
+	// helpers is the far helper axis, and helperStop ends the subscription it
+	// installed. The axis belongs to the connection, so one source serves every
+	// pane; the driver's only job is to carry its readings to the panes bound
+	// to that connection.
+	helpers    HelperSource
+	helperStop func()
 }
 
 // binding is one pane's side: which connection it rides, how many observations
@@ -164,6 +234,7 @@ type connection struct {
 	quality   *Quality
 	observed  time.Time
 	panes     map[string]struct{}
+	helper    Helper
 }
 
 // New builds the driver over one backend instance.
@@ -228,6 +299,112 @@ func (d *Driver) SetPublisher(fn func(Snapshot)) {
 	d.mu.Unlock()
 }
 
+// SetHelperSource installs the far helper axis and subscribes to its changes.
+// Every later reading of a connection this driver already knows reaches every
+// pane bound to it, in the same frame the connection's transport uses, because
+// the axis is a fact of the CONNECTION and not of a panel or a pane
+// (ADR-727g63tr decision 2).
+//
+// A connection bound before the source was installed is reconciled here, so a
+// pane never stays at the default starting axis once an owner can answer.
+func (d *Driver) SetHelperSource(source HelperSource) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	stop := d.helperStop
+	d.helperStop = nil
+	d.helpers = source
+	known := make([]string, 0, len(d.conns))
+	if source != nil {
+		for connectionID := range d.conns {
+			known = append(known, connectionID)
+		}
+	}
+	d.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if source == nil {
+		return
+	}
+	watch := source.Watch(d.helperChanged)
+	d.mu.Lock()
+	d.helperStop = watch
+	d.mu.Unlock()
+	for _, connectionID := range known {
+		if helper, ok := source.Axis(connectionID); ok {
+			d.helperChanged(connectionID, helper)
+		}
+	}
+}
+
+// helperChanged folds one axis reading into a connection this driver knows and
+// republishes it to every pane bound there. A connection with no pane is left
+// alone: a pane binding later asks the source directly, so there is nothing to
+// remember for it.
+func (d *Driver) helperChanged(connectionID string, helper Helper) {
+	d.mu.Lock()
+	c := d.conns[connectionID]
+	if c == nil {
+		d.mu.Unlock()
+		return
+	}
+	helper = normalizeHelper(helper)
+	if c.helper == helper {
+		d.mu.Unlock()
+		return
+	}
+	c.helper = helper
+	snaps := make([]Snapshot, 0, len(c.panes))
+	for paneID := range c.panes {
+		if b := d.panes[paneID]; b != nil {
+			snaps = append(snaps, d.snapshotLocked(paneID, b, c))
+		}
+	}
+	d.mu.Unlock()
+	for _, snap := range snaps {
+		d.emit(snap)
+	}
+}
+
+// RefreshHelper carries a person's refresh press to the connection's helper
+// owner. The press is accepted only against the observation that offered it:
+// the axis must still read unavailable(helper-lost, refresh), and the epoch
+// must be the pane's newest. It never installs anything; the owner redials the
+// helper it already has.
+func (d *Driver) RefreshHelper(ctx context.Context, paneID string, epoch uint64) error {
+	d.mu.Lock()
+	b := d.panes[paneID]
+	if b == nil || ctx.Err() != nil || b.ctx.Err() != nil {
+		d.mu.Unlock()
+		return ErrUnknownPane
+	}
+	if b.epoch != epoch {
+		d.mu.Unlock()
+		return ErrStaleEpoch
+	}
+	c := d.conns[b.connectionID]
+	if c == nil || !helperOffersRefresh(c.helper) {
+		d.mu.Unlock()
+		return ErrNoHelperRefresh
+	}
+	connectionID := b.connectionID
+	source := d.helpers
+	d.mu.Unlock()
+	if source == nil {
+		return ErrNoHelperRefresh
+	}
+	return source.Refresh(ctx, connectionID)
+}
+
+// helperOffersRefresh is the one offer the refresh action may appear on
+// (ADR-727g63tr decision 2): a helper that was serving and is gone. An absent
+// decision (a mode, a refused consent, a failed install) carries no button.
+func helperOffersRefresh(h Helper) bool {
+	return h.State == HelperUnavailable && h.Reason == "helper-lost" && h.Action == HelperActionRefresh
+}
+
 // Bind records that a pane rides a connection, and answers the observation the
 // pane is owed right now: the connection's current state if it has one, or the
 // opening the pane was just bound for.
@@ -273,6 +450,16 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 		d.conns[connectionID] = c
 	}
 	c.panes[paneID] = struct{}{}
+	// THE AXIS IS READ AT THE BIND, because the source replays nothing and a
+	// pane binding after the decision must learn what it already decided. An
+	// unknown connection keeps the zero reading, which snapshotLocked renders
+	// as starting.
+	if d.helpers != nil {
+		if helper, ok := d.helpers.Axis(connectionID); ok {
+			c.helper = normalizeHelper(helper)
+		}
+	}
+	c.helper = normalizeHelper(c.helper)
 	// THE FIRST OBSERVATION IS PUBLISHED HERE, BEFORE ANY NETWORK. A pane
 	// bound for an open has begun at `resolve`, and the renderer is owed that
 	// stage on the same frame the tab exists; waiting for the helper's own
@@ -543,6 +730,7 @@ func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapsh
 		Quality:            c.quality,
 		Attempt:            Attempt{Shown: "none", Candidate: "none"},
 		Reconnect:          offer,
+		Helper:             normalizeHelper(c.helper),
 		ObservedAt:         time.Now(),
 	}
 }

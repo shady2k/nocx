@@ -88,6 +88,18 @@
     {
       "test": "go:TestBashAgentWrapperCancelsTheLaunchOnCtrlCDuringResolution",
       "bead": "nocx-pd55v"
+    },
+    {
+      "test": "go:TestCatalogueRejectsFailedAndIncompleteRPC",
+      "bead": "nocx-ccnck"
+    },
+    {
+      "test": "job:ci-linux (no-secret-service)#843",
+      "bead": "nocx-y3kfq"
+    },
+    {
+      "test": "job:ci-linux (with-secret-service)#843",
+      "bead": "nocx-y3kfq"
     }
   ]
 }

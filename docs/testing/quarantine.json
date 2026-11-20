@@ -80,6 +80,10 @@
     {
       "test": "e2e:e2e/transcript-scroll-budget.spec.ts › long transcript scroll budget › measures 500 blocks and preserves native selection/search",
       "bead": "nocx-o8p3b"
+    },
+    {
+      "test": "e2e:e2e/load-no-busy.spec.ts › a person never sees busy under load",
+      "bead": "nocx-6sz7y"
     }
   ]
 }

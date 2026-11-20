@@ -266,6 +266,20 @@ func (d *Driver) SetAction(fn func(context.Context, string, uint64) error) {
 }
 
 // Unbind forgets one pane and cancels its shell replacement lifetime.
+// ConnectionID answers which connection a live pane rides without exposing mutable binding state.
+func (d *Driver) ConnectionID(paneID string) (string, bool) {
+	if d == nil || paneID == "" {
+		return "", false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	b, ok := d.panes[paneID]
+	if !ok || b.connectionID == "" {
+		return "", false
+	}
+	return b.connectionID, true
+}
+
 func (d *Driver) Unbind(paneID string) {
 	if d == nil || paneID == "" {
 		return

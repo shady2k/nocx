@@ -103,6 +103,21 @@ func TestABindTellsThePaneTheStateItsConnectionIsAlreadyIn(t *testing.T) {
 // any network. The bind IS the start of the open, so `opening/resolve` is what
 // the coordinator knows at that moment — and the renderer must not have to
 // invent the same stage to keep its first frame honest.
+func TestConnectionIDReadsTheLivePaneBinding(t *testing.T) {
+	d, _ := newDriver(t)
+	if id, ok := d.ConnectionID("pane"); ok || id != "" {
+		t.Fatalf("unbound = %q, %v", id, ok)
+	}
+	d.Bind("pane", "conn-a")
+	if id, ok := d.ConnectionID("pane"); !ok || id != "conn-a" {
+		t.Fatalf("bound = %q, %v", id, ok)
+	}
+	d.Unbind("pane")
+	if id, ok := d.ConnectionID("pane"); ok || id != "" {
+		t.Fatalf("unbound after close = %q, %v", id, ok)
+	}
+}
+
 func TestABindBeforeAnyObservationPublishesTheOpening(t *testing.T) {
 	d, out := newDriver(t)
 	d.Bind("pane-1", "conn-a")

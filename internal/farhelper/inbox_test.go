@@ -59,9 +59,9 @@ func TestObservationReturnsWhileRetiredClientCloseWaits(t *testing.T) {
 	h.conns.Put(connected("close", 1))
 	h.want("close", farhelper.StateServing, "", farhelper.ActionNone)
 	peer := h.dial.lastPeer(t)
-	release := make(chan struct{})
-	defer close(release)
-	peer.lane.closeBlock = release
+	release := newGate()
+	defer release.release()
+	peer.lane.closeBlock = release.open
 	peer.lane.closeEntered = make(chan struct{})
 	returned := make(chan struct{})
 	go func() {
@@ -78,12 +78,23 @@ func TestObservationReturnsWhileRetiredClientCloseWaits(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("entry did not close retired client")
 	}
-	// A second lifecycle signal must still enter while the actor waits in Close.
+	// CloseFor is the synchronous uninstall barrier, unlike observations.
 	done := make(chan struct{})
-	go func() { h.reg.CloseFor(machine); h.reg.FinishFor(machine); h.conns.end("close"); close(done) }()
+	go func() { h.reg.CloseFor(machine); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("CloseFor returned before the retired client closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release.release()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("lifecycle input waited for Close")
+		t.Fatal("CloseFor did not acknowledge client closure")
+	}
+	select {
+	case <-peer.lane.waitDone:
+	default:
+		t.Fatal("CloseFor acknowledged before client closure")
 	}
 }

@@ -105,6 +105,9 @@ func TestUnrelatedStoreNotificationDoesNotFailDecision(t *testing.T) {
 	h.modes.Set(otherMachine, hostmode.Raw)
 	h.probe.gate.release()
 	h.want("unrelated", farhelper.StateServing, "", farhelper.ActionNone)
+	if calls := h.probe.count(); calls != 1 {
+		t.Fatalf("unrelated notification restarted probe: calls=%d", calls)
+	}
 }
 
 func TestDelayedOldLossCannotHideCurrentPeerLoss(t *testing.T) {

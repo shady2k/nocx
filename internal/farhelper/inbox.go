@@ -11,6 +11,7 @@ type entryInbox struct {
 	inputs      uint64
 	refresh     uint64
 	freeze      uint64
+	freezeAck   chan struct{}
 	thaw        uint64
 	lost        *client.Client
 	close       bool
@@ -43,10 +44,28 @@ func (e *entry) apply(c Connection) {
 		in.observation = &c
 	}, false)
 }
-func (e *entry) inputsChanged() { e.enqueue(func(in *entryInbox) { in.inputs++ }, true) }
+func (e *entry) inputsChanged() { e.enqueue(func(in *entryInbox) { in.inputs++ }, false) }
 func (e *entry) refresh()       { e.enqueue(func(in *entryInbox) { in.refresh++ }, false) }
-func (e *entry) freeze() {
-	e.enqueue(func(in *entryInbox) { in.serial++; in.freeze = in.serial }, true)
+func (e *entry) freeze() <-chan struct{} {
+	e.inboxMu.Lock()
+	select {
+	case <-e.stopped:
+		e.inboxMu.Unlock()
+		return e.stopped
+	default:
+	}
+	if e.inbox.freezeAck == nil {
+		e.inbox.freezeAck = make(chan struct{})
+	}
+	done := e.inbox.freezeAck
+	e.inbox.serial++
+	e.inbox.freeze = e.inbox.serial
+	if e.interruptCancel != nil {
+		e.interruptCancel()
+	}
+	e.inboxMu.Unlock()
+	e.notify()
+	return done
 }
 
 func (e *entry) thaw() {
@@ -63,6 +82,9 @@ func (e *entry) drainInbox() bool {
 	in := e.inbox
 	e.inbox = entryInbox{}
 	e.inboxMu.Unlock()
+	if in.freezeAck != nil {
+		defer close(in.freezeAck)
+	}
 	if in.close {
 		e.accept(event{kind: eventClose})
 		return true

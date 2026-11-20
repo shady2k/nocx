@@ -268,6 +268,7 @@ type Registry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	retiring  sync.WaitGroup
 	publishMu sync.Mutex
 	mu        sync.Mutex
 	entries   map[string]*entry
@@ -317,7 +318,10 @@ func New(cfg Config) *Registry {
 	return r
 }
 
-// Close ends every decision and closes every client this registry owns.
+// Close retires every current decision and waits for its client to close,
+// before the caller closes the local transport carrying the far lanes.
+// It does not wait for remote steps that ignore cancellation: their late
+// clients are closed when those steps return.
 func (r *Registry) Close() {
 	if r == nil {
 		return
@@ -334,6 +338,7 @@ func (r *Registry) Close() {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
+		r.retiring.Wait()
 		return
 	}
 	r.closed = true
@@ -347,6 +352,7 @@ func (r *Registry) Close() {
 	for _, e := range entries {
 		e.close()
 	}
+	r.retiring.Wait()
 }
 
 // Watch registers fn for every published axis change. It answers the function
@@ -459,12 +465,19 @@ func (r *Registry) Refresh(_ context.Context, connectionID string) error {
 // its host-key fingerprint and refuses to dial again until FinishFor. It is
 // D25's close-before-remove half: no helper may be running out of a directory
 // being deleted, and a decision that is mid-install must not redial into one.
+// A dial already in flight that ignores cancellation can still start a helper
+// after this returns; its stale client is closed when the dial finally returns.
 func (r *Registry) CloseFor(fingerprint string) {
 	if fingerprint == "" {
 		return
 	}
-	for _, e := range r.matching(fingerprint) {
-		e.freeze()
+	entries := r.matching(fingerprint)
+	acks := make([]<-chan struct{}, 0, len(entries))
+	for _, e := range entries {
+		acks = append(acks, e.freeze())
+	}
+	for _, ack := range acks {
+		<-ack
 	}
 }
 
@@ -517,6 +530,7 @@ func (r *Registry) observe(c Connection) {
 	if e == nil {
 		e = newEntry(r, c)
 		r.entries[c.ID] = e
+		r.retiring.Add(1)
 		e.start()
 		r.mu.Unlock()
 		return

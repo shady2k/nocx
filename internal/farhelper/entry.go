@@ -249,8 +249,8 @@ func transition(s decisionState, ev event) (decisionState, effects) {
 		if r.err != nil {
 			switch {
 			case errors.Is(r.err, context.Canceled):
-				// A store broadcasts without a key. An unrelated notification
-				// can cancel work without changing this entry's revision.
+				// An interrupted observation may cancel work before the actor
+				// applies the corresponding decision change.
 				s.nextAttemptAt = 0
 			case r.kind == stepDial && s.everServed:
 				s.phase = phaseBroken
@@ -384,6 +384,7 @@ type entry struct {
 	ingress         Connection
 	interruptCancel context.CancelFunc
 	wake            chan struct{}
+	stopped         chan struct{}
 	ready           chan struct{}
 	active          int
 	results         chan stepResult
@@ -396,7 +397,7 @@ type entry struct {
 
 func newEntry(r *Registry, c Connection) *entry {
 	ctx, cancel := context.WithCancel(r.ctx)
-	e := &entry{r: r, id: c.ID, ingress: c, wake: make(chan struct{}, 1), ready: make(chan struct{}), results: make(chan stepResult), ctx: ctx, cancel: cancel}
+	e := &entry{r: r, id: c.ID, ingress: c, wake: make(chan struct{}, 1), stopped: make(chan struct{}), ready: make(chan struct{}), results: make(chan stepResult), ctx: ctx, cancel: cancel}
 	e.decisionState, _ = transition(e.decisionState, event{kind: eventObserve, conn: c})
 	return e
 }
@@ -506,6 +507,16 @@ func (e *entry) checkInputs() event {
 func (e *entry) run() {
 	defer func() {
 		e.cancel()
+		// Retirement is complete; late, cancellation-ignoring work is reaped
+		// below, but must not hold close-before-remove acknowledgements.
+		e.inboxMu.Lock()
+		if e.inbox.freezeAck != nil {
+			close(e.inbox.freezeAck)
+			e.inbox.freezeAck = nil
+		}
+		close(e.stopped)
+		e.inboxMu.Unlock()
+		e.r.retiring.Done()
 		for e.active > 0 {
 			result := <-e.results
 			e.active--
@@ -578,7 +589,7 @@ func (e *entry) launch(kind stepKind, s decisionState) {
 	ctx, cancel := context.WithCancel(e.ctx)
 	e.inboxMu.Lock()
 	e.interruptCancel = cancel
-	if e.inbox.close || e.inbox.inputs != 0 || e.inbox.interrupted || e.inbox.freeze != 0 {
+	if e.inbox.close || e.inbox.interrupted || e.inbox.freeze != 0 {
 		cancel()
 	}
 	e.inboxMu.Unlock()

@@ -14,7 +14,7 @@
  */
 export interface GitError {
   /**
-   * Fixed refusal vocabulary. `unknown-binding` is the single reason the store's isUnknownBinding treats as 'the binding is gone — re-resolve'; every other value is a refusal or an expiry that reaches the caller as itself, and the Git panel picks the sentence a person reads from THIS value — never from the message, which is prose the backend may reword (nocx-oalo1.6.3). The three expiry reasons are the catalogue's declared outcomes (ADR-8eej3e66 §2), never a saturation class.
+   * Fixed refusal vocabulary. `unknown-binding` is the single reason the store's isUnknownBinding treats as 'the binding is gone — re-resolve'; every other value is a refusal or an expiry that reaches the caller as itself. The three expiry reasons are the catalogue's declared outcomes (ADR-8eej3e66 §2), never a saturation class.
    */
   reason:
     | 'unknown-binding'

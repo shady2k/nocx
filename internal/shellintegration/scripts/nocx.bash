@@ -1418,8 +1418,21 @@ __nocx_agent_run() {
     # is the same gesture in the same second.
     if (( __nocx_agent_launch_cancelled )); then
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
-        __nocx_agent_launch_cancel
-        __nocx_agent_launch_clear
+        # The teardown is LOCAL: a published wrapper has no ticket to release
+        # and no launch state to clear, and the helpers that do it are not in
+        # its bytes (agents.go, nocx-pd55v).
+        # @NOCX_AGENT_LAUNCH_CANCEL@
+        # AN ACCEPTED ENROLMENT OPENED AN INTERVAL AND NOBODY WILL RUN IN IT
+        # (nocx-pd55v). The withdrawal usually happens at the far end of the
+        # agent's life, and this branch is the one return that skips that end:
+        # the backend still reads the interval as "an agent is running in this
+        # pane" until the session's output ends. Only an rc of 0 means the
+        # enrolment was admitted; a refusal opened nothing to close.
+        if (( __rc == 0 )); then
+            __nocx_lc_send agent_withdraw ',"request":"'"$__nocx_agent_rid"'"' || true
+            __nocx_lc_read_agent_answer "$__nocx_agent_rid" || true
+        fi
+        # @NOCX_AGENT_LAUNCH_CLEAR@
         return 130
     fi
     __rid="$__nocx_agent_rid"
@@ -1476,7 +1489,7 @@ __nocx_agent_run() {
         __nocx_agent_cleanup
         __nocx_agent_restore_traps
     fi
-    __nocx_agent_launch_clear
+    # @NOCX_AGENT_LAUNCH_CLEAR@
     return $__rc
 }
 

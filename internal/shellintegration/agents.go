@@ -141,16 +141,35 @@ func renderScript(raw string, names []string, delivery Delivery) string {
         __nocx_agent_launch_valid=1
         __nocx_agent_launch_ticket=`)
 		out = strings.ReplaceAll(out, agentEnrolRefusalMarker, `command "$__agent" "$@"`+"\n        return $?")
-		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "")
+		out = dropStatement(out, agentLaunchCancelMarker)
+		out = dropStatement(out, agentLaunchClearMarker)
 	} else {
 		out = strings.ReplaceAll(out, agentLaunchSetupMarker, agentLaunchSetupLocal)
 		out = strings.ReplaceAll(out, agentEnrolRefusalMarker, agentEnrolRefusalLocal)
 		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "__nocx_agent_launch_cancel")
+		out = strings.ReplaceAll(out, agentLaunchClearMarker, "__nocx_agent_launch_clear")
 	}
 	out = strings.ReplaceAll(out, toolSurfaceMarker, surface)
 	out = strings.ReplaceAll(out, "@NOCX_AGENT_TOKEN_ENV@", panebind.TokenEnvVar)
 	out = strings.ReplaceAll(out, "@NOCX_SCRIPT_VERSION@", version)
 	return stripShellComments(out, ShellBash)
+}
+
+// dropStatement takes a marker's whole LINE out of a script, for a statement a
+// delivery does not carry. Replacing the marker alone would leave its
+// indentation behind as a line of spaces in a script a person's shell reads, so
+// what is dropped here is the line the marker stands on — a marker of this kind
+// is a statement and nothing else sits beside it.
+func dropStatement(script, marker string) string {
+	lines := strings.Split(script, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) == marker {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 func stripAgentLaunchHelpers(script string) string {
@@ -196,7 +215,15 @@ const (
 	agentUnorchestratedMarker     = "# @NOCX_AGENT_UNORCHESTRATED@"
 	agentLaunchSetupMarker        = "# @NOCX_AGENT_LAUNCH_SETUP@"
 	agentEnrolRefusalMarker       = "# @NOCX_AGENT_ENROL_REFUSAL@"
-	agentLaunchCancelMarker       = "# @NOCX_AGENT_LAUNCH_CANCEL@"
+	// The TEARDOWN of a launch: releasing a ticket the resolution issued and
+	// clearing the state it left. Both are defined in the stripped launch
+	// helpers because only a pane on this machine resolves a launch, so the
+	// statements that call them are markers rather than calls — a published
+	// wrapper has no ticket to release and no state to clear, and calling what
+	// publication strips printed `command not found` in the person's remote
+	// shell on the one path that delivery reaches (nocx-pd55v).
+	agentLaunchCancelMarker = "# @NOCX_AGENT_LAUNCH_CANCEL@"
+	agentLaunchClearMarker  = "# @NOCX_AGENT_LAUNCH_CLEAR@"
 )
 
 // agentLaunchSetupLocal is what a LOCAL pane runs before it enrols: resolve what
@@ -209,9 +236,29 @@ const (
 // aborted silently, with no sentence and whatever status the shell left. The
 // ticket is cancelled too when one arrived: a launch nobody will perform must
 // not leave it live.
+//
+// A RESOLUTION THAT SUCCEEDED IS NOT A RESOLUTION NOBODY INTERRUPTED
+// (nocx-pd55v). The wait's own arm clears its window's flag when the wait ends
+// — deliberately, so a stale flag cannot leak into the next window — while the
+// wrapper's flag survives it. So an interrupt delivered as the answer was
+// consumed, or in the instant after the wait returned, arrives here with rc 0
+// and the cancel recorded, and this block is the only thing between that fact
+// and an enrolment: without the check the wrapper asked the backend to admit a
+// pane it then refused to run anything in, spending the launch ticket on a
+// launch the person had already cancelled.
+//
+// THE RECORDED CANCEL OUTRANKS THE STATUS THE WAIT RETURNED (nocx-pd55v). A
+// status of 130 is only ONE of the ways an interrupted resolution says so: an
+// interrupt that lands on the last `sleep` of the wait is recorded by
+// __nocx_agent_note_int, which sets this flag, and the loop then leaves by its
+// own counter with rc 1 — never reaching the check at the top of an iteration
+// it will not make again. Read rc alone and that interrupt took the refusal
+// branch below: `not started` for a launch the person had just cancelled, and
+// the ticket left to be spent. So the flag is tested FIRST and in the same
+// branch as 130, before any non-zero status is read as a refusal.
 const agentLaunchSetupLocal = `__nocx_agent_launch_resolve "$__agent"
     __rc=$?
-    if (( __rc == 130 )); then
+    if (( __rc == 130 || __nocx_agent_launch_cancelled )); then
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
         __nocx_agent_launch_cancel
         __nocx_agent_launch_clear

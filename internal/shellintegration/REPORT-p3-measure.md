@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **93,216**.
+- Maximum bytes written per publish: **94,147**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -177,3 +177,51 @@ The same day the length prefix went back to `dd bs=1 count=4 | od` (**93,965**,
 with its header, and on macOS a nested bash child under fish sent `hello` and
 never `prompt_ready` (ci-mac, PR #831). The elapsed-time wait is kept; the
 63-call maximum is unchanged.
+
+The 2026-11-20 measurement (nocx-pd55v) is **398 bytes above** that
+93,965-byte figure, at **94,363**, and keeps the **63**-call maximum. The growth
+is the cancelled launch that used to enrol anyway: the branch that cancels an
+admitted enrolment withdraws the interval that enrolment opened instead of
+leaving it live until the session's output ends, and that withdrawal has a copy
+in each script. It is **199 bytes in `nocx.bash`** (41,930 -> 42,129) and **199
+in `nocx.zsh`** (34,460 -> 34,659) — per-file figures from TestMeasureBundleBytes
+on this tree and on `01e36c206`, and 199 is what the comment stripper leaves of
+the block: the `if (( __rc == 0 ))`, the withdrawal frame, the read of its answer
+and the `fi`. The comments beside it are prose and never publish. The other half
+of the fix — the check of the interrupt recorded while the resolution's answer
+was read, which is what sends a launch into that branch at all — adds **nothing**
+to these bytes: it lives in the launch-setup block, and a published script does
+not carry that block's local form at all, because `agents.go` substitutes the
+published form (a plain local/valid/ticket assignment) for the same marker. Two
+tiers pay for the withdrawal; no published tier pays for the guard.
+
+The script version moved **71 -> 72** with the same fix, and that is not a byte
+move: `version` is embedded in the delivered scripts at the same width, and the
+bundle's own size is unchanged at **94,363** with **63** calls, re-measured on
+the 72 tree. What the bump buys is arrival. A bundle publishes under its version
+plus a digest of its agent set, and a host reconnected to with the same agents
+enabled answered `already-installed` to a 71 bundle — the generation matched, so
+the publisher wrote nothing and the host kept a wrapper that enrols a cancelled
+launch. Nothing in the measurement can see that, because the bytes the
+measurement publishes are the bytes a re-publish of the same generation never
+sends. The worst path is still replacement plus sweep with the launch carrier
+absent, at fault `remove#4`.
+
+The second 2026-11-20 measurement (nocx-pd55v, the re-review) is **216 bytes
+below** that 94,363-byte figure, at **94,147**, and keeps the **63**-call
+maximum. The block the version above delivers called two helpers that
+publication strips — the ticket release and the launch-state clear both live in
+the stripped launch helpers — so the branch a host reaches answered
+`command not found` into the person's remote shell, twice, at the one moment
+this delivery exists for. That teardown is the resolution's: a published
+wrapper carries no ticket to release and no state to clear. It is a statement
+marker now, like the setup block's, so a published script carries no call at
+all: **108 bytes removed from each** of `nocx.bash` (42,129 -> 42,021) and
+`nocx.zsh` (34,659 -> 34,551), per-file figures from TestMeasureBundleBytes on
+this tree and on `715816ee4`. Both tiers lose the same three lines — the cancel
+in the cancelled-enrolment branch, the clear below it and the clear on the
+agent's return — because both carry the same wrapper. The local pane's bytes
+are unchanged: a marker renders the statement for one delivery and nothing for
+the other, so the pane a person sits in front of pays neither way. The worst
+path is still replacement plus sweep with the launch carrier absent, at fault
+`remove#4`.

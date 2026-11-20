@@ -359,7 +359,23 @@ var (
 // `interrupt trap: line 2: unexpected EOF while looking for matching ')'` and
 // the open-question wait, which has no deadline, never ended: ^C echoed, then
 // nothing. A shell still sourcing 70 can be left inside a cancelled launch.
-const version = "71"
+// 72: a launch cancelled as its resolution was read no longer enrols, and the
+// branch that cancels an admitted enrolment withdraws the interval that
+// enrolment opened (nocx-pd55v). Both shells carry the withdrawal; the check
+// that sends a launch into that branch is the launch-setup block's, which a
+// PUBLISHED script never carries — so a host only ever reaches the withdrawal,
+// and that block must arrive. It would not have. A bundle publishes under a
+// generation made of its script version plus a digest of its agent set, and
+// that equality is what makes a re-publish free: a host already holding 71
+// answered `already-installed` to this build's bytes for as long as they said
+// 71 — same version, same agent set, so the same generation — and the publisher
+// skipped the write, leaving the host the wrapper it had. It is the VERSION
+// separating the two generations (v71-… -> v72-…) that publishes the new one,
+// which is why the number moves here: 71 and 72 are the same width, so the
+// token itself changes no byte. Every installed copy must be rewritten: a
+// shell still sourcing 71 enrols a cancelled launch and leaves the interval it
+// opened live until the session's output ends.
+const version = "72"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

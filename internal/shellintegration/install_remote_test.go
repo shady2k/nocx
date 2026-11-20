@@ -370,6 +370,122 @@ func TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation(t *testing.T) {
 	}
 }
 
+// A HOST THAT STILL HOLDS THE PREVIOUS SCRIPT VERSION IS UPGRADED, NOT TOLD
+// `already-installed` (nocx-pd55v).
+//
+// A bundle publishes under a generation made of its script version plus a digest
+// of its agent set, and checkInstalled treats a matching generation as the same
+// bundle and skips the write. That equality is right — it is how a re-publish of
+// the same generation costs nothing — but it makes the VERSION the only thing
+// that can carry a script change to a host whose enabled agents did not move,
+// which is every host a person reconnects to. The cancelled launch's withdrawal
+// block travels in the published scripts and nowhere else, so with the version
+// left at 71 the reconnect answered `already-installed`, wrote nothing, and the
+// host kept a wrapper that enrols a cancelled launch and leaves the interval it
+// opened live.
+//
+// The seed is the bundle the PREVIOUS build published: this build's scripts and
+// agent set under the old version token, which is what a host connected to
+// before the fix holds, and whose generation differs from this build's by that
+// token alone. The same seed is published twice first, so the test states the
+// trap it is about rather than assuming it.
+//
+// WHAT ARRIVES IS ASSERTED BY WHAT IT DOES, not by a word it shares with 71:
+// `agent_withdraw` is as old as the enrolment, so its presence on the host
+// proved nothing about this version — a host holding 71 would have passed. The
+// delivered file is therefore sourced in the real shell, an enrolment is
+// admitted and then cancelled, and the withdrawal of THAT interval is what is
+// required: delete the branch this version exists for and the wrapper falls
+// through to the agent, which is the other assertion here.
+func TestEnsureInstalledRemote_UpgradesAHostHoldingThePreviousScriptVersion(t *testing.T) {
+	const previousVersion = "71"
+	if version == previousVersion {
+		t.Fatalf("the script version is still %s: a host holding it publishes the same generation, the publisher answers already-installed and no script change can reach it — scripts.go says why the version has to move", previousVersion)
+	}
+	srv := startRemoteTestSSHServer(t)
+	defer srv.close()
+
+	remoteHome := t.TempDir()
+	srv.home = remoteHome
+	ctx := context.Background()
+	s := New(testLogger())
+
+	client := dialRemoteTestSSHClient(t, srv)
+	defer func() { _ = client.Close() }()
+	fsys := sftpFSForClient(t, client)
+	root := filepath.Join(remoteHome, dirName)
+
+	// The host as the previous build left it.
+	previous := launchBundle(shippedAgentNames())
+	previous.Version = previousVersion
+	seed := NewPublisher(testLogger(), fsys, root)
+	if _, err := seed.Publish(previous); err != nil {
+		t.Fatalf("seed the previous version: %v", err)
+	}
+	// The premise: the same bundle again is a no-op, which is the answer that
+	// kept the withdrawal off the host.
+	res, err := seed.Publish(previous)
+	if err != nil {
+		t.Fatalf("re-publish the seeded bundle: %v", err)
+	}
+	if res.Published || res.Reason != "already-installed" {
+		t.Fatalf("the same generation must be already-installed, got %+v", res)
+	}
+
+	if err := s.EnsureInstalledRemote(ctx, fsys, remoteHome); err != nil {
+		t.Fatalf("EnsureInstalledRemote: %v", err)
+	}
+
+	manifest := readManifestT(t, root)
+	if manifest.Version != version {
+		t.Errorf("the host names version %s after the reconnect, want %s", manifest.Version, version)
+	}
+	if want := shippedBundle().generation(); manifest.Generation != want {
+		t.Errorf("the host names generation %s after the reconnect, want %s", manifest.Generation, want)
+	}
+	// The block this version exists for is ON the host, in the file the shell
+	// sources, and not merely in the bytes this build would have published.
+	// Both shells carry it, so both are driven: a generation that arrives with
+	// the block in one of them is a host that half-upgraded.
+	for _, sh := range []struct{ name, file string }{
+		{"bash", "nocx.bash"},
+		{"zsh", "nocx.zsh"},
+	} {
+		t.Run(sh.name, func(t *testing.T) {
+			delivered := readFileT(t, filepath.Join(root, integrationDir, manifest.Generation, sh.file))
+			text := runScriptFile(t, sh.name, writeScriptFile(t, sh.file, string(delivered)), `__nocx_agent_enrol() {
+    __nocx_agent_cancelled=0
+    __nocx_agent_rid=a-1
+    __nocx_agent_launch_cancelled=1
+    return 0
+}
+__nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
+__nocx_lc_read_agent_answer() { builtin printf 'READ %s\n' "$*"; return 0; }
+`)
+			if strings.Contains(text, "AGENT-RAN") {
+				t.Fatalf("a launch cancelled after its enrolment started the agent; output=%q", text)
+			}
+			if !strings.Contains(text, "SEND agent_withdraw") || !strings.Contains(text, `,"request":"a-1"`) {
+				t.Errorf("the delivered %s does not withdraw the interval a cancelled launch admitted; output=%q", sh.file, text)
+			}
+			if !strings.Contains(text, "READ a-1") {
+				t.Errorf("the delivered %s does not read the withdrawal's answer, so the pane waits for ever; output=%q", sh.file, text)
+			}
+			if !strings.Contains(text, "WRAPPER-RC=130") {
+				t.Errorf("the delivered %s does not report the interrupt; output=%q", sh.file, text)
+			}
+			// NOTHING PUBLICATION STRIPS MAY BE CALLED BY WHAT IT KEEPS. The
+			// ticket release and the state clear are the resolution's, and the
+			// resolution does not travel; a delivered branch that calls them
+			// answers `command not found` into the person's remote shell on the
+			// path this version exists for.
+			if strings.Contains(text, "command not found") {
+				t.Errorf("the delivered %s calls what its delivery does not carry; output=%q", sh.file, text)
+			}
+		})
+	}
+}
+
 // TestEnsureInstalledRemote_ModesOverSFTP: modes are set at creation, never
 // left to umask — over SFTP the server applies its own umask to mkdir and
 // create, so the carrier's chmod is what pins them. Directories 0700, data

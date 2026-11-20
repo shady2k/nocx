@@ -430,8 +430,8 @@ func TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime(t *testing.T) {
 	provider := &fakeLaneProvider{peer: sharedRecordingPeer(t, svc, rec)}
 
 	source := stubArtifacts(t)
-	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, source, store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))

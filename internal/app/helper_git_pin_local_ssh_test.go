@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -54,18 +55,17 @@ func TestHostKeyPinHelperGitBridgeRefusesAnotherPooledHostKey(t *testing.T) {
 		opts:              opts,
 	}
 	provider := pinnedGitLaneProvider{fakeLaneProvider: &fakeLaneProvider{}, bridge: stand.helper}
-	store, installs := testConsentStoresFor(t, sessionPin)
-	selectGit, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger(t))
+	store, _ := testConsentStoresFor(t, sessionPin)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, nil, reg)
-	selection := selectGit(sess)
-	if selection.Factory == nil {
-		t.Fatalf("git selection refused before opening its bridge: %+v", selection.Refusal)
+	installed, installErr := installHelperAt(ctx, destination, opts, provider, stubArtifacts(t), deploy.Platform{GOOS: "linux", GOARCH: "amd64"})
+	if installErr != nil {
+		t.Fatal(installErr)
 	}
-	repo, outcome, err := selection.Factory.Open(ctx, fixtureRepo(t))
-	if repo != nil {
-		_ = repo.Close()
-		t.Fatal("git opened a repository on a host with another key")
-	}
+	h := &hostedShellCarrier{f: &hostedShellBinding{reg: reg, sid: sess.ID(), host: sess.Host(), opts: append(opts, ssh.WithHostKeyPin(sessionPin)), install: installed}, lanes: provider, log: discardLogger(t)}
+	h.mu.Lock()
+	_, outcome, err := h.connectLocked(ctx)
+	h.mu.Unlock()
 	var refusal *helperclient.RefusalError
 	if !errors.As(err, &refusal) || refusal.Code != proto.ErrCodeHostKeyPinMismatch {
 		t.Fatalf("git bridge refusal = %v (outcome %+v), want host-key-pin-mismatch", err, outcome)

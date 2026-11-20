@@ -102,10 +102,6 @@ func TestReadoptedGitRefusesAnotherTrustedHostKeyAfterClientLoss(t *testing.T) {
 			if err != nil {
 				t.Fatalf("readopt did not register original session: %v (adopter: %v)", err, adopter.failure())
 			}
-			selection := second.gitFor(sess)
-			if selection.Factory == nil {
-				t.Fatalf("git selection refused: %+v", selection.Refusal)
-			}
 			h := second.reg.hosts[sess.ID()]
 			if h == nil {
 				t.Fatal("readopt did not register its helper in git's registry")
@@ -124,14 +120,10 @@ func TestReadoptedGitRefusesAnotherTrustedHostKeyAfterClientLoss(t *testing.T) {
 			provider.bridge = stand.helper
 			provider.mu.Unlock()
 
-			repo, outcome, err := selection.Factory.Open(ctx, fixtureRepo(t))
-			if repo != nil {
-				_ = repo.Close()
-				t.Fatal("git opened on a different trusted host key")
-			}
+			_, err = h.inventoryClient(ctx)
 			var refusal *helperclient.RefusalError
 			if !errors.As(err, &refusal) || refusal.Code != proto.ErrCodeHostKeyPinMismatch {
-				t.Fatalf("git after readopt client loss = %v (outcome %+v), want host-key-pin-mismatch", err, outcome)
+				t.Fatalf("carrier after readopt client loss = %v, want host-key-pin-mismatch", err)
 			}
 			if second.reg.hosts[sess.ID()] != h {
 				t.Fatal("git replaced the readopt registry entry")

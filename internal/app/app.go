@@ -1029,17 +1029,6 @@ func New(opts ...Option) (*App, error) {
 	// it and so does the file panel's factory below. Two literals would be two
 	// answers to one question, and the second would be the one that drifts.
 	sshLeases := installLeaseRoutes{viaLocal: overHelper, probes: probes}
-	helperFactory, helperReg := helperGitFactory(
-		sshLeases, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
-	// AND THE SAME OBJECT ANSWERS THE FAR PANE'S TOOL SURFACE (nocx-e2bws): it
-	// holds this machine's helper's connection, so the install lease and the far
-	// socket are one owner asked two questions. The registry takes the value
-	// directly rather than through installLeaseRoutes, because a forwarding
-	// method per op would put a capability on a dispatch that has no use for it
-	// — the narrowness rule this file's own comments keep.
-	helperReg.tools = overHelper
-	helperReg.modes = hostModes
-	helperReg.registry = sess
 	// THE FAR HELPER'S AXIS (ADR-727g63tr decision 2). One registry for the
 	// process, deciding per connection in the background; it publishes nothing
 	// yet (stage C carries the axis on pane.connection), and it owns the far
@@ -1059,6 +1048,11 @@ func New(opts ...Option) (*App, error) {
 		Dial:        &farHelperDial{over: overHelper, log: slogger},
 		Log:         log.NewSlogAdapter(slogger),
 	})
+	helperFactory := helperGitFactory(farHelpers, func() *panedriver.Driver { return localOpener.paneConnections() })
+	helperReg := newHostedShellRegistry(sshLeases, helperartifacts.DefaultSource, helperConsent, slogger)
+	helperReg.tools = overHelper
+	helperReg.modes = hostModes
+	helperReg.registry = sess
 	// The axis is a backend fact a surface will draw in stage C; until then it
 	// is at least visible in the log, which is the same rule every soft degrade
 	// here follows: a state nobody can read is a state nobody can debug.

@@ -97,7 +97,7 @@ func TestAFrameThatCannotBeWrittenIsRetriedByTheLocalHelperOpen(t *testing.T) {
 	// AND THE LANE THE LOST CLIENT RODE IS ENDED BY THE CLIENT ITSELF
 	// (nocx-ouru5.1.8). The retry above dials a fresh connection and this
 	// stand's client is dropped, exactly as the opener drops it
-	// (`dropIfLost`, hostHelper.invalidate) — a lost client is never reused.
+	// (`dropIfLost`, hostedShellCarrier.invalidate) — a lost client is never reused.
 	// What must not survive that is the lane: this stand's peer IS the helper
 	// process, so a lane nobody closed is a helper still serving after every
 	// test has ended, which is the leak ci-linux reported against this very

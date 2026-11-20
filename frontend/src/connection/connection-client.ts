@@ -96,6 +96,21 @@ export class ConnectionClient {
    * A press carrying anything else is about a state the person is no longer
    * looking at, and the backend refuses it with `stale connectionEpoch`.
    */
+  async reconnectPane(paneId: string, connectionEpoch: number): Promise<void> {
+    const result = await this.client.dispatcher.call<PaneReconnect>('pane.reconnect', {
+      paneId,
+      connectionEpoch,
+    })
+    if (
+      typeof result !== 'object' ||
+      result === null ||
+      result.paneId !== paneId ||
+      result.registered !== true
+    ) {
+      throw new Error('nocx: pane.reconnect did not register this pane')
+    }
+  }
+
   /**
    * The person's one action on the far HELPER axis: redial a helper that was
    * serving and is gone (ADR-727g63tr decision 2).
@@ -122,20 +137,5 @@ export class ConnectionClient {
       throw new Error('nocx: connection.helperRefresh did not accept the refresh')
     }
     return result.connectionId
-  }
-
-  async reconnectPane(paneId: string, connectionEpoch: number): Promise<void> {
-    const result = await this.client.dispatcher.call<PaneReconnect>('pane.reconnect', {
-      paneId,
-      connectionEpoch,
-    })
-    if (
-      typeof result !== 'object' ||
-      result === null ||
-      result.paneId !== paneId ||
-      result.registered !== true
-    ) {
-      throw new Error('nocx: pane.reconnect did not register this pane')
-    }
   }
 }

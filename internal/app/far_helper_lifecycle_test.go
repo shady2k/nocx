@@ -213,8 +213,8 @@ func startFarStand(t *testing.T, spawner interface {
 		return 0
 	}
 	provider := &fakeLaneProvider{peer: peer, home: t.TempDir()}
-	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger(t))
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 	t.Cleanup(func() {
 		endSessions(reg.registry)
@@ -442,8 +442,8 @@ func TestAFarHelperThatDiedIsReplacedByTheNextOpen(t *testing.T) {
 		return 0
 	}
 	provider := &fakeLaneProvider{peer: peer, home: t.TempDir()}
-	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger(t))
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 	reg.tools = &immediateTools{}
 	t.Cleanup(func() {

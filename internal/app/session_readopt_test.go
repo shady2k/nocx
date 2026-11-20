@@ -364,22 +364,16 @@ type coordinator struct {
 	reg      *helperRegistry
 	sess     *session.Reg
 	consent  *consent.Store
-	// gitFor is the SAME selection closure ws_git.go's handleOpen would call
-	// (transport.GitFactoryFor), captured from the one helperGitFactory call
-	// that also built reg — a second call would build a second, unrelated
-	// registry, and a test driving git.open against reg's own hostHelpers
-	// needs the closure that actually looks them up in this reg.
-	gitFor transport.GitFactoryFor
 }
 
 func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 	t.Helper()
 	source := stubArtifacts(t)
-	store, installs := testConsentStores(t)
-	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, source, store, discardLogger(t))
 	sess := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sess
-	c := &coordinator{t: t, provider: provider, reg: reg, sess: sess, consent: store, gitFor: gitFor}
+	c := &coordinator{t: t, provider: provider, reg: reg, sess: sess, consent: store}
 	// THE STAND'S PROCESS ENDS WITH THE TEST, which is what quit is, and it
 	// is registered here rather than at each of the thirty call sites for the
 	// reason this bead exists: a test that forgot it left its helper's own

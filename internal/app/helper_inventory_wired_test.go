@@ -11,7 +11,7 @@ import (
 )
 
 func TestHelperSessionInventoryWithoutActiveHelperIsUnavailable(t *testing.T) {
-	reg := &helperRegistry{hosts: make(map[coresession.ID]*hostHelper)}
+	reg := &helperRegistry{hosts: make(map[coresession.ID]*hostedShellCarrier)}
 	_, err := (&helperSessionInventories{registry: reg}).Sessions(context.Background())
 	if err == nil {
 		t.Fatal("inventory without an active helper returned an empty answer")

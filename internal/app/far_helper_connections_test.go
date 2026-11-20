@@ -15,6 +15,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -23,10 +24,12 @@ import (
 
 	"github.com/shady2k/nocx/internal/farhelper"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	helperhost "github.com/shady2k/nocx/internal/helper/host"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -350,6 +353,14 @@ func dialInProcessHelper(t *testing.T, logger *slog.Logger, service helperhost.S
 
 func TestReviewAuthenticatedFingerprintReachesTheRegistry(t *testing.T) {
 	source := newFarHelperConnections()
+	_, logger := logtest.New(t)
+	registry := farhelper.New(farhelper.Config{
+		Connections: source,
+		Modes:       &reviewModeStore{mode: hostmode.Raw},
+		Consents:    &reviewConsentStore{},
+		Log:         logger,
+	})
+	defer registry.Close()
 	var observed farhelper.Connection
 	source.Watch(func(c farhelper.Connection) { observed = c })
 	// bind without a pin, then the authenticated connection event, then the
@@ -359,6 +370,14 @@ func TestReviewAuthenticatedFingerprintReachesTheRegistry(t *testing.T) {
 	source.Observe(farhelper.Connection{ID: "review", Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, HostKeyFingerprint: "SHA256:x"})
 	if observed.HostKeyFingerprint != "SHA256:x" || observed.Seq != 1 || observed.State != hostconn.Connected {
 		t.Fatalf("registry observation = %+v, want authenticated fingerprint on connected seq 1", observed)
+	}
+	var status farhelper.Status
+	waittest.WaitFor(t, "raw-mode decision after authenticated observation", func() bool {
+		status, _ = registry.Axis("review")
+		return status.State != farhelper.StateStarting
+	})
+	if status.State != farhelper.StateUnavailable || status.Reason != farhelper.ReasonModeRaw || status.Action != farhelper.ActionHostSettings {
+		t.Fatalf("axis = %+v, want unavailable/mode-raw/host-settings", status)
 	}
 }
 
@@ -385,5 +404,82 @@ func TestFarHelperCloserUnfreezesOnSessionCloseFailure(t *testing.T) {
 	status, ok := registry.Axis("d25")
 	if !ok || status.Reason == farhelper.ReasonHelperLost {
 		t.Fatalf("axis remained frozen after failed close: %+v", status)
+	}
+}
+
+type reviewModeStore struct{ mode hostmode.Mode }
+
+func (s *reviewModeStore) Lookup(string) (hostmode.Mode, bool) { return s.mode, true }
+func (*reviewModeStore) Watch(func()) func()                   { return func() {} }
+
+type reviewConsentStore struct{}
+
+func (*reviewConsentStore) Lookup(string) (consent.Answer, bool) { return consent.Granted, true }
+func (*reviewConsentStore) Watch(func()) func()                  { return func() {} }
+
+type reviewInstall struct{ installs int }
+
+func (*reviewInstall) Find(context.Context, farhelper.Target, farhelper.Platform) (farhelper.Installed, bool, error) {
+	return farhelper.Installed{Dir: "/helper", Generation: "installed"}, true, nil
+}
+
+func (i *reviewInstall) Install(context.Context, farhelper.Target, farhelper.Platform) (farhelper.Installed, error) {
+	i.installs++
+	return farhelper.Installed{Dir: "/helper", Generation: "installed"}, nil
+}
+
+type reviewProber struct{}
+
+func (reviewProber) Probe(context.Context, farhelper.Target) (farhelper.Platform, error) {
+	return farhelper.Platform{GOOS: "linux", GOARCH: "amd64"}, nil
+}
+
+type reviewHelloService struct{}
+
+func (reviewHelloService) Name() string  { return "review" }
+func (reviewHelloService) Ops() []string { return []string{"noop"} }
+func (reviewHelloService) ParamsSchema(string) *helperhost.Schema {
+	return helperhost.SchemaFor(struct{}{})
+}
+
+func (reviewHelloService) Call(context.Context, string, json.RawMessage) (any, error) {
+	return struct{}{}, nil
+}
+
+type reviewDialer struct {
+	t      *testing.T
+	logger *slog.Logger
+}
+
+func (d reviewDialer) Dial(context.Context, farhelper.Target, farhelper.Installed) (*helperclient.Client, error) {
+	return dialInProcessHelper(d.t, d.logger, reviewHelloService{}), nil
+}
+
+func TestReviewInstalledBuildServesWithoutPlainShells(t *testing.T) {
+	for _, slow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow=%v", slow), func(t *testing.T) {
+			logger := logtest.Slog(t)
+			_, registryLogger := logtest.New(t)
+			source := newFarHelperConnections()
+			installer := &reviewInstall{}
+			registry := farhelper.New(farhelper.Config{
+				Connections: source,
+				Modes:       &reviewModeStore{mode: hostmode.Helper},
+				Consents:    &reviewConsentStore{},
+				Probe:       reviewProber{}, Install: installer,
+				Dial: reviewDialer{t: t, logger: logger}, Log: registryLogger,
+			})
+			defer registry.Close()
+			const id = "review-installed"
+			source.Observe(farhelper.Connection{ID: id, Destination: proto.SSHDestination{Host: "host.example", Port: 22, User: "dev"}, HostKeyFingerprint: "SHA256:installed", State: hostconn.Connected, Generation: 1, Shells: 0, Slow: slow})
+			var status farhelper.Status
+			waittest.WaitFor(t, "installed helper to serve without a plain shell", func() bool {
+				status, _ = registry.Axis(id)
+				return status.State == farhelper.StateServing
+			})
+			if installer.installs != 0 {
+				t.Fatalf("Install calls = %d, want 0", installer.installs)
+			}
+		})
 	}
 }

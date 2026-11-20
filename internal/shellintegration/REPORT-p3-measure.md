@@ -178,13 +178,31 @@ with its header, and on macOS a nested bash child under fish sent `hello` and
 never `prompt_ready` (ci-mac, PR #831). The elapsed-time wait is kept; the
 63-call maximum is unchanged.
 
-The 2026-11-20 measurement on branch `agent/agent/alx-772`, on the tree above,
-is **398 bytes above** that 93,965-byte figure, at **94,363**, and keeps the
-**63**-call maximum. The growth is the cancelled launch that used to enrol
-anyway (nocx-pd55v): an interrupt recorded while the resolution's answer was
-being read is checked before the wrapper enrols, and the branch that cancels an
+The 2026-11-20 measurement (nocx-pd55v) is **398 bytes above** that
+93,965-byte figure, at **94,363**, and keeps the **63**-call maximum. The growth
+is the cancelled launch that used to enrol anyway: the branch that cancels an
 admitted enrolment withdraws the interval that enrolment opened instead of
-leaving it live until the session's output ends. The setup block is rendered
-into `nocx.bash` and `nocx.zsh` from one constant, so both tiers pay for the
-first check; the withdrawal has a copy in each script. The worst path is still
-replacement plus sweep with the launch carrier absent, at fault `remove#4`.
+leaving it live until the session's output ends, and that withdrawal has a copy
+in each script. It is **199 bytes in `nocx.bash`** (41,930 -> 42,129) and **199
+in `nocx.zsh`** (34,460 -> 34,659) — per-file figures from TestMeasureBundleBytes
+on this tree and on `01e36c206`, and 199 is what the comment stripper leaves of
+the block: the `if (( __rc == 0 ))`, the withdrawal frame, the read of its answer
+and the `fi`. The comments beside it are prose and never publish. The other half
+of the fix — the check of the interrupt recorded while the resolution's answer
+was read, which is what sends a launch into that branch at all — adds **nothing**
+to these bytes: it lives in the launch-setup block, and a published script does
+not carry that block's local form at all, because `agents.go` substitutes the
+published form (a plain local/valid/ticket assignment) for the same marker. Two
+tiers pay for the withdrawal; no published tier pays for the guard.
+
+The script version moved **71 -> 72** with the same fix, and that is not a byte
+move: `version` is embedded in the delivered scripts at the same width, and the
+bundle's own size is unchanged at **94,363** with **63** calls, re-measured on
+the 72 tree. What the bump buys is arrival. A bundle publishes under its version
+plus a digest of its agent set, and a host reconnected to with the same agents
+enabled answered `already-installed` to a 71 bundle — the generation matched, so
+the publisher wrote nothing and the host kept a wrapper that enrols a cancelled
+launch. Nothing in the measurement can see that, because the bytes the
+measurement publishes are the bytes a re-publish of the same generation never
+sends. The worst path is still replacement plus sweep with the launch carrier
+absent, at fault `remove#4`.

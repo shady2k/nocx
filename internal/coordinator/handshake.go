@@ -167,7 +167,17 @@ package coordinator
 // helperConsentSaved in its result; a version 40 window does not read it.
 // The integration axis also names host-key-unconfirmed when delivery cannot
 // be authorised without an authenticated host key.
-const ProtocolVersion = 41
+// 42 (nocx-pd55v): the embedded shell integration's agent wrapper changed, and
+// the scripts this build hands to a pane are part of this surface (ADR-0104).
+// An interrupt recorded while a launch's resolution was read now cancels the
+// launch before it enrols, instead of spending the launch ticket on an agent
+// the last door refuses to run, and the branch that cancels an admitted
+// enrolment withdraws the interval that enrolment opened rather than leaving it
+// live until the session's output ends. A 41 coordinator would keep serving a
+// wrapper whose cancel leaves that interval open, so the number moves and the
+// launcher replaces it. The wire the helper speaks is untouched: what moved is
+// what the shells do with a cancel.
+const ProtocolVersion = 42
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

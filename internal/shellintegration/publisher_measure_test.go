@@ -334,13 +334,18 @@ import (
 // stays; the comment that says why dd is longer than the one it replaces.
 //
 // 2026-11-20, sixteenth move (nocx-pd55v): 93,965 -> 94,363, **+398**, and both
-// `nocx.bash` and `nocx.zsh` — the wrapper checks the interrupt it recorded
-// when a resolution SUCCEEDED before it enrols, and the branch that cancels
-// between the enrolment and the agent withdraws the interval the admitted
-// enrolment opened. The launch setup block is rendered into both tiers from one
-// constant, so both paid for the first check; the withdrawal has a copy in each
-// script, and neither is stripped at publish time. No file is added, removed or
-// written twice: the 63-call maximum is unchanged.
+// `nocx.bash` (41,930 -> 42,129) and `nocx.zsh` (34,460 -> 34,659) — the branch
+// that cancels an admitted enrolment withdraws the interval the admitted
+// enrolment opened. It is 199 bytes per script, which is what the comment
+// stripper leaves of the withdrawal: the `if (( __rc == 0 ))`, the withdrawal
+// frame, the read of its answer and the `fi`. The other half of the fix — the
+// check of the interrupt recorded while the resolution's answer was read — is in
+// the launch-setup block, and a published script never carries that block's
+// local form, so no published tier pays for it. The same fix moved the script
+// version 71 -> 72, which is a same-width token: the measured bytes are the same
+// on the 72 tree, and the bump is what makes them ARRIVE at a host whose agent
+// set did not change (nocx-pd55v, TestEnsureInstalledRemote_UpgradesAHostHoldingThePreviousScriptVersion).
+// No file is added, removed or written twice: the 63-call maximum is unchanged.
 const (
 	measuredMaxPublishCalls = 63
 	measuredMaxPublishBytes = 94363

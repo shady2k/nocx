@@ -86,6 +86,14 @@ __nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
 // The enrolment is stubbed to be admitted and then to record the interrupt, so
 // the state under test is the one the real wrapper reaches: rc 0 from an
 // accepted enrolment, and the person's cancel already recorded.
+//
+// BOTH HALVES OF THE WITHDRAWAL ARE ASSERTED, because either alone leaves a
+// live interval behind: the frame that asks the backend to close it (agent_withdraw
+// naming the enrolment's request) AND the read of its answer, which is what makes
+// the wait for that answer finish instead of holding the wrapper. The read is
+// stubbed to print its argument, so a read that names another request — or the
+// read going away while the send stays — fails here rather than passing as a
+// half-performed withdrawal.
 func TestAgentWrapperWithdrawsAnIntervalItAdmittedButWillNotRunIn(t *testing.T) {
 	for _, shell := range []struct {
 		name string
@@ -106,7 +114,7 @@ __nocx_agent_enrol() {
     return 0
 }
 __nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
-__nocx_lc_read_agent_answer() { return 0; }
+__nocx_lc_read_agent_answer() { builtin printf 'READ %s\n' "$*"; return 0; }
 `)
 			if strings.Contains(text, "AGENT-RAN") {
 				t.Fatalf("a cancelled launch started the agent; output=%q", text)
@@ -116,6 +124,12 @@ __nocx_lc_read_agent_answer() { return 0; }
 			}
 			if !strings.Contains(text, `,"request":"a-1"`) {
 				t.Errorf("the withdrawal did not name the enrolment's interval; output=%q", text)
+			}
+			// The answer is read for the SAME request the withdrawal names: the
+			// wrapper waits on the answer before it returns, and a read of another
+			// interval's answer is a wait that never ends.
+			if !strings.Contains(text, "READ a-1") {
+				t.Errorf("the withdrawal's answer was not read for the enrolment's interval; output=%q", text)
 			}
 			if !strings.Contains(text, "nocx: cancelled — claude was not started") {
 				t.Errorf("the pane did not say the launch was cancelled; output=%q", text)

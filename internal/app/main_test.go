@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +35,10 @@ func TestMain(m *testing.M) {
 				"a test never ended what it opened:\n", countStandGoroutines(left))
 			for _, g := range left {
 				fmt.Fprintf(os.Stderr, "  %3d × %s (ends when %s)\n", g.count, g.frame, g.ends)
+			}
+			for _, c := range unopenedLanes() {
+				fmt.Fprintf(os.Stderr, "  a fake lane opened by %s never ended: it was closed %d time(s), "+
+					"and its helper peer is still running\n", c.openedBy, c.closeCount())
 			}
 			code = 1
 		}
@@ -124,6 +129,37 @@ func countStandGoroutines(left []standGoroutine) int {
 		n += g.count
 	}
 	return n
+}
+
+// testFrameInStack names the test whose goroutine is asking: the first Test
+// function of this package in the caller's own stack. It exists for the leak
+// report, which otherwise knows only the goroutine that is still parked and
+// not the test — already finished by then — that opened what it is parked on
+// (nocx-y3kfq). "?" is every other caller: a helper called from a goroutine
+// no test started, which cannot be the author of a leak this check reports.
+//
+// The frame is read from the CREATING goroutine, which is the only place the
+// answer exists: the leak's own goroutines carry the fixture's frames and no
+// test's, and the test's goroutine is gone. A subtest's frame reads
+// TestX.func1, which is the name a reader searches for.
+func testFrameInStack() string {
+	buf := make([]byte, 1<<16)
+	dump := string(buf[:runtime.Stack(buf, false)])
+	const pkg = "github.com/shady2k/nocx/internal/app."
+	for _, line := range strings.Split(dump, "\n") {
+		line = strings.TrimSpace(line)
+		name, ok := strings.CutPrefix(line, pkg)
+		if !ok {
+			continue
+		}
+		if i := strings.IndexAny(name, "( \t"); i > 0 {
+			name = name[:i]
+		}
+		if strings.HasPrefix(name, "Test") || name == "TestMain" {
+			return name
+		}
+	}
+	return "?"
 }
 
 // goroutineDump is every goroutine's stack, in one buffer that grows until the

@@ -167,17 +167,35 @@ type fakeLaneConn struct {
 
 	mu     sync.Mutex
 	closed int
+
+	// openedBy is the test that asked this stand for a lane, captured where
+	// the lane is made rather than where it leaks: by the time TestMain reads
+	// the dump, the goroutines are all that is left of it and the test that
+	// owns them is gone (nocx-y3kfq).
+	openedBy string
+}
+
+// laneConns is every fake lane this package's stands have made. The reports
+// at the end of the run read it to say WHICH test left one open instead of
+// only which shape is still parked.
+var laneConns struct {
+	mu    sync.Mutex
+	conns []*fakeLaneConn
 }
 
 func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
 	toPeerR, toPeerW := io.Pipe()
 	fromPeerR, fromPeerW := io.Pipe()
 	f := &fakeLaneConn{
-		stdin:  toPeerW,
-		stdout: fromPeerR,
-		stderr: bytes.NewReader(nil),
-		exited: make(chan struct{}),
+		stdin:    toPeerW,
+		stdout:   fromPeerR,
+		stderr:   bytes.NewReader(nil),
+		exited:   make(chan struct{}),
+		openedBy: testFrameInStack(),
 	}
+	laneConns.mu.Lock()
+	laneConns.conns = append(laneConns.conns, f)
+	laneConns.mu.Unlock()
 	go func() {
 		code := peer(toPeerR, fromPeerW)
 		_ = fromPeerW.Close()
@@ -185,6 +203,24 @@ func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLane
 		close(f.exited)
 	}()
 	return f
+}
+
+// unopenedLanes are the fake lanes whose helper peer is still running: the
+// lane was never closed, or its close never reached the peer. It is the same
+// fact Wait is parked on, read from the fixture's own side so the report can
+// name the test.
+func unopenedLanes() []*fakeLaneConn {
+	laneConns.mu.Lock()
+	defer laneConns.mu.Unlock()
+	var left []*fakeLaneConn
+	for _, c := range laneConns.conns {
+		select {
+		case <-c.exited:
+		default:
+			left = append(left, c)
+		}
+	}
+	return left
 }
 
 func (f *fakeLaneConn) Stdin() io.WriteCloser { return f.stdin }

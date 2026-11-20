@@ -748,6 +748,7 @@ func (rp *readoptPass) readopt(
 	// pump and nothing reading it: a row a restored pane would claim and then
 	// find silent.
 	adopted := false
+	var adoptedSession session.Session
 	var replayCursor *lifecycleCursor
 	var reconciledThrough proto.StreamOffset
 	err := rp.adopter.ReadoptHostedSession(ctx, sid, func(ctx context.Context, from uint64) (transport.HostedSessionOpen, error) {
@@ -954,6 +955,7 @@ func (rp *readoptPass) readopt(
 			rp.rearmLocal(sess, entry)
 		}
 		adopted = true
+		adoptedSession = sess
 		open := transport.HostedSessionOpen{
 			Session: sess, Host: p.Host, Account: p.Account,
 			Generation: p.Generation, HelperCommand: p.HelperCommand,
@@ -980,6 +982,16 @@ func (rp *readoptPass) readopt(
 		adoption.attachTo(&open, attached)
 		return open, nil
 	})
+	if err == nil && adopted && cfg.Kind == session.KindRemote {
+		if binder, ok := rp.local.(interface {
+			readoptSSHConnection(context.Context, session.Config, session.Session) error
+		}); ok {
+			if bindErr := binder.readoptSSHConnection(ctx, cfg, adoptedSession); bindErr != nil {
+				nocxlog.From(ctx).Warn("re-adopted session could not bind its pane connection; the shell remains available",
+					"session_id", p.SessionID, "pane_id", p.PaneID, "error", bindErr)
+			}
+		}
+	}
 	if err == nil && adopted && replayCursor != nil && p.LifecycleApplied != nil {
 		// Inventory alone says only that the helper still holds the session.
 		// The stale notice is cleared after the retained lifecycle window has
@@ -1007,6 +1019,32 @@ func (rp *readoptPass) readopt(
 		_ = rp.registry.registry.Close(sid)
 	}
 	return err
+}
+
+// readoptSSHConnection restores the same pane binding as an ordinary open.
+// Binding is deliberately after adoption: a failure to name the connection
+// may refuse panels, but must never cost the shell that survived the restart.
+func (o *localHelperOpener) readoptSSHConnection(ctx context.Context, cfg session.Config, sess session.Session) error {
+	if cfg.PaneID == "" || o.paneConnections() == nil {
+		return nil
+	}
+	if cfg.Remote == nil {
+		return errors.New("re-adopted ssh pane carries no destination")
+	}
+	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
+	if err != nil {
+		return err
+	}
+	client, _, err := o.connect(ctx)
+	if err != nil {
+		return err
+	}
+	binding, err := o.bindSSHConnection(ctx, cfg, client, target)
+	if err != nil {
+		return err
+	}
+	o.paneConnections().AdoptSession(cfg.PaneID, binding.connectionID, string(sess.ID()), string(sess.Identity().InstanceID), binding.generation)
+	return nil
 }
 
 // launchCwd is the directory the HELPER recorded for a session, read off

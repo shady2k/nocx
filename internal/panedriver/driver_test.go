@@ -99,10 +99,6 @@ func TestABindTellsThePaneTheStateItsConnectionIsAlreadyIn(t *testing.T) {
 	}
 }
 
-// TestABindBeforeAnyObservationPublishesTheOpening: the pane is painted before
-// any network. The bind IS the start of the open, so `opening/resolve` is what
-// the coordinator knows at that moment — and the renderer must not have to
-// invent the same stage to keep its first frame honest.
 func TestConnectionIDReadsTheLivePaneBinding(t *testing.T) {
 	d, _ := newDriver(t)
 	if id, ok := d.ConnectionID("pane"); ok || id != "" {
@@ -118,6 +114,10 @@ func TestConnectionIDReadsTheLivePaneBinding(t *testing.T) {
 	}
 }
 
+// TestABindBeforeAnyObservationPublishesTheOpening: the pane is painted before
+// any network. The bind IS the start of the open, so `opening/resolve` is what
+// the coordinator knows at that moment — and the renderer must not have to
+// invent the same stage to keep its first frame honest.
 func TestABindBeforeAnyObservationPublishesTheOpening(t *testing.T) {
 	d, out := newDriver(t)
 	d.Bind("pane-1", "conn-a")

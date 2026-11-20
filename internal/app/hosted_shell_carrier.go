@@ -246,8 +246,8 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 
 // installRowReporter binds the install's progress to the Operations row the
 // caller's invocation carries (ADR-8eej3e66 §8), and answers a Progress that
-// is nil when nobody is watching — the ordinary case for the git path, which
-// installs on a background consultation with no row at all.
+// is nil when nobody is watching. This reporter observes hosted installation;
+// a Git consultation does not install through this registry.
 //
 // The row appears on the FIRST progress the install reports, which is after
 // the completeness check and the removal of an unfinished tree. That is the
@@ -387,16 +387,15 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 func (a installFS) Chmod(p string, m fs.FileMode) error     { return a.conn.Chmod(p, m) }
 func (a installFS) Sync(p string) error                     { return a.conn.Sync(p) }
 
-// helperRegistry owns the helper processes the composition root started:
-// one per session, shared by every binding that session opens. A session is
-// one pooled connection — one host, one principal, one set of connect
-// options — so sharing within it is the design's "one process per helper
-// connection (D4) bounded by the binding registry", and the helper lives
-// while any binding references it. Two sessions to the same host — even
-// the same user — each get their own helper: the pool key that would prove
-// they share one connection is resolved inside internal/ssh and not
-// exposed, and sharing a helper across principals would be an
-// authorization error. Cross-session sharing waits for that seam.
+// helperRegistry owns the separate carriers used by hosted shells, keyed by
+// their session ids. Git bindings consume farhelper leases and do not acquire
+// or release these entries. A successfully opened carrier belongs to this
+// registry from openFarHelper's registration until SessionEnded, uninstall, or
+// coordinator shutdown closes it; a failed open closes its unregistered carrier
+// in its own rollback. Readoption stages a carrier outside hosts until adoption
+// transfers it here, so an unfinished readopt cannot claim a live inventory.
+// Carrier loss alone does not end a far session: inventory can reach the same
+// daemon again through a fresh lane without forgetting the hosted entry (D1).
 type helperRegistry struct {
 	lifetime *sessionLifetimeSetting
 	lanes    laneProvider
@@ -1426,6 +1425,9 @@ func (r *helperRegistry) forget(h *hostedShellCarrier) {
 // stageReadoptHelper brings up a helper for a carried-over session without
 // making it an inventory or adopting the session. A successful return is the
 // helper client's completed handshake; Readopt consumes the same client.
+// The pending interval starts at registration in pendingReadopts and ends at
+// takeReadoptHelper's transfer to one adoption attempt, or discard on failure
+// or shutdown. Until adoption registers it in hosts, inventory must not see it.
 func (r *helperRegistry) stageReadoptHelper(ctx context.Context, f *hostedShellBinding) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1582,12 +1584,14 @@ func (r *helperRegistry) sessions(ctx context.Context) ([]client.SessionEntry, e
 	return out, nil
 }
 
-// CloseHelpersFor first asks every helper daemon this coordinator knows about
+// CloseHelpersFor first asks every hosted daemon on the named machine
 // for its sessions and closes each one through the daemon's close-session
 // operation. Only after all those acknowledgements does it close the bridge
 // channels and forget the registry entries. A daemon that cannot enumerate
 // sessions refuses the operation rather than allowing uninstall to delete a
-// live session's executable.
+// live session's executable. The closing interval begins with the fingerprint
+// reservation below and ends at FinishHelpersFor after the caller's uninstall
+// attempt; on a session-close failure this function releases it before returning.
 func (r *helperRegistry) CloseHelpersFor(ctx context.Context, fp string) error {
 	if fp == "" {
 		return nil
@@ -1696,13 +1700,16 @@ type hostedShellBinding struct {
 	// helper channel on a machine without holding a session (D25).
 	fp   string
 	opts []ssh.ConnectOption
-	// install is the completed install this session's git rides: the machine
+	// install is the completed install this hosted shell uses: the machine
 	// identity and the generation the lane names, and the installed binary's
 	// path for the two readers that need a path rather than a lane.
 	install installedHelper
 }
 
 // hostedShellCarrier is the carrier of one hosted shell, not a Git client.
+// The shell's attachment and lifecycle leg need it even when no Git repository
+// is open. There is no Git reference count here: only the hosted lifetime owns
+// closing this carrier, and carrier loss does not erase the daemon's session.
 type hostedShellCarrier struct {
 	f       *hostedShellBinding
 	lanes   laneProvider
@@ -1713,15 +1720,11 @@ type hostedShellCarrier struct {
 	closing bool
 }
 
-// connectLocked returns the existing carrier or establishes a new bridge to
-// the helper daemon. A lost carrier is disposable; the daemon's endpoint and
-// session state live on the host and are reached again through a fresh lane.
 // screenClient is the route a remote pane's screen is read through: this
 // helper's carrier, and the handle it knows the session by.
 //
 // The generation is the one the daemon answers to — f.install.generation, the
-// same
-// value an inventory row carries and the same one the session-close path
+// same value an inventory row carries and the same one the session-close path
 // compares against — because a handle addressed to another generation names
 // nothing there and the helper refuses it.
 func (h *hostedShellCarrier) screenClient(ctx context.Context, sid string) (*client.Client, client.HostSessionID, error) {
@@ -1738,6 +1741,9 @@ func (h *hostedShellCarrier) screenClient(ctx context.Context, sid string) (*cli
 	return c, client.HostSessionID{Generation: generation, Session: sid}, nil
 }
 
+// connectLocked returns the existing carrier or establishes a new bridge to
+// the helper daemon. A lost carrier is disposable; the daemon's endpoint and
+// session state live on the host and are reached again through a fresh lane.
 func (h *hostedShellCarrier) connectLocked(ctx context.Context) (*client.Client, git.OpenOutcome, error) {
 	if h.client != nil && !h.dead {
 		select {

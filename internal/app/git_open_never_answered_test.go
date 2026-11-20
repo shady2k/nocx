@@ -1,5 +1,13 @@
 package app
 
+// A git.open accepted by a far helper that never answers must still return an
+// error the panel can show (nocx-xn63t.6.4). The caller's context is not that
+// guarantee: a WS request can stay live while the browser waits for its promise,
+// and client.Call deliberately bounds its wait only by the context it receives.
+// Exercise the production Git selection and leased factory against a real
+// helper host that dispatches the request but never completes it. The registry
+// owns the serving client; bounding this read must not give Git carrier ownership.
+
 import (
 	"context"
 	"errors"
@@ -18,6 +26,8 @@ import (
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
+// neverAnsweringGitFactory waits for the far request's context to end, not for
+// a delay: receiving git.open proves neither progress nor an eventual answer.
 type neverAnsweringGitFactory struct{}
 
 func (neverAnsweringGitFactory) Open(ctx context.Context, _ string) (git.Repo, git.OpenOutcome, error) {
@@ -25,13 +35,10 @@ func (neverAnsweringGitFactory) Open(ctx context.Context, _ string) (git.Repo, g
 	return nil, git.OpenOutcome{}, ctx.Err()
 }
 
-// neverAnsweringHelperPeer serves the real helper host and the real session
-// service (git.open is only ever offered on a helper-selected session, which
-// needs the session surface to exist for CloseHelpersFor/inventory calls
-// elsewhere in this package's fixtures), but with the git service backed by
-// a factory that never answers — helperPeerWithoutSession and realHelperPeer
-// both wire localgit.NewFactory() instead, which is exactly the "and it
-// answers" case those tests already cover.
+// neverAnsweringHelperPeer serves the real helper host and session service, as
+// the ordinary peer does, but replaces only the Git factory with one that never
+// answers. This keeps the silent Git read distinct from a missing service or a
+// failed helper handshake; realHelperPeer covers the answering factory instead.
 func neverAnsweringHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
@@ -52,7 +59,13 @@ func neverAnsweringHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) in
 	}
 }
 
+// The interval starts when the leased factory calls the helper's Open and ends
+// when Open returns, successfully or not, within gitOpenTimeout (or earlier on
+// caller cancellation or serving loss). A caller that remains live must not
+// extend that interval indefinitely just because the far side remains silent.
 func TestGitOpenNeverAnsweredIsBoundedRatherThanHungForever(t *testing.T) {
+	// Shrink only the test's budget: the assertion is about an internal deadline,
+	// not the production duration or a sleep used to guess when work completed.
 	old := gitOpenTimeout
 	gitOpenTimeout = 200 * time.Millisecond
 	defer func() { gitOpenTimeout = old }()

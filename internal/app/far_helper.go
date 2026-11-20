@@ -30,9 +30,11 @@ import (
 	"log/slog"
 	"path"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/farhelper"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -80,13 +82,32 @@ func (p *farHelperProbe) Probe(ctx context.Context, target farhelper.Target) (fa
 // farHelperInstall writes the artifact over an install channel on the same
 // destination and reports the directory and the build hash.
 type farHelperInstall struct {
-	local  *localHelperOpener
-	over   *sshOverHelper
-	source deploy.ArtifactSource
+	local    *localHelperOpener
+	over     farInstallChannels
+	source   deploy.ArtifactSource
+	installs *consent.InstallStore
+}
+
+// farInstallChannels is the resolved-destination install channel the adapter needs.
+type farInstallChannels interface {
+	openInstallFor(context.Context, proto.OpenChannelParams) (ssh.HelperInstallConn, error)
+}
+
+func (h *sshOverHelper) openInstallFor(ctx context.Context, params proto.OpenChannelParams) (ssh.HelperInstallConn, error) {
+	stream, err := h.openChannelFor(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := ssh.NewHelperInstallConn(ctx, stream)
+	if err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("install channel: %w", err)
+	}
+	return conn, nil
 }
 
 func (i *farHelperInstall) Find(ctx context.Context, target farhelper.Target, platform farhelper.Platform) (farhelper.Installed, bool, error) {
-	stream, err := i.over.openChannelFor(ctx, proto.OpenChannelParams{
+	conn, err := i.over.openInstallFor(ctx, proto.OpenChannelParams{
 		HostKeyFingerprint: target.HostKeyFingerprint,
 		Destination:        target.Destination,
 		Kind:               proto.ChannelSFTP,
@@ -94,11 +115,6 @@ func (i *farHelperInstall) Find(ctx context.Context, target farhelper.Target, pl
 	})
 	if err != nil {
 		return farhelper.Installed{}, false, classifyFarHelperRefusal(err)
-	}
-	conn, err := ssh.NewHelperInstallConn(ctx, stream)
-	if err != nil {
-		_ = stream.Close()
-		return farhelper.Installed{}, false, fmt.Errorf("install channel: %w", classifyFarHelperRefusal(err))
 	}
 	defer func() { _ = conn.Close() }()
 	home, err := conn.Home()
@@ -112,11 +128,15 @@ func (i *farHelperInstall) Find(ctx context.Context, target farhelper.Target, pl
 	if !found {
 		return farhelper.Installed{}, false, nil
 	}
-	return farhelper.Installed{Dir: path.Dir(binary), Generation: hash}, true, nil
+	installed := farhelper.Installed{Dir: path.Dir(binary), Generation: hash}
+	if err := i.record(target, installed); err != nil {
+		return farhelper.Installed{}, false, err
+	}
+	return installed, true, nil
 }
 
 func (i *farHelperInstall) Install(ctx context.Context, target farhelper.Target, platform farhelper.Platform) (farhelper.Installed, error) {
-	stream, err := i.over.openChannelFor(ctx, proto.OpenChannelParams{
+	conn, err := i.over.openInstallFor(ctx, proto.OpenChannelParams{
 		HostKeyFingerprint: target.HostKeyFingerprint,
 		Destination:        target.Destination,
 		Kind:               proto.ChannelSFTP,
@@ -124,11 +144,6 @@ func (i *farHelperInstall) Install(ctx context.Context, target farhelper.Target,
 	})
 	if err != nil {
 		return farhelper.Installed{}, classifyFarHelperRefusal(err)
-	}
-	conn, err := ssh.NewHelperInstallConn(ctx, stream)
-	if err != nil {
-		_ = stream.Close()
-		return farhelper.Installed{}, fmt.Errorf("install channel: %w", classifyFarHelperRefusal(err))
 	}
 	defer func() { _ = conn.Close() }()
 	home, err := conn.Home()
@@ -150,7 +165,27 @@ func (i *farHelperInstall) Install(ctx context.Context, target farhelper.Target,
 	if err := deploy.Prune(ctx, installFS{conn}, home, path.Base(path.Dir(command))); err != nil {
 		return farhelper.Installed{}, fmt.Errorf("prune after install: %w", err)
 	}
-	return farhelper.Installed{Dir: path.Dir(command), Generation: hash}, nil
+	installed := farhelper.Installed{Dir: path.Dir(command), Generation: hash}
+	if err := i.record(target, installed); err != nil {
+		return farhelper.Installed{}, err
+	}
+	return installed, nil
+}
+
+// record keeps the footprint surface's durable observation beside the remote
+// success. A failed observation is an error, not an untracked success.
+func (i *farHelperInstall) record(target farhelper.Target, installed farhelper.Installed) error {
+	destination := target.Destination
+	if err := i.installs.Record(consent.Install{
+		Fingerprint: target.HostKeyFingerprint,
+		Identity:    fmt.Sprintf("%s@%s:%d", destination.User, destination.Host, destination.Port),
+		Path:        installed.Dir,
+		Hash:        installed.Generation,
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("record helper footprint: %w", err)
+	}
+	return nil
 }
 
 // inflate is the install's one optimisation seam: the host's own gzip over the

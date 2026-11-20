@@ -1,8 +1,10 @@
 package app
 
-// Hosted shell carrier fixtures and tests. Git owns a separate far-helper
-// connection; these tests cover shell installation, lane identity, inventory,
-// reconnect and uninstall without constructing a Git binding.
+// Hosted shell carrier fixtures and tests. The farhelper registry owns the
+// separate client Git consumes; these tests cover shell installation, lane
+// identity, inventory, reconnect and uninstall without constructing a Git binding.
+// The wire meets the real helper host and services over io.Pipe; only SSH and
+// the remote filesystem are doubles.
 
 import (
 	"bytes"
@@ -981,6 +983,9 @@ func registerHostedCarrier(t *testing.T, reg *helperRegistry, sid session.ID, ho
 	return h
 }
 
+// Uninstall must close the named machine's carriers before its install can be
+// removed (D25), without disturbing another machine. The verified host-key
+// fingerprint, not a hostname or a Git binding, identifies the affected entries.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
 	store, _ := testConsentStores(t)
@@ -1006,6 +1011,9 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	}
 }
 
+// An unknown session service is not an empty inventory: uninstall cannot know
+// whether deleting the executable is safe. On refusal, every affected carrier
+// must remain registered and unfrozen so a repaired daemon can be tried again.
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
 	provider := &fakeLaneProvider{peer: helperPeerWithoutSession(t)}
 	store, _ := testConsentStores(t)
@@ -1042,6 +1050,9 @@ func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T
 	}
 }
 
+// A carrier can end while the daemon's sessions survive on the host (D1).
+// From carrier loss until the next inventory answer the registry must retain
+// the hosted entry, redial its lane, and use the replacement for later teardown.
 func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 	store, _ := testConsentStores(t)
@@ -1068,6 +1079,11 @@ func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
 	}
 }
 
+// Hosted selection installs the artifact (D7); a repeat open of a complete
+// install uploads nothing. The lane names the install DIRECTORY and generation,
+// not an argv: the helper builds the command (D3). A wrong generation reaches a
+// different build's sessions; a wrong directory names a binary nobody installed.
+// Compare with deploy's layout so the test does not invent another install path.
 func TestHostedOpenInstallsArtifactAndNamesItsGenerationOnTheLane(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 	c := newCoordinator(t, provider)
@@ -1092,6 +1108,9 @@ func TestHostedOpenInstallsArtifactAndNamesItsGenerationOnTheLane(t *testing.T) 
 	}
 }
 
+// A destination with no available helper artifact must decline hosted delivery
+// before taking an install lease or opening a lane. The ordinary opener can
+// still serve the pane; declining is not permission to deploy another binary.
 func TestHostedOpenRefusesUnavailableArtifactWithoutInstalling(t *testing.T) {
 	provider := &fakeLaneProvider{}
 	c := newCoordinator(t, provider)

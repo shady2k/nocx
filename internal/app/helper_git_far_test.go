@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
-
 	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/hostsvc"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/session"
@@ -23,15 +24,25 @@ import (
 )
 
 type gitFarSeams struct {
-	t        *testing.T
-	probes   atomic.Int32
-	installs atomic.Int32
-	dials    atomic.Int32
-	peer     func(io.Reader, io.Writer) int
+	t            *testing.T
+	probes       atomic.Int32
+	installs     atomic.Int32
+	dials        atomic.Int32
+	peer         func(io.Reader, io.Writer) int
+	probeStarted chan struct{}
+	probeRelease <-chan struct{}
 }
 
-func (s *gitFarSeams) Probe(context.Context, farhelper.Target) (farhelper.Platform, error) {
+func (s *gitFarSeams) Probe(ctx context.Context, _ farhelper.Target) (farhelper.Platform, error) {
 	s.probes.Add(1)
+	if s.probeStarted != nil {
+		close(s.probeStarted)
+		select {
+		case <-s.probeRelease:
+		case <-ctx.Done():
+			return farhelper.Platform{}, ctx.Err()
+		}
+	}
 	return farhelper.Platform{GOOS: "linux", GOARCH: "amd64"}, nil
 }
 
@@ -64,18 +75,24 @@ func (s *gitPaneSession) PaneID() string { return s.pane }
 
 func gitFarStand(t *testing.T, mode hostmode.Mode) (*farhelper.Registry, *panedriver.Driver, *gitFarSeams) {
 	t.Helper()
+	return gitFarStandWithSeams(t, mode, &gitFarSeams{t: t, peer: helperPeerWithoutSession(t)}, true)
+}
+
+func gitFarStandWithSeams(t *testing.T, mode hostmode.Mode, seams *gitFarSeams, settled bool) (*farhelper.Registry, *panedriver.Driver, *gitFarSeams) {
+	t.Helper()
 	source := newFarHelperConnections()
 	source.Observe(farhelper.Connection{ID: "conn", Destination: proto.SSHDestination{Host: "far.example", Port: 22, User: "dev"}, HostKeyFingerprint: "SHA256:test-host", State: hostconn.Connected, Shells: 1})
 	modes := newTestHostModes(t)
 	mustRecordHostMode(t, modes, "SHA256:test-host", mode)
 	consent, _ := testConsentStores(t)
-	seams := &gitFarSeams{t: t, peer: helperPeerWithoutSession(t)}
 	far := farhelper.New(farhelper.Config{Clock: hostconntest.New(), Connections: source, Modes: modes, Consents: consent, Probe: seams, Install: seams, Dial: seams, Log: farHelperTestLogger(t)})
 	t.Cleanup(far.Close)
 	panes := panedriver.New("instance", farHelperTestLogger(t))
 	panes.ApplyFrom("local", proto.ConnectionStateEvent{ConnectionID: "conn", Seq: 1, State: proto.ConnectionConnected, PlainShells: 1})
 	panes.Bind("pane", "conn")
-	waittest.WaitFor(t, "far helper decision", func() bool { status, ok := far.Axis("conn"); return ok && status.State != farhelper.StateStarting })
+	if settled {
+		waittest.WaitFor(t, "far helper decision", func() bool { status, ok := far.Axis("conn"); return ok && status.State != farhelper.StateStarting })
+	}
 	return far, panes, seams
 }
 
@@ -178,9 +195,8 @@ func TestGitPausesOnHelperLossAndResumesAfterRefresh(t *testing.T) {
 	if refusal.Factory != nil || refusal.Refusal == nil || !strings.Contains(refusal.Refusal.Message, "helper-lost") {
 		t.Fatalf("selection after loss=%+v", refusal)
 	}
-	if _, err = repo.Status(t.Context()); err == nil {
-		t.Fatal("old lease still serves after loss")
-	}
+	_, err = repo.Status(t.Context())
+	assertGitUnavailable(t, err, farhelper.ReasonHelperLost, farhelper.ActionRefresh)
 	_, _, err = selected.Factory.Open(t.Context(), "/repo")
 	var unavailable *farhelper.Unavailable
 	if !errors.As(err, &unavailable) || unavailable.Reason != farhelper.ReasonHelperLost {
@@ -246,12 +262,149 @@ func TestGitInFlightReadEndsWhenServingEnds(t *testing.T) {
 	lifetime, end := context.WithCancel(context.Background())
 	defer end()
 	entered := make(chan struct{})
-	repo := &leasedGitRepo{Repo: blockingGitRead{entered: entered}, lifetime: lifetime}
+	far, _, _ := gitFarStand(t, hostmode.Raw)
+	repo := &leasedGitRepo{Repo: blockingGitRead{entered: entered}, lifetime: lifetime, far: far, connectionID: "conn"}
 	done := make(chan error, 1)
 	go func() { _, err := repo.Status(t.Context()); done <- err }()
 	<-entered
 	end()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("in-flight status=%v", err)
+	assertGitUnavailable(t, <-done, farhelper.ReasonModeRaw, farhelper.ActionHostSettings)
+}
+
+func assertGitUnavailable(t *testing.T, err error, reason farhelper.Reason, action farhelper.Action) {
+	t.Helper()
+	var unavailable *farhelper.Unavailable
+	if !errors.As(err, &unavailable) || unavailable.Reason != reason || unavailable.Action != action {
+		t.Fatalf("error = %v, want far helper unavailable %s (%s)", err, reason, action)
 	}
+}
+
+func TestGitStartingSelectionWaitsForDecision(t *testing.T) {
+	for _, finish := range []bool{true, false} {
+		t.Run(map[bool]string{true: "serves", false: "bounded"}[finish], func(t *testing.T) {
+			old := gitOpenTimeout
+			if !finish {
+				gitOpenTimeout = 100 * time.Millisecond
+			}
+			defer func() { gitOpenTimeout = old }()
+			release := make(chan struct{})
+			seams := &gitFarSeams{t: t, peer: helperPeerWithoutSession(t), probeStarted: make(chan struct{}), probeRelease: release}
+			far, panes, _ := gitFarStandWithSeams(t, hostmode.Helper, seams, false)
+			<-seams.probeStarted
+			selected := helperGitFactory(far, func() *panedriver.Driver { return panes })(&gitPaneSession{fakeRemoteSession: &fakeRemoteSession{host: "far.example"}, pane: "pane"})
+			if selected.Factory == nil || selected.Refusal != nil {
+				t.Fatalf("starting selection = %+v, want factory, not an empty-reason refusal", selected)
+			}
+			cwd := fixtureRepo(t)
+			if finish {
+				close(release)
+				repo, outcome, err := selected.Factory.Open(t.Context(), cwd)
+				if err != nil || outcome.State != git.OpenOK {
+					t.Fatalf("open = %+v, %v", outcome, err)
+				}
+				_ = repo.Close()
+			} else {
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				_, _, err := selected.Factory.Open(ctx, cwd)
+				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+					t.Fatalf("acquire = %v, caller = %v; want internal deadline", err, ctx.Err())
+				}
+			}
+		})
+	}
+}
+
+func TestGitEndedLeaseRefusesEveryBindingCall(t *testing.T) {
+	far, panes, _ := gitFarStand(t, hostmode.Helper)
+	selected := helperGitFactory(far, func() *panedriver.Driver { return panes })(&gitPaneSession{fakeRemoteSession: &fakeRemoteSession{host: "far.example"}, pane: "pane"})
+	repo, _, err := selected.Factory.Open(t.Context(), fixtureRepo(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = repo.Close() }()
+	far.CloseFor("SHA256:test-host")
+	calls := map[string]func() error{
+		"status":               func() error { _, e := repo.Status(t.Context()); return e },
+		"diff":                 func() error { _, e := repo.Diff(t.Context(), "f.txt", git.Side("worktree"), 100); return e },
+		"log":                  func() error { _, e := repo.Log(t.Context(), 1); return e },
+		"stage":                func() error { _, e := repo.Stage(t.Context(), []string{"f.txt"}); return e },
+		"unstage":              func() error { _, e := repo.Unstage(t.Context(), []string{"f.txt"}); return e },
+		"stageAll":             func() error { _, e := repo.StageAll(t.Context()); return e },
+		"unstageAll":           func() error { _, e := repo.UnstageAll(t.Context()); return e },
+		"commit":               func() error { _, e := repo.Commit(t.Context(), "message", false); return e },
+		"headMessage":          func() error { _, e := repo.HeadMessage(t.Context()); return e },
+		"remoteURL":            func() error { _, e := repo.RemoteURL(t.Context()); return e },
+		"addWorktree":          func() error { _, e := repo.AddWorktree(t.Context(), "branch", "base", "path"); return e },
+		"worktrees":            func() error { _, e := repo.Worktrees(t.Context(), "base"); return e },
+		"removeWorktree":       func() error { _, e := repo.RemoveWorktree(t.Context(), "path", git.RemoveWorktreeOptions{}); return e },
+		"deleteWorktreeBranch": func() error { return repo.DeleteWorktreeBranch(t.Context(), "branch", "base") },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) { assertGitUnavailable(t, call(), farhelper.ReasonHelperLost, farhelper.ActionNone) })
+	}
+}
+
+type waitingGitOpen struct{ entered chan struct{} }
+
+func (f waitingGitOpen) Open(ctx context.Context, _ string) (git.Repo, git.OpenOutcome, error) {
+	close(f.entered)
+	<-ctx.Done()
+	return nil, git.OpenOutcome{}, ctx.Err()
+}
+
+func TestGitOpenLosingAcquiredLeaseNamesCurrentAxis(t *testing.T) {
+	entered := make(chan struct{})
+	seams := &gitFarSeams{t: t, peer: func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger(t))
+		h.Register(hostsvc.New(waitingGitOpen{entered: entered}))
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	}}
+	far, panes, _ := gitFarStandWithSeams(t, hostmode.Helper, seams, true)
+	selected := helperGitFactory(far, func() *panedriver.Driver { return panes })(&gitPaneSession{fakeRemoteSession: &fakeRemoteSession{host: "far.example"}, pane: "pane"})
+	done := make(chan error, 1)
+	go func() { _, _, err := selected.Factory.Open(t.Context(), "/repo"); done <- err }()
+	<-entered
+	far.CloseFor("SHA256:test-host")
+	assertGitUnavailable(t, <-done, farhelper.ReasonHelperLost, farhelper.ActionNone)
+}
+
+type waitingGitCommit struct {
+	git.Repo
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r waitingGitCommit) Commit(ctx context.Context, _ string, _ bool) (git.CommitOutcome, error) {
+	// The helper mutation seam removes cancellation before dispatch (D11).
+	ctx = context.WithoutCancel(ctx)
+	close(r.entered)
+	<-r.release
+	if err := ctx.Err(); err != nil {
+		return git.CommitOutcome{}, err
+	}
+	return git.CommitOutcome{State: git.CommitIndeterminate}, nil
+}
+
+func TestGitAdmittedCommitKeepsIndeterminateOnLeaseLoss(t *testing.T) {
+	lifetime, end := context.WithCancel(t.Context())
+	defer end()
+	far, _, _ := gitFarStand(t, hostmode.Raw)
+	commit := waitingGitCommit{entered: make(chan struct{}), release: make(chan struct{})}
+	repo := &leasedGitRepo{Repo: commit, lifetime: lifetime, far: far, connectionID: "conn"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		outcome, err := repo.Commit(t.Context(), "message", false)
+		if err != nil || outcome.State != git.CommitIndeterminate {
+			t.Errorf("commit = %+v, %v; want indeterminate", outcome, err)
+		}
+	}()
+	<-commit.entered
+	end()
+	close(commit.release)
+	<-done
 }

@@ -23,7 +23,7 @@ func helperGitFactory(far *farhelper.Registry, panes func() *panedriver.Driver) 
 		if !ok || !known {
 			return gitAxisRefusal(farhelper.ReasonConnection, farhelper.ActionNone)
 		}
-		if status.State != farhelper.StateServing {
+		if status.State != farhelper.StateServing && status.State != farhelper.StateStarting {
 			return gitAxisRefusal(status.Reason, status.Action)
 		}
 		return transport.GitOpenSelection{Factory: &sessionFactory{far: far, panes: panes, paneID: sess.PaneID(), host: sess.Host()}}
@@ -48,7 +48,9 @@ func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.Op
 	if !ok {
 		return nil, git.OpenOutcome{}, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
 	}
-	lease, err := f.far.Acquire(ctx, id)
+	bounded, end := context.WithTimeout(ctx, gitOpenTimeout)
+	defer end()
+	lease, err := f.far.Acquire(bounded, id)
 	if err != nil {
 		var unavailable *farhelper.Unavailable
 		if errors.As(err, &unavailable) {
@@ -56,13 +58,22 @@ func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.Op
 		}
 		return nil, git.OpenOutcome{}, err
 	}
-	openCtx, cancel := leaseContext(ctx, lease.Ctx)
+	openCtx, cancel := leaseContext(bounded, lease.Ctx)
 	defer cancel()
-	bounded, end := context.WithTimeout(openCtx, gitOpenTimeout)
-	defer end()
-	repo, outcome, err := helpergit.NewFactory(lease.Client).Open(bounded, cwd)
+	binding := &leasedGitRepo{lifetime: lease.Ctx, far: f.far, connectionID: id}
+	if unavailable := binding.unavailable(); unavailable != nil {
+		return nil, git.OpenOutcome{}, unavailable
+	}
+	repo, outcome, err := helpergit.NewFactory(lease.Client).Open(openCtx, cwd)
+	if unavailable := binding.unavailable(); unavailable != nil {
+		if repo != nil {
+			_ = repo.Close()
+		}
+		return nil, git.OpenOutcome{}, unavailable
+	}
 	if repo != nil {
-		repo = &leasedGitRepo{Repo: repo, lifetime: lease.Ctx}
+		binding.Repo = repo
+		repo = binding
 	}
 	return repo, outcome, err
 }
@@ -88,89 +99,128 @@ var gitOpenTimeout = 20 * time.Second
 // client itself and the helper layer reports an indeterminate transport loss.
 type leasedGitRepo struct {
 	git.Repo
-	lifetime context.Context
+	lifetime     context.Context
+	far          *farhelper.Registry
+	connectionID string
+}
+
+// An ended lease stays ended even if a new helper now serves the connection.
+// Starting/serving carry no refusal reason, so that stale binding names the
+// helper it lost, while a current refusal comes from the axis's sole owner.
+func (r *leasedGitRepo) unavailable() error {
+	if r.lifetime.Err() == nil {
+		return nil
+	}
+	status, known := r.far.Axis(r.connectionID)
+	if !known {
+		return &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	if status.Reason == "" {
+		return &farhelper.Unavailable{Reason: farhelper.ReasonHelperLost, Action: farhelper.ActionNone}
+	}
+	return &farhelper.Unavailable{Reason: status.Reason, Action: status.Action}
+}
+
+func gitLeaseCall[T any](r *leasedGitRepo, ctx context.Context, mutation bool, call func(context.Context) (T, error)) (T, error) {
+	if err := r.unavailable(); err != nil {
+		var zero T
+		return zero, err
+	}
+	ctx, cancel := leaseContext(ctx, r.lifetime)
+	defer cancel()
+	result, err := call(ctx)
+	// Once admitted, mutations keep their helper-layer D11/D12 result: a
+	// lost commit may have happened, and must remain indeterminate.
+	if !mutation {
+		if unavailable := r.unavailable(); unavailable != nil {
+			var zero T
+			return zero, unavailable
+		}
+	}
+	return result, err
 }
 
 func (r *leasedGitRepo) Status(ctx context.Context) (git.Status, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Status(ctx)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) (git.Status, error) {
+		return r.Repo.Status(ctx)
+	})
 }
 
 func (r *leasedGitRepo) Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Diff(ctx, path, side, maxBytes)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) (git.Diff, error) {
+		return r.Repo.Diff(ctx, path, side, maxBytes)
+	})
 }
 
 func (r *leasedGitRepo) Log(ctx context.Context, max int) (git.Log, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Log(ctx, max)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) (git.Log, error) {
+		return r.Repo.Log(ctx, max)
+	})
 }
 
 func (r *leasedGitRepo) Stage(ctx context.Context, paths []string) (git.Status, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Stage(ctx, paths)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.Status, error) {
+		return r.Repo.Stage(ctx, paths)
+	})
 }
 
 func (r *leasedGitRepo) Unstage(ctx context.Context, paths []string) (git.Status, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Unstage(ctx, paths)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.Status, error) {
+		return r.Repo.Unstage(ctx, paths)
+	})
 }
 
 func (r *leasedGitRepo) StageAll(ctx context.Context) (git.Status, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.StageAll(ctx)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.Status, error) {
+		return r.Repo.StageAll(ctx)
+	})
 }
 
 func (r *leasedGitRepo) UnstageAll(ctx context.Context) (git.Status, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.UnstageAll(ctx)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.Status, error) {
+		return r.Repo.UnstageAll(ctx)
+	})
 }
 
 func (r *leasedGitRepo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Commit(ctx, msg, amend)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.CommitOutcome, error) {
+		return r.Repo.Commit(ctx, msg, amend)
+	})
 }
 
 func (r *leasedGitRepo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.HeadMessage(ctx)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) (git.HeadMessage, error) {
+		return r.Repo.HeadMessage(ctx)
+	})
 }
 
 func (r *leasedGitRepo) RemoteURL(ctx context.Context) (string, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.RemoteURL(ctx)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) (string, error) {
+		return r.Repo.RemoteURL(ctx)
+	})
 }
 
 func (r *leasedGitRepo) AddWorktree(ctx context.Context, branch, base, path string) (git.WorktreeAdded, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.AddWorktree(ctx, branch, base, path)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.WorktreeAdded, error) {
+		return r.Repo.AddWorktree(ctx, branch, base, path)
+	})
 }
 
 func (r *leasedGitRepo) Worktrees(ctx context.Context, base string) ([]git.Worktree, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.Worktrees(ctx, base)
+	return gitLeaseCall(r, ctx, false, func(ctx context.Context) ([]git.Worktree, error) {
+		return r.Repo.Worktrees(ctx, base)
+	})
 }
 
 func (r *leasedGitRepo) RemoveWorktree(ctx context.Context, path string, opts git.RemoveWorktreeOptions) (git.WorktreeDiscard, error) {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.RemoveWorktree(ctx, path, opts)
+	return gitLeaseCall(r, ctx, true, func(ctx context.Context) (git.WorktreeDiscard, error) {
+		return r.Repo.RemoveWorktree(ctx, path, opts)
+	})
 }
 
 func (r *leasedGitRepo) DeleteWorktreeBranch(ctx context.Context, branch, base string) error {
-	ctx, cancel := leaseContext(ctx, r.lifetime)
-	defer cancel()
-	return r.Repo.DeleteWorktreeBranch(ctx, branch, base)
+	_, err := gitLeaseCall(r, ctx, true, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, r.Repo.DeleteWorktreeBranch(ctx, branch, base)
+	})
+	return err
 }

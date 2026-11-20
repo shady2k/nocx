@@ -1044,7 +1044,7 @@ func New(opts ...Option) (*App, error) {
 		Modes:       hostModes,
 		Consents:    helperConsent,
 		Probe:       &farHelperProbe{local: localOpener, source: helperartifacts.DefaultSource},
-		Install:     &farHelperInstall{local: localOpener, over: overHelper, source: helperartifacts.DefaultSource},
+		Install:     &farHelperInstall{local: localOpener, over: overHelper, source: helperartifacts.DefaultSource, installs: helperInstalls},
 		Dial:        &farHelperDial{over: overHelper, log: slogger},
 		Log:         log.NewSlogAdapter(slogger),
 	})

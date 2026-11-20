@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -206,5 +207,53 @@ func TestPersistManyFailureLeavesMemoryAndDiskUnchanged(t *testing.T) {
 	var after modeDocument
 	if found, err := ds.Read("host-modes.json", &after); err != nil || !found || after.Modes["one"] != before.Modes["one"] || after.Modes["two"] != before.Modes["two"] {
 		t.Fatalf("disk changed: before=%+v after=%+v found=%v err=%v", before, after, found, err)
+	}
+}
+
+// TestAChangeNotifiesSubscribersOncePerChange: the far helper's registry moves
+// its decision revision on this signal, so a write that changes nothing must
+// not move it, and a subscription that has ended must hear nothing.
+func TestAChangeNotifiesSubscribersOncePerChange(t *testing.T) {
+	s, _ := newTestStore(t)
+	var calls atomic.Int32
+	stop := s.Watch(func() { calls.Add(1) })
+
+	if err := s.Set("SHA256:abc", Helper); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("notifications after the first answer = %d, want 1", got)
+	}
+	if err := s.Set("SHA256:abc", Helper); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("notifications after the same answer = %d, want 1", got)
+	}
+	if err := s.Set("SHA256:abc", Script); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("notifications after a change = %d, want 2", got)
+	}
+	if err := s.PersistMany([]string{"SHA256:abc"}, Auto); err != nil {
+		t.Fatalf("PersistMany: %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("notifications after a removal = %d, want 3", got)
+	}
+	if err := s.PersistMany([]string{"SHA256:abc"}, Auto); err != nil {
+		t.Fatalf("PersistMany: %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("notifications after removing an absent record = %d, want 3", got)
+	}
+
+	stop()
+	if err := s.Set("SHA256:abc", Raw); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("a stopped subscription was notified: %d, want 3", got)
 	}
 }

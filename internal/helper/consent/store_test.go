@@ -3,6 +3,7 @@ package consent
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -205,5 +206,47 @@ func TestDeniedThenGrantOverwrites(t *testing.T) {
 	}
 	if ans, ok := s.Lookup("SHA256:abc"); !ok || ans != Granted {
 		t.Fatalf("Lookup after Denied then Grant = %q/%v, want granted", ans, ok)
+	}
+}
+
+// TestAChangeNotifiesSubscribersOncePerChange: the far helper's registry moves
+// its decision revision on this signal, so granting the same answer twice is
+// one event, a revocation is one, and a stopped subscription hears nothing.
+func TestAChangeNotifiesSubscribersOncePerChange(t *testing.T) {
+	s := newTestStore(t)
+	var calls atomic.Int32
+	stop := s.Watch(func() { calls.Add(1) })
+
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("notifications after the grant = %d, want 1", got)
+	}
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("notifications after the same grant = %d, want 1", got)
+	}
+	if err := s.Revoke("SHA256:abc"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("notifications after the revocation = %d, want 2", got)
+	}
+	if err := s.Revoke("SHA256:abc"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("notifications after revoking nothing = %d, want 2", got)
+	}
+
+	stop()
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("a stopped subscription was notified: %d, want 2", got)
 	}
 }

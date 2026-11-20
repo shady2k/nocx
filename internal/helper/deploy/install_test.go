@@ -844,3 +844,28 @@ func TestACancelDuringTheUploadStopsAtTheNextChunk(t *testing.T) {
 		t.Fatal("a cancelled upload left a complete-looking tree")
 	}
 }
+
+func TestFindIsReadOnlyForCompleteAndMissingInstall(t *testing.T) {
+	fs := newFakeFS()
+	platform := deploy.Platform{GOOS: "linux", GOARCH: "amd64"}
+	binary, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/dev", platform, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = binary
+	beforeCreates := fs.binaryCreateCount()
+	_, foundHash, found, err := deploy.Find(context.Background(), fs, syntheticSource{}, "/home/dev", platform)
+	if err != nil || !found || foundHash != hash {
+		t.Fatalf("Find complete = %q,%v,%v", foundHash, found, err)
+	}
+	if got := fs.binaryCreateCount(); got != beforeCreates {
+		t.Fatalf("Find wrote binary: creates %d -> %d", beforeCreates, got)
+	}
+	_, _, found, err = deploy.Find(context.Background(), fs, syntheticSource{}, "/home/empty", platform)
+	if err != nil || found {
+		t.Fatalf("Find missing = found %v, err %v", found, err)
+	}
+	if got := fs.binaryCreateCount(); got != beforeCreates {
+		t.Fatalf("Find missing wrote binary: %d -> %d", beforeCreates, got)
+	}
+}

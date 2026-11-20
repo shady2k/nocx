@@ -615,12 +615,25 @@ new FIELD on one of these shapes does not.
 The **connection table**, and the **link generation** each observation carries.
 
 `connections` is one forward op with no params. It subscribes the coordinator
-that asks to EVERY connection this helper's supervisors hold — the ones that
-exist now, in its answer, and the ones it creates later, as they appear — and it
+that asks to the helper's whole supervisor table — the entries that exist now,
+in its answer, and the ones the helper creates later, as they appear — and it
 answers each of them as the same observation `connection-state` carries, plus
 the two facts a coordinator that restarted cannot do without: the resolved
 `destination` the connection was acquired for, and the `hostKeyFingerprint` its
 current link was verified against.
+
+THE TABLE IS THE HELPER'S. One helper serves every coordinator of the same user
+(D12) and its supervisors are one set, so the answer includes connections
+another coordinator acquired — a restarted coordinator has nothing of its own,
+which is the point — and a reader must not take it for a list of its own
+connections. It is also NEVER PRUNED: a supervisor outlives its transport, and
+one exists as soon as a key is named (`connection`, `disconnect`, `reconnect`,
+a watch). The answer therefore contains entries in `ended`, entries whose last
+link failed, and entries that never dialled; read `state` before acting on one.
+`destination` is absent only for a connection no destination-naming op acquired
+— a ProxyJump hop is dialled by the carrier under its own pool key — because
+`connection`, `reconnect`, `disconnect` and every pooled acquisition all record
+one.
 
 Both halves have one reason, and it is design §5.10's seventh scenario. A
 coordinator's entries — the far helper's per-connection decision, the host's
@@ -634,14 +647,20 @@ connection without ever describing one. The id is not a destination, and the
 fingerprint is not derivable from it.
 
 `generation` is a required field on every `connection-state` observation, and it
-names which of the supervisor's LINKS the observation is about, counting from
-one. It is on the wire because the receiving side cannot derive it: a reader is
-given the newest observation and refuses any that is not newer, so a
-`reconnecting` overtaken by `connected` arrives as ONE `connected` — the same
-bytes whether the transport survived the stall or was replaced under it. A
-coordinator that must drop what belongs to a link it has lost (a far helper's
-answer, an attempt's result) needs the number the answer was taken against, and
-the supervisor is the only party holding the link.
+names which LINK of the supervisor the observation is about: a monotonic
+identifier of the transport, NOT a count of links. It moves when a link is
+admitted and again when that link is retired or detached, so consecutive links
+do not have consecutive numbers — the first link is 1, its retirement 2, the
+second link 3 — and an observation taken while there is no link carries the
+number the retirement produced. Zero means no link has ever existed. Readers
+compare numbers (`!=`, `<`) and never read a value as an index. It is on the
+wire because the receiving side cannot derive it: a reader is given the newest
+observation and refuses any that is not newer, so a `reconnecting` overtaken by
+`connected` arrives as ONE `connected` — the same bytes whether the transport
+survived the stall or was replaced under it. A coordinator that must drop what
+belongs to a link it has lost (a far helper's answer, an attempt's result) needs
+the number the answer was taken against, and the supervisor is the only party
+holding the link.
 
 Two decisions worth naming rather than leaving to a reader:
 
@@ -659,10 +678,12 @@ Two decisions worth naming rather than leaving to a reader:
   something it did not.
 
 The number moved because of the FIELD rather than the op, and the distinction is
-the freeze's own. The op is the half that degrades: a 29-helper answers
-`unknown_op`, which a coordinator reads as "this machine's helper is older than
-this app", and it keeps the entries its own panes rebuilt. The field does not
-degrade: a 29-coordinator's `connection-state` schema is
+the freeze's own. The op WOULD be the half that degrades — an older helper
+answers `unknown_op`, which a coordinator reads as "this machine's helper is
+older than this app" — but hello refuses the pair first: a 29-helper does not
+admit a 30-coordinator, so that refusal is the fallback for a generation that
+grows an op without moving the number, not a path two shipped peers take. The
+field does not degrade: a 29-coordinator's `connection-state` schema is
 `additionalProperties: false`, so an observation carrying `generation` is
 REJECTED — it would lose every connection state it has, not the one fact it did
 not ask for. Two peers that disagree refuse each other at hello in both

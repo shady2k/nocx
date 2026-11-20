@@ -61,6 +61,11 @@ type Store struct {
 	mu      sync.Mutex
 	answers map[string]Answer
 	loaded  bool
+	// watchers are the parties told about a changed answer. It is the far
+	// helper's registry's decision revision (ADR-727g63tr decision 2), keyed by
+	// a minted id because one caller may hold two subscriptions.
+	watchers    map[uint64]func()
+	nextWatcher uint64
 }
 
 // NewStore creates a store persisting under docName in docStore. Callers
@@ -122,7 +127,6 @@ func (s *Store) setAnswer(fingerprint string, answer Answer) error {
 		return ErrEmptyFingerprint
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.loadLocked()
 	prev, existed := s.answers[fingerprint]
 	s.answers[fingerprint] = answer
@@ -134,7 +138,14 @@ func (s *Store) setAnswer(fingerprint string, answer Answer) error {
 		} else {
 			delete(s.answers, fingerprint)
 		}
+		s.mu.Unlock()
 		return err
+	}
+	changed := !existed || prev != answer
+	watchers := s.watchersLocked()
+	s.mu.Unlock()
+	if changed {
+		notify(watchers)
 	}
 	return nil
 }
@@ -146,18 +157,70 @@ func (s *Store) Revoke(fingerprint string) error {
 		return ErrEmptyFingerprint
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.loadLocked()
 	prev, existed := s.answers[fingerprint]
 	if !existed {
+		s.mu.Unlock()
 		return nil
 	}
 	delete(s.answers, fingerprint)
 	if err := s.writeDocLocked(); err != nil {
 		s.answers[fingerprint] = prev
+		s.mu.Unlock()
 		return err
 	}
+	watchers := s.watchersLocked()
+	s.mu.Unlock()
+	notify(watchers)
 	return nil
+}
+
+// Watch registers fn to be called after every change to a stored answer. It
+// answers the function that ends the subscription; calling that twice is
+// harmless.
+//
+// THE CALLBACK IS MADE OUTSIDE THE STORE'S LOCK: the far helper's registry
+// re-reads the answer in the callback, and a notification made under the mutex
+// would deadlock the party it exists for.
+func (s *Store) Watch(fn func()) (stop func()) {
+	if s == nil || fn == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	if s.watchers == nil {
+		s.watchers = make(map[uint64]func())
+	}
+	s.nextWatcher++
+	id := s.nextWatcher
+	s.watchers[id] = fn
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.watchers, id)
+			s.mu.Unlock()
+		})
+	}
+}
+
+// watchersLocked snapshots the subscribers so the notification runs after the
+// lock is released. Called with the mutex held.
+func (s *Store) watchersLocked() []func() {
+	if len(s.watchers) == 0 {
+		return nil
+	}
+	out := make([]func(), 0, len(s.watchers))
+	for _, fn := range s.watchers {
+		out = append(out, fn)
+	}
+	return out
+}
+
+func notify(watchers []func()) {
+	for _, fn := range watchers {
+		fn()
+	}
 }
 
 // writeDocLocked persists the answers document atomically (the

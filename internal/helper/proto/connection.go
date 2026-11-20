@@ -45,8 +45,8 @@ const OpConnection = "connection"
 // sends to a coordinator that is not already holding a stream.
 const EventConnectionState = "connection-state"
 
-// OpConnections subscribes the coordinator to EVERY connection this helper
-// holds and answers the ones that exist now.
+// OpConnections subscribes the coordinator to the helper's whole connection
+// table and answers it as it stands now.
 //
 // IT IS NOT A WIDER `connection`, and the difference is what a coordinator that
 // restarted needs. `connection` names one destination, so a coordinator
@@ -57,11 +57,18 @@ const EventConnectionState = "connection-state"
 // entries from has to be the helper's whole connection table, and it has to
 // arrive without a destination to ask about.
 //
-// The subscription is per coordinator CONNECTION, like `connection-state`'s own
-// deliveries, so a helper serving several coordinators (D12) tells each of them
-// only what it holds for them. The answer carries the same observation the
-// event stream does, so a receiver folds the list and the stream with one
-// function.
+// THE TABLE IS THE HELPER'S, NOT THE ASKING COORDINATOR'S. One helper serves
+// every coordinator of the same user (D12), its supervisors are one set, and
+// this op answers all of them to each caller — including connections another
+// coordinator acquired. That is exactly what a restart needs: the restarted
+// coordinator has no entries of its own to rebuild from. A reader must not
+// mistake the answer for a list of its own connections; an entry another
+// coordinator uses is in it too.
+//
+// The DELIVERY is per coordinator CONNECTION, like `connection-state`'s own
+// deliveries: a helper serving several coordinators (D12) writes the stream to
+// each of their connections. The answer carries the same observation the event
+// stream does, so a receiver folds the list and the stream with one function.
 const OpConnections = "connections"
 
 // OpDisconnect closes the connection a destination rides, if this helper has
@@ -143,8 +150,12 @@ type ConnectionStateEvent struct {
 	// supervisor; a receiver drops anything not greater than the last sequence
 	// it applied, which is how a late event for an old epoch is refused.
 	Seq uint64 `json:"seq"`
-	// Generation is which of the supervisor's LINKS this observation is about,
-	// counting from one.
+	// Generation is which LINK of the supervisor this observation is about: a
+	// monotonic identifier of the transport, not a count of links. It moves
+	// when a link is admitted and again when that link is retired or detached,
+	// so consecutive links do not have consecutive numbers (1, 2, 3 are the
+	// first link, its retirement and the second link). Zero means no link has
+	// ever existed. Readers compare numbers; a value is never an index.
 	//
 	// IT IS ON THE WIRE BECAUSE IT CANNOT BE DERIVED, and this is the field's
 	// whole justification. A coordinator is handed the observations it reads,

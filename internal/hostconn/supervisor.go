@@ -106,8 +106,15 @@ type Facts struct {
 	// reader can refuse an observation older than the last one it applied.
 	Key Key
 	Seq uint64
-	// Generation is which LINK this observation is about, counting the
-	// supervisor's links from one.
+	// Generation is which LINK this observation is about: a monotonic
+	// identifier of the transport, not a count of links.
+	//
+	// It moves when a link is admitted and again when that link is retired or
+	// detached, so consecutive links do not have consecutive numbers — the
+	// first link is 1, its retirement 2, the second link 3 — and an observation
+	// taken while there is no link carries the number the retirement produced.
+	// Zero means no link has ever existed for this connection. Fences compare
+	// numbers (`!=`, `<`); a value is never an index.
 	//
 	// IT IS ON THE OBSERVATION AND NOT DERIVED FROM THE TRANSITIONS, and that is
 	// the whole of why it exists: a reader is handed the newest observation and
@@ -475,6 +482,14 @@ func (m *Manager) Supervisor(key Key) *Supervisor {
 // that restarts must learn about is exactly the connections that exist without
 // one of its panes (design §5.10, scenario 7). The order is the id's so two
 // answers to the same question are the same document.
+//
+// THE TABLE IS NEVER PRUNED, so this answers every connection this manager has
+// ever created and not only the ones it holds now. A supervisor outlives its
+// transport by design, and one is created the first time a key is named — by
+// the `connection` op, by `disconnect`, by `reconnect`, by a watch. Entries
+// therefore include connections in `ended`, ones whose last link failed, and
+// ones that never dialled at all; a reader that may act on a connection reads
+// its State (and, on the wire, its `generation`) before it decides anything.
 func (m *Manager) Supervisors() []*Supervisor {
 	m.mu.Lock()
 	out := make([]*Supervisor, 0, len(m.sups))

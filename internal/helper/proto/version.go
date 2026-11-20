@@ -395,10 +395,12 @@ package proto
 // `generation` field on the connection observation, which says which LINK the
 // observation is about.
 //
-// The op is the half that degrades — a 29-helper answers `unknown_op`, which a
-// coordinator reads as "this machine's helper is older than this app", and a
-// coordinator that has just restarted keeps the entries its panes rebuilt and
-// loses the ones nothing was watching. The FIELD is the half that does not: a
+// The op WOULD be the half that degrades — an older helper answers
+// `unknown_op`, which a coordinator reads as "this machine's helper is older
+// than this app" — but hello is what actually answers it: a 29-helper does not
+// admit a 30-coordinator, so the op-level refusal is the fallback for a
+// generation that ever grows an op without moving the number, not a path two
+// shipped peers take. The FIELD is the half that must be fenced: a
 // 29-coordinator is handed an event whose `additionalProperties: false` forbids
 // `generation` and refuses it, which would cost it every connection state it
 // has, not the one fact it did not ask for. A field on a frozen shape is the

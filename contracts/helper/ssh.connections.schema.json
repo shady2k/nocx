@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.connections.schema.json",
   "title": "HelperSSHConnectionsResult",
-  "description": "Result of the ssh service's connections op: every connection this helper holds for the coordinator that asked, and the subscription that keeps it current (nocx-oalo1.6.2; design §5.10, scenario 7). A coordinator that restarted rebuilds what it keeps per connection — the far helper's entry, the host's mode, the person's consent — from this answer, and it has to include the connections NO PANE rides: a tunnel, a probe lease, the far helper's own lane. The old per-destination subscription could never show it those, because nothing had named their destinations on the new connection. The array is never null: an empty table is [], because a decoder distinguishing 'this helper holds nothing' from 'no answer' needs the empty case to arrive as one, and a coordinator that read a missing list as 'nothing' would rebuild nothing and never notice.",
+  "description": "Result of the ssh service's connections op: the helper's whole supervisor table, and the subscription that keeps it current (nocx-oalo1.6.2; design §5.10, scenario 7). THE TABLE IS THE HELPER'S, NOT THE ASKING COORDINATOR'S: one helper serves every coordinator of the same user (D12), and this answer carries all of its supervisors to each caller — a restarted coordinator has nothing of its own to rebuild from, and it must not mistake the answer for a list of its own connections. The table is never pruned, so it also includes connections in `ended` and supervisors that never got a link; read each entry's `state` before acting on it. It has to include the connections NO PANE rides: a tunnel, a probe lease, the far helper's own lane. The old per-destination subscription could never show a coordinator those, because nothing had named their destinations on the new connection. The array is never null: an empty table is [], because a decoder distinguishing 'this helper holds nothing' from 'no answer' needs the empty case to arrive as one, and a coordinator that read a missing list as 'nothing' would rebuild nothing and never notice.",
   "type": "object",
   "additionalProperties": false,
   "required": ["connections"],
   "properties": {
     "connections": {
-      "description": "One entry per connection the helper's supervisor table holds, in a stable order (by connection id), so two answers to the same question are the same document.",
+      "description": "One entry per supervisor the helper has created, in a stable order (by connection id), so two answers to the same question are the same document. Supervisors are never removed, so the list is every connection this helper has ever named and not only the ones with a live transport: entries in `ended` and entries that never dialled are here too, and the entry's own `state` says which is which.",
       "type": "array",
       "items": {
         "description": "One connection: the observation the event stream carries, plus the two facts a restart cannot do without. The observation is the SAME declaration `ssh.connection-state` makes, by $ref and not by a copy, so a receiver folds a list entry and a live event with one function (AD-8).",
@@ -20,7 +20,7 @@
             "$ref": "https://nocx.local/contracts/helper/ssh.connection-state.schema.json"
           },
           "destination": {
-            "description": "The RESOLVED destination this connection was acquired for, exactly as the op that acquired it carried it. It is what a restarted coordinator redials from, and it cannot be re-derived: the connection id is a digest over the account, the credential principal and the route, and a digest is not a destination. Absent only for a connection this helper never acquired for a destination it was told — one named by a reconnect before anything dialled.",
+            "description": "The RESOLVED destination this connection was acquired for, exactly as the op that acquired it carried it. It is what a restarted coordinator redials from, and it cannot be re-derived: the connection id is a digest over the account, the credential principal and the route, and a digest is not a destination. Absent for a connection no destination-naming op ever acquired: a ProxyJump HOP of a route is dialled by the carrier under its own pool key, so it never passes the destination funnel and no destination is recorded for it. (`connection`, `reconnect`, `disconnect` and every pooled acquisition all name one, so a reconnecting or disconnected connection normally does have this.)",
             "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
           },
           "hostKeyFingerprint": {

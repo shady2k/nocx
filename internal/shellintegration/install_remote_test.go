@@ -389,6 +389,14 @@ func TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation(t *testing.T) {
 // before the fix holds, and whose generation differs from this build's by that
 // token alone. The same seed is published twice first, so the test states the
 // trap it is about rather than assuming it.
+//
+// WHAT ARRIVES IS ASSERTED BY WHAT IT DOES, not by a word it shares with 71:
+// `agent_withdraw` is as old as the enrolment, so its presence on the host
+// proved nothing about this version — a host holding 71 would have passed. The
+// delivered file is therefore sourced in the real shell, an enrolment is
+// admitted and then cancelled, and the withdrawal of THAT interval is what is
+// required: delete the branch this version exists for and the wrapper falls
+// through to the agent, which is the other assertion here.
 func TestEnsureInstalledRemote_UpgradesAHostHoldingThePreviousScriptVersion(t *testing.T) {
 	const previousVersion = "71"
 	if version == previousVersion {
@@ -437,9 +445,44 @@ func TestEnsureInstalledRemote_UpgradesAHostHoldingThePreviousScriptVersion(t *t
 	}
 	// The block this version exists for is ON the host, in the file the shell
 	// sources, and not merely in the bytes this build would have published.
-	delivered := string(readFileT(t, filepath.Join(root, integrationDir, manifest.Generation, "nocx.bash")))
-	if !strings.Contains(delivered, "agent_withdraw") {
-		t.Error("the delivered nocx.bash has no withdrawal for an admitted interval")
+	// Both shells carry it, so both are driven: a generation that arrives with
+	// the block in one of them is a host that half-upgraded.
+	for _, sh := range []struct{ name, file string }{
+		{"bash", "nocx.bash"},
+		{"zsh", "nocx.zsh"},
+	} {
+		t.Run(sh.name, func(t *testing.T) {
+			delivered := readFileT(t, filepath.Join(root, integrationDir, manifest.Generation, sh.file))
+			text := runScriptFile(t, sh.name, writeScriptFile(t, sh.file, string(delivered)), `__nocx_agent_enrol() {
+    __nocx_agent_cancelled=0
+    __nocx_agent_rid=a-1
+    __nocx_agent_launch_cancelled=1
+    return 0
+}
+__nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
+__nocx_lc_read_agent_answer() { builtin printf 'READ %s\n' "$*"; return 0; }
+`)
+			if strings.Contains(text, "AGENT-RAN") {
+				t.Fatalf("a launch cancelled after its enrolment started the agent; output=%q", text)
+			}
+			if !strings.Contains(text, "SEND agent_withdraw") || !strings.Contains(text, `,"request":"a-1"`) {
+				t.Errorf("the delivered %s does not withdraw the interval a cancelled launch admitted; output=%q", sh.file, text)
+			}
+			if !strings.Contains(text, "READ a-1") {
+				t.Errorf("the delivered %s does not read the withdrawal's answer, so the pane waits for ever; output=%q", sh.file, text)
+			}
+			if !strings.Contains(text, "WRAPPER-RC=130") {
+				t.Errorf("the delivered %s does not report the interrupt; output=%q", sh.file, text)
+			}
+			// NOTHING PUBLICATION STRIPS MAY BE CALLED BY WHAT IT KEEPS. The
+			// ticket release and the state clear are the resolution's, and the
+			// resolution does not travel; a delivered branch that calls them
+			// answers `command not found` into the person's remote shell on the
+			// path this version exists for.
+			if strings.Contains(text, "command not found") {
+				t.Errorf("the delivered %s calls what its delivery does not carry; output=%q", sh.file, text)
+			}
+		})
 	}
 }
 

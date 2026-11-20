@@ -346,9 +346,21 @@ import (
 // on the 72 tree, and the bump is what makes them ARRIVE at a host whose agent
 // set did not change (nocx-pd55v, TestEnsureInstalledRemote_UpgradesAHostHoldingThePreviousScriptVersion).
 // No file is added, removed or written twice: the 63-call maximum is unchanged.
+//
+// 2026-11-20, seventeenth move (nocx-pd55v): 94,363 -> 94,147, **-216**, and
+// both `nocx.bash` (42,129 -> 42,021) and `nocx.zsh` (34,659 -> 34,551) — the
+// delivered branch above called two helpers that PUBLICATION strips, so the
+// branch that reaches a host printed `command not found` into the person's
+// remote shell on the one path it exists for. The teardown those helpers
+// perform is the resolution's — a published wrapper has no ticket to release
+// and no launch state to clear — so it is now a statement marker like the
+// setup block's, and a published script carries no call at all: three lines
+// removed per script, 108 bytes each. The local pane's bytes are unchanged,
+// which is what a marker that renders the same statement both ways buys. No
+// file is added, removed or written twice: the 63-call maximum is unchanged.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 94363
+	measuredMaxPublishBytes = 94147
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

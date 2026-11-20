@@ -363,15 +363,18 @@ var (
 // branch that cancels an admitted enrolment withdraws the interval that
 // enrolment opened (nocx-pd55v). Both shells carry the withdrawal; the check
 // that sends a launch into that branch is the launch-setup block's, which a
-// PUBLISHED script never carries — so a host is only reachable through the
-// withdrawal, and its block must arrive. It would not have. The generation a
-// bundle publishes under is its version plus the digest of its agent set, so a
-// host holding 71 answers `already-installed` to a 72 bundle whose set is
-// unchanged: the publisher skips the write and the new block never lands. The
-// number moves for that reason, not for the bytes — 71 and 72 are the same
-// width and the measured publish is unchanged. Every installed copy must be
-// rewritten: a shell still sourcing 71 enrols a cancelled launch and leaves the
-// interval it opened live until the session's output ends.
+// PUBLISHED script never carries — so a host only ever reaches the withdrawal,
+// and that block must arrive. It would not have. A bundle publishes under a
+// generation made of its script version plus a digest of its agent set, and
+// that equality is what makes a re-publish free: a host already holding 71
+// answered `already-installed` to this build's bytes for as long as they said
+// 71 — same version, same agent set, so the same generation — and the publisher
+// skipped the write, leaving the host the wrapper it had. It is the VERSION
+// separating the two generations (v71-… -> v72-…) that publishes the new one,
+// which is why the number moves here: 71 and 72 are the same width, so the
+// token itself changes no byte. Every installed copy must be rewritten: a
+// shell still sourcing 71 enrols a cancelled launch and leaves the interval it
+// opened live until the session's output ends.
 const version = "72"
 
 // ScriptVersion is the integration script version other packages may read.

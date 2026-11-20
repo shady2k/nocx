@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **94,363**.
+- Maximum bytes written per publish: **94,147**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -206,3 +206,22 @@ launch. Nothing in the measurement can see that, because the bytes the
 measurement publishes are the bytes a re-publish of the same generation never
 sends. The worst path is still replacement plus sweep with the launch carrier
 absent, at fault `remove#4`.
+
+The second 2026-11-20 measurement (nocx-pd55v, the re-review) is **216 bytes
+below** that 94,363-byte figure, at **94,147**, and keeps the **63**-call
+maximum. The block the version above delivers called two helpers that
+publication strips — the ticket release and the launch-state clear both live in
+the stripped launch helpers — so the branch a host reaches answered
+`command not found` into the person's remote shell, twice, at the one moment
+this delivery exists for. That teardown is the resolution's: a published
+wrapper carries no ticket to release and no state to clear. It is a statement
+marker now, like the setup block's, so a published script carries no call at
+all: **108 bytes removed from each** of `nocx.bash` (42,129 -> 42,021) and
+`nocx.zsh` (34,659 -> 34,551), per-file figures from TestMeasureBundleBytes on
+this tree and on `715816ee4`. Both tiers lose the same three lines — the cancel
+in the cancelled-enrolment branch, the clear below it and the clear on the
+agent's return — because both carry the same wrapper. The local pane's bytes
+are unchanged: a marker renders the statement for one delivery and nothing for
+the other, so the pane a person sits in front of pays neither way. The worst
+path is still replacement plus sweep with the launch carrier absent, at fault
+`remove#4`.

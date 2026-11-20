@@ -72,6 +72,68 @@ __nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
 	}
 }
 
+// A RECORDED CANCEL IS THE ANSWER EVEN WHEN THE RESOLUTION REPORTS A FAILURE
+// (nocx-pd55v).
+//
+// The resolution's wait can end with a status that is not 130 while the
+// wrapper's cancel flag is set: an interrupt that lands on the wait's last
+// `sleep` is recorded by __nocx_agent_note_int, and the loop then leaves by its
+// own counter with 1, without another iteration in which to notice. A wrapper
+// that reads the status first calls that a refusal — the pane says `not
+// started` about a launch the person stopped, which is the one sentence the
+// cancel exists to replace — and leaves the launch's ticket live.
+//
+// The state is forced rather than raced for, for the reason the test above
+// gives: a real shell cannot be made to deliver a signal into that one instant
+// on demand. What is stubbed is the resolution's return; what is asserted is
+// the sentence the person reads, the ticket being released, and the enrolment
+// never happening.
+func TestAgentWrapperCancelsWhenTheResolutionFailedAfterTheInterrupt(t *testing.T) {
+	for _, shell := range []struct {
+		name string
+		raw  string
+	}{
+		{"bash", bashScriptRaw},
+		{"zsh", zshScriptRaw},
+	} {
+		t.Run(shell.name, func(t *testing.T) {
+			text := runWrapperScript(t, shell.name, shell.raw, `__nocx_agent_launch_resolve() {
+    __nocx_agent_launch_agent=claude
+    __nocx_agent_launch_ticket=ticket-1
+    __nocx_agent_launch_reason=local agent launch could not be resolved
+    __nocx_agent_launch_cancelled=1
+    return 1
+}
+__nocx_agent_enrol() {
+    __nocx_agent_cancelled=0
+    __nocx_agent_rid=a-1
+    builtin printf 'ENROL-CALLED\n'
+    return 0
+}
+__nocx_lc_send() { builtin printf 'SEND %s\n' "$*"; return 0; }
+`)
+			if strings.Contains(text, "AGENT-RAN") {
+				t.Fatalf("a cancelled launch started the agent; output=%q", text)
+			}
+			if strings.Contains(text, "ENROL-CALLED") {
+				t.Errorf("a launch cancelled during its resolution enrolled anyway; output=%q", text)
+			}
+			if strings.Contains(text, "nocx: not started") {
+				t.Errorf("an interrupted resolution was reported as a refusal; output=%q", text)
+			}
+			if !strings.Contains(text, "nocx: cancelled — claude was not started") {
+				t.Errorf("the pane did not say the launch was cancelled; output=%q", text)
+			}
+			if !strings.Contains(text, "SEND agent_launch_cancel") {
+				t.Errorf("the launch's ticket was not cancelled; output=%q", text)
+			}
+			if !strings.Contains(text, "WRAPPER-RC=130") {
+				t.Errorf("the cancelled launch must report the interrupt; output=%q", text)
+			}
+		})
+	}
+}
+
 // AN ENROLMENT THAT WAS ADMITTED BEFORE THE CANCEL LANDED LEAVES AN INTERVAL
 // NOBODY WILL RUN IN (nocx-pd55v).
 //
@@ -146,6 +208,15 @@ __nocx_lc_read_agent_answer() { builtin printf 'READ %s\n' "$*"; return 0; }
 // everything the pane printed.
 func runWrapperScript(t *testing.T, shell, raw, stubs string) string {
 	t.Helper()
+	script := writeScriptFile(t, "nocx."+shell, renderScript(raw, []string{"claude"}, DeliveryLocal))
+	return runScriptFile(t, shell, script, stubs)
+}
+
+// runScriptFile is the same run for a script that already exists as bytes — a
+// file that was DELIVERED to a host rather than rendered here — so that what is
+// asserted is what the far side will source, not a re-render of it.
+func runScriptFile(t *testing.T, shell, script, stubs string) string {
+	t.Helper()
 	binary := requireShell(t, shell)
 	home := t.TempDir()
 	binDir := t.TempDir()
@@ -156,7 +227,6 @@ printf 'AGENT-RAN\n'
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(agent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := writeScriptFile(t, "nocx."+shell, renderScript(raw, []string{"claude"}, DeliveryLocal))
 	program := "script=$1\nshift\nsource \"$script\"\n__nocx_lc_active=1\n" + stubs +
 		"claude\nbuiltin printf 'WRAPPER-RC=%s\\n' \"$?\"\n"
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

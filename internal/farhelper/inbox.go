@@ -13,8 +13,6 @@ type entryInbox struct {
 	freeze      uint64
 	thaw        uint64
 	lost        *client.Client
-	publish     bool
-	retiring    []*client.Client
 	close       bool
 	serial      uint64
 }
@@ -50,9 +48,11 @@ func (e *entry) refresh()       { e.enqueue(func(in *entryInbox) { in.refresh++ 
 func (e *entry) freeze() {
 	e.enqueue(func(in *entryInbox) { in.serial++; in.freeze = in.serial }, true)
 }
+
 func (e *entry) thaw() {
 	e.enqueue(func(in *entryInbox) { in.serial++; in.thaw = in.serial; in.inputs++ }, true)
 }
+
 func (e *entry) clientLost(peer *client.Client) {
 	e.enqueue(func(in *entryInbox) { in.lost = peer }, false)
 }
@@ -63,58 +63,39 @@ func (e *entry) drainInbox() bool {
 	in := e.inbox
 	e.inbox = entryInbox{}
 	e.inboxMu.Unlock()
-	for _, peer := range in.retiring {
-		_ = peer.Close()
-	}
 	if in.close {
-		e.finishClose()
+		e.accept(event{kind: eventClose})
 		return true
 	}
-	if in.interrupted {
-		e.mu.Lock()
-		peer := e.detachClientLocked()
-		e.attempt = 0
-		e.nextAttemptAt = 0
-		_, changed := e.publishLocked()
-		e.mu.Unlock()
-		if peer != nil {
-			e.closePeer(peer)
-		}
-		if changed {
-			e.requestPublication()
-		}
-	}
 	if in.observation != nil {
-		e.handleApply(*in.observation)
+		e.accept(event{kind: eventObserve, conn: *in.observation, interrupted: in.interrupted})
 	}
 	if in.inputs != 0 {
-		e.handleInputsChanged()
+		e.accept(e.checkInputs())
 	}
-	if in.freeze != 0 || in.thaw != 0 {
-		// Even a freeze immediately followed by thaw must retire the old client.
-		if in.freeze != 0 {
-			e.handleFreeze()
-		}
-		if in.thaw > in.freeze {
-			e.handleThaw()
-		}
+	if in.freeze != 0 {
+		e.accept(event{kind: eventFreeze})
+	}
+	if in.thaw > in.freeze {
+		e.accept(event{kind: eventThaw})
+		e.accept(e.checkInputs())
 	}
 	if in.lost != nil {
-		e.handleClientLost(in.lost)
+		// Any loss signal rechecks the CURRENT peer. A delayed watch for an
+		// old peer cannot overwrite and hide the current peer's queued loss.
+		e.mu.Lock()
+		peer := e.client
+		e.mu.Unlock()
+		if peer != nil {
+			select {
+			case <-peer.Done():
+				e.accept(event{kind: eventLost, peer: peer})
+			default:
+			}
+		}
 	}
 	if in.refresh != 0 {
-		e.handleRefresh()
-	}
-	if in.publish {
-		e.mu.Lock()
-		status := e.lastStatus
-		e.mu.Unlock()
-		e.r.publishEntry(e, status)
+		e.accept(event{kind: eventRefresh})
 	}
 	return false
-}
-
-func (e *entry) requestPublication() { e.enqueue(func(in *entryInbox) { in.publish = true }, false) }
-func (e *entry) closePeer(peer *client.Client) {
-	e.enqueue(func(in *entryInbox) { in.retiring = append(in.retiring, peer) }, false)
 }

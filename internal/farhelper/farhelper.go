@@ -268,6 +268,7 @@ type Registry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	publishMu sync.Mutex
 	mu        sync.Mutex
 	entries   map[string]*entry
 	watchers  map[uint64]func(string, Status)
@@ -554,8 +555,20 @@ func (r *Registry) decide(e *entry) {
 }
 
 func (r *Registry) publishEntry(e *entry, status Status) {
+	// Delivery is serialized separately from map access. A replacement's
+	// frame follows an already-authorized old callback, never precedes it.
+	// Callbacks may read Axis/Acquire; no registry/state lock is held here.
+	r.publishMu.Lock()
+	defer r.publishMu.Unlock()
 	r.mu.Lock()
 	current := r.entries[e.id] == e
+	// A retired actor may publish its final status only while the identity
+	// remains absent. A replacement owns all subsequent frames for that ID.
+	if status.State == StateUnavailable && e.ctx.Err() == nil && r.entries[e.id] == nil {
+		e.mu.Lock()
+		current = e.closed
+		e.mu.Unlock()
+	}
 	r.mu.Unlock()
 	if current {
 		r.publish(e.id, status)

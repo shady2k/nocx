@@ -309,6 +309,7 @@ func (h *sshOverHelper) openLaneFor(ctx context.Context, params proto.LaneParams
 type farHelperConnections struct {
 	mu       sync.Mutex
 	conns    map[string]farhelper.Connection
+	pending  map[string]proto.ConnectionStateEvent
 	watchers map[uint64]func(farhelper.Connection)
 	next     uint64
 	// instance is the helper process the cached sequences were observed from,
@@ -388,6 +389,7 @@ func (f *farHelperConnections) adoptInstance(instance string) {
 	}
 	dropped := f.conns
 	f.conns = make(map[string]farhelper.Connection)
+	f.pending = make(map[string]proto.ConnectionStateEvent)
 	watchers := f.snapshotLocked()
 	defer f.mu.Unlock()
 	for _, c := range dropped {
@@ -418,6 +420,7 @@ func (f *farHelperConnections) acceptInstance(instance string) bool {
 func newFarHelperConnections() *farHelperConnections {
 	return &farHelperConnections{
 		conns:    make(map[string]farhelper.Connection),
+		pending:  make(map[string]proto.ConnectionStateEvent),
 		watchers: make(map[uint64]func(farhelper.Connection)),
 	}
 }
@@ -471,6 +474,13 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 		c = previous
 	}
 	f.conns[c.ID] = c
+	if pending, ok := f.pending[c.ID]; ok {
+		delete(f.pending, c.ID)
+		if pending.Seq > c.Seq || c.Seq == 0 {
+			f.foldLocked(pending, nil, "")
+			return
+		}
+	}
 	watchers := f.snapshotLocked()
 	for _, fn := range watchers {
 		fn(c)
@@ -479,10 +489,9 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 
 // Apply folds one connection-state notification into the cache.
 //
-// A notification carries no destination, so it only updates a connection the
-// table (or a pane's bind) named: a decision needs one, and deriving it from
-// the id would be a second answer to "which address is this". The answer that
-// adds a connection this process never bound is Sync.
+// A notification carries no destination, so an unknown connection is retained
+// only as a pending observation until the table or a pane's bind names where
+// it dials. No decision is published without that destination.
 func (f *farHelperConnections) Apply(source string, ev proto.ConnectionStateEvent) {
 	if f == nil || ev.ConnectionID == "" {
 		return
@@ -505,22 +514,30 @@ func (f *farHelperConnections) foldLocked(ev proto.ConnectionStateEvent, destina
 	c, known := f.conns[ev.ConnectionID]
 	if !known {
 		if destination == nil {
-			// The notification for a connection nothing has named: it cannot
-			// be decided about until the helper's table, or a bind, says where
-			// it dials.
+			// Keep the sequence fence until a table or bind supplies the
+			// destination. A subscription can precede its table response.
+			if previous, ok := f.pending[ev.ConnectionID]; !ok || ev.Seq > previous.Seq {
+				f.pending[ev.ConnectionID] = ev
+			}
 			return
 		}
+		if pending, ok := f.pending[ev.ConnectionID]; ok {
+			if pending.Seq > ev.Seq {
+				ev = pending
+			}
+		}
 		if !farHelperDecidable(ev) {
+			f.pending[ev.ConnectionID] = ev
 			// The helper's table is every supervisor it has ever created and is
 			// never pruned, so it carries connections that ended, ones whose
 			// last link failed, and ones that never dialled. None of them is
 			// unfolded: a dead host is not something to probe, and a connection
-			// with no link cannot be decided about at all. The voice that
-			// brings such a connection back is a pane's bind (Observe) or the
-			// next table read, not a notification — notifications carry no
-			// destination, so they can only update an entry that exists.
+			// with no link cannot be decided about at all. A later table or
+			// bind supplies the destination before a newer pending observation
+			// can bring such a connection back.
 			return
 		}
+		delete(f.pending, ev.ConnectionID)
 		c = farhelper.Connection{ID: ev.ConnectionID}
 	}
 	if ev.Seq != 0 && c.Seq != 0 && ev.Seq <= c.Seq {

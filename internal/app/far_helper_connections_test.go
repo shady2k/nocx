@@ -356,8 +356,8 @@ func TestReviewAuthenticatedFingerprintReachesTheRegistry(t *testing.T) {
 	_, logger := logtest.New(t)
 	registry := farhelper.New(farhelper.Config{
 		Connections: source,
-		Modes:       &reviewModeStore{mode: hostmode.Raw},
-		Consents:    &reviewConsentStore{},
+		Modes:       reviewFingerprintModes{},
+		Consents:    reviewFingerprintConsents{},
 		Log:         logger,
 	})
 	defer registry.Close()
@@ -374,7 +374,7 @@ func TestReviewAuthenticatedFingerprintReachesTheRegistry(t *testing.T) {
 	var status farhelper.Status
 	waittest.WaitFor(t, "raw-mode decision after authenticated observation", func() bool {
 		status, _ = registry.Axis("review")
-		return status.State != farhelper.StateStarting
+		return status.State == farhelper.StateUnavailable && status.Reason == farhelper.ReasonModeRaw
 	})
 	if status.State != farhelper.StateUnavailable || status.Reason != farhelper.ReasonModeRaw || status.Action != farhelper.ActionHostSettings {
 		t.Fatalf("axis = %+v, want unavailable/mode-raw/host-settings", status)
@@ -406,6 +406,20 @@ func TestFarHelperCloserUnfreezesOnSessionCloseFailure(t *testing.T) {
 		t.Fatalf("axis remained frozen after failed close: %+v", status)
 	}
 }
+
+type reviewFingerprintModes struct{}
+
+func (reviewFingerprintModes) Lookup(key string) (hostmode.Mode, bool) {
+	return hostmode.Raw, key == "SHA256:x"
+}
+func (reviewFingerprintModes) Watch(func()) func() { return func() {} }
+
+type reviewFingerprintConsents struct{}
+
+func (reviewFingerprintConsents) Lookup(key string) (consent.Answer, bool) {
+	return consent.Granted, key == "SHA256:x"
+}
+func (reviewFingerprintConsents) Watch(func()) func() { return func() {} }
 
 type reviewModeStore struct{ mode hostmode.Mode }
 

@@ -62,14 +62,29 @@ func TestCatalogueCacheWaitHonorsDeadline(t *testing.T) {
 }
 
 func TestCatalogueRejectsFailedAndIncompleteRPC(t *testing.T) {
-	for _, tc := range []struct{ name, script, want string }{
-		{"failure", `read request; printf '%s\n' '{"type":"response","command":"get_available_models","success":false,"error":"provider unavailable"}'`, "provider unavailable"},
-		{"incomplete", `read request; printf '%s\n' '{"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}'`, "incomplete catalogue"},
-		{"malformed", `read request; printf '%s\n' 'not json'`, "invalid character"},
+	// The fixture consumes every request before it exits, because queryCatalog
+	// writes both of its commands before it reads a reply. A fixture that stops
+	// after the first command lets the second write race the closing pipe, and
+	// the resulting EPIPE then replaces the refusal under assertion. The
+	// get_state arm returns without answering, which is what ends the catalogue
+	// early in the incomplete case instead of stalling the scan until the
+	// readiness deadline.
+	const fixture = `while IFS= read -r request; do
+case "$request" in
+*get_available_models*) printf '%s\n' '<answer>' ;;
+*get_state*) exit 0 ;;
+esac
+done
+`
+	for _, tc := range []struct{ name, answer, want string }{
+		{"failure", `{"type":"response","command":"get_available_models","success":false,"error":"provider unavailable"}`, "provider unavailable"},
+		{"incomplete", `{"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}`, "incomplete catalogue"},
+		{"malformed", `not json`, "invalid character"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "pi"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
+			script := strings.Replace(fixture, "<answer>", tc.answer, 1)
+			if err := os.WriteFile(filepath.Join(dir, "pi"), []byte("#!/bin/sh\n"+script), 0o700); err != nil { //nolint:gosec // executable fixture in private test directory
 				t.Fatal(err)
 			}
 			c := newTestConnector(t.TempDir(), []string{"PATH=" + dir})

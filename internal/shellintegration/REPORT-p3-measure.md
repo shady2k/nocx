@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **93,216**.
+- Maximum bytes written per publish: **94,363**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -177,3 +177,14 @@ The same day the length prefix went back to `dd bs=1 count=4 | od` (**93,965**,
 with its header, and on macOS a nested bash child under fish sent `hello` and
 never `prompt_ready` (ci-mac, PR #831). The elapsed-time wait is kept; the
 63-call maximum is unchanged.
+
+The 2026-11-20 measurement on branch `agent/agent/alx-772`, on the tree above,
+is **398 bytes above** that 93,965-byte figure, at **94,363**, and keeps the
+**63**-call maximum. The growth is the cancelled launch that used to enrol
+anyway (nocx-pd55v): an interrupt recorded while the resolution's answer was
+being read is checked before the wrapper enrols, and the branch that cancels an
+admitted enrolment withdraws the interval that enrolment opened instead of
+leaving it live until the session's output ends. The setup block is rendered
+into `nocx.bash` and `nocx.zsh` from one constant, so both tiers pay for the
+first check; the withdrawal has a copy in each script. The worst path is still
+replacement plus sweep with the launch carrier absent, at fault `remove#4`.

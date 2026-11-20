@@ -332,9 +332,18 @@ import (
 // through stdio, so on a socket it took the frame's body with its header and
 // ci-mac's nested bash child never sent prompt_ready. The elapsed-time wait
 // stays; the comment that says why dd is longer than the one it replaces.
+//
+// 2026-11-20, sixteenth move (nocx-pd55v): 93,965 -> 94,363, **+398**, and both
+// `nocx.bash` and `nocx.zsh` — the wrapper checks the interrupt it recorded
+// when a resolution SUCCEEDED before it enrols, and the branch that cancels
+// between the enrolment and the agent withdraws the interval the admitted
+// enrolment opened. The launch setup block is rendered into both tiers from one
+// constant, so both paid for the first check; the withdrawal has a copy in each
+// script, and neither is stripped at publish time. No file is added, removed or
+// written twice: the 63-call maximum is unchanged.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 93965
+	measuredMaxPublishBytes = 94363
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

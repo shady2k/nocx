@@ -1087,6 +1087,16 @@ __nocx_agent_run() {
     if (( __nocx_agent_launch_cancelled )); then
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
         __nocx_agent_launch_cancel
+        # AN ACCEPTED ENROLMENT OPENED AN INTERVAL AND NOBODY WILL RUN IN IT
+        # (nocx-pd55v). The withdrawal usually happens at the far end of the
+        # agent's life, and this branch is the one return that skips that end:
+        # the backend still reads the interval as "an agent is running in this
+        # pane" until the session's output ends. Only an rc of 0 means the
+        # enrolment was admitted; a refusal opened nothing to close.
+        if (( __rc == 0 )); then
+            __nocx_lc_send agent_withdraw ',"request":"'"$__nocx_agent_rid"'"' || true
+            __nocx_lc_read_agent_answer "$__nocx_agent_rid" || true
+        fi
         __nocx_agent_launch_clear
         return 130
     fi

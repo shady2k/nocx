@@ -209,6 +209,16 @@ const (
 // aborted silently, with no sentence and whatever status the shell left. The
 // ticket is cancelled too when one arrived: a launch nobody will perform must
 // not leave it live.
+//
+// A RESOLUTION THAT SUCCEEDED IS NOT A RESOLUTION NOBODY INTERRUPTED
+// (nocx-pd55v). The wait's own arm clears its window's flag when the wait ends
+// — deliberately, so a stale flag cannot leak into the next window — while the
+// wrapper's flag survives it. So an interrupt delivered as the answer was
+// consumed, or in the instant after the wait returned, arrives here with rc 0
+// and the cancel recorded, and this block is the only thing between that fact
+// and an enrolment: without the check the wrapper asked the backend to admit a
+// pane it then refused to run anything in, spending the launch ticket on a
+// launch the person had already cancelled.
 const agentLaunchSetupLocal = `__nocx_agent_launch_resolve "$__agent"
     __rc=$?
     if (( __rc == 130 )); then
@@ -222,6 +232,12 @@ const agentLaunchSetupLocal = `__nocx_agent_launch_resolve "$__agent"
         __nocx_agent_launch_cancel
         __nocx_agent_launch_clear
         return 1
+    fi
+    if (( __nocx_agent_launch_cancelled )); then
+        builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        __nocx_agent_launch_cancel
+        __nocx_agent_launch_clear
+        return 130
     fi
     if (( __nocx_agent_launch_local && ! __nocx_agent_launch_valid )); then
         builtin printf 'nocx: not started — %s\n' "${__nocx_agent_launch_reason:-local agent record has no usable launch configuration}" >&2

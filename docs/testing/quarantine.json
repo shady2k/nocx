@@ -86,10 +86,6 @@
       "bead": "nocx-6sz7y"
     },
     {
-      "test": "go:TestBashAgentWrapperCancelsTheLaunchOnCtrlCDuringResolution",
-      "bead": "nocx-pd55v"
-    },
-    {
       "test": "go:TestCatalogueRejectsFailedAndIncompleteRPC",
       "bead": "nocx-ccnck"
     },

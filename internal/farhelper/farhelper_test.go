@@ -398,13 +398,15 @@ func (d *fakeDialer) lastPeer(t *testing.T) *fakePeer {
 // ── a real client over a pipe with a hello peer ──────────────────────────
 
 type fakeLane struct {
-	conn      net.Conn
-	done      chan struct{}
-	waitDone  chan struct{}
-	closeOnce sync.Once
-	doneOnce  sync.Once
-	waitOnce  sync.Once
-	lostErr   error
+	closeBlock   <-chan struct{}
+	closeEntered chan struct{}
+	conn         net.Conn
+	done         chan struct{}
+	waitDone     chan struct{}
+	closeOnce    sync.Once
+	doneOnce     sync.Once
+	waitOnce     sync.Once
+	lostErr      error
 }
 
 func (l *fakeLane) Stdin() io.WriteCloser { return l.conn }
@@ -419,6 +421,12 @@ func (l *fakeLane) Done() <-chan struct{} { return l.done }
 func (l *fakeLane) LostErr() error        { return l.lostErr }
 func (l *fakeLane) Close() error {
 	l.closeOnce.Do(func() {
+		if l.closeEntered != nil {
+			close(l.closeEntered)
+		}
+		if l.closeBlock != nil {
+			<-l.closeBlock
+		}
 		_ = l.conn.Close()
 		l.waitOnce.Do(func() { close(l.waitDone) })
 	})

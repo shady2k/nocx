@@ -39,6 +39,10 @@ type Config struct {
 	// one supervisor's lifetime. A consumer that keeps sequences must fence on
 	// the source or a replacement's first observations look stale.
 	//
+	// Called synchronously on the client reader goroutine, which must not
+	// wait. The callback may only enqueue O(1) work and cancel contexts;
+	// it must not perform RPC, close clients, or wait for remote work.
+	//
 	// Nil is ordinary for a caller that opens no ssh pane and prefers no
 	// parsing cost; the frame is decoded only when the callback exists.
 	OnConnectionEvent func(sourceInstance string, ev proto.ConnectionStateEvent)

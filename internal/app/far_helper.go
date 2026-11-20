@@ -307,7 +307,6 @@ func (h *sshOverHelper) openLaneFor(ctx context.Context, params proto.LaneParams
 // helper that held them is gone, and a decision that kept riding its client
 // would serve a dead transport.
 type farHelperConnections struct {
-	dispatch sync.Mutex
 	mu       sync.Mutex
 	conns    map[string]farhelper.Connection
 	watchers map[uint64]func(farhelper.Connection)
@@ -343,15 +342,18 @@ func (f *farHelperConnections) Sync(ctx context.Context, table farHelperTable) e
 	if f == nil || table == nil {
 		return nil
 	}
-	f.dispatch.Lock()
-	defer f.dispatch.Unlock()
 	f.adoptInstance(table.InstanceID())
 	summaries, err := table.Connections(ctx)
 	if err != nil {
 		return err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.acceptInstance(table.InstanceID()) {
+		return nil
+	}
 	for _, summary := range summaries {
-		f.fold(summary.Connection, summary.Destination, summary.HostKeyFingerprint)
+		f.foldLocked(summary.Connection, summary.Destination, summary.HostKeyFingerprint)
 	}
 	return nil
 }
@@ -387,7 +389,7 @@ func (f *farHelperConnections) adoptInstance(instance string) {
 	dropped := f.conns
 	f.conns = make(map[string]farhelper.Connection)
 	watchers := f.snapshotLocked()
-	f.mu.Unlock()
+	defer f.mu.Unlock()
 	for _, c := range dropped {
 		c.State = hostconn.Ended
 		for _, fn := range watchers {
@@ -401,12 +403,11 @@ func (f *farHelperConnections) adoptInstance(instance string) {
 // refused. The epoch is opened explicitly — by adoptInstance, on the client the
 // opener handed out — rather than by whichever frame arrives next, so a
 // replaced helper's last queued event cannot take the cache back.
+// The caller holds mu.
 func (f *farHelperConnections) acceptInstance(instance string) bool {
 	if instance == "" {
 		return true
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.instance == "" {
 		f.instance = instance
 		return true
@@ -431,6 +432,8 @@ func (f *farHelperConnections) List() []farhelper.Connection {
 	return out
 }
 
+// Watch callbacks run under mu and may run on the helper reader goroutine.
+// They may only enqueue O(1) work and cancel contexts, never wait or re-enter.
 func (f *farHelperConnections) Watch(fn func(farhelper.Connection)) (stop func()) {
 	f.mu.Lock()
 	f.next++
@@ -456,9 +459,8 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 	if f == nil || c.ID == "" {
 		return
 	}
-	f.dispatch.Lock()
-	defer f.dispatch.Unlock()
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if previous, known := f.conns[c.ID]; known {
 		if c.Destination.Host != "" {
 			previous.Destination = c.Destination
@@ -470,7 +472,6 @@ func (f *farHelperConnections) Observe(c farhelper.Connection) {
 	}
 	f.conns[c.ID] = c
 	watchers := f.snapshotLocked()
-	f.mu.Unlock()
 	for _, fn := range watchers {
 		fn(c)
 	}
@@ -486,27 +487,27 @@ func (f *farHelperConnections) Apply(source string, ev proto.ConnectionStateEven
 	if f == nil || ev.ConnectionID == "" {
 		return
 	}
-	f.dispatch.Lock()
-	defer f.dispatch.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.acceptInstance(source) {
 		return
 	}
-	f.fold(ev, nil, "")
+	f.foldLocked(ev, nil, "")
 }
 
-// fold merges one observation — a table entry or a notification — into the
+// foldLocked merges one observation — a table entry or a notification — into the
 // cache. Both arrive in the same shape because the helper answers the table
 // with the event it publishes (proto.ConnectionSummary), which is what lets
 // one function own the fence, the generation and the shell count.
-func (f *farHelperConnections) fold(ev proto.ConnectionStateEvent, destination *proto.SSHDestination, fingerprint string) {
-	f.mu.Lock()
+// It also delivers callbacks under mu, preserving observation order.
+// Subscribers only enqueue work; they must never wait or re-enter this source.
+func (f *farHelperConnections) foldLocked(ev proto.ConnectionStateEvent, destination *proto.SSHDestination, fingerprint string) {
 	c, known := f.conns[ev.ConnectionID]
 	if !known {
 		if destination == nil {
 			// The notification for a connection nothing has named: it cannot
 			// be decided about until the helper's table, or a bind, says where
 			// it dials.
-			f.mu.Unlock()
 			return
 		}
 		if !farHelperDecidable(ev) {
@@ -518,13 +519,11 @@ func (f *farHelperConnections) fold(ev proto.ConnectionStateEvent, destination *
 			// brings such a connection back is a pane's bind (Observe) or the
 			// next table read, not a notification — notifications carry no
 			// destination, so they can only update an entry that exists.
-			f.mu.Unlock()
 			return
 		}
 		c = farhelper.Connection{ID: ev.ConnectionID}
 	}
 	if ev.Seq != 0 && c.Seq != 0 && ev.Seq <= c.Seq {
-		f.mu.Unlock()
 		return
 	}
 	if destination != nil {
@@ -540,7 +539,6 @@ func (f *farHelperConnections) fold(ev proto.ConnectionStateEvent, destination *
 	c.Shells = ev.PlainShells
 	f.conns[c.ID] = c
 	watchers := f.snapshotLocked()
-	f.mu.Unlock()
 	for _, fn := range watchers {
 		fn(c)
 	}

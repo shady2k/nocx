@@ -206,7 +206,8 @@ type Connections interface {
 	// no panes. A coordinator restart rebuilds its entries from this.
 	List() []Connection
 	// Watch reports every later observation. The current list is NOT replayed:
-	// the registry calls List first, then watches.
+	// the registry subscribes before List. Callbacks run on a goroutine that
+	// must not wait: only O(1) enqueue and context cancellation are permitted.
 	Watch(fn func(Connection)) (stop func())
 }
 
@@ -215,11 +216,13 @@ type Connections interface {
 // and moves the decision revision only when that record changed.
 type Modes interface {
 	Lookup(fingerprint string) (hostmode.Mode, bool)
+	// Watch callbacks must not wait; only O(1) enqueue and context cancellation.
 	Watch(fn func()) (stop func())
 }
 
 type Consents interface {
 	Lookup(fingerprint string) (consent.Answer, bool)
+	// Watch callbacks must not wait; only O(1) enqueue and context cancellation.
 	Watch(fn func()) (stop func())
 }
 
@@ -513,26 +516,22 @@ func (r *Registry) observe(c Connection) {
 	if e == nil {
 		e = newEntry(r, c)
 		r.entries[c.ID] = e
-		r.mu.Unlock()
 		e.start()
+		r.mu.Unlock()
 		return
 	}
-	r.mu.Unlock()
 	e.apply(c)
+	r.mu.Unlock()
 }
 
 func (r *Registry) remove(connectionID string) {
 	r.mu.Lock()
 	e := r.entries[connectionID]
 	delete(r.entries, connectionID)
+	if e != nil {
+		e.close()
+	}
 	r.mu.Unlock()
-	if e == nil {
-		return
-	}
-	status, changed := e.close()
-	if changed {
-		r.publish(connectionID, status)
-	}
 }
 
 // storeChanged re-reads the mode and consent for every entry. The stores report
@@ -540,12 +539,8 @@ func (r *Registry) remove(connectionID string) {
 // is about its own machine, and only that one moves its revision.
 func (r *Registry) storeChanged() {
 	r.mu.Lock()
-	entries := make([]*entry, 0, len(r.entries))
+	defer r.mu.Unlock()
 	for _, e := range r.entries {
-		entries = append(entries, e)
-	}
-	r.mu.Unlock()
-	for _, e := range entries {
 		e.inputsChanged()
 	}
 }
@@ -556,6 +551,15 @@ func (r *Registry) storeChanged() {
 // because a step is the registry's work, not a value the entry owns.
 func (r *Registry) decide(e *entry) {
 	e.advance()
+}
+
+func (r *Registry) publishEntry(e *entry, status Status) {
+	r.mu.Lock()
+	current := r.entries[e.id] == e
+	r.mu.Unlock()
+	if current {
+		r.publish(e.id, status)
+	}
 }
 
 func (r *Registry) publish(connectionID string, status Status) {

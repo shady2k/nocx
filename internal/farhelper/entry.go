@@ -1,24 +1,8 @@
 package farhelper
 
-// The per-connection decision. One goroutine per entry runs a small loop: it
-// reads the current facts under the entry's mutex, takes one blocking step when
-// a step is possible, and otherwise waits for a wake or the retry timer.
-//
-// # Why one loop and not a goroutine per step
-//
-// The decision is a sequence — probe, gate, install, dial, hello — and each
-// step is only allowed once the previous one is a fact. A loop makes "decides
-// once per generation and revision" true by construction: while a step is
-// running there is no second loop to start a second one, and after an install
-// succeeds the install is remembered rather than probed again.
-//
-// # Who may interrupt a step
-//
-// Two facts interrupt: a new transport generation, and a new decision revision
-// (the host's mode or the machine's consent). Both cancel the step's context,
-// and the step's answer is dropped because it is tagged with the pair it began
-// under. A mere observation — a quality grade, a shell count, a state repeat —
-// only wakes the loop, so a burst of events cannot turn one probe into many.
+// External inputs are coalesced by an entry-owned inbox. Its loop handles
+// lifecycle events independently of a remote step that ignores cancellation.
+// Step state mutations are retained here until the transition-table rebuild.
 
 import (
 	"context"
@@ -67,7 +51,11 @@ type entry struct {
 	r  *Registry
 	id string
 
-	mu sync.Mutex
+	inboxMu         sync.Mutex
+	interruptCancel context.CancelFunc
+	inbox           entryInbox
+	ingress         Connection
+	mu              sync.Mutex
 	// conn is the newest observation, and haveConn says one arrived.
 	conn     Connection
 	haveConn bool
@@ -134,6 +122,7 @@ func newEntry(r *Registry, c Connection) *entry {
 	ctx, cancel := context.WithCancel(r.ctx)
 	e := &entry{
 		r:        r,
+		ingress:  c,
 		id:       c.ID,
 		conn:     c,
 		haveConn: true,
@@ -144,28 +133,15 @@ func newEntry(r *Registry, c Connection) *entry {
 		ctx:      ctx,
 		cancel:   cancel,
 	}
-	e.readInputsLocked()
 	return e
 }
 
-func (e *entry) start() {
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		return
-	}
-	status, changed := e.publishLocked()
-	e.mu.Unlock()
-	if changed {
-		e.r.publish(e.id, status)
-	}
-	go e.run()
-}
+func (e *entry) start() { go e.run() }
 
 func (e *entry) fingerprint() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.conn.HostKeyFingerprint
+	e.inboxMu.Lock()
+	defer e.inboxMu.Unlock()
+	return e.ingress.HostKeyFingerprint
 }
 
 func (e *entry) targetLocked() Target {
@@ -205,7 +181,7 @@ func (e *entry) readInputsLocked() {
 // step in flight only for the two facts a result is fenced by (a new generation
 // or leaving the connected state) and for the first fingerprint, because every
 // step reads the record the fingerprint keys.
-func (e *entry) apply(c Connection) {
+func (e *entry) handleApply(c Connection) {
 	e.mu.Lock()
 	if c.Seq != 0 && e.conn.Seq != 0 && c.Seq <= e.conn.Seq && c.HostKeyFingerprint == e.conn.HostKeyFingerprint {
 		e.mu.Unlock()
@@ -247,20 +223,20 @@ func (e *entry) apply(c Connection) {
 			e.action = ActionNone
 		}
 	}
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if closeClient != nil {
-		_ = closeClient.Close()
+		e.closePeer(closeClient)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
 
 // inputsChanged is the stores' notification. It reads the two records and moves
 // the revision only when the answer about THIS machine changed.
-func (e *entry) inputsChanged() {
+func (e *entry) handleInputsChanged() {
 	e.mu.Lock()
 	fingerprint := e.conn.HostKeyFingerprint
 	e.mu.Unlock()
@@ -311,13 +287,13 @@ func (e *entry) inputsChanged() {
 	if e.workCancel != nil {
 		e.workCancel()
 	}
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if closeClient != nil {
-		_ = closeClient.Close()
+		e.closePeer(closeClient)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
@@ -356,6 +332,15 @@ func (e *entry) checkInputs(rev uint64) bool {
 }
 
 func (e *entry) stillCurrent(generation, rev uint64) bool {
+	e.inboxMu.Lock()
+	pending := e.inbox.close || e.inbox.freeze != 0
+	if c := e.inbox.observation; c != nil {
+		pending = pending || c.Generation != generation || c.State != hostconn.Connected
+	}
+	e.inboxMu.Unlock()
+	if pending {
+		return false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.ctx.Err() == nil &&
@@ -367,26 +352,38 @@ func (e *entry) stillCurrent(generation, rev uint64) bool {
 }
 
 func (e *entry) run() {
+	e.handleInputsChanged()
+	done := make(chan struct{}, 1)
+	working := false
 	for {
+		if e.drainInbox() {
+			return
+		}
 		e.reconcileInputs()
 		act, wait := e.plan()
-		if act {
-			e.r.decide(e)
-			continue
+		if act && !working {
+			working = true
+			go func() { e.r.decide(e); done <- struct{}{} }()
 		}
-		if wait > 0 {
+		if wait > 0 && !working {
 			select {
 			case <-e.ctx.Done():
+				e.finishClose()
 				return
 			case <-e.wake:
+			case <-done:
+				working = false
 			case <-e.r.cfg.Clock.After(wait):
 			}
-			continue
-		}
-		select {
-		case <-e.ctx.Done():
-			return
-		case <-e.wake:
+		} else {
+			select {
+			case <-e.ctx.Done():
+				e.finishClose()
+				return
+			case <-e.wake:
+			case <-done:
+				working = false
+			}
 		}
 	}
 }
@@ -422,13 +419,13 @@ func (e *entry) reconcileInputs() {
 		}
 		closeClient = e.detachClientLocked()
 	}
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if closeClient != nil {
-		_ = closeClient.Close()
+		e.closePeer(closeClient)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 }
 
@@ -619,7 +616,7 @@ func (e *entry) dial(generation, rev uint64, installed Installed) {
 		return
 	}
 	if !e.checkInputs(rev) || !e.stillCurrent(generation, rev) {
-		_ = peer.Close()
+		e.closePeer(peer)
 		return
 	}
 	e.serve(generation, rev, peer)
@@ -630,7 +627,7 @@ func (e *entry) serve(generation, rev uint64, peer *client.Client) {
 	if e.closed || e.ctx.Err() != nil || e.conn.Generation != generation ||
 		e.rev != rev || !e.connectedLocked() || e.phase == phaseAbsent || e.frozen {
 		e.mu.Unlock()
-		_ = peer.Close()
+		e.closePeer(peer)
 		return
 	}
 	old := e.detachClientLocked()
@@ -644,13 +641,13 @@ func (e *entry) serve(generation, rev uint64, peer *client.Client) {
 	e.everServed = true
 	e.attempt = 0
 	e.nextAttemptAt = 0
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if old != nil {
-		_ = old.Close()
+		e.closePeer(old)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	go e.watchClient(peer, servingCtx)
 	e.notify()
@@ -668,7 +665,7 @@ func (e *entry) watchClient(peer *client.Client, servingCtx context.Context) {
 	}
 }
 
-func (e *entry) clientLost(peer *client.Client) {
+func (e *entry) handleClientLost(peer *client.Client) {
 	e.mu.Lock()
 	if e.client != peer {
 		e.mu.Unlock()
@@ -692,10 +689,10 @@ func (e *entry) clientLost(peer *client.Client) {
 			e.action = ActionNone
 		}
 	}
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
@@ -794,10 +791,10 @@ func (e *entry) markBroken() {
 	e.action = ActionRefresh
 	e.attempt++
 	e.nextAttemptAt = time.Duration(e.r.cfg.Clock.Now()) + redialDelay(e.attempt)
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
@@ -815,13 +812,13 @@ func (e *entry) setAbsent(reason Reason, action Action) {
 		e.workCancel()
 	}
 	closeClient := e.detachClientLocked()
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if closeClient != nil {
-		_ = closeClient.Close()
+		e.closePeer(closeClient)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
@@ -835,10 +832,10 @@ func (e *entry) setPhase(p phase) {
 	e.phase = p
 	e.reason = ""
 	e.action = ActionNone
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
@@ -846,7 +843,7 @@ func (e *entry) setPhase(p phase) {
 // refresh redials now: it resets the schedule and wakes the loop without
 // touching installed. An absent axis, or one with no build, is left alone —
 // refresh never installs.
-func (e *entry) refresh() {
+func (e *entry) handleRefresh() {
 	e.mu.Lock()
 	if e.closed || e.phase == phaseAbsent || e.installed == nil || e.frozen || !e.connectedLocked() {
 		e.mu.Unlock()
@@ -861,7 +858,7 @@ func (e *entry) refresh() {
 // freeze is D25's window: close the client and refuse to dial until thaw. The
 // axis reads helper-lost without a button, because the only action that would
 // help is the uninstall that is already running.
-func (e *entry) freeze() {
+func (e *entry) handleFreeze() {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -877,28 +874,28 @@ func (e *entry) freeze() {
 		e.reason = ""
 		e.action = ActionNone
 	}
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if closeClient != nil {
-		_ = closeClient.Close()
+		e.closePeer(closeClient)
 	}
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
 	e.notify()
 }
 
 // thaw releases freeze and re-reads the records. An uninstall that revoked
 // consent therefore answers consent-pending, and installs nothing.
-func (e *entry) thaw() {
+func (e *entry) handleThaw() {
 	e.mu.Lock()
 	e.frozen = false
-	status, changed := e.publishLocked()
+	_, changed := e.publishLocked()
 	e.mu.Unlock()
 	if changed {
-		e.r.publish(e.id, status)
+		e.requestPublication()
 	}
-	e.inputsChanged()
+	e.handleInputsChanged()
 	e.notify()
 }
 
@@ -981,11 +978,20 @@ func (e *entry) gateOpen() bool {
 
 func (e *entry) beginWork() (context.Context, func()) {
 	ctx, cancel := context.WithCancel(e.ctx)
+	e.inboxMu.Lock()
+	e.interruptCancel = cancel
+	if e.inbox.close || e.inbox.inputs != 0 || e.inbox.interrupted || e.inbox.freeze != 0 {
+		cancel()
+	}
+	e.inboxMu.Unlock()
 	e.mu.Lock()
 	e.workCancel = cancel
 	e.mu.Unlock()
 	return ctx, func() {
 		cancel()
+		e.inboxMu.Lock()
+		e.interruptCancel = nil
+		e.inboxMu.Unlock()
 		e.mu.Lock()
 		e.workCancel = nil
 		e.mu.Unlock()
@@ -995,7 +1001,7 @@ func (e *entry) beginWork() (context.Context, func()) {
 // close ends the entry: no more decisions, no client, and Acquire's waiters
 // released. It answers the last status so the registry can publish a final
 // frame.
-func (e *entry) close() (Status, bool) {
+func (e *entry) finishClose() (Status, bool) {
 	e.mu.Lock()
 	if e.closed {
 		status := e.statusLocked()

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/shady2k/nocx/internal/farhelper"
@@ -32,8 +31,54 @@ func helperGitFactory(far *farhelper.Registry, panes func() *panedriver.Driver) 
 
 func gitAxisRefusal(reason farhelper.Reason, action farhelper.Action) transport.GitOpenSelection {
 	return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
-		Message: (&farhelper.Unavailable{Reason: reason, Action: action}).Error(),
+		Message: helperReasonPhrase(reason),
 	}}
+}
+
+// helperReasonPhrase says what a far-helper reason means for the Git surface in
+// a person's terms. The reason is the wire's closed-set token (ADR-727g63tr
+// decision 2) and stays there: a panel names the choice that would change the
+// answer, never the token itself.
+func helperReasonPhrase(reason farhelper.Reason) string {
+	switch reason {
+	case farhelper.ReasonModeRaw:
+		return "this host's integration method is Raw, which does not run the nocx helper — set it to Helper to open repositories here"
+	case farhelper.ReasonModeScript:
+		return "this host's integration method is Script, which installs the shell integration but not the nocx helper — set it to Helper to ask for the helper on this machine"
+	case farhelper.ReasonConsentPending:
+		return "this machine has not been asked yet whether nocx may use its helper — reconnect this connection to be asked"
+	case farhelper.ReasonConsentDenied:
+		return "this machine has declined to run the nocx helper — change that answer in the footprint screen to allow it"
+	case farhelper.ReasonUnsupportedPlatform:
+		return "we build no nocx helper for this machine's platform"
+	case farhelper.ReasonInstallFailed:
+		return "the nocx helper could not be installed on this machine"
+	case farhelper.ReasonExecForbidden:
+		return "this host refused to run the nocx helper"
+	case farhelper.ReasonVersionMismatch:
+		return "the nocx helper on this machine answered a different protocol version — reinstall it to recover"
+	case farhelper.ReasonHelperLost:
+		return "the nocx helper on this machine is no longer reachable — refresh the connection to reach it again"
+	case farhelper.ReasonConnection:
+		return "this connection is not ready for the nocx helper — reconnect it"
+	default:
+		return "the nocx helper is not available on this machine"
+	}
+}
+
+// gitRefusalError renders a far-helper refusal as the phrase above while
+// keeping the typed refusal reachable with errors.As. The transport's own
+// branch and every caller that classifies a refusal still read the reason and
+// the action; only what a person sees changes.
+type gitRefusalError struct {
+	unavailable *farhelper.Unavailable
+}
+
+func (e *gitRefusalError) Error() string { return helperReasonPhrase(e.unavailable.Reason) }
+func (e *gitRefusalError) Unwrap() error { return e.unavailable }
+
+func gitRefusal(reason farhelper.Reason, action farhelper.Action) error {
+	return &gitRefusalError{unavailable: &farhelper.Unavailable{Reason: reason, Action: action}}
 }
 
 type sessionFactory struct {
@@ -46,7 +91,7 @@ type sessionFactory struct {
 func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
 	id, ok := f.panes().ConnectionID(f.paneID)
 	if !ok {
-		return nil, git.OpenOutcome{}, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+		return nil, git.OpenOutcome{}, gitRefusal(farhelper.ReasonConnection, farhelper.ActionNone)
 	}
 	bounded, end := context.WithTimeout(ctx, gitOpenTimeout)
 	defer end()
@@ -54,7 +99,7 @@ func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.Op
 	if err != nil {
 		var unavailable *farhelper.Unavailable
 		if errors.As(err, &unavailable) {
-			return nil, git.OpenOutcome{}, fmt.Errorf("git on %s: %w", f.host, unavailable)
+			return nil, git.OpenOutcome{}, &gitRefusalError{unavailable: unavailable}
 		}
 		return nil, git.OpenOutcome{}, err
 	}
@@ -113,12 +158,12 @@ func (r *leasedGitRepo) unavailable() error {
 	}
 	status, known := r.far.Axis(r.connectionID)
 	if !known {
-		return &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+		return gitRefusal(farhelper.ReasonConnection, farhelper.ActionNone)
 	}
 	if status.Reason == "" {
-		return &farhelper.Unavailable{Reason: farhelper.ReasonHelperLost, Action: farhelper.ActionNone}
+		return gitRefusal(farhelper.ReasonHelperLost, farhelper.ActionNone)
 	}
-	return &farhelper.Unavailable{Reason: status.Reason, Action: status.Action}
+	return gitRefusal(status.Reason, status.Action)
 }
 
 func gitLeaseCall[T any](r *leasedGitRepo, ctx context.Context, mutation bool, call func(context.Context) (T, error)) (T, error) {

@@ -101,8 +101,11 @@ func TestGitRawRefusalNamesTheFarHelperAxis(t *testing.T) {
 	selectGit := helperGitFactory(far, func() *panedriver.Driver { return panes })
 	for range 2 {
 		got := selectGit(&gitPaneSession{fakeRemoteSession: &fakeRemoteSession{host: "far.example"}, pane: "pane"})
-		if got.Factory != nil || got.Refusal == nil || got.Refusal.State != "" || !strings.Contains(got.Refusal.Message, "mode-raw") || !strings.Contains(got.Refusal.Message, "host-settings") {
-			t.Fatalf("selection = %+v, want mode-raw (host-settings)", got)
+		if got.Factory != nil || got.Refusal == nil || got.Refusal.State != "" ||
+			strings.Contains(got.Refusal.Message, "mode-raw") ||
+			!strings.Contains(got.Refusal.Message, "Raw") ||
+			!strings.Contains(got.Refusal.Message, "nocx helper") {
+			t.Fatalf("selection = %+v, want a Raw phrase naming the nocx helper", got)
 		}
 	}
 	if seams.probes.Load() != 0 || seams.installs.Load() != 0 || seams.dials.Load() != 0 {
@@ -192,8 +195,10 @@ func TestGitPausesOnHelperLossAndResumesAfterRefresh(t *testing.T) {
 	}
 	waittest.WaitFor(t, "helper loss", func() bool { s, _ := far.Axis("conn"); return s.Reason == farhelper.ReasonHelperLost })
 	refusal := selectGit(sess)
-	if refusal.Factory != nil || refusal.Refusal == nil || !strings.Contains(refusal.Refusal.Message, "helper-lost") {
-		t.Fatalf("selection after loss=%+v", refusal)
+	if refusal.Factory != nil || refusal.Refusal == nil ||
+		strings.Contains(refusal.Refusal.Message, "helper-lost") ||
+		!strings.Contains(refusal.Refusal.Message, "nocx helper") {
+		t.Fatalf("selection after loss=%+v, want a phrase naming the nocx helper", refusal)
 	}
 	_, err = repo.Status(t.Context())
 	assertGitUnavailable(t, err, farhelper.ReasonHelperLost, farhelper.ActionRefresh)

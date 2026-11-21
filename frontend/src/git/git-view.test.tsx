@@ -408,6 +408,45 @@ describe('the panel renders what the store says', () => {
     expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3', 9)
   })
 
+  it('the same helper-lost Refresh presses with the newest epoch, without re-opening Git', async () => {
+    // ALX-998: a quality sample bumps the connection epoch without moving
+    // the axis, and the button the person still sees must press with THAT
+    // epoch — the driver refuses a stale one. The update is not a new
+    // permission: the binding stays closed and git.open is not asked again.
+    const onRefreshHelper = vi.fn()
+    const open = vi.fn().mockResolvedValue(openOk())
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const services = fakeServices({ open, close })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, undefined, undefined, {
+      onRefreshHelper,
+    })
+    const lost = (connectionEpoch: number): ActiveOrigin => ({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch,
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      },
+    })
+
+    setActiveOrigin(SSH_ORIGIN)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+
+    setActiveOrigin(lost(9))
+    await settle()
+    expect(close).toHaveBeenCalledWith('b1')
+    expect(panel.querySelector('[data-testid="git-helper-refresh"]')).not.toBeNull()
+
+    setActiveOrigin(lost(12))
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="git-helper-refresh"]')
+    expect(refresh).not.toBeNull()
+    refresh?.click()
+    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3', 12)
+  })
+
   it('an ad-hoc tab is told to save the connection rather than offered a settings door', async () => {
     const { panel, setActiveOrigin } = mountApp(fakeServices())
     setActiveOrigin({

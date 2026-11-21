@@ -6545,15 +6545,19 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
         action: 'refresh',
       })
 
-      // A newer observation of the SAME axis is not a change: the panel
-      // must not re-scope for every heartbeat, while the origin it reads
-      // carries the newer epoch the action has to press with.
+      // THE EPOCH IS PART OF THE ANSWER (ALX-998). A quality sample
+      // publishes a new observation — a new connectionEpoch — without moving
+      // the axis, and the visible Refresh must press with THAT epoch: the
+      // driver refuses a stale one while the head reads the live store. The
+      // surfaces are woken for it and decide it is not a new permission
+      // (Git keeps its binding, Files reveals only a changed cwd), which is
+      // cheaper than a button carrying an epoch the backend will reject.
       const epoch = content.activeOrigin()?.connection?.connectionEpoch ?? 0
       publishConnection(client, content, {
         helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
         transport: { state: 'connected', stateMs: 200, plainShells: 1 },
       })
-      expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(4)
       expect(content.activeOrigin()?.connection?.connectionEpoch).toBeGreaterThan(epoch)
     } finally {
       teardown()

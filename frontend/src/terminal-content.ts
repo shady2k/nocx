@@ -2113,8 +2113,19 @@ export class TerminalContent extends BasePaneContent {
   /** Tell origin-following surfaces that the helper axis moved. The key
    *  names every field a surface may branch on — the backend instance (a
    *  replacement coordinator republishes the same state under a new one),
-   *  the state, the reason and the action — and nothing a surface must not
-   *  wake for (the epoch, the transport's own stage). */
+   *  the state, the reason, the action — AND the epoch.
+   *
+   *  The epoch is here because it is part of the answer a surface draws: the
+   *  axis's one action presses with the epoch of the observation that
+   *  offered it, and the driver refuses a stale one. A quality sample
+   *  publishes a new observation with a new epoch and the same axis, and a
+   *  visible Refresh still reads `activeOrigin()`; leaving the epoch out of
+   *  the key left that button pressing an epoch the backend had replaced
+   *  (ALX-998). The wake costs the two surfaces no work they would not do:
+   *  Git's rescope keeps the live binding for a same-scope epoch change, and
+   *  Files reveals only a changed cwd (revealPath is a no-op when the target
+   *  has not moved). Everything else a surface must not wake for — the
+   *  transport's own stage — is still absent from the key. */
   private _publishAxisChange(observation: PaneConnection | null): void {
     const helper = observation?.helper
     if (observation === null || helper === undefined) {
@@ -2124,7 +2135,7 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     const reason = 'reason' in helper ? helper.reason : ''
-    const key = `${observation.instanceId}:${helper.state}:${reason}:${helper.action}`
+    const key = `${observation.instanceId}:${observation.connectionEpoch}:${helper.state}:${reason}:${helper.action}`
     if (key === this._lastAxisKey) return
     this._lastAxisKey = key
     this.hooks.onActiveOriginChange?.()

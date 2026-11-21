@@ -18,8 +18,8 @@ package content
 // are forced by the artifacts table having neither a head_end column nor a
 // per-chunk flag: the reservation and the cursor ride the artifact's payload
 // (one writer, one transaction, so it cannot drift from the chunks), and a
-// chunk is head by arithmetic — its end offset at or before head_end —
-// derived from the same seq-ordered scan that drives eviction.
+// chunk is head by arithmetic — its start offset is before head_end —
+// derived from the surviving chunks in seq order.
 
 import (
 	"bytes"
@@ -800,11 +800,14 @@ func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, cap
 		return err
 	}
 	var scanned, headCursor, victimBytes int64
-	var firstVictim, lastVictim int
+	var firstVictim, lastVictim int64
+	// Keep the scan destinations outside the loop: database/sql receives
+	// their addresses, so per-row declarations would allocate per chunk.
+	// SQLite integers are int64; scanning seq into int instead also takes
+	// database/sql's string-format/parse conversion on every chunk.
+	var seq, size int64
 	haveVictim := false
 	for rows.Next() {
-		var seq int
-		var size int64
 		if err = rows.Scan(&seq, &size); err != nil {
 			_ = rows.Close()
 			return err

@@ -118,6 +118,58 @@ func TestBlockRowsTextAfter_SkipsRowsBelowOutputStart(t *testing.T) {
 	}
 }
 
+func TestBlockRowsTextAfter_CompactRowText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  string
+		want string
+	}{
+		{
+			"unmarked Unicode and non-space whitespace",
+			`{"text":" \t中é👩‍💻   "}`,
+			" \t中é👩‍💻\u00a0",
+		},
+		{
+			"unordered marks preserve clusters and blank positions",
+			`{"text":"中é👩‍💻Z  ","marks":[[4,3,2],[2,2,1],[0,0,4],[3,0,1],[1,1,2]]}`,
+			" 中é 👩‍💻Z",
+		},
+		{
+			"spacer head between text",
+			`{"text":"AB","marks":[[1,0,4]]}`,
+			"A B",
+		},
+		{
+			"empty wide cell contributes one blank",
+			`{"text":"AB","marks":[[1,0,2]]}`,
+			"A B",
+		},
+		{
+			"explicit spacer tail consumes text without emitting it",
+			`{"text":"AhiddenB","marks":[[1,6,3]]}`,
+			"AB",
+		},
+		{
+			"blank positions without text",
+			`{"text":"","marks":[[0,0,1],[1,0,4],[2,0,2]]}`,
+			"",
+		},
+		{
+			"trailing blank positions and ASCII spaces are trimmed",
+			`{"text":"A \t  ","marks":[[5,0,1],[6,0,4]]}`,
+			"A \t",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"row":` + tc.row + "}\n")
+			got, err := content.BlockRowsTextAfter(splitBlockRowsChunks(body, 1), 0)
+			if err != nil || got != tc.want {
+				t.Fatalf("BlockRowsTextAfter = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBlockRowsTextAfter_EmptyAndInvalidChunks(t *testing.T) {
 	for _, chunks := range [][][]byte{nil, {nil, {}, []byte(" \n")}} {
 		got, err := content.BlockRowsTextAfter(chunks, 0)
@@ -129,6 +181,13 @@ func TestBlockRowsTextAfter_EmptyAndInvalidChunks(t *testing.T) {
 		`{"row":`,
 		`{"row":{"text":"x","marks":[[0,1,1],[0,1,1]]}}`,
 		`{"row":{"text":"","marks":[[0,2,1]]}}`,
+		`{"row":{"text":"ab","marks":[[1,1,2],[0,1,1],[1,1,1]]}}`,
+		`{"row":{"text":"x","marks":[[0,-1,1]]}}`,
+		`{"row":{"text":"x","marks":[[-1,1,1]]}}`,
+		`{"row":{"text":"x","marks":[[1,1,1]]}}`,
+		`{"row":{"text":"x","marks":[[0,2,1]]}}`,
+		`{"row":{"text":"x","marks":[[0,9223372036854775807,1],[1,9223372036854775807,1]]}}`,
+		`{"row":{"text":"x","marks":[[9223372036854775807,0,1]]}}`,
 	} {
 		t.Run(invalid, func(t *testing.T) {
 			chunks := [][]byte{[]byte("{\"row\":{\"text\":\"valid\"}}\n"), []byte(invalid)}

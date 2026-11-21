@@ -164,4 +164,87 @@ print('OVERFLOW-DONE', flush=True)
 - The automatic document-readiness gate is not installed in this repository;
   documentation is reviewed, not reported as automatically accepted.
 
-Integrate the two backend changes together once their checks pass.
+## Current-main follow-up, 2026-11-14
+
+Task: `nocx-5xlys`. Baseline: `03cd697a0555f7a3a1610d9e6bd1fda5c9f5ee2a`,
+Linux amd64, Ryzen 7 5700X, Go 1.26.10. The earlier two repairs are already
+on this baseline; this investigation does not claim them again.
+
+### Remaining text reconstruction
+
+`blockRowPlainText` still expanded stored text into a rune slice and one
+`storedCell` per cell before immediately joining the graphemes again. It now
+walks UTF-8 spans directly, sorting the decoder-owned sparse marks in place.
+The unmarked case only trims trailing ASCII spaces. Combining graphemes,
+wide/spacer cells, blank cells, reordered marks, malformed marks and overflow
+remain covered through the public text-reading path.
+
+Identical retained benchmarks, three samples each:
+
+| Scenario                        | Before median | After median | Before B/op | After B/op | Before allocations/op | After allocations/op |
+| ------------------------------- | ------------: | -----------: | ----------: | ---------: | --------------------: | -------------------: |
+| 4 MiB, separate lines           |    240.332 ms |    72.240 ms | 216,157,160 | 28,671,320 |             4,666,323 |              105,016 |
+| 4 MiB, wrapped line             |    240.216 ms |    75.720 ms | 216,157,176 | 28,671,320 |             4,666,324 |              105,016 |
+| Retention, 3,000 prefilled rows |      1.605 ms |     1.070 ms |      63,237 |     36,320 |                 3,465 |                1,199 |
+
+Elapsed times are diagnostic: machine load differed and browser diagnostics
+overlapped some measurements. In particular, fresh append also fell from
+0.287 ms to 0.193 ms, leaving the prefilled/fresh ratio around 5.6 in both
+runs. Do not read the retention timings as proof that its append cliff is gone.
+The allocation reduction is the supported improvement; these are cumulative
+allocations, not retained memory or RSS.
+
+### Retention: keep the policy, remove conversion overhead
+
+The final repair keeps the original ordered query and victim walk. Scan
+destinations live outside the loop, and sequence numbers stay `int64`, the
+SQLite driver's native representation, instead of passing through
+`database/sql`'s format/parse conversion into `int`.
+
+A candidate locating the head boundary with a SQL window sum was rejected:
+prefilled median time rose to 2.800 ms despite reducing allocations. No cache,
+schema, payload field, cap, batching or confirmation policy was introduced.
+The protected head is still traversed on every over-cap append.
+
+### Browser evidence and limits
+
+The current-main diagnostic matrix passed all 16 cases: three unprofiled
+repetitions plus one separately profiled repetition for hidden tabs, history,
+16 KiB output and 256 KiB output. Chromium 149, 1280 by 800, real headless
+coordinator and helper, disposable HOME, dev debug logging, no login-session
+keystore. The workload invokes explicit Bash and Node script files rather
+than assuming the user's login shell is Bash.
+
+With 0, 1 and 6 hidden output producers, foreground command-to-visible-marker
+medians were 60.55, 75.15 and 171.15 ms respectively (24 samples per condition).
+Keyboard next-task measurements had all 60 samples per condition, but are not
+visible-echo latency. Binary-message counters include all message types and
+must not be called screen-frame rates.
+
+At 50, 250 and 500 history blocks, DOM nodes grew from 6,257 through 31,057 to
+62,057. Scroll-frame p95 remained about 16.7–16.8 ms; this Chromium workload
+does not demonstrate a scrolling slowdown or establish a memory bound.
+Its profile still attributes application work to `_loadVisibleBlockRows`
+and `loadedRowRanges`; that alone is not a native-WebKit performance result.
+
+The baseline's short 4,000-row producer crossed 16 KiB but not 256 KiB. The
+post-change visual smoke therefore used longer rows and explicitly required
+both caps to evict. Both checks passed: at 16 KiB, 174 retained plus 3,826
+dropped rows; at 256 KiB, 2,443 retained plus 1,557 dropped rows. Stored ranges,
+DOM counts, the single truthful gap marker, sealing, and visible first/last
+numbered rows agreed. This is fidelity evidence, not a paired latency comparison.
+
+The fresh ingest profile still puts 48.61% cumulative CPU and 88.15% allocation
+space in Ghostty `historyRow`. The prefix-capture skip and immutable frontend
+row reuse are already present; the reverted bulk active-row read is not
+restored here. Its durable-confirmation/row-pool acceptance remains separate.
+
+`go test ./internal/content` passed on the assembled repair. The first
+package run exposed a test-harness defect: the disk-full test's process-wide
+64 KiB `RLIMIT_FSIZE` damaged Go's test-cache log, causing failure after
+all assertions passed. That scenario now runs in a child test process,
+preserving failed-write and recovery assertions without restricting the
+parent suite's files or signal handling.
+
+No full integration gate, native macOS/WebKit check, raw-session-recording
+repair, or claim of constant-time capped appends is included.

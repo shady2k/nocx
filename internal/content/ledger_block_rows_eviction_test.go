@@ -81,7 +81,13 @@ func TestBlockRowsEvictionRetainsExactChunks(t *testing.T) {
 		{"multiple sparse victims", []int{1, 3, 7, 9, 13, 21}, []int{2, 2, 1, 2, 3, 3}, new(int64(3)), 10, []int{0, 1, 4, 5}, 10, 2, 2},
 		{"protected ends exceed cap", []int{1, 3, 7, 9, 13, 21}, []int{2, 2, 1, 2, 3, 4}, new(int64(3)), 10, []int{0, 1, 4, 5}, 11, 2, 2},
 		{"overlapping protected ends", []int{1, 3, 7}, []int{3, 3, 3}, new(int64(7)), 8, []int{0, 1, 2}, 9, 2, 0},
+		{"head reservation exceeds retained bytes", []int{1, 3, 7}, []int{3, 3, 3}, new(int64(10)), 8, []int{0, 1, 2}, 9, 2, 0},
+		{"exact head boundary", []int{1, 3, 7, 9, 13, 21}, []int{2, 2, 1, 2, 3, 3}, new(int64(4)), 10, []int{0, 1, 4, 5}, 10, 2, 2},
+		{"negative head boundary", []int{-9, -5, -2, 4, 10}, []int{2, 2, 2, 2, 4}, new(int64(3)), 8, []int{0, 1, 4}, 8, 2, 2},
+		{"zero seq inside protected head", []int{-3, 0, 5, 9, 13}, []int{2, 2, 2, 2, 4}, new(int64(3)), 8, []int{0, 1, 4}, 8, 2, 2},
+		{"zero seq stops after headed negative victim", []int{-4, -2, 0, 5, 9}, []int{2, 2, 2, 2, 4}, new(int64(2)), 8, []int{0, 2, 3, 4}, 10, 2, 1},
 		{"no head sparse prefix", []int{1, 3, 7, 9, 13}, []int{1, 3, 2, 2, 4}, nil, 8, []int{2, 3, 4}, 8, 0, 0},
+		{"zero head sparse prefix", []int{1, 3, 7, 9, 13}, []int{1, 3, 2, 2, 4}, new(int64(0)), 8, []int{2, 3, 4}, 8, 0, 0},
 		{"zero victim stops after negative seq", []int{-3, 0, 5, 9}, []int{2, 2, 2, 6}, nil, 8, []int{1, 2, 3}, 10, 0, 0},
 		{"zero first victim", []int{0, 5, 9}, []int{2, 2, 6}, nil, 8, []int{0, 1, 2}, 10, 0, 0},
 	} {
@@ -157,6 +163,70 @@ func TestBlockRowsEvictionRetainsExactChunks(t *testing.T) {
 				t.Fatalf("truncation = %v, want cap", art.Truncated)
 			}
 		})
+	}
+}
+
+func TestBlockRowsEvictionKeepsFixedHeadAcrossCapChanges(t *testing.T) {
+	s, entry := newBlockRowsEvictionStore(t)
+	ctx := context.Background()
+	rows := make([]emulator.Row, 13)
+	bodies := make([][]byte, len(rows))
+	for i := range uint64(len(rows)) {
+		rows[i] = emulator.Row{Cells: []emulator.Cell{{
+			Grapheme: fmt.Sprintf("row-%03d", i), Width: emulator.WidthNarrow, HasText: true,
+		}}}
+		var err error
+		bodies[i], err = encodeBlockRowsLine(100+i, rows[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bodies[i]) != len(bodies[0]) {
+			t.Fatal("fixture must have equal-sized rows")
+		}
+	}
+	unit := len(bodies[0])
+	next := uint64(0)
+	// The first cap reserves three rows. Lowering the cap keeps those
+	// three plus the newest two, even though the whole ends exceed four.
+	// Raising it later keeps the original three, not a promoted fourth,
+	// and does not resurrect the rows the smaller cap already removed.
+	for _, phase := range []struct {
+		cap  int
+		to   uint64
+		keep []int
+	}{
+		{6, 6, []int{0, 1, 2, 3, 4, 5}},
+		{4, 7, []int{0, 1, 2, 5, 6}},
+		{8, 13, []int{0, 1, 2, 8, 9, 10, 11, 12}},
+	} {
+		s.policy.SetOutputCapBytes(phase.cap * unit)
+		for ; next < phase.to; next++ {
+			if err := s.AppendBlockRows(ctx, AppendBlockRows{
+				EntryID: entry, ArtifactID: evictionArtifact,
+				FromRow: 100 + next, Rows: rows[next : next+1],
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		art, err := s.Artifact(ctx, evictionArtifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := make([][]byte, len(phase.keep))
+		for i, index := range phase.keep {
+			want[i] = bodies[index]
+		}
+		if !reflect.DeepEqual(art.Chunks, want) {
+			t.Fatalf("cap %d rows: retained chunks differ from indices %v", phase.cap, phase.keep)
+		}
+		assertByteLenIsChunkTotal(t, art)
+	}
+	summary, err := s.CloseBlockRows(ctx, CloseBlockRows{EntryID: entry, ArtifactID: evictionArtifact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DroppedRows != 5 || summary.LostRows != 0 || summary.UnavailableRows != 0 {
+		t.Fatalf("summary = %+v, want five cap drops and no loss", summary)
 	}
 }
 

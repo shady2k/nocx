@@ -23,10 +23,12 @@ package content
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -180,9 +182,8 @@ func BlockRowsOutputStart(payload string) uint64 {
 }
 
 // BlockRowsTextAfter turns a stored rows artifact into the plain text a
-// block reader needs. Styles are intentionally ignored; a mark's width is
-// read only to tell a spacer head from ordinary text (neither carries text,
-// so both already read as blank once hasText is false), and continuation
+// block reader needs. Styles are intentionally ignored; empty positions
+// contribute a space, spacer tails contribute nothing, and continuation
 // rows belong to the logical line above.
 //
 // The chunks are decoded in place through one reader instead of being
@@ -233,81 +234,66 @@ func BlockRowsTextAfter(chunks [][]byte, startRow uint64) (string, error) {
 	return out.String(), nil
 }
 
-// blockRowPlainText walks one row's text+marks and reads back each
-// position's grapheme (a space for a position with no text), skipping
-// nothing else — a spacer contributes no position of its own, so there is
-// nothing to skip here that decodeStoredRowCells does not already leave out.
-// The trailing space trim matches the prior cell-walk reader: a row's own
-// trailing default blanks are already omitted at the source, but a caller
-// may still have padded before calling this, and a plain-text reader has no
-// use for that padding either way.
+// blockRowPlainText reads the compact text+marks directly, without rebuilding
+// column-indexed cells or materializing individual graphemes. A wide cell's
+// implicit spacer tail adds no text; an empty position (including a spacer
+// head) adds one space. Only trailing ASCII spaces are trimmed.
 func blockRowPlainText(text string, marks [][3]int64) (string, error) {
-	cells, err := decodeStoredRowCells(text, marks)
-	if err != nil {
-		return "", err
+	if len(marks) == 0 {
+		return strings.TrimRight(text, " "), nil
 	}
-	var out strings.Builder
-	for _, cell := range cells {
-		if cell.width == int(emulator.WidthSpacerTail) {
-			continue
+
+	// The JSON decoder owns this slice. Marks need not arrive in position
+	// order; sorting in place preserves that interpretation without a map.
+	slices.SortFunc(marks, func(a, b [3]int64) int {
+		return cmp.Compare(a[0], b[0])
+	})
+	remainingCodepoints := int64(utf8.RuneCountInString(text))
+	for i, m := range marks {
+		if i > 0 && marks[i-1][0] == m[0] {
+			return "", fmt.Errorf("content: block rows: two marks name position %d", m[0])
 		}
-		if !cell.hasText {
-			out.WriteByte(' ')
-			continue
+		if m[0] < 0 || m[1] < 0 {
+			return "", fmt.Errorf("content: block rows: negative position or codepoint count in mark %v", m)
 		}
-		out.WriteString(cell.grapheme)
+		// Subtract rather than sum untrusted spans: a malformed count must
+		// return an error, not overflow or become a negative slice bound.
+		if m[1] > remainingCodepoints {
+			return "", fmt.Errorf("content: block rows: marks claim more codepoints than the row's text has")
+		}
+		remainingCodepoints -= m[1]
 	}
-	return strings.TrimRight(out.String(), " "), nil
-}
-
-// storedCell is the fully expanded (column-indexed) form BlockRowsTextAfter
-// reads: what decodeStoredRowCells rebuilds from a row's text+marks,
-// spacers synthesised back in.
-type storedCell struct {
-	grapheme string
-	width    int
-	hasText  bool
-}
-
-// decodeStoredRowCells rebuilds the column-indexed cells a stored row's
-// text+marks encode — the read half of encodeBlockRowsLine's write half,
-// used by BlockRowsTextAfter. It does not need runs (styles are not part of
-// plain text) and does not pad to any column count: a stored row carries no
-// frame geometry, and nothing here needs the untouched tail a live frame
-// pads back in.
-func decodeStoredRowCells(text string, marks [][3]int64) ([]storedCell, error) {
-	codepoints := []rune(text)
-	byPos := make(map[int][2]int64, len(marks))
-	explicitCodepoints := 0
+	positions := remainingCodepoints + int64(len(marks))
 	for _, m := range marks {
-		if _, dup := byPos[int(m[0])]; dup {
-			return nil, fmt.Errorf("content: block rows: two marks name position %d", m[0])
-		}
-		byPos[int(m[0])] = [2]int64{m[1], m[2]}
-		explicitCodepoints += int(m[1])
-	}
-	positions := len(codepoints) - explicitCodepoints + len(marks)
-	if positions < 0 {
-		return nil, fmt.Errorf("content: block rows: marks claim more codepoints than the row's text has")
-	}
-	out := make([]storedCell, 0, positions)
-	idx := 0
-	for pos := 0; pos < positions; pos++ {
-		span, width := 1, 1
-		if m, ok := byPos[pos]; ok {
-			span, width = int(m[0]), int(m[1])
-		}
-		if idx+span > len(codepoints) {
-			return nil, fmt.Errorf("content: block rows: position %d needs %d codepoints past the row's text", pos, span)
-		}
-		grapheme := string(codepoints[idx : idx+span])
-		idx += span
-		out = append(out, storedCell{grapheme: grapheme, width: width, hasText: span > 0})
-		if width == 2 {
-			out = append(out, storedCell{width: 3})
+		if m[0] >= positions {
+			return "", fmt.Errorf("content: block rows: mark position %d is outside the row's %d positions", m[0], positions)
 		}
 	}
-	return out, nil
+
+	var out strings.Builder
+	out.Grow(len(text))
+	markIndex, offset, textStart := 0, 0, 0
+	for pos := int64(0); pos < positions; pos++ {
+		span, width := int64(1), int64(emulator.WidthNarrow)
+		if markIndex < len(marks) && marks[markIndex][0] == pos {
+			span, width = marks[markIndex][1], marks[markIndex][2]
+			markIndex++
+		}
+		start := offset
+		for range span {
+			_, size := utf8.DecodeRuneInString(text[offset:])
+			offset += size
+		}
+		if width == int64(emulator.WidthSpacerTail) || span == 0 {
+			out.WriteString(text[textStart:start])
+			if width != int64(emulator.WidthSpacerTail) {
+				out.WriteByte(' ')
+			}
+			textStart = offset
+		}
+	}
+	out.WriteString(text[textStart:])
+	return strings.TrimRight(out.String(), " "), nil
 }
 
 func trimStoredTrailingCells(cells []emulator.Cell) []emulator.Cell {

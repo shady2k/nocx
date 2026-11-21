@@ -106,3 +106,40 @@ function sentenceFor(
       return t('helper.connection', 'The nocx helper is unavailable while the connection is down.')
   }
 }
+
+/** The saved connection a tab was opened from, or null when it has none.
+ *
+ *  ONE ANSWER, TWO SPELLINGS. Quick Connect and a hand-typed host open a pane
+ *  with `profileId: ''` (main.tsx's newSSHPane('', …)), while a local tab has
+ *  no profile at all; both mean "there is no host record this tab may edit".
+ *  A surface that tests the raw option for null alone draws a door that opens
+ *  nothing on the ad-hoc tab — the defect ALX-998 found — so every surface and
+ *  the pane itself ask here. */
+export function savedProfileId(profileId: string | null | undefined): string | null {
+  return profileId === null || profileId === undefined || profileId === '' ? null : profileId
+}
+
+/** The axis as an UNSAVED tab must read it.
+ *
+ *  The backend offers `host-settings` for a host whose mode can be changed on
+ *  a saved connection's record. A tab opened from Quick Connect has no such
+ *  record, and the head and the Git panel draw the same substitute: the
+ *  sentence saying what to do, with the action taken away. Kept here, beside
+ *  the axis, because a surface that folded it itself would be the second
+ *  formulation of one answer. */
+export function withSavedConnection(
+  axis: HelperAxis | null,
+  profileId: string | null | undefined,
+): HelperAxis | null {
+  if (axis === null || axis.action !== 'host-settings' || savedProfileId(profileId) !== null) {
+    return axis
+  }
+  return {
+    ...axis,
+    sentence: `${axis.sentence ?? ''} ${t(
+      'helper.saveConnection',
+      'Save this connection to change how nocx integrates with its host.',
+    )}`.trim(),
+    action: null,
+  }
+}

@@ -6574,6 +6574,39 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       teardown()
     }
   })
+
+  it('answers the saved-profile question once, with Quick Connect’s empty id spelled as none', async () => {
+    // main.tsx's Quick Connect calls newSSHPane('', …): the tab has no saved
+    // connection, and the head, the Git panel and the ports target must all
+    // read that from one answer (ALX-998).
+    const adhocClient = makeClient()
+    adhocClient.openSSHSessionByHost.mockResolvedValue(makeSession())
+    const adhoc = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: '', host: 'srv-01' } },
+      adhocClient,
+    )
+    try {
+      expect(adhoc.content.savedProfileId()).toBeNull()
+      expect(adhoc.content.portsTargetId).toBeNull()
+    } finally {
+      adhoc.teardown()
+    }
+
+    const savedClient = makeClient()
+    savedClient.openSSHSessionByHost.mockResolvedValue(makeSession())
+    const saved = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'profile-1', host: 'srv-01' } },
+      savedClient,
+    )
+    try {
+      expect(saved.content.savedProfileId()).toBe('profile-1')
+      expect(saved.content.portsTargetId).toBe('profile-1')
+    } finally {
+      saved.teardown()
+    }
+  })
 })
 
 describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => {

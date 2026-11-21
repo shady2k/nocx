@@ -77,7 +77,7 @@ import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { GitMutationError, GitStore } from './git-store'
 import type { GitError } from '../generated/git.error'
-import { helperAxis } from '../connection/helper-axis'
+import { helperAxis, savedProfileId, withSavedConnection } from '../connection/helper-axis'
 
 /** The diff-tab opener seam (worker G's surface, design §5.4): the panel
  *  calls this fixed contract and never builds the tab itself. A no-op
@@ -607,20 +607,13 @@ export function GitPanel(props: GitPanelProps) {
   // (connection/helper-axis.ts). The panel decides nothing about it: the
   // sentence, tone and action are the contract member's answer, and the
   // action is rendered only where the backend offered it.
-  const axis = () => helperAxis(props.activeOrigin()?.connection?.helper ?? null)
+  const axis = () =>
+    withSavedConnection(
+      helperAxis(props.activeOrigin()?.connection?.helper ?? null),
+      props.activeProfileId(),
+    )
   const axisConnection = () => props.activeOrigin()?.connection ?? null
-  const axisDescription = (): string | undefined => {
-    const facts = axis()
-    if (facts === null) return undefined
-    const saved = props.activeProfileId()
-    if (facts.action === 'host-settings' && saved === null) {
-      return `${facts.sentence ?? ''} ${t(
-        'helper.saveConnection',
-        'Save this connection to change how nocx integrates with its host.',
-      )}`.trim()
-    }
-    return facts.sentence ?? undefined
-  }
+  const axisDescription = (): string | undefined => axis()?.sentence ?? undefined
   const axisAction = () => {
     const facts = axis()
     const connection = axisConnection()
@@ -635,7 +628,7 @@ export function GitPanel(props: GitPanelProps) {
         </Button>
       )
     }
-    const saved = props.activeProfileId()
+    const saved = savedProfileId(props.activeProfileId())
     if (facts?.action === 'host-settings' && saved !== null) {
       return (
         <Button

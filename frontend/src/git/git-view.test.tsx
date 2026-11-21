@@ -463,6 +463,32 @@ describe('the panel renders what the store says', () => {
     expect(panel.querySelector('[data-testid="git-retry-open"]')).toBeNull()
   })
 
+  it('an ad-hoc Quick Connect tab carries the empty profile id, and is told to save too', async () => {
+    // ALX-998: Quick Connect opens a host with profileId '' (main.tsx's
+    // newSSHPane('', ...)), not null. The panel used to test only null, so
+    // this tab drew Host settings and handed the empty id to an editor that
+    // returns at once.
+    const onHostSettings = vi.fn()
+    const { panel, setActiveOrigin } = mountApp(fakeServices(), undefined, undefined, undefined, {
+      onHostSettings,
+      activeProfileId: () => '',
+    })
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 7,
+        helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+      },
+    })
+    await settle()
+    expect(panel.textContent).toContain('Save this connection to change how nocx integrates')
+    expect(panel.querySelector('[data-testid="git-host-settings"]')).toBeNull()
+    const labels = Array.from(panel.querySelectorAll('button')).map((b) => b.textContent)
+    expect(labels).not.toContain('Host settings')
+    expect(onHostSettings).not.toHaveBeenCalled()
+  })
+
   it('ready: the lists and the header render from the wire status', async () => {
     const services = fakeServices({
       open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),

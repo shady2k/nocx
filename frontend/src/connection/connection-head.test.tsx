@@ -60,7 +60,7 @@ let head: ConnectionHeadHandle | null
 interface MountOpts {
   onRefreshHelper?: (paneId: string, connectionEpoch: number) => void
   onHostSettings?: () => void
-  savedProfile?: boolean
+  profileId?: string | null
 }
 
 function mount(onReconnect = vi.fn(), opts: MountOpts = {}): void {
@@ -73,7 +73,7 @@ function mount(onReconnect = vi.fn(), opts: MountOpts = {}): void {
     onReconnect,
     onRefreshHelper: opts.onRefreshHelper ?? vi.fn(),
     onHostSettings: opts.onHostSettings ?? vi.fn(),
-    savedProfile: opts.savedProfile ?? true,
+    profileId: opts.profileId === undefined ? 'profile-1' : opts.profileId,
   })
 }
 
@@ -283,7 +283,7 @@ describe('the connection head', () => {
   })
 
   it('an ad-hoc connection is told to save itself instead of being offered a settings door', () => {
-    mount(vi.fn(), { savedProfile: false })
+    mount(vi.fn(), { profileId: '' })
     wire.deliver(
       'pane.connection',
       observation({

@@ -1155,8 +1155,10 @@ function main(): void {
     },
     onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
     // The tab's own opening option, read live: a saved profile has a host
-    // record whose mode can be edited, a hand-typed tab does not.
-    activeProfileId: () => tm.activeTerminalContent()?.sshOptions()?.profileId ?? null,
+    // record whose mode can be edited, a hand-typed tab does not. The pane
+    // normalizes Quick Connect's empty id to null, so both surfaces draw the
+    // one answer (helper-axis.ts's savedProfileId).
+    activeProfileId: () => tm.activeTerminalContent()?.savedProfileId() ?? null,
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────

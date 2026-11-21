@@ -100,6 +100,7 @@ import { ConnectionClient } from './connection/connection-client'
 import type { PaneConnection } from './generated/pane.connection'
 import { ConnectionStore } from './connection/connection-store'
 import { mountConnectionHead, type ConnectionHeadHandle } from './connection/connection-head'
+import { savedProfileId } from './connection/helper-axis'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import { connectionLabel } from './connection-label'
@@ -2495,7 +2496,17 @@ export class TerminalContent extends BasePaneContent {
   get portsTargetId(): string | null {
     if (this._paneWalkedToRemoteChild) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
-    return this.sshOpts.profileId || null
+    return this.savedProfileId()
+  }
+
+  /** The saved connection this tab was opened from, or null. Quick Connect and
+   *  a hand-typed host carry `''` — no profile — and the surfaces that must
+   *  tell "saved" from "ad-hoc" (the pane head, the Git panel) read THIS one
+   *  answer through helper-axis.ts's fold rather than testing the raw option.
+   *  `portsTargetId` asks it too: a ports target and an editable host record
+   *  are the same "this connection is saved" fact. */
+  savedProfileId(): string | null {
+    return savedProfileId(this.sshOpts?.profileId)
   }
 
   /** Why portsTargetId is null, when it is null because the pane went
@@ -3384,7 +3395,7 @@ export class TerminalContent extends BasePaneContent {
         const profileId = this.sshOpts?.profileId ?? ''
         if (profileId !== '') this.hooks.onOpenHostSettings?.(profileId)
       },
-      savedProfile: (this.sshOpts?.profileId ?? '') !== '',
+      profileId: this.savedProfileId(),
     })
   }
 

@@ -35,7 +35,7 @@ import { Button } from '../ui/button'
 import { AlertTriangleIcon, CheckIcon, PlugIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { t } from '../i18n/locale-model'
-import { helperAxis, type HelperAxis } from './helper-axis'
+import { helperAxis, withSavedConnection, type HelperAxis } from './helper-axis'
 
 export interface ConnectionHeadHandle {
   /** The strip itself, so the pane can place it once its scrollback exists. */
@@ -298,12 +298,14 @@ export interface ConnectionHeadDeps {
    *  button the person pressed. */
   readonly onRefreshHelper: (paneId: string, connectionEpoch: number) => void
   /** The other axis action: open the SAVED connection's host-integration
-   *  field. Meaningful only when `savedProfile` is true. */
+   *  field. Meaningful only when `profileId` names a saved connection. */
   readonly onHostSettings: () => void
-  /** Whether this pane was opened from a saved connection. An ad-hoc tab has
-   *  no host record whose mode could be edited, so the axis says to save the
-   *  connection instead of offering a door that does not exist. */
-  readonly savedProfile: boolean
+  /** The saved connection this pane was opened from, or null. An ad-hoc tab —
+   *  including Quick Connect's empty `profileId` — has no host record whose
+   *  mode could be edited, so the axis says to save the connection instead of
+   *  offering a door that does not exist. The fold that turns it into that
+   *  sentence is `withSavedConnection`, shared with the Git panel. */
+  readonly profileId: string | null
 }
 
 /**
@@ -367,23 +369,8 @@ export function mountConnectionHead(
       })
     const offer = deps.store.offer()
     const base = withNote(factsFor(observation(), startedAt, now(), offer?.endsShells ?? null))
-    const axis = withSavedConnectionNote(helperAxis(observation()?.helper ?? null))
+    const axis = withSavedConnection(helperAxis(observation()?.helper ?? null), deps.profileId)
     return withAxis(base, axis)
-  }
-
-  /** An ad-hoc tab cannot reach a host record, so the backend's
-   *  `host-settings` offer is drawn as the sentence that says what to do
-   *  instead — never as a button that would open nothing. */
-  const withSavedConnectionNote = (axis: HelperAxis | null): HelperAxis | null => {
-    if (axis === null || axis.action !== 'host-settings' || deps.savedProfile) return axis
-    return {
-      ...axis,
-      sentence: `${axis.sentence ?? ''} ${t(
-        'helper.saveConnection',
-        'Save this connection to change how nocx integrates with its host.',
-      )}`.trim(),
-      action: null,
-    }
   }
 
   const unsubscribe = deps.store.onChange(() => {
@@ -418,7 +405,7 @@ export function mountConnectionHead(
    *  drawn from — and a settings press opens the saved connection's editor. */
   const pressAxis = (): void => {
     const current = observation()
-    const axis = withSavedConnectionNote(helperAxis(current?.helper ?? null))
+    const axis = withSavedConnection(helperAxis(current?.helper ?? null), deps.profileId)
     if (current === null || axis === null || axis.action === null) return
     if (axis.action === 'refresh') {
       if (pressed()) return

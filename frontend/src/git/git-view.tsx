@@ -75,6 +75,15 @@ export interface GitViewDeps {
    *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly
    *  like the files view. */
   activeOrigin: () => ActiveOrigin | null
+  /** The helper axis's one action. Wired at the composition root to the
+   *  connection client's `refreshHelper`, which presses with the epoch of
+   *  the observation the button was drawn from. */
+  onRefreshHelper: (paneId: string, connectionEpoch: number) => void
+  /** The axis's settings action: open the saved connection's editor on its
+   *  host-integration field. */
+  onHostSettings: (profileId: string) => void
+  /** The saved connection the active tab was opened from, or null. */
+  activeProfileId: () => string | null
 }
 
 /** Build the Git view descriptor. The store is created once, per
@@ -144,6 +153,9 @@ export function createGitView(deps: GitViewDeps): SidebarViewDescriptor {
         urlOpener={deps.urlOpener ?? createUrlOpener(deps.services)}
         activeOrigin={props.activeOrigin}
         visible={props.visible}
+        onRefreshHelper={deps.onRefreshHelper}
+        onHostSettings={deps.onHostSettings}
+        activeProfileId={deps.activeProfileId}
       />
     ),
     order: GIT_VIEW_ORDER,

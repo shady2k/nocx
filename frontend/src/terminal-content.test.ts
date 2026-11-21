@@ -6507,6 +6507,69 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       teardown()
     }
   })
+
+  it('carries the far helper axis on an SSH origin and fires when the axis changes', async () => {
+    // ADR-727g63tr: the axis is a fact of the CONNECTION, published on the
+    // observation. The origin carries the member verbatim so a panel can
+    // gate on it; it never derives a state of its own.
+    const onActiveOriginChange = vi.fn()
+    const client = makeClient()
+    const session = makeSession()
+    client.openSSHSessionByHost.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: '', host: 'srv-01' }, hooks: { onActiveOriginChange } },
+      client,
+    )
+    try {
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(1)
+      expect(content.activeOrigin()?.connection ?? null).toBeNull()
+
+      publishConnection(client, content, {
+        helper: { state: 'starting', action: 'none' },
+      })
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(2)
+      const starting = content.activeOrigin()?.connection
+      expect(starting?.helper).toEqual({ state: 'starting', action: 'none' })
+      expect(starting?.paneId).toBe(paneIdOf(content))
+      expect(starting?.connectionEpoch).toBeGreaterThan(0)
+
+      publishConnection(client, content, {
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+        transport: { state: 'connected', stateMs: 100, plainShells: 1 },
+      })
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
+      expect(content.activeOrigin()?.connection?.helper).toEqual({
+        state: 'unavailable',
+        reason: 'helper-lost',
+        action: 'refresh',
+      })
+
+      // A newer observation of the SAME axis is not a change: the panel
+      // must not re-scope for every heartbeat, while the origin it reads
+      // carries the newer epoch the action has to press with.
+      const epoch = content.activeOrigin()?.connection?.connectionEpoch ?? 0
+      publishConnection(client, content, {
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+        transport: { state: 'connected', stateMs: 200, plainShells: 1 },
+      })
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
+      expect(content.activeOrigin()?.connection?.connectionEpoch).toBeGreaterThan(epoch)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a local tab has no connection axis', async () => {
+    const client = makeClient()
+    client.openSession.mockResolvedValue(makeSession())
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(content.activeOrigin()?.connection ?? null).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => {

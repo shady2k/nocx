@@ -45,6 +45,9 @@ function mountGitView() {
     store: createGitStore(services),
     opener: { open: () => {} },
     activeOrigin: () => origin,
+    onRefreshHelper: () => {},
+    onHostSettings: () => {},
+    activeProfileId: () => null,
   })
   const bar = document.createElement('div')
   const panel = document.createElement('div')

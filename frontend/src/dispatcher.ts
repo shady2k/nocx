@@ -57,6 +57,25 @@ export class RpcError extends Error {
   }
 }
 
+/**
+ * A call could not be made because no control socket was open, or was
+ * settled without an answer because the socket closed under it.
+ *
+ * It exists so a surface can say "the connection was lost" from the SHAPE of
+ * the failure rather than from its sentence: `dispatcher.call` used to reject
+ * these with a bare `Error('not connected')`/'ws closed', and the Git panel
+ * read the text with a regex to tell a lost connection from a refused
+ * mutation (AGENTS.md's typed-discriminator rule, nocx-oalo1.6.3). The
+ * message stays the same words, because it is still a useful diagnostic and
+ * older call sites print it; identity is now the class.
+ */
+export class TransportUnavailableError extends Error {
+  constructor(message = 'not connected') {
+    super(message)
+    this.name = 'TransportUnavailableError'
+  }
+}
+
 /** A vault prompt was dismissed by the person who initiated the operation. */
 export class VaultOperationCancelledError extends Error {
   constructor() {
@@ -719,7 +738,7 @@ export class Dispatcher {
     return new Promise<T>((resolve, reject) => {
       const ws = this.ws
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('not connected'))
+        reject(new TransportUnavailableError())
         return
       }
       const member: CallMember = {
@@ -910,7 +929,7 @@ export class Dispatcher {
   private send(slot: CallSlot): void {
     const ws = this.ws
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      this.settleSlot(slot, new Error('not connected'))
+      this.settleSlot(slot, new TransportUnavailableError())
       return
     }
     this.removeFromQueue(slot)
@@ -1530,7 +1549,7 @@ export class Dispatcher {
     this.resetCredit()
     this.queue = []
     for (const slot of [...this.slots.values()]) {
-      this.settleSlot(slot, new Error(reason), undefined, 'no-answer')
+      this.settleSlot(slot, new TransportUnavailableError(reason), undefined, 'no-answer')
     }
     this.slots.clear()
     this.pending.clear()

@@ -77,6 +77,25 @@ export interface ActiveOrigin {
    *  cwd; it is how the session was opened. */
   host: string | null
   /**
+   * The far helper's axis on the connection this origin rides, verbatim from
+   * the backend's `pane.connection` observation (ADR-727g63tr decision 2).
+   * Absent or null is a LOCAL tab, and also an SSH tab whose first
+   * observation has not arrived: both have no axis to draw, and inventing a
+   * `starting` here would be this layer deciding a connection fact
+   * (ADR-ba6xet1b). A surface gates on `helper.state` and draws the axis
+   * through the one fold (`connection/helper-axis.ts`), never by inspecting
+   * this object's fields itself.
+   *
+   * `paneId` is the BACKEND's pane id (the key `pane.connection` and
+   * `connection.helperRefresh` are addressed by), not the tab's numeric id
+   * above; the two are different identities that happen to share a name.
+   */
+  connection?: {
+    paneId: string
+    connectionEpoch: number
+    helper: import('./generated/pane.connection').PaneConnection['helper']
+  } | null
+  /**
    * The machine this origin speaks for, as a person NAMES it — the string
    * `machine-name.ts` produces (`user@host`, or "This machine"), and the
    * same one the tab strip's second line shows for this tab.

@@ -331,6 +331,14 @@ export interface ConnectionsViewProps {
    */
   newProfileRequest?: number
   /**
+   * Open a SAVED connection's editor on its host-integration field. `seq`
+   * makes two requests for the same connection two requests — the counter
+   * shape `newProfileRequest` uses, carrying the identity this one needs.
+   * The far helper axis's `host-settings` action is the only caller
+   * (ADR-727g63tr decision 2).
+   */
+  editProfileRequest?: { id: string; seq: number } | null
+  /**
    * Navigate from the Connections page to the Secrets page (in the same
    * Settings tab). The Connections page does not import SecretsSection —
    * it asks its parent to show it, and the parent decides how.
@@ -1794,6 +1802,33 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       },
     ),
   )
+  // The far helper axis's "Host settings" request: a saved connection's
+  // editor, on the field that decides whether its host may carry a helper.
+  createEffect(
+    on(
+      () => props.editProfileRequest?.seq ?? 0,
+      (seq) => {
+        if (seq > 0) void openSavedProfile(props.editProfileRequest?.id ?? '')
+      },
+    ),
+  )
+
+  /** Load the list if the page mounted after the request, then open the
+   *  saved connection on Advanced → Integration method. A connection the
+   *  list does not hold is not opened: the pane asked about a record that
+   *  was deleted underneath it, and inventing an empty editor would offer to
+   *  write a host mode for nothing. */
+  async function openSavedProfile(id: string): Promise<void> {
+    if (id === '') return
+    if (!profiles().some((p) => p.id === id)) await loadAll()
+    const profile = profiles().find((p) => p.id === id)
+    if (profile === undefined) return
+    openEditDialog(profile)
+    setProfileSection('advanced')
+    // The field's panel is mounted on the next render; focus it there, the
+    // same way saveHostMode reveals a failed write.
+    queueMicrotask(() => document.getElementById('profile-integration-method')?.focus())
+  }
 
   // ── Form / dialog helpers ─────────────────────────────────────────────
 

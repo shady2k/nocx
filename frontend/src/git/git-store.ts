@@ -72,15 +72,16 @@
 // states it.
 
 import { createMemo, createSignal, untrack } from 'solid-js'
-import { isNotStartedAnswer, RpcError } from '../dispatcher'
+import { t } from '../i18n/locale-model'
+import { isNotStartedAnswer, RpcError, TransportUnavailableError } from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
 import type { ActiveOrigin } from '../pane-content'
 import type { GitPanelServices, GitDiffSide } from './git-client'
-import type { GitOpenResult } from '../generated/git.open'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitLogResult } from '../generated/git.log'
 import type { Status } from '../generated/git.status'
 import type { GitError } from '../generated/git.error'
+import type { PaneConnection } from '../generated/pane.connection'
 
 /** The panel's phases — the interstitial and failure scaffolding around the
  *  eight render states. The view renders 'opening' as a spinner and 'failed'
@@ -88,17 +89,22 @@ import type { GitError } from '../generated/git.error'
  *  everything resolved is one of the eight state() answers. */
 type GitPanelPhase = 'no-origin' | 'opening' | 'ready' | 'failed'
 
-/** Exactly one of these renders (design §5.4, remote-helper design §6). */
+/** Exactly one of these renders (design §5.4, remote-helper design §6).
+ *
+ *  The four §6 refusal states left with the far helper's axis
+ *  (nocx-oalo1.6.3): an SSH tab no longer asks git.open unless the helper
+ *  SERVES, so `unsupportedPlatform`, `deployFailed`, `execForbidden` and
+ *  `helperVersionMismatch` can no longer be reached through this store. A
+ *  serving helper that still answers a refusal lands on the ordinary failed
+ *  card with Retry, which is what an open failure has always been. */
 type GitPanelState =
   | 'noPane'
+  | 'helperStarting'
+  | 'helperBlocked'
   | 'noCwd'
   | 'notARepository'
   | 'gitUnavailable'
   | 'gitTooOld'
-  | 'unsupportedPlatform'
-  | 'deployFailed'
-  | 'execForbidden'
-  | 'helperVersionMismatch'
   | 'ready'
   | 'tooManyChanges'
 /** The panel's collapsible sections (nocx-nak2). The Conflicted section and
@@ -124,6 +130,10 @@ interface GitBinding {
 export interface GitMutationError {
   message: string
   reason: GitError['reason'] | null
+  /** The call never reached the backend because the control socket was not
+   *  open, or was settled unanswered when it closed. A TYPED fact from the
+   *  dispatcher, never a reading of `message` (nocx-oalo1.6.3). */
+  connectionLost: boolean
 }
 
 /** A failed commit's account: git's own output (D11) and whether the
@@ -166,11 +176,6 @@ export interface GitStore {
    *  'failed'. */
   remoteError(): string | null
   openError(): string | null
-  /** The §6 refusal's account — what failed and what to do about it —
-   *  for the unsupportedPlatform, deployFailed, execForbidden and
-   *  helperVersionMismatch states; null otherwise (remote-helper design
-   *  §6). Each refusal state renders it, never a generic error. */
-  refusalMessage(): string | null
   /** The git version the capability probe found — the gitTooOld state
    *  renders it against the floor. */
   gitVersion(): string | null
@@ -320,6 +325,15 @@ function isUnknownBinding(e: unknown): boolean {
   return gitErrorReasonOf(e.data) === 'unknown-binding'
 }
 
+/** The fields of the helper axis that change what a surface may do. The
+ *  epoch is deliberately absent: a newer observation of the same axis is not
+ *  a new permission to open a repository. */
+function helperKey(helper: PaneConnection['helper'] | undefined): string {
+  if (helper === undefined) return 'none'
+  const reason = 'reason' in helper ? helper.reason : ''
+  return `${helper.state}:${reason}:${helper.action}`
+}
+
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
  *  JSON comparison is the cheapest honest equality here because it includes
  *  every field (including optional count fields) without maintaining a second
@@ -391,7 +405,12 @@ export function createGitStore(
   /** The git.open outcome — sticky across the opening interstitial so
    *  state() keeps answering truthfully; the generation guard is what
    *  prevents a stale open from satisfying a new scope, never this value. */
-  const [openState, setOpenState] = createSignal<GitOpenResult['state'] | null>(null)
+  /** The three repository answers that keep their own cards, plus ok. The
+   *  §6 helper refusals are not states any more (nocx-oalo1.6.3): a serving
+   *  helper that answers one is the failed phase, so it never reaches here. */
+  const [openState, setOpenState] = createSignal<
+    'ok' | 'notARepository' | 'gitUnavailable' | 'gitTooOld' | null
+  >(null)
   const [binding, setBinding] = createSignal<GitBinding | null>(null)
   const [status, setStatus] = createSignal<Status | null>(null)
   const [statusStale, setStatusStale] = createSignal(false)
@@ -415,12 +434,6 @@ export function createGitStore(
   const [remoteUrl, setRemoteUrl] = createSignal<string | null>(null)
   const [remoteError, setRemoteError] = createSignal<string | null>(null)
   const [openError, setOpenError] = createSignal<string | null>(null)
-  /** The §6 refusal's account: what failed and what to do about it
-   *  (remote-helper design §6). Set from the open result's message for
-   *  unsupportedPlatform, deployFailed, execForbidden and
-   *  helperVersionMismatch; null otherwise. Each refusal state renders
-   *  this — a state that renders a generic error is not done. */
-  const [refusalMessage, setRefusalMessage] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
   const [envState, setEnvState] = createSignal<'resolved' | 'degraded' | null>(null)
   const [envReason, setEnvReason] = createSignal<string | null>(null)
@@ -449,16 +462,21 @@ export function createGitStore(
   const state = createMemo<GitPanelState>(() => {
     const o = origin()
     if (o === null) return 'noPane'
+    // THE FAR HELPER GATES AN SSH TAB (ADR-727g63tr decision 2; task
+    // .6.3c-1). An observation that has not arrived and a decision that has
+    // not finished are the same answer here: nothing to ask yet. Only
+    // `serving` reaches git.open.
+    if (o.kind === 'ssh') {
+      const helper = o.connection?.helper
+      if (helper === undefined || helper.state === 'starting') return 'helperStarting'
+      if (helper.state !== 'serving') return 'helperBlocked'
+    }
     if (!o.cwdVerified || o.cwd === null) return 'noCwd'
     const os = openState()
     switch (os) {
       case 'notARepository':
       case 'gitUnavailable':
       case 'gitTooOld':
-      case 'unsupportedPlatform':
-      case 'deployFailed':
-      case 'execForbidden':
-      case 'helperVersionMismatch':
         return os
       case 'ok': {
         const s = status()
@@ -798,20 +816,38 @@ export function createGitStore(
           return
         }
         if (res.state !== 'ok') {
-          // cd'd out, git vanished, git too old, a §6 refusal, or a
-          // transport guard. The old binding, if any, is superseded:
-          // close it. The state renders from openState, never from a
-          // stale status; a refusal's message names what to do.
+          // cd'd out, git vanished, git too old, or a refusal a SERVING
+          // helper still answered. The old binding, if any, is superseded:
+          // close it. The three repository answers have their own cards;
+          // anything else is the ordinary open failure, with Retry — the
+          // §6 helper refusals are unreachable here now that git.open is
+          // only issued for a serving axis, and a serving axis that still
+          // refuses is a failure of this open, not a state of the helper.
           if (prev !== null) void services.close(prev.bindingId).catch(() => {})
-          setOpenState(res.state)
-          setRefusalMessage(res.message ?? null)
           setGitVersion(res.gitVersion ?? null)
           setEnvState(res.envState ?? null)
           setEnvReason(res.envReason ?? null)
           setStatus(null)
           setStatusStale(false)
           resetRepositoryState()
-          setPhase('ready')
+          if (
+            res.state === 'notARepository' ||
+            res.state === 'gitUnavailable' ||
+            res.state === 'gitTooOld'
+          ) {
+            setOpenState(res.state)
+            setPhase('ready')
+          } else {
+            setOpenState(null)
+            setOpenError(
+              res.message ??
+                t(
+                  'git.helper.refused',
+                  'The repository could not be opened through the nocx helper.',
+                ),
+            )
+            setPhase('failed')
+          }
           return
         }
         // ok. git owns repository identity: the answer, not the path,
@@ -842,7 +878,6 @@ export function createGitStore(
           resetRepositoryState()
         }
         setOpenState('ok')
-        setRefusalMessage(null)
         setGitVersion(res.gitVersion ?? null)
         setEnvState(res.envState ?? null)
         setEnvReason(res.envReason ?? null)
@@ -922,6 +957,42 @@ export function createGitStore(
       resetRemote()
       return
     }
+    // THE FAR HELPER GATES AN SSH TAB (ADR-727g63tr decision 2; task
+    // .6.3c-1). Only `serving` reaches git.open: `starting` — including a
+    // connection whose first observation has not arrived — is the launch
+    // label, and a paused or unavailable axis closes whatever binding was
+    // live and lets the panel draw the axis's own sentence and action.
+    const helper = next.kind === 'ssh' ? next.connection?.helper : undefined
+    const serving = next.kind !== 'ssh' || helper?.state === 'serving'
+    if (!serving) {
+      const live = untrack(binding)
+      if (live !== null) void services.close(live.bindingId).catch(() => {})
+      const prevHelper = prev?.connection?.helper
+      const changed =
+        prev === null ||
+        prev.sessionId !== next.sessionId ||
+        prev.kind !== next.kind ||
+        helperKey(prevHelper) !== helperKey(helper) ||
+        live !== null ||
+        untrack(phase) !== 'ready'
+      setBinding(null)
+      setOrigin(next)
+      if (!changed) return
+      setOpenState(null)
+      setOpenError(null)
+      setStatus(null)
+      setStatusStale(false)
+      setGitVersion(null)
+      setEnvState(null)
+      setEnvReason(null)
+      resetRepositoryState()
+      resetLog()
+      resetRemote()
+      // The discriminator's other half: the axis states render from state(),
+      // never from the opening spinner or the failed card.
+      setPhase('ready')
+      return
+    }
     // The frontend's own guard, decided BEFORE any backend call (AD-5):
     // a session with no verified cwd never reaches git.open — local or
     // SSH alike. An SSH tab WITH a verified cwd reaches git.open and the
@@ -931,7 +1002,7 @@ export function createGitStore(
       const b = untrack(binding)
       if (b !== null) void services.close(b.bindingId).catch(() => {})
       setBinding(null)
-      setOpenState('noCwd')
+      setOpenState(null)
       setStatus(null)
       setStatusStale(false)
       resetRepositoryState()
@@ -1064,7 +1135,11 @@ export function createGitStore(
     // "stage succeeds, the status that follows it fails"): the panel says
     // the view is stale rather than reverting the row.
     setStatusStale(true)
-    setMutationError({ message: messageOf(e), reason: gitErrorReason(e) })
+    setMutationError({
+      message: messageOf(e),
+      reason: gitErrorReason(e),
+      connectionLost: e instanceof TransportUnavailableError,
+    })
     finishMutationPoll(ctx)
   }
 
@@ -1304,7 +1379,6 @@ export function createGitStore(
     status,
     statusStale,
     openError,
-    refusalMessage,
     logState,
     log,
     logError,

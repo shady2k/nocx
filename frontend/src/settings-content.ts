@@ -156,6 +156,11 @@ export class SettingsContent extends SolidPaneContent {
       this.pendingNewConnection = false
       this.handle.newConnection()
     }
+    if (this.pendingEditConnection !== null) {
+      const id = this.pendingEditConnection
+      this.pendingEditConnection = null
+      this.handle.editConnection(id)
+    }
     if (this.pendingNewSecret !== null) {
       const queued = this.pendingNewSecret
       this.pendingNewSecret = null
@@ -202,6 +207,19 @@ export class SettingsContent extends SolidPaneContent {
     this.pendingNewConnection = true
   }
 
+  /**
+   * Open the Connections page on a SAVED connection's editor, at its
+   * host-integration field (the far helper axis's `host-settings` action).
+   * Queued before mount for the same reason as startNewConnection.
+   */
+  editConnection(profileId: string): void {
+    if (this.handle) {
+      this.handle.editConnection(profileId)
+      return
+    }
+    this.pendingEditConnection = profileId
+  }
+
   /** Open the Secrets page with the add dialog up — the prompt's '@' picker
    *  offering to create the secret it could not find, or a value field whose
    *  lock offers to store what it is holding. Queued before mount for the
@@ -233,6 +251,9 @@ export class SettingsContent extends SolidPaneContent {
   }
 
   private pendingNewConnection = false
+  /** The saved connection whose editor a call asked for before the tab
+   *  mounted — queued for the same reason as pendingNewConnection. */
+  private pendingEditConnection: string | null = null
   /** The queued request's prefilled name and value, or null when nothing is
    *  queued. An object (with either field '') means "asked"; null means
    *  "nobody asked". */

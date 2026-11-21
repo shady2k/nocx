@@ -24,7 +24,7 @@ import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../pane-content'
 import type { ClipboardAccess } from '../clipboard'
 import type { UrlOpener } from '../open-url'
-import { RpcError } from '../dispatcher'
+import { RpcError, TransportUnavailableError } from '../dispatcher'
 import { ToastHost, clearToasts } from '../ui/toast'
 import { setDocumentHidden } from '../test-support/document-visibility'
 
@@ -58,6 +58,11 @@ const SSH_ORIGIN: ActiveOrigin = {
   cwdVerified: true,
   cwdFollow: true,
   host: 'srv',
+  connection: {
+    paneId: 'backend-pane-3',
+    connectionEpoch: 1,
+    helper: { state: 'serving', action: 'none' },
+  },
 }
 
 const statusFixture = (over: Partial<Status> = {}): Status => ({
@@ -154,11 +159,18 @@ interface SharedMount {
   origin: [() => ActiveOrigin | null, (o: ActiveOrigin | null) => void]
 }
 
+interface AxisDeps {
+  onRefreshHelper?: (paneId: string, connectionEpoch: number) => void
+  onHostSettings?: (profileId: string) => void
+  activeProfileId?: () => string | null
+}
+
 function mountApp(
   services: GitPanelServices,
   shared?: SharedMount,
   clipboard?: ClipboardAccess,
   urlOpener?: UrlOpener,
+  axis: AxisDeps = {},
 ): Mounted {
   const open = vi.fn()
   const store = shared?.store ?? createGitStore(services)
@@ -176,6 +188,9 @@ function mountApp(
     activeOrigin,
     clipboard,
     urlOpener,
+    onRefreshHelper: axis.onRefreshHelper ?? (() => {}),
+    onHostSettings: axis.onHostSettings ?? (() => {}),
+    activeProfileId: axis.activeProfileId ?? (() => null),
   })
   const bar = document.createElement('div')
   bar.id = 'activitybar'
@@ -281,25 +296,132 @@ describe('the panel renders what the store says', () => {
     expect(panel.querySelector('[data-testid="git-commit"]')).toBeNull()
   })
 
-  it('ssh: every refusal state renders its own message naming what to do', async () => {
-    const cases: { state: string; title: string }[] = [
-      { state: 'unsupportedPlatform', title: "This platform can't run the nocx helper" },
-      { state: 'deployFailed', title: "Couldn't install the nocx helper" },
-      { state: 'execForbidden', title: 'The host refused the nocx helper' },
-      { state: 'helperVersionMismatch', title: 'The nocx helper needs reinstalling' },
+  it('ssh: a serving helper that still refuses git.open is the ordinary failed card with Retry — never a §6 card', async () => {
+    const cases: { state: string; message: string }[] = [
+      { state: 'unsupportedPlatform', message: 'we build no helper for darwin/amd64' },
+      { state: 'deployFailed', message: 'installing the helper on srv failed: upload refused' },
+      { state: 'execForbidden', message: 'the host refused the probe that would run the helper' },
+      { state: 'helperVersionMismatch', message: 'the installed helper is a different version' },
     ]
     for (const tc of cases) {
       const { panel, setActiveOrigin } = mountApp(
         fakeServices({
-          open: vi.fn().mockResolvedValue({ state: tc.state, message: `account for ${tc.state}` }),
+          open: vi.fn().mockResolvedValue({ state: tc.state, message: tc.message }),
         }),
       )
       setActiveOrigin(SSH_ORIGIN)
       await settle()
-      expect(panel.textContent).toContain(tc.title)
-      expect(panel.textContent).toContain(`account for ${tc.state}`)
+      const card = panel.querySelector('[data-testid="git-error"]')
+      expect(card?.textContent, tc.state).toContain('Could not reach git')
+      expect(card?.textContent, tc.state).toContain(tc.message)
+      expect(panel.querySelector('[data-testid="git-retry-open"]')).not.toBeNull()
       expect(panel.querySelector('[data-testid="git-stage-all"]')).toBeNull()
     }
+  })
+
+  it('a raw host shows the backend reason and Host settings, and never a Retry or an install', async () => {
+    const onHostSettings = vi.fn()
+    const open = vi.fn()
+    const services = fakeServices({ open })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, undefined, undefined, {
+      onHostSettings,
+      activeProfileId: () => 'profile-1',
+    })
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 3,
+        helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      },
+    })
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    const axis = panel.querySelector('[data-testid="git-helper-axis"]')
+    expect(axis?.textContent).toContain('Raw integration')
+    expect(axis?.textContent).not.toContain('mode-raw')
+    expect(panel.textContent).not.toContain('Could not reach git')
+    expect(panel.querySelector('[data-testid="git-retry-open"]')).toBeNull()
+    const settings = panel.querySelector<HTMLButtonElement>('[data-testid="git-host-settings"]')
+    expect(settings?.textContent).toBe('Host settings')
+    settings?.click()
+    expect(onHostSettings).toHaveBeenCalledWith('profile-1')
+    const labels = Array.from(panel.querySelectorAll('button')).map((b) => b.textContent)
+    for (const label of labels) expect(label).not.toMatch(/install|accept|allow/i)
+  })
+
+  it('a script host says Script integration, not the wire token (nocx-oalo1.6.3c-1)', async () => {
+    const { panel, setActiveOrigin } = mountApp(fakeServices(), undefined, undefined, undefined, {
+      activeProfileId: () => 'profile-1',
+    })
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 4,
+        helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+      },
+    })
+    await settle()
+    expect(panel.querySelector('[data-testid="git-helper-axis"]')?.textContent).toContain(
+      'Script integration',
+    )
+    expect(panel.textContent).not.toContain('mode-script')
+    expect(panel.textContent).not.toContain('Could not reach git')
+  })
+
+  it('a starting helper shows the launch label and asks git nothing', async () => {
+    const open = vi.fn()
+    const services = fakeServices({ open })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 5,
+        helper: { state: 'starting', action: 'none' },
+      },
+    })
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(panel.querySelector('[data-testid="git-helper-axis"]')).not.toBeNull()
+    expect(panel.textContent).toContain('Waiting for the nocx helper')
+  })
+
+  it('a lost helper offers Refresh on the panel with the observation epoch', async () => {
+    const onRefreshHelper = vi.fn()
+    const { panel, setActiveOrigin } = mountApp(fakeServices(), undefined, undefined, undefined, {
+      onRefreshHelper,
+    })
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 9,
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      },
+    })
+    await settle()
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="git-helper-refresh"]')
+    expect(refresh?.textContent).toBe('Refresh')
+    refresh?.click()
+    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3', 9)
+  })
+
+  it('an ad-hoc tab is told to save the connection rather than offered a settings door', async () => {
+    const { panel, setActiveOrigin } = mountApp(fakeServices())
+    setActiveOrigin({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId: 'backend-pane-3',
+        connectionEpoch: 6,
+        helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      },
+    })
+    await settle()
+    expect(panel.textContent).toContain('Save this connection to change how nocx integrates')
+    expect(panel.querySelector('[data-testid="git-host-settings"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="git-retry-open"]')).toBeNull()
   })
 
   it('ready: the lists and the header render from the wire status', async () => {
@@ -719,7 +841,7 @@ describe('row actions', () => {
     // refusals carry data.reason (nocx-bpqil): only reason
     // "unknown-binding" re-resolves; every other refusal reaches this
     // toast as the refusal it is.
-    const stage = vi.fn().mockRejectedValue(new Error('ws closed'))
+    const stage = vi.fn().mockRejectedValue(new TransportUnavailableError('ws closed'))
     const services = fakeServices({
       open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
       stage,

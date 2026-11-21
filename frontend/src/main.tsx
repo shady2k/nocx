@@ -115,6 +115,7 @@ import { createOperationsModel } from './operations/operations'
 import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
+import { ConnectionClient } from './connection/connection-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
 import type { ActiveOrigin } from './pane-content'
@@ -263,6 +264,10 @@ function main(): void {
   // has to exist for it to have anything to read.
   const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
+  // One typed door for the connection's own actions (ADR-ba6xet1b). Each
+  // pane builds its own over the same socket; this one is the Git panel's,
+  // and it is stateless — the socket and the store are the state.
+  const connectionClient = new ConnectionClient(client)
 
   // The connection condition is the only startup surface that depends on the
   // socket. Mount it now, before the first attempt, so an unavailable backend
@@ -654,6 +659,10 @@ function main(): void {
   // standing answer the line is about (nocx-2019q). The same idea again — a
   // fact on screen names the one page that manages it.
   tm.onManagePermissions = () => openSettingsPane().openPage('policy')
+  // The far helper axis's `host-settings` action (ADR-727g63tr decision 2):
+  // the saved connection's editor, opened on the field that decides whether
+  // its host carries a helper at all.
+  tm.onOpenHostSettings = (profileId) => openSettingsPane().editConnection(profileId)
   tm.onActivity = reportActivity
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
@@ -1134,6 +1143,20 @@ function main(): void {
     services: gitServicesTracked,
     store: gitStore,
     activeOrigin,
+    // The axis's actions are the backend's offers. A refresh press carries
+    // the observation's epoch, exactly as the head's does; a refusal there is
+    // a stale press and the next observation has already replaced it.
+    onRefreshHelper: (paneId, connectionEpoch) => {
+      void connectionClient.refreshHelper(paneId, connectionEpoch).catch((err: unknown) => {
+        log.warn('nocx: the Git panel helper refresh press was not accepted', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+    },
+    onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
+    // The tab's own opening option, read live: a saved profile has a host
+    // record whose mode can be edited, a hand-typed tab does not.
+    activeProfileId: () => tm.activeTerminalContent()?.sshOptions()?.profileId ?? null,
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────

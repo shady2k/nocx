@@ -48,6 +48,15 @@ const OTHER_ORIGIN: ActiveOrigin = {
   host: null,
 }
 
+const connectionAxis = (
+  helper: import('../generated/pane.connection').PaneConnection['helper'],
+  connectionEpoch = 1,
+): NonNullable<ActiveOrigin['connection']> => ({
+  paneId: 'backend-pane-3',
+  connectionEpoch,
+  helper,
+})
+
 const SSH_ORIGIN: ActiveOrigin = {
   paneId: 3,
   sessionId: 's3',
@@ -56,6 +65,7 @@ const SSH_ORIGIN: ActiveOrigin = {
   cwdVerified: true,
   cwdFollow: true,
   host: 'srv',
+  connection: connectionAxis({ state: 'serving', action: 'none' }),
 }
 
 const NO_CWD_ORIGIN: ActiveOrigin = { ...LOCAL_ORIGIN, cwd: null, cwdVerified: false }
@@ -220,31 +230,6 @@ describe('the eight states', () => {
     await settle()
     expect(store.state()).toBe('noCwd')
     expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
-  })
-
-  it('ssh: every §6 refusal state renders from the wire, with its message naming what to do', async () => {
-    const cases: { state: GitOpenResult['state']; message: string }[] = [
-      { state: 'unsupportedPlatform', message: 'we build no helper for darwin/amd64' },
-      { state: 'deployFailed', message: 'installing the helper on srv failed: upload refused' },
-      { state: 'execForbidden', message: 'the host refused the probe that would run the helper' },
-      {
-        state: 'helperVersionMismatch',
-        message: 'the installed helper is a different version — reinstall it',
-      },
-    ]
-    for (const tc of cases) {
-      const services = makeServices({
-        open: vi.fn().mockResolvedValue({ state: tc.state, message: tc.message }),
-      })
-      const store = track(createGitStore(services))
-      store.rescope(SSH_ORIGIN)
-      await settle()
-      expect(store.state()).toBe(tc.state)
-      if (tc.message !== '') {
-        expect(store.refusalMessage()).toBe(tc.message)
-      }
-      expect(store.binding()).toBeNull()
-    }
   })
 
   it('ssh: a machine the selection refuses with no earned state is the failed phase, carrying the reason', async () => {
@@ -740,6 +725,111 @@ describe('polling is coalesced by repository identity (D23)', () => {
 })
 
 // ── No feature surface may raise the tier (ADR-0068) ──────────────────────
+
+describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () => {
+  it('holds a starting helper with zero opens and no failure card, then opens exactly once when it serves', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({ state: 'starting', action: 'none' }),
+    })
+    await settle()
+    expect(store.state()).toBe('helperStarting')
+    expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
+    expect(store.phase()).not.toBe('failed')
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.state()).toBe('ready')
+
+    // A newer observation of a SERVING axis is not a new permission to open:
+    // re-opening on every heartbeat would mint a binding per poll.
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({ state: 'serving', action: 'none' }, 2),
+    })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes the binding when the helper is lost, and the next serving transition opens it exactly once more', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('ready')
+
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis(
+        { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+        2,
+      ),
+    })
+    await settle()
+    expect(store.state()).toBe('helperBlocked')
+    expect(mockHandle(services, 'close')).toHaveBeenCalledWith('b1')
+    expect(store.binding()).toBeNull()
+
+    // The redial's hello arrives as the next serving observation.
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({ state: 'serving', action: 'none' }, 3),
+    })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
+    expect(store.state()).toBe('ready')
+  })
+
+  it('holds an SSH origin whose first observation has not arrived, and mints no state for it', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope({ ...SSH_ORIGIN, connection: null })
+    await settle()
+    expect(store.state()).toBe('helperStarting')
+    expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
+  })
+
+  it('a raw or paused connection stops the repository without asking git', async () => {
+    for (const helper of [
+      { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      { state: 'paused', reason: 'connection', action: 'none' },
+      { state: 'unavailable', reason: 'install-failed', action: 'none' },
+    ] as const) {
+      const services = makeServices()
+      const store = track(createGitStore(services))
+      store.rescope({ ...SSH_ORIGIN, connection: connectionAxis(helper) })
+      await settle()
+      expect(store.state()).toBe('helperBlocked')
+      expect(mockHandle(services, 'open'), JSON.stringify(helper)).not.toHaveBeenCalled()
+    }
+  })
+
+  it('a serving helper whose git.open is refused keeps the failed card with Retry', async () => {
+    const services = makeServices({
+      open: vi.fn().mockResolvedValue({
+        state: 'deployFailed',
+        message: 'the helper could not be installed',
+      }),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('could not be installed')
+  })
+
+  it('keeps local Git untouched: no axis, the same open on a verified cwd', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.state()).toBe('ready')
+  })
+})
 
 describe('a machine with no helper-tier answer', () => {
   // ADR-0068 removed the git panel's consent card: the connection, or the

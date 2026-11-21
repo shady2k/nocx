@@ -181,6 +181,12 @@ export interface SettingsComponentHandle {
    */
   newConnection(): void
   /**
+   * Show the Connections page with a SAVED connection's editor open on the
+   * host-integration field — the far helper axis's `host-settings` action
+   * (ADR-727g63tr decision 2, nocx-oalo1.6.3).
+   */
+  editConnection(profileId: string): void
+  /**
    * Show the Secrets page with the add dialog open — the prompt's '@'
    * picker offering to create a secret when the one you want is not there,
    * or a value field whose lock offers to store what it is holding.
@@ -296,6 +302,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // boolean would need a reset that both sides have to remember to do. Zero
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
+  // The same counter shape, carrying the profile the axis named: a request
+  // made before the Settings tab mounted must survive until it does.
+  const [editConnectionRequest, setEditConnectionRequest] = createSignal<{
+    id: string
+    seq: number
+  } | null>(null)
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
   const [newSecretValue, setNewSecretValue] = createSignal('')
@@ -568,6 +580,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           footprintClient={props.footprintClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
+          editProfileRequest={editConnectionRequest()}
           onNavigateToSecrets={() => setActiveComponentPage('secrets')}
         />
       ),
@@ -1261,6 +1274,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setSectionFilter(null)
       setActiveComponentPage('connections')
       setNewConnectionRequest((n) => n + 1)
+    },
+    editConnection(profileId: string): void {
+      // Same filter clearing as newConnection: the page must be among the
+      // ones the rail offers when the request lands.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('connections')
+      setEditConnectionRequest((prev) => ({ id: profileId, seq: (prev?.seq ?? 0) + 1 }))
     },
     newSecret(name?: string, value?: string): void {
       // Same reason as newConnection: an active search hides the page the

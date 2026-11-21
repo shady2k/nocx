@@ -373,61 +373,6 @@
       "text": "transport.WithBuildInfo(version.Info()),"
     },
     {
-      "file": "internal/app/helper_git.go",
-      "line": 152,
-      "text": "log.Info(\"helper unavailable: install failed\","
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 205,
-      "text": "log.Info(\"helper unavailable: no artifact for the platform\","
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 142,
-      "text": "log.Info(\"helper unavailable: the platform probe failed\","
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 197,
-      "text": "log.Info(\"helper unavailable: the platform probe failed\","
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 175,
-      "text": "log.Warn(\"helper installed but the footprint observation was not recorded\","
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 156,
-      "text": "Message: \"installing the helper on \" + sess.Host() + \" failed: \" + err.Error(),"
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 235,
-      "text": "Message: \"the host refused the probe that would run the helper: \" + err.Error(),"
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 1679,
-      "text": "outcome := git.OpenOutcome{Message: err.Error()}"
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 1690,
-      "text": "outcome.Message = \"no nocx helper is running on \" + host + \" for the generation nocx installed, and it could not be started: \" + err.Error()"
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 1683,
-      "text": "outcome.Message = \"the helper installed on \" + host + \" answered with a different protocol version or content than nocx installed \u2014 reinstall it to recover (\" + err.Error() + \")\""
-    },
-    {
-      "file": "internal/app/helper_git.go",
-      "line": 1693,
-      "text": "outcome.Message = \"the host did not answer with the nocx helper: \" + err.Error()"
-    },
-    {
       "file": "internal/app/helper_reverse.go",
       "line": 436,
       "text": "return &proto.Refusal{Code: proto.ErrCodeNoAuthChannel, Message: err.Error()}"
@@ -461,6 +406,26 @@
       "file": "internal/app/helper_reverse.go",
       "line": 549,
       "text": "return nil, badReverseParams(\"the key is not a public key: \" + err.Error())"
+    },
+    {
+      "file": "internal/app/hosted_shell_carrier.go",
+      "line": 1832,
+      "text": "outcome := git.OpenOutcome{Message: err.Error()}"
+    },
+    {
+      "file": "internal/app/hosted_shell_carrier.go",
+      "line": 1843,
+      "text": "outcome.Message = \"no nocx helper is running on \" + host + \" for the generation nocx installed, and it could not be started: \" + err.Error()"
+    },
+    {
+      "file": "internal/app/hosted_shell_carrier.go",
+      "line": 1836,
+      "text": "outcome.Message = \"the helper installed on \" + host + \" answered with a different protocol version or content than nocx installed \u2014 reinstall it to recover (\" + err.Error() + \")\""
+    },
+    {
+      "file": "internal/app/hosted_shell_carrier.go",
+      "line": 1846,
+      "text": "outcome.Message = \"the host did not answer with the nocx helper: \" + err.Error()"
     },
     {
       "file": "internal/app/session_reconcile.go",

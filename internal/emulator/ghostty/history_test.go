@@ -317,10 +317,24 @@ func TestHistoryRowsCarryCellsAndStyles(t *testing.T) {
 		t.Fatalf("active row 0: %v", err)
 	}
 
-	histFeed(t, term, histNumbered(12))
+	const following = "different cells fill this row 界"
+	histFeed(t, term, strings.Repeat(following+"\r\n", 12))
 	page := histPage(t, term, 0, 50)
 	if page.Total != 4 {
 		t.Fatalf("total history rows: %d, want 4", page.Total)
+	}
+	// Later rows in this same read overwrite the bridge scratch, including
+	// the earlier row's multi-byte grapheme. They must not inherit its style
+	// or change the owned cells and strings returned for it.
+	for _, later := range page.Rows[1:] {
+		if got := histText(later); got != following {
+			t.Fatalf("following history row: text %q, want %q", got, following)
+		}
+		for _, cell := range later.Cells {
+			if cell.Style != (emulator.Style{}) {
+				t.Fatalf("following unstyled row inherited style: %+v", cell.Style)
+			}
+		}
 	}
 	row := page.Rows[0]
 	if got, want := histText(row), "BOLDRED plain 日"; got != want {

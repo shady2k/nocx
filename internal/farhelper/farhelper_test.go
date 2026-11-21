@@ -21,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/monoclock"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -508,9 +509,33 @@ func serveHello(conn net.Conn) {
 
 // ── the harness ──────────────────────────────────────────────────────────
 
+// countingClock is the harness clock with a count of After registrations. The
+// entry registers its next wait only after it has accepted the result that
+// armed it, so the count says the reducer has applied a result and moved on —
+// unlike a dial returning, which only says the reducer is about to see it.
+type countingClock struct {
+	*hostconntest.Clock
+
+	mu     sync.Mutex
+	afters int
+}
+
+func (c *countingClock) After(d time.Duration) <-chan monoclock.Nanos {
+	c.mu.Lock()
+	c.afters++
+	c.mu.Unlock()
+	return c.Clock.After(d)
+}
+
+func (c *countingClock) afterRegistrations() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.afters
+}
+
 type harness struct {
 	t        *testing.T
-	clock    *hostconntest.Clock
+	clock    *countingClock
 	conns    *fakeConnections
 	modes    *fakeModes
 	consents *fakeConsents
@@ -538,7 +563,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
 		t:        t,
-		clock:    hostconntest.New(),
+		clock:    &countingClock{Clock: hostconntest.New()},
 		conns:    newFakeConnections(),
 		modes:    newFakeModes(),
 		consents: newFakeConsents(),
@@ -858,16 +883,30 @@ func TestALostDaemonBacksOffAndRefreshes(t *testing.T) {
 	h.want("c1", farhelper.StateUnavailable, farhelper.ReasonHelperLost, farhelper.ActionRefresh)
 
 	// The first redial is one second away.
+	h.dial.mu.Lock()
 	h.dial.err = errors.New("still gone")
+	h.dial.mu.Unlock()
+	// helper-lost is published from inside the accept, before the entry arms
+	// the redial's wait. Advancing in that window would deliver to no waiter
+	// and the redial would never start. Startup arms no wait, so the first
+	// registration is the redial's one-second wait.
+	waittest.WaitFor(t, "the first redial to be armed", func() bool {
+		return h.clock.afterRegistrations() >= 1
+	})
 	h.clock.Advance(time.Second)
 	waittest.WaitFor(t, "the first redial", func() bool { return h.dial.count() == 2 })
-	// The attempt failed; wait for it to be processed so Refresh below is not
-	// racing its schedule.
-	select {
-	case <-h.dial.returned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the failed redial was never processed")
-	}
+	// The attempt failed; wait for the entry to apply the failure and arm its
+	// next wait, so Refresh below is not racing that result. A dial returning
+	// is not this moment: the result is still in flight, and a Refresh that
+	// overtook it would have its reset overwritten by the late failure, which
+	// re-arms a wait this test never advances. The loss armed the first wait
+	// and the advance above consumed it, so the second is the failure's own.
+	waittest.WaitForDetail(t, "the failed redial to arm its next wait", func() string {
+		st, _ := h.reg.Axis("c1")
+		return fmt.Sprintf("afters=%d dials=%d axis=%+v", h.clock.afterRegistrations(), h.dial.count(), st)
+	}, func() bool {
+		return h.clock.afterRegistrations() >= 2
+	})
 	if got := h.install.count(); got != 1 {
 		t.Fatalf("install calls = %d, want 1: a redial never installs", got)
 	}
@@ -882,10 +921,24 @@ func TestALostDaemonBacksOffAndRefreshes(t *testing.T) {
 		t.Fatalf("install calls = %d after refresh, want 1", got)
 	}
 
-	// A daemon that answers again serves.
+	// A daemon that answers again serves. The refresh's own attempt carries
+	// the failure too, so serving waits on the redial that failure arms, and
+	// advancing the clock is what starts it. The schedule itself is not
+	// asserted here.
+	h.dial.mu.Lock()
 	h.dial.err = nil
-	h.clock.Advance(30 * time.Second)
-	h.want("c1", farhelper.StateServing, "", farhelper.ActionNone)
+	h.dial.mu.Unlock()
+	waittest.WaitForDetail(t, "axis c1 to be serving", func() string {
+		status, ok := h.reg.Axis("c1")
+		return fmt.Sprintf("axis is %+v (known=%v)", status, ok)
+	}, func() bool {
+		status, ok := h.reg.Axis("c1")
+		if ok && status.State == farhelper.StateServing && status.Reason == "" && status.Action == farhelper.ActionNone {
+			return true
+		}
+		h.clock.Advance(30 * time.Second)
+		return false
+	})
 }
 
 func TestAnInstallFailureOffersNoRetry(t *testing.T) {

@@ -26,9 +26,21 @@
 //
 // Every wait is on an observable: the head's own data-helper attribute, the
 // Git branch badge, the destroyed sockets the fault proxy reports, the far
-// host's own HELPERKILLDONE line, and a command's output. Nothing sleeps for
-// an effect to arrive.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+// host's own HELPERKILLDONE line, a redial's own account on the far side, and
+// a command's output. Nothing sleeps for an effect to arrive. The kill
+// scenario additionally HOLDS the backend's automatic redial behind a
+// far-side gate, so the return is a moment this spec chooses rather than a
+// speed its assertions have to beat.
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -224,6 +236,70 @@ function helperGenerations(remoteHome: string): number {
   return existsSync(root) ? readdirSync(root).length : 0
 }
 
+/** The far helper's automatic redial, held at a gate this spec owns.
+ *
+ * WHY. The backend redials a lost helper by itself, a second after the loss,
+ * and a healthy return removes the Refresh button this scenario presses. No
+ * longer wait fixes that — it widens the race instead of closing it. So the
+ * redial is made to PARK: the installed binary is swapped for a wrapper that
+ * announces the dial and waits for a file only the spec writes. The
+ * automatic return becomes a moment the spec chooses rather than a speed it
+ * hopes to beat.
+ *
+ * The wrapper execs the real binary it was installed over, so the bridge
+ * speaks to the same helper; the directory, its name and its generation are
+ * untouched, which is what keeps the "redial, never reinstall" reading
+ * honest. Both files live under the home's `.nocx/` tree, which the fixture
+ * excludes from the git checkout standing in the same directory.
+ */
+interface RedialHold {
+  /** How many dials the far side has started since the hold was installed. */
+  dials(): number
+  /** Let the parked dial proceed. */
+  release(): void
+  /** Put the install back the way the product left it. */
+  restore(): void
+}
+
+function holdFarRedial(remoteHome: string): RedialHold {
+  const root = path.join(remoteHome, '.nocx', 'helper')
+  const dir = readdirSync(root)
+    .map((name) => path.join(root, name))
+    .find((candidate) => existsSync(path.join(candidate, 'nocx-helper')))
+  if (dir === undefined) throw new Error(`holdFarRedial: no helper install under ${root}`)
+  const binary = path.join(dir, 'nocx-helper')
+  const real = path.join(dir, 'nocx-helper.real')
+  const log = path.join(remoteHome, '.nocx', 'redial.log')
+  const gate = path.join(remoteHome, '.nocx', 'redial-go')
+  renameSync(binary, real)
+  rmSync(log, { force: true })
+  rmSync(gate, { force: true })
+  writeFileSync(
+    binary,
+    [
+      '#!/bin/sh',
+      `printf '%s\\n' "DIAL $$" >> '${log}'`,
+      `while [ ! -f '${gate}' ]; do sleep 0.05; done`,
+      `exec '${real}' "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+  return {
+    dials: () =>
+      existsSync(log)
+        ? readFileSync(log, 'utf8')
+            .split('\n')
+            .filter((line) => line !== '').length
+        : 0,
+    release: () => writeFileSync(gate, 'go\n'),
+    restore: () => {
+      rmSync(binary, { force: true })
+      renameSync(real, binary)
+    },
+  }
+}
+
 test('a serving helper opens the repository and says nothing on the head', async ({ page }) => {
   test.setTimeout(180_000)
   const wired = await wire(page, { mode: 'helper' })
@@ -382,36 +458,56 @@ test('a helper killed with the transport up offers Refresh on both surfaces, and
     const installsBefore = helperGenerations(wired.host.remoteHome)
     expect(installsBefore).toBeGreaterThan(0)
 
-    await killFarHelper(wired.host.fixture)
+    // THE AUTOMATIC RETURN IS HELD, NOT RACED. Installed before the death so
+    // the very first redial parks; a return can now happen only when this
+    // spec releases it, so the shell step below cannot lose the button the
+    // scenario presses.
+    const redial = holdFarRedial(wired.host.remoteHome)
+    try {
+      await killFarHelper(wired.host.fixture)
 
-    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'unavailable', {
-      timeout: 30_000,
-    })
-    await expect(page.locator(HEAD_TEXT)).toContainText(LOST_SENTENCE)
-    await expect(page.locator(HEAD_ACTION)).toContainText('Refresh')
-    await expect(page.locator(GIT_AXIS)).toContainText(LOST_SENTENCE)
-    await expect(page.locator('[data-testid="git-helper-refresh"]')).toBeVisible()
+      // The far side's own account that the redial has started and parked.
+      await expect.poll(() => redial.dials(), { timeout: 30_000 }).toBeGreaterThan(0)
 
-    // THE SHELL IS UNTOUCHED: a command typed now runs and prints. The command
-    // text does not contain the marker, so the marker can only be output.
-    await page.locator(EDITOR).click()
-    await page.keyboard.type("printf 'NOCXPANELALIVE\\n'")
-    await page.keyboard.press('Enter')
-    await expect(page.locator('.pane.active')).toContainText('NOCXPANELALIVE', {
-      timeout: 30_000,
-    })
+      await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'unavailable', {
+        timeout: 30_000,
+      })
+      await expect(page.locator(HEAD_TEXT)).toContainText(LOST_SENTENCE)
+      await expect(page.locator(HEAD_ACTION)).toContainText('Refresh')
+      await expect(page.locator(GIT_AXIS)).toContainText(LOST_SENTENCE)
+      await expect(page.locator('[data-testid="git-helper-refresh"]')).toBeVisible()
 
-    await page.locator('[data-testid="git-helper-refresh"]').click()
-    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', {
-      timeout: 60_000,
-    })
-    await expect(page.locator(GIT_BRANCH)).toBeVisible({ timeout: 60_000 })
-    await expect(page.locator(GIT_BRANCH)).toHaveText('main')
+      // THE SHELL IS UNTOUCHED: a command typed now runs and prints. The
+      // command text does not contain the marker, so the marker can only be
+      // output. The helper's return is parked, so this step cannot cost the
+      // button below its existence.
+      await page.locator(EDITOR).click()
+      await page.keyboard.type("printf 'NOCXPANELALIVE\\n'")
+      await page.keyboard.press('Enter')
+      await expect(page.locator('.pane.active')).toContainText('NOCXPANELALIVE', {
+        timeout: 30_000,
+      })
 
-    // Redial, never install: the generation directory is the same one.
-    expect(helperGenerations(wired.host.remoteHome)).toBe(installsBefore)
-    const labels = await page.locator(`${GIT_PANEL} button`).allTextContents()
-    for (const label of labels) expect(label).not.toMatch(/accept|allow|install|use the helper/i)
+      // THE PERSON'S PRESS, while the automatic return is still parked.
+      await page.locator('[data-testid="git-helper-refresh"]').click()
+
+      // The moment of the automatic return, CHOSEN here rather than slept
+      // for: the parked dial proceeds and the axis comes back.
+      redial.release()
+      await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', {
+        timeout: 60_000,
+      })
+      await expect(page.locator(GIT_BRANCH)).toBeVisible({ timeout: 60_000 })
+      await expect(page.locator(GIT_BRANCH)).toHaveText('main')
+
+      // Redial, never install: the generation directory is the same one.
+      expect(helperGenerations(wired.host.remoteHome)).toBe(installsBefore)
+      const labels = await page.locator(`${GIT_PANEL} button`).allTextContents()
+      for (const label of labels) expect(label).not.toMatch(/accept|allow|install|use the helper/i)
+    } finally {
+      redial.release()
+      redial.restore()
+    }
   } finally {
     await unwire(page, wired)
   }

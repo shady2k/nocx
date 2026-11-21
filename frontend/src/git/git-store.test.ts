@@ -783,6 +783,74 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     expect(store.state()).toBe('ready')
   })
 
+  it('a git.open still in flight when the axis stops serving cannot revive the binding (success)', async () => {
+    // The review's race (ALX-998): leaving serving closes the accepted
+    // binding but used to leave the in-flight open current, so its answer
+    // adopted a binding and started Git reads while the panel was supposed
+    // to be blocked — and a filled binding then suppressed the re-open on
+    // the way back to serving.
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis(
+        { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+        2,
+      ),
+    })
+    await settle()
+    expect(store.state()).toBe('helperBlocked')
+    expect(store.phase()).toBe('ready')
+
+    // The answer arrives only now — after the axis stopped serving.
+    pending.resolve(openOk())
+    await settle()
+
+    expect(store.binding()).toBeNull()
+    expect(store.phase()).toBe('ready')
+    expect(store.state()).toBe('helperBlocked')
+    // Rule 2: the binding the backend minted is closed, never leaked.
+    expect(mockHandle(services, 'close')).toHaveBeenCalledWith('b1')
+
+    // The return to serving is what opens the repository — exactly once.
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({ state: 'serving', action: 'none' }, 3),
+    })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
+    expect(store.state()).toBe('ready')
+  })
+
+  it('a git.open that rejects after the axis stops serving is not the failed card', async () => {
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({ state: 'paused', reason: 'connection', action: 'none' }, 2),
+    })
+    await settle()
+
+    pending.reject(new Error('the helper went away'))
+    await settle()
+
+    // A stale failure never replaces the axis's own reason with the
+    // "Could not reach git" card and its Retry.
+    expect(store.phase()).toBe('ready')
+    expect(store.openError()).toBeNull()
+    expect(store.state()).toBe('helperBlocked')
+  })
+
   it('holds an SSH origin whose first observation has not arrived, and mints no state for it', async () => {
     const services = makeServices()
     const store = track(createGitStore(services))

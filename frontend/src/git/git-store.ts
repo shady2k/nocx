@@ -965,6 +965,15 @@ export function createGitStore(
     const helper = next.kind === 'ssh' ? next.connection?.helper : undefined
     const serving = next.kind !== 'ssh' || helper?.state === 'serving'
     if (!serving) {
+      // THE PERMISSION THAT ISSUED AN OPEN HAS ENDED. A git.open sent while
+      // the axis served may still be in flight, and leaving serving closes
+      // only the binding already accepted. Bumping the scope is what makes
+      // the late answer stale: a success then closes the binding the backend
+      // minted instead of adopting it (and starting reads) under a blocked
+      // axis, a failure no longer replaces the axis's own sentence with the
+      // "Could not reach git" card, and an adopted binding no longer
+      // suppresses the re-open on the way back to serving (ALX-998).
+      generation++
       const live = untrack(binding)
       if (live !== null) void services.close(live.bindingId).catch(() => {})
       const prevHelper = prev?.connection?.helper

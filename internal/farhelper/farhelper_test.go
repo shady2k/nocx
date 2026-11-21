@@ -510,9 +510,12 @@ func serveHello(conn net.Conn) {
 // ── the harness ──────────────────────────────────────────────────────────
 
 // countingClock is the harness clock with a count of After registrations. The
-// entry registers its next wait only after it has accepted the result that
-// armed it, so the count says the reducer has applied a result and moved on —
-// unlike a dial returning, which only says the reducer is about to see it.
+// count is published only after the underlying timer is registered, so a
+// registration the test observes names a wait that already exists and can be
+// advanced. The entry in turn registers its next wait only after it has
+// accepted the result that armed it, so the count says the reducer has applied
+// a result and moved on — unlike a dial returning, which only says the reducer
+// is about to see it.
 type countingClock struct {
 	*hostconntest.Clock
 
@@ -521,10 +524,11 @@ type countingClock struct {
 }
 
 func (c *countingClock) After(d time.Duration) <-chan monoclock.Nanos {
+	ch := c.Clock.After(d)
 	c.mu.Lock()
 	c.afters++
 	c.mu.Unlock()
-	return c.Clock.After(d)
+	return ch
 }
 
 func (c *countingClock) afterRegistrations() int {

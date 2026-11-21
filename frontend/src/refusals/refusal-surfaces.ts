@@ -315,6 +315,7 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'session.recoveryStatus',
       'open',
       'pane.reconnect',
+      'connection.helperRefresh',
       'attach',
       'detach',
       'close',
@@ -339,7 +340,7 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
         'terminal-content: the pane’s own connection/overlay state, or the action’s own outcome',
       retry: 'the overlay’s Retry, or the same control',
     },
-    note: "The pane's bookkeeping (attach, detach, close, resize, sessions.live, sessions.inventory, fs.*, shell.commandNames) is BACKGROUND: it is the pane's own machinery, and the person's recovery is the connection overlay. session.open and session.intent, shell.integrate and the footprint calls are PERSON.",
+    note: "The pane's bookkeeping (attach, detach, close, resize, sessions.live, sessions.inventory, fs.*, shell.commandNames) is BACKGROUND: it is the pane's own machinery, and the person's recovery is the connection overlay. session.open and session.intent, shell.integrate, the footprint calls, pane.reconnect and connection.helperRefresh are PERSON.",
   },
   // ── layout, tabs, panes, workspaces, uistate
   {

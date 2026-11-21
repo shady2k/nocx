@@ -25,6 +25,7 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		ConnectionSequence: s.ConnectionSequence,
 		InstanceID:         s.InstanceID,
 		SessionID:          s.SessionID,
+		Helper:             helperOnTheWire(s.Helper),
 		Transport: transport.PaneConnectionTransport{
 			State:  s.Transport.State,
 			Stage:  s.Transport.Stage,
@@ -67,6 +68,22 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		p.Reconnect = &transport.PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
 	}
 	return p
+}
+
+// helperOnTheWire renders the far helper axis, defaulting a reading nobody
+// made to the wire's own starting shape. The default is a shape rule, not a
+// decision: panedriver already normalizes, and this keeps a hand-built
+// snapshot in a test from producing a payload the schema refuses.
+func helperOnTheWire(h panedriver.Helper) transport.PaneConnectionHelper {
+	state := string(h.State)
+	if state == "" {
+		state = string(panedriver.HelperStarting)
+	}
+	action := h.Action
+	if action == "" {
+		action = panedriver.HelperActionNone
+	}
+	return transport.PaneConnectionHelper{State: state, Reason: h.Reason, Action: action}
 }
 
 // causeOnTheWire answers the cause for the states the renderer's contract gives

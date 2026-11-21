@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connection.helperRefresh.params.schema.json",
+  "title": "ConnectionHelperRefreshParams",
+  "description": "Press Refresh on the far helper of one pane's connection (ADR-727g63tr decision 2; design §5.10 lifecycle scenario 4). The press is the pane.connection's own offer, so it names the pane and the epoch that carried it: a press about any other observation is about an axis the person is no longer looking at, and the backend refuses it. The refresh redials the helper already installed and completes a new hello; it never installs and never accepts anything, and any state without the refresh offer — serving, starting, an absent decision, a paused connection — has no button to press.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "connectionEpoch"],
+  "properties": {
+    "paneId": {
+      "description": "The pane whose connection's helper is refreshed. It is the renderer's own durable id, the same one pane.connection is keyed by, and it must be a pane this backend instance opened: the offer it presses belongs to that pane's newest observation.",
+      "type": "string",
+      "minLength": 1
+    },
+    "connectionEpoch": {
+      "description": "The epoch from the pane.connection observation whose helper object offered refresh. Monotonic per pane and minted at observation; a press carrying an older one is refused as stale.",
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

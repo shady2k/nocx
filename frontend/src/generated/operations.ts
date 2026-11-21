@@ -525,6 +525,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 120000,
     answerMs: null,
   },
+  'connection.helperRefresh': {
+    waiting: 'Refreshing the helper connection',
+    row: 'never',
+    expired: 'not-started',
+    merge: 'none',
+    domain: 'session',
+    turnMs: 30000,
+    maxMs: 5000,
+    answerMs: null,
+  },
   'connections.hostMode': {
     waiting: "Reading the host's integration method",
     row: 'never',

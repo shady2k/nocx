@@ -1461,6 +1461,14 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 			h := paneReconnectHandlers{machine: s, r: r, w: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
+		// THE OTHER ACTION ON A CONNECTION'S AXIS: redial a far helper that
+		// was serving and is gone (ADR-727g63tr decision 2). It rides the same
+		// work submission as the reconnect whose axis it belongs to, wakes a
+		// background decision and answers at once, and it never installs.
+		reg(openSub, catalog.OpConnectionHelperRefresh, params(validateConnectionHelperRefreshRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := connectionHelperRefreshHandlers{machine: s, r: r, w: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		keyedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }

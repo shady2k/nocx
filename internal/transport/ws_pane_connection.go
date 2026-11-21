@@ -55,11 +55,22 @@ type PaneConnection struct {
 	ConnectionEpoch    uint64                   `json:"connectionEpoch"`
 	InstanceID         string                   `json:"instanceId"`
 	SessionID          string                   `json:"sessionId,omitempty"`
+	Helper             PaneConnectionHelper     `json:"helper"`
 	Transport          PaneConnectionTransport  `json:"transport"`
 	Quality            *PaneConnectionQuality   `json:"quality,omitempty"`
 	Attempt            PaneConnectionAttempt    `json:"attempt"`
 	Reconnect          *PaneConnectionReconnect `json:"reconnect,omitempty"`
 	ObservedAt         string                   `json:"observedAt"`
+}
+
+// PaneConnectionHelper is the far helper axis on the connection the pane
+// rides: always present, because a fact of the connection belongs on every one
+// of its panes. The schema's oneOf is the authority on which reason and action
+// each state admits; this struct is the carrier.
+type PaneConnectionHelper struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	Action string `json:"action"`
 }
 
 // PaneConnectionTransport is the state, with exactly the fields that state
@@ -124,6 +135,13 @@ type paneRecord struct {
 	// renderer was told, so the button and the call cannot disagree.
 	offer        bool
 	shellFailure bool
+	// connectionID is the connection the newest observation named, kept so a
+	// press answered after the frame can say which connection it acted on.
+	connectionID string
+	// helperRefresh is whether the last published observation offered the
+	// person a Refresh on the far helper. Like offer, it is the SAME value the
+	// renderer was told, so a button and the call cannot disagree.
+	helperRefresh bool
 	// busy is a reconnect being carried out for this pane RIGHT NOW, whoever
 	// asked. It is the transport's own guard, because a second press arrives
 	// on another request and would otherwise open a second shell while the
@@ -263,8 +281,18 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 	s.paneEpochs[p.PaneID] = p.ConnectionEpoch
 	if rec != nil {
 		rec.offer = p.Reconnect != nil
+		rec.connectionID = p.ConnectionID
+		rec.helperRefresh = helperRefreshOffered(p.Helper)
 		rec.shellFailure = p.ShellFailure != nil && p.Transport.State == "connected"
 		rec.connectionSequence = p.ConnectionSequence
 	}
 	s.paneMu.Unlock()
+}
+
+// helperRefreshOffered is the one axis reading a Refresh press may name
+// (ADR-727g63tr decision 2): a helper that was serving and is gone. Every
+// other state either has nothing to press or is a decision a button cannot
+// change.
+func helperRefreshOffered(h PaneConnectionHelper) bool {
+	return h.State == "unavailable" && h.Reason == "helper-lost" && h.Action == "refresh"
 }

@@ -40,6 +40,7 @@ function connection(over: Partial<PaneConnection> = {}): PaneConnection {
     connectionEpoch: 1,
     generation: 1,
     instanceId: 'instance-gate',
+    helper: { state: 'serving', action: 'none' },
     transport: { state: 'connected', stateMs: 10, plainShells: 1 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
     observedAt: new Date().toISOString(),

@@ -31,11 +31,92 @@
     "connectionEpoch",
     "generation",
     "instanceId",
+    "helper",
     "transport",
     "attempt",
     "observedAt"
   ],
   "properties": {
+    "helper": {
+      "description": "Whether the far helper serves this connection, and if not, why and what a person can do about it (ADR-727g63tr decision 2). It is a fact of the CONNECTION and is published on every pane riding it, so two panes on one host can never disagree. The object is required on every observation: a decision that has not finished yet is `starting`, never an absent member. `reason` is a closed set and is absent while starting or serving. `action` is the one thing a surface may offer and it never installs or accepts anything (ADR-0068): host-settings opens the host record's mode; refresh redials a helper that was serving and is gone and is offered for helper-lost alone.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "action"],
+          "description": "A decision that is still running. A surface shows a quiet starting mark, and no action.",
+          "properties": {
+            "state": { "type": "string", "const": "starting" },
+            "action": { "type": "string", "const": "none" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "action"],
+          "description": "A reachable far helper. Nothing is missing, so there is no reason and nothing to offer.",
+          "properties": {
+            "state": { "type": "string", "const": "serving" },
+            "action": { "type": "string", "const": "none" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason", "action"],
+          "description": "The transport is not connected and the far helper was serving or would serve. The axis is paused, not absent: the decision did not change, and the return redials the helper already installed.",
+          "properties": {
+            "state": { "type": "string", "const": "paused" },
+            "reason": { "type": "string", "const": "connection" },
+            "action": { "type": "string", "const": "none" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason", "action"],
+          "description": "The host's recorded mode does not allow a far helper. The one useful action is opening the host record's mode, and it is not an install.",
+          "properties": {
+            "state": { "type": "string", "const": "unavailable" },
+            "reason": { "type": "string", "enum": ["mode-raw", "mode-script"] },
+            "action": { "type": "string", "const": "host-settings" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason", "action"],
+          "description": "A far helper that was serving on this connection and is gone with the transport still up. Refresh redials the helper already installed and never installs; during an uninstall window the same reason is published with no action.",
+          "properties": {
+            "state": { "type": "string", "const": "unavailable" },
+            "reason": { "type": "string", "const": "helper-lost" },
+            "action": { "type": "string", "enum": ["refresh", "none"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "reason", "action"],
+          "description": "A decision no button can change: an absent or refused consent, a platform without an artifact, a failed install, a refused exec, a version mismatch, or a connection that is gone. A person changes it through the connection's own settings, never by pressing a retry here (the owner's decision of 2026-11-16).",
+          "properties": {
+            "state": { "type": "string", "const": "unavailable" },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "consent-pending",
+                "consent-denied",
+                "unsupported-platform",
+                "install-failed",
+                "exec-forbidden",
+                "version-mismatch",
+                "connection"
+              ]
+            },
+            "action": { "type": "string", "const": "none" }
+          }
+        }
+      ]
+    },
     "generation": {
       "description": "The driver's binding generation, shared with pane.opened; older opening results and failures do not apply to a newer binding.",
       "type": "integer",

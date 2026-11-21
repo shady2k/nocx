@@ -76,7 +76,7 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 	})
 	driver.SetPublisher(func(s panedriver.Snapshot) {
 		shells := s.Transport.PlainShells
-		p := PaneConnection{Generation: s.Generation, PaneID: s.PaneID, ConnectionID: s.ConnectionID, ConnectionEpoch: s.ConnectionEpoch, InstanceID: s.InstanceID, SessionID: s.SessionID, Transport: PaneConnectionTransport{State: s.Transport.State, StateMs: s.Transport.StateMs, PlainShells: &shells}, Attempt: PaneConnectionAttempt{Shown: "none", Candidate: "none"}, ObservedAt: "2026-11-14T11:00:00Z"}
+		p := PaneConnection{Generation: s.Generation, PaneID: s.PaneID, ConnectionID: s.ConnectionID, ConnectionEpoch: s.ConnectionEpoch, InstanceID: s.InstanceID, SessionID: s.SessionID, Helper: PaneConnectionHelper{State: "serving", Action: "none"}, Transport: PaneConnectionTransport{State: s.Transport.State, StateMs: s.Transport.StateMs, PlainShells: &shells}, Attempt: PaneConnectionAttempt{Shown: "none", Candidate: "none"}, ObservedAt: "2026-11-14T11:00:00Z"}
 		if s.Reconnect != nil {
 			p.Reconnect = &PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
 		}

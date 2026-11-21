@@ -44,6 +44,7 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     connectionEpoch: 1,
     generation: 1,
     instanceId: 'instance-1',
+    helper: { state: 'starting', action: 'none' },
     transport: { state: 'opening', stage: 'tcp', stateMs: 2000 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
     observedAt: '2026-11-14T00:00:00Z',

@@ -19,6 +19,7 @@ function observation(transport: PaneConnection['transport'], over: Partial<PaneC
     connectionEpoch: 1,
     generation: 1,
     instanceId: 'instance-1',
+    helper: { state: 'serving' as const, action: 'none' as const },
     transport,
     attempt: { shown: 'none' as const, candidate: 'none' as const, reason: '' },
     observedAt: '2026-11-14T00:00:00Z',

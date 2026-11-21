@@ -28,6 +28,7 @@ func publishTestConnection(ws *WSServer, paneID string, epoch uint64, state stri
 		ConnectionID:    "conn-1",
 		ConnectionEpoch: epoch,
 		InstanceID:      "instance-1",
+		Helper:          PaneConnectionHelper{State: "serving", Action: "none"},
 		Transport:       PaneConnectionTransport{State: state, StateMs: 1000},
 		Attempt:         PaneConnectionAttempt{Shown: "none", Candidate: "none"},
 		Reconnect:       offer,

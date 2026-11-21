@@ -1175,6 +1175,12 @@ func New(opts ...Option) (*App, error) {
 		return value
 	}
 	localOpener.paneConns = paneConns
+	// THE AXIS ON EVERY PANE OF THE CONNECTION (ADR-727g63tr decision 2). The
+	// far helper registry decides per connection; the driver carries that
+	// reading to each pane riding it, in the same observation the transport
+	// state travels in. A change reaches every pane, which is what makes two
+	// tabs on one host unable to disagree.
+	paneConns.SetHelperSource(paneHelperAxis{reg: farHelpers})
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in

@@ -433,6 +433,7 @@ function publishConnection(
     generation: 1,
     instanceId: CONNECTION_INSTANCE,
     ...(session !== null ? { sessionId: session.sessionId } : {}),
+    helper: { state: 'serving', action: 'none' },
     transport: { state: 'connected', stateMs: 0, plainShells: 1 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
     observedAt: new Date().toISOString(),

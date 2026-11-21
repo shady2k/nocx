@@ -878,6 +878,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
             generation: 1,
             instanceId: backendInstance ?? 'test-instance',
             sessionId: replacement.sessionId,
+            helper: { state: 'serving', action: 'none' },
             transport: { state: 'connected', stateMs: 0, plainShells: 1 },
             attempt: { shown: 'none', candidate: 'none', reason: '' },
             observedAt: new Date().toISOString(),

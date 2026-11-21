@@ -3391,6 +3391,73 @@
       ]
     },
     {
+      "id": "connection.helperRefresh",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "session",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "session",
+            "helper",
+            "ssh"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 5000,
+        "basis": "read",
+        "note": "read: validates the pane's own refresh offer and wakes the far helper's redial; the dial and its hello continue on pane.connection after the RPC answers"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Refreshing the helper connection",
+      "row": "never",
+      "expired": "not-started",
+      "resources": [
+        {
+          "kind": "session",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "session",
+        "helper",
+        "ssh"
+      ],
+      "preempts": []
+    },
+    {
       "id": "connections.hostMode",
       "kind": "method",
       "owner": "request",

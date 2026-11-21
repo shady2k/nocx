@@ -129,7 +129,7 @@ func (o *localHelperOpener) scrollbackTargets(ctx context.Context) ([]scrollback
 // sessions, so pushing to what it reports cannot miss one.
 func (r *helperRegistry) scrollbackTargets(ctx context.Context) ([]scrollbackTarget, error) {
 	r.mu.Lock()
-	hosts := make([]*hostHelper, 0, len(r.hosts))
+	hosts := make([]*hostedShellCarrier, 0, len(r.hosts))
 	for _, h := range r.hosts {
 		hosts = append(hosts, h)
 	}

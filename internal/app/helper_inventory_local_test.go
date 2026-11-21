@@ -101,12 +101,12 @@ func farHelperStand(t *testing.T, a *App, sid session.ID, hostName, account, gen
 		t.Fatalf("spawn: %v", err)
 	}
 
-	f := &sessionFactory{
+	f := &hostedShellBinding{
 		reg: a.helperRegistry, sid: sid, host: hostName, account: account,
 		install: installedHelper{generation: generation},
 	}
 	a.helperRegistry.mu.Lock()
-	a.helperRegistry.hosts[f.sid] = &hostHelper{f: f, client: c}
+	a.helperRegistry.hosts[f.sid] = &hostedShellCarrier{f: f, client: c}
 	a.helperRegistry.mu.Unlock()
 	return spawned.Entry.Session.Session
 }

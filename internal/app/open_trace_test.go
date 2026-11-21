@@ -86,8 +86,8 @@ func TestAFarOpenThatNeverAnswersNamesItsStageAndWhoClosedIt(t *testing.T) {
 	})
 	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc), home: t.TempDir()}
-	store, installs := testConsentStores(t)
-	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, sl)
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, sl)
 	endStandOnCleanup(t, provider, reg)
 	// AFTER endStandOnCleanup, so it runs FIRST (LIFO): the blocked far spawn
 	// must be released before the stand waits for its helper peer to end.

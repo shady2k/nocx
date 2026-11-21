@@ -98,8 +98,8 @@ func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.St
 		consent:         store,
 		modes:           newTestHostModes(t),
 		registry:        session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))}),
-		hosts:           make(map[session.ID]*hostHelper),
-		pendingReadopts: make(map[session.ID]*hostHelper),
+		hosts:           make(map[session.ID]*hostedShellCarrier),
+		pendingReadopts: make(map[session.ID]*hostedShellCarrier),
 		closing:         make(map[string]struct{}),
 	}
 	// The stand is a coordinator, so its process ends with the test
@@ -167,25 +167,15 @@ func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
 	}
 }
 
-// TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen is the regression
-// the e2e rewrite for ADR-0068 caught: a session opened through the far
-// helper (the DesiredHelper arm of openHoldingLease) is a data-plane
-// attachment to a dial the HELPER made, not the coordinator, so its
-// ordinary HostKeyFingerprint() path answers "" forever
-// (session.Reg.RecordHostKeyFingerprint's own comment) unless openFarHelper
-// records it. Without that record, git.open's OWN later consultation of the
-// SAME session (helperGitFactory's sess.HostKeyFingerprint()) cannot find
-// the Granted answer this open already acted on, and treats an
-// already-answered machine as never having been asked at all — exactly the
-// "this connection has not yet been asked" refusal
-// e2e/git-remote.spec.ts hit after granting the helper at connect.
-func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
+// TestOpenHoldingLease_GrantedMachineRetainsItsFingerprint pins the hosted
+// attachment's identity: subsequent consent and host settings reads use the
+// verified host key even though the helper, not the coordinator, dialed it.
+func TestOpenHoldingLease_GrantedMachineRetainsItsFingerprint(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
 	source := stubArtifacts(t)
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factoryFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	reg := newHostedShellRegistry(provider, source, store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 
@@ -201,15 +191,6 @@ func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
 	if got := opened.Session.HostKeyFingerprint(); got != "SHA256:fake" {
 		t.Errorf("the opened session's HostKeyFingerprint() = %q, want the granted fingerprint — "+
 			"git.open reads this same session and must find the answer this open already acted on", got)
-	}
-
-	// git.open's OWN consultation of this exact session must resolve to a
-	// factory, never a refusal: the machine's answer is already recorded,
-	// and treating it as unanswered would contradict the open that just
-	// happened and never offer the panel a repository at all.
-	selection := factoryFor(opened.Session)
-	if selection.Factory == nil {
-		t.Fatalf("git.open selection = %+v, want a factory for an already-granted machine", selection)
 	}
 }
 

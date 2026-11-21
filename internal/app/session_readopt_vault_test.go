@@ -504,7 +504,7 @@ func TestFailedReadoptDiscardsAnUnconsumedStagedHelper(t *testing.T) {
 	second := newCoordinator(t, &fakeLaneProvider{})
 	sid := session.ID("session")
 	second.reg.mu.Lock()
-	second.reg.pendingReadopts[sid] = &hostHelper{f: &sessionFactory{reg: second.reg, sid: sid}, lanes: second.reg.lanes, log: second.reg.log}
+	second.reg.pendingReadopts[sid] = &hostedShellCarrier{f: &hostedShellBinding{reg: second.reg, sid: sid}, lanes: second.reg.lanes, log: second.reg.log}
 	second.reg.mu.Unlock()
 	pass := &readoptPass{registry: second.reg, routes: &stubRoutes{err: errors.New("route lookup failed")}, adopter: &stubAdopter{}}
 	binding := content.PendingSession{SessionID: string(sid), Host: "host", Account: "account", ProfileID: "profile", Generation: "generation", HelperCommand: "/helper", PaneID: "pane"}

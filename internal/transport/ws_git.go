@@ -606,14 +606,10 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 	}
 	openErr := h.op.Open(ctx, sess, params.Cwd, func(ctx context.Context, svc capability.GitOpenService) error {
 		if sess.Kind() != session.KindLocal {
-			// D3 as amended 2026-08-13, superseded by ADR-0068: the
-			// remote case is the helper's, and git.open never asks — the
-			// selection answers a factory, a §6 refusal
-			// (unsupportedPlatform, deployFailed, execForbidden), or —
-			// for a machine with no earned state (raw, denied, or no
-			// helper-tier answer yet) — nothing, and the not-available
-			// error is the answer, naming the connection setting that
-			// would change it.
+			// The pane's far-helper axis decides availability (ADR-727g63tr).
+			// Current refusals carry its reason as an RPC error. Keep the
+			// legacy result-state branch until the renderer migration removes
+			// that contract too; selection never installs or asks for consent.
 			if h.helperFor == nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available for SSH sessions (no helper factory wired)"})
 				return nil
@@ -1284,10 +1280,10 @@ func (s *WSServer) gitSpecs(sessionGate control.Admission, gitOrder *schedule.Ke
 				if s.gitHelperFor == nil {
 					return nil
 				}
-				// The refusal decision has already answered the refusal
-				// states; this second consultation is the open itself,
-				// and only a selection carrying a factory may proceed
-				// (ADR-0068).
+				// Re-read the live axis for the open. It may have changed since
+				// the handler's refusal check; this legacy double consultation
+				// can then lose the specific reason. Remove it together with
+				// the renderer's legacy refusal-state contract (nocx-oalo1.6.3).
 				return s.gitHelperFor(sess).Factory
 			}
 			return s.gitFactory

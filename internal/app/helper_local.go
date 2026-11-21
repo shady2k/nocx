@@ -1200,13 +1200,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	publishFailure := shellintegration.PublishFailureNone
 	endPublish := diagnostics.Stage(ctx, diagnostics.StagePublish)
 	cfg.Remote.HostKeyFingerprint = authenticatedFingerprint
-	if o.farConnections != nil && authenticatedFingerprint != "" {
-		o.farConnections.Observe(farhelper.Connection{
-			ID:                 connectionID,
-			Destination:        ssh.WireDestination(target),
-			HostKeyFingerprint: authenticatedFingerprint,
-		})
-	}
+	o.recordConfirmedConnection(connectionID, target, authenticatedFingerprint)
 	perr := o.publishForPane(ctx, cfg)
 	endPublish(perr)
 	if perr != nil {
@@ -2162,6 +2156,22 @@ func (o *localHelperOpener) bindSSHConnection(ctx context.Context, cfg session.C
 	return binding, nil
 }
 
+// recordConfirmedConnection is the one writer of a connection's confirmed host
+// key to the far-helper source. Both open branches reach it: the local opener
+// from its own authenticated lease, the remote branch from the platform probe
+// that selected the far host's helper. Keeping it in one place is what makes
+// the two routes tell farConnections the same thing about the same connection.
+func (o *localHelperOpener) recordConfirmedConnection(connectionID string, target ssh.DialTarget, fingerprint string) {
+	if o.farConnections == nil || connectionID == "" || fingerprint == "" {
+		return
+	}
+	o.farConnections.Observe(farhelper.Connection{
+		ID:                 connectionID,
+		Destination:        ssh.WireDestination(target),
+		HostKeyFingerprint: fingerprint,
+	})
+}
+
 // sshIntegrationRefusalKey carries only this open's refused fingerprint decision.
 // It must not persist: a new Connect action may authenticate and decide anew.
 type sshIntegrationRefusalKey struct{}
@@ -2220,11 +2230,13 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 		return h.local.OpenHosted(ctx, cfg, claim)
 	}
 	var binding sshPaneBinding
+	var target ssh.DialTarget
 	if cfg.PaneID != "" && cfg.Remote != nil && h.local.paneConnections() != nil {
-		target, err := h.local.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
+		resolved, err := h.local.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
 		if err != nil {
 			return transport.HostedSessionOpen{}, true, err
 		}
+		target = resolved
 		client, _, err := h.local.connect(ctx)
 		if err != nil {
 			return transport.HostedSessionOpen{}, true, err
@@ -2256,6 +2268,15 @@ func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, clai
 			}
 		}
 		if err == nil && opened.Session != nil && binding.connectionID != "" {
+			// THE PROBE'S CONFIRMED KEY BELONGS TO THE CONNECTION, not only to
+			// the local branch that used to be its sole writer. A profile that
+			// trusts the host through known_hosts carries no pin, so the bind
+			// above wrote an empty key; this selection's dial saw the real
+			// one, and the axis keys its mode and consent on it (far_helper.go's
+			// checkInputs). It is recorded only once the pane exists, and
+			// before AdoptSession, so the axis starts on an answered machine
+			// whose helper this open has already installed and reached.
+			h.local.recordConfirmedConnection(binding.connectionID, target, hold.fingerprint())
 			h.local.paneConnections().AdoptSession(cfg.PaneID, binding.connectionID, string(opened.Session.ID()), string(opened.Session.Identity().InstanceID), binding.generation)
 		}
 		return opened, true, err

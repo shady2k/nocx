@@ -1,13 +1,10 @@
 package app
 
-// Tests for the helper-backed git factory selection (the remote-helper
-// design): the env configuration that says a helper is available, the
-// dialing factory that brings one helper up per session and never leaks
-// it — a refusing open closes the lane, an exec the server refuses closes
-// the lane, and two bindings on one session share ONE helper process (D4)
-// that dies when the last binding closes and is redialed on the next open.
-// The wire is met in process: the real host, the real git service, over
-// io.Pipe.
+// Hosted shell carrier fixtures and tests. The farhelper registry owns the
+// separate client Git consumes; these tests cover shell installation, lane
+// identity, inventory, reconnect and uninstall without constructing a Git binding.
+// The wire meets the real helper host and services over io.Pipe; only SSH and
+// the remote filesystem are doubles.
 
 import (
 	"bytes"
@@ -32,23 +29,19 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
 
-	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
-	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
-	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/transport"
 )
 
 func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
@@ -262,7 +255,7 @@ func endHelperChannels(reg *helperRegistry) {
 		return
 	}
 	reg.mu.Lock()
-	helpers := make([]*hostHelper, 0, len(reg.hosts))
+	helpers := make([]*hostedShellCarrier, 0, len(reg.hosts))
 	for _, h := range reg.hosts {
 		helpers = append(helpers, h)
 	}
@@ -969,628 +962,164 @@ func testConsentStoresFor(t *testing.T, fingerprints ...string) (*consent.Store,
 	return store, installs
 }
 
-func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitFactoryFor {
+// registerHostedCarrier installs and opens a shell carrier without a Git binding.
+func registerHostedCarrier(t *testing.T, reg *helperRegistry, sid session.ID, hostName, fingerprint string) *hostedShellCarrier {
 	t.Helper()
-	source := stubArtifacts(t)
-	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
-	return factory
-}
-
-// TestHelperSelectorInstallsTheArtifact is the deploy wiring (D7): the
-// selection obtains the factory's command and hash by INSTALLING the
-// artifact on the session's host — the fake install lease carries a
-// complete install afterwards — and a second consultation of the same host
-// uploads nothing (an already-complete directory is not reinstalled).
-func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	sel := configuredSelector(t, provider)
-	sess := &fakeRemoteSession{id: "s1", host: "host.example"}
-
-	selection := sel(sess)
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory after a successful install")
-	}
-	if provider.install == nil {
-		t.Fatal("the selection never acquired an install lease")
-	}
-	if !provider.install.hasCompleteInstall("/home/u") {
-		t.Fatal("the selection did not install the artifact (no complete install directory)")
-	}
-
-	before := provider.install.uploadCount()
-	selection2 := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection2.Factory == nil {
-		t.Fatal("second consultation returned no factory after a complete install")
-	}
-	if got := provider.install.uploadCount() - before; got != 0 {
-		t.Fatalf("second consultation performed %d uploads, want 0 — a complete install must not be reinstalled", got)
-	}
-}
-
-// TestHelperSelectorFallsBackWhenArtifactsNotBuilt is the fresh-checkout
-// path CI exercises: with no artifacts built, asking to install is a
-// VISIBLE ErrArtifactsNotBuilt refusal naming the missing build step —
-// never an unsupported-platform confusion, which would be a silent degrade
-// the UI contradicts (AGENTS.md). The selection returns nil and the
-// zero-install refusal stands (D16); the log carries the distinct refusal.
-// On CI (no embedded artifacts) the REAL artifact source is what produces
-// the refusal; in a workspace where `make helpers` has run, the same path
-// is exercised through the stub, so the test asserts identically in both
-// worlds and never depends on which one it is in.
-func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
-	source := helperartifacts.DefaultSource
-	if _, _, err := source.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
-		source = refusingSource{}
-	}
-
-	var buf bytes.Buffer
-	sel, _ := helperGitFactory(&fakeLaneProvider{}, source, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
-	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
-		t.Fatalf("selection with no artifacts = %+v, want the empty refusal", got)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "not built") {
-		t.Fatalf("the refusal was not visible: log says %q, want it to name the missing build step", out)
-	}
-	if strings.Contains(out, "no helper artifact for this platform") {
-		t.Fatalf("no artifacts must not look like an unsupported platform: log says %q", out)
-	}
-}
-
-// TestHelperSelectorFallsBackOnUnsupportedPlatform: a host we build no
-// helper for gets none — darwin/amd64 is deliberately not a build target
-// (D20), and the refusal stands rather than an install attempt.
-func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
-	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger(t))
-	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
-		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
-	}
-}
-
-// TestHelperSharesOneProcessAcrossOpens is D4 on the wire: two bindings on
-// one session share ONE helper process — one lane acquired, one dial — and
-// the process dies when the last binding closes and is redialed on the
-// next open.
-func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	sel := configuredSelector(t, provider)
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory")
-	}
-	factory := selection.Factory
-	dir := fixtureRepo(t)
-
-	repo1, outcome, err := factory.Open(context.Background(), dir)
+	installed, err := installHelperAt(t.Context(), hostName, nil, reg.install, reg.source, deploy.Platform{GOOS: "linux", GOARCH: "amd64"})
 	if err != nil {
-		t.Fatalf("first open: %v", err)
+		t.Fatal(err)
 	}
-	if outcome.State != git.OpenOK {
-		t.Fatalf("first open outcome = %s, want ok", outcome.State)
+	f := &hostedShellBinding{reg: reg, sid: sid, host: hostName, fp: fingerprint, opts: []ssh.ConnectOption{ssh.WithHostKeyPin(fingerprint)}, install: installed}
+	h := &hostedShellCarrier{f: f, lanes: reg.lanes, log: reg.log}
+	reg.mu.Lock()
+	reg.hosts[sid] = h
+	reg.mu.Unlock()
+	h.mu.Lock()
+	_, outcome, err := h.connectLocked(t.Context())
+	h.mu.Unlock()
+	if err != nil || outcome.State != "" {
+		t.Fatalf("open hosted carrier: %v %+v", err, outcome)
 	}
-	repo2, outcome, err := factory.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("second open: %v", err)
-	}
-	if outcome.State != git.OpenOK {
-		t.Fatalf("second open outcome = %s, want ok", outcome.State)
-	}
-	if got := provider.laneCount(); got != 1 {
-		t.Fatalf("two opens brought up %d helper processes, want 1 — the second open must share the first's process (D4)", got)
-	}
-
-	// Both bindings reference the helper; closing the first must NOT kill
-	// the process the second still uses.
-	if err = repo1.Close(); err != nil {
-		t.Fatalf("first close: %v", err)
-	}
-	if got := provider.lane(0).closeCount(); got != 0 {
-		t.Fatalf("lane closed %d times after the first binding closed, want 0 — the second binding still references it", got)
-	}
-
-	// The last binding closes → the helper process dies with it.
-	if err = repo2.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
-	}
-	if got := provider.lane(0).closeCount(); got != 1 {
-		t.Fatalf("lane closed %d times after the last binding closed, want 1", got)
-	}
-
-	// The next open must NOT reuse the dead client — a fresh helper comes
-	// up.
-	repo3, outcome, err := factory.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("open after the helper died: %v", err)
-	}
-	if outcome.State != git.OpenOK {
-		t.Fatalf("third open outcome = %s, want ok", outcome.State)
-	}
-	if got := provider.laneCount(); got != 2 {
-		t.Fatalf("open after the helper died brought up %d helpers total, want 2 — the dead client must not be reused", got)
-	}
-	_ = repo3.Close()
+	return h
 }
 
-// TestHelperSessionsDoNotShareAProcess: two sessions — even to the same
-// host — each get their own helper. The pool key that would prove they
-// share one connection is not exposed, and sharing across principals would
-// be an authorization error.
-func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	sel := configuredSelector(t, provider)
-	dir := fixtureRepo(t)
-
-	selectionA := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	selectionB := sel(&fakeRemoteSession{id: "s2", host: "host.example"})
-	if selectionA.Factory == nil || selectionB.Factory == nil {
-		t.Fatal("selection returned no factory for one of the sessions")
-	}
-	factoryA := selectionA.Factory
-	factoryB := selectionB.Factory
-	repoA, _, err := factoryA.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("session A open: %v", err)
-	}
-	repoB, _, err := factoryB.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("session B open: %v", err)
-	}
-	if got := provider.laneCount(); got != 2 {
-		t.Fatalf("two sessions brought up %d helpers, want 2 — each session owns its helper", got)
-	}
-	_ = repoA.Close()
-	_ = repoB.Close()
-}
-
-// TestHelperCloseHelpersForClosesOnlyTheMachine is D25's closer: an
-// uninstall must close the exec channel of every live helper on the
-// machine being uninstalled BEFORE the directory is removed, and it must
-// not touch any other machine's helpers — the backend knows its own
-// channels by the host-key fingerprint that keys consent.
+// Uninstall must close the named machine's carriers before its install can be
+// removed (D25), without disturbing another machine. The verified host-key
+// fingerprint, not a hostname or a Git binding, identifies the affected entries.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	if err := store.Grant("SHA256:machine-a"); err != nil {
-		t.Fatalf("grant a: %v", err)
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	registerHostedCarrier(t, reg, "s1", "host.example", "SHA256:machine-a")
+	registerHostedCarrier(t, reg, "s2", "host.other", "SHA256:machine-b")
+	if err := reg.CloseHelpersFor(t.Context(), "SHA256:machine-a"); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.Grant("SHA256:machine-b"); err != nil {
-		t.Fatalf("grant b: %v", err)
-	}
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
-	dir := fixtureRepo(t)
-
-	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
-	selB := factory(&fakeRemoteSession{id: "s2", host: "host.other", fingerprint: "SHA256:machine-b"})
-	repoA, outcome, err := selA.Factory.Open(context.Background(), dir)
-	if err != nil || outcome.State != git.OpenOK {
-		t.Fatalf("open A: %v %+v", err, outcome)
-	}
-	repoB, outcome, err := selB.Factory.Open(context.Background(), dir)
-	if err != nil || outcome.State != git.OpenOK {
-		t.Fatalf("open B: %v %+v", err, outcome)
-	}
-	if got := provider.laneCount(); got != 2 {
-		t.Fatalf("two machines brought up %d helpers, want 2", got)
-	}
-
-	if closeErr := reg.CloseHelpersFor(context.Background(), "SHA256:machine-a"); closeErr != nil {
-		t.Fatalf("close machine-a helper: %v", closeErr)
-	}
-
-	// The machine named by the fingerprint lost its helper channel; the
-	// other machine's helper is untouched.
 	if got := provider.lane(0).closeCount(); got != 1 {
-		t.Fatalf("machine-a's helper closed %d times, want 1 (its channel is closed first, D25)", got)
+		t.Fatalf("machine-a lane closes = %d, want 1", got)
 	}
 	if got := provider.lane(1).closeCount(); got != 0 {
-		t.Fatalf("machine-b's helper closed %d times, want 0 — the closer must not touch other machines", got)
+		t.Fatalf("machine-b lane closes = %d, want 0", got)
 	}
-	// The closed helper is forgotten: the next open redials it instead of
-	// reusing a dead client.
-	if _, ok := reg.hosts["s1"]; ok {
-		t.Fatal("the closed helper is still registered")
-	}
-	if _, _, openErr := selA.Factory.Open(context.Background(), dir); openErr == nil || openErr.Error() != "helper is closing for uninstall" {
-		t.Fatalf("open during uninstall gate: got %v, want helper is closing for uninstall", openErr)
+	if _, ok := reg.hostFor("s1"); ok {
+		t.Fatal("closed carrier remains registered")
 	}
 	reg.FinishHelpersFor("SHA256:machine-a")
-	retryRepo, retryOutcome, err := selA.Factory.Open(context.Background(), dir)
-	if err != nil || retryOutcome.State != git.OpenOK {
-		t.Fatalf("open after uninstall gate: %v %+v", err, retryOutcome)
-	}
-	_ = retryRepo.Close()
-	_ = repoB.Close()
-	_ = repoA.Close()
-
-	// An unknown fingerprint closes nothing and is not an error.
-	if err := reg.CloseHelpersFor(context.Background(), "SHA256:nobody"); err != nil {
-		t.Fatalf("close unknown helper: %v", err)
+	if err := reg.CloseHelpersFor(t.Context(), "SHA256:nobody"); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated protects
-// uninstall's safety boundary: an unknown session service is not an empty
-// inventory. Every affected helper must be unfrozen and remain registered so
-// the operation can be retried after the daemon is repaired.
+// An unknown session service is not an empty inventory: uninstall cannot know
+// whether deleting the executable is safe. On refusal, every affected carrier
+// must remain registered and unfrozen so a repaired daemon can be tried again.
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
-	const fingerprint = "SHA256:test-host"
 	provider := &fakeLaneProvider{peer: helperPeerWithoutSession(t)}
-	source := stubArtifacts(t)
-	store, installs := testConsentStores(t)
-	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
-	dir := fixtureRepo(t)
-
-	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
-	selectionB := factory(&fakeRemoteSession{id: "s2", host: "host.example"})
-	repoA, outcome, err := selectionA.Factory.Open(context.Background(), dir)
-	if err != nil || outcome.State != git.OpenOK {
-		t.Fatalf("open A: %v %+v", err, outcome)
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	for _, sid := range []session.ID{"s1", "s2"} {
+		registerHostedCarrier(t, reg, sid, "host.example", "SHA256:test-host")
 	}
-	t.Cleanup(func() { _ = repoA.Close() })
-	repoB, outcome, err := selectionB.Factory.Open(context.Background(), dir)
-	if err != nil || outcome.State != git.OpenOK {
-		t.Fatalf("open B: %v %+v", err, outcome)
+	if err := reg.CloseHelpersFor(t.Context(), "SHA256:test-host"); err == nil {
+		t.Fatal("uninstall continued without a session inventory")
 	}
-	t.Cleanup(func() { _ = repoB.Close() })
-
-	if got := len(reg.hosts); got != 2 {
-		t.Fatalf("helper registry before uninstall = %d entries, want 2", got)
+	reg.mu.Lock()
+	_, closing := reg.closing["SHA256:test-host"]
+	reg.mu.Unlock()
+	if closing {
+		t.Fatal("failed uninstall left closing state")
 	}
-	if err := reg.CloseHelpersFor(context.Background(), fingerprint); err == nil {
-		t.Fatal("uninstall continued after the daemon could not list its sessions, so a live session's executable was about to be deleted")
-	}
-	if reg.isClosing(fingerprint) {
-		t.Fatal("failed uninstall left the machine in the closing state")
-	}
-	for _, id := range []session.ID{"s1", "s2"} {
-		h, ok := reg.hosts[id]
+	for _, sid := range []session.ID{"s1", "s2"} {
+		h, ok := reg.hostFor(sid)
 		if !ok {
-			t.Fatalf("failed uninstall forgot helper %q, so retry could not reach it", id)
+			t.Fatalf("forgot carrier %s", sid)
 		}
 		h.mu.Lock()
 		closing := h.closing
 		h.mu.Unlock()
 		if closing {
-			t.Fatalf("failed uninstall left helper %q frozen against retry", id)
+			t.Fatalf("carrier %s stayed frozen", sid)
 		}
 	}
 	for i := range 2 {
 		if got := provider.lane(i).closeCount(); got != 0 {
-			t.Fatalf("failed uninstall closed helper lane %d %d times, want 0", i, got)
+			t.Fatalf("lane %d closed %d times", i, got)
 		}
 	}
 }
 
-// TestHelperDialFactory_RefusingOpenClosesTheLane: an open that answers
-// notARepository carries no repo, and nothing else references the helper
-// process — the factory must close the client (and so the lane) rather
-// than leaking it on the far host.
-func TestHelperDialFactory_RefusingOpenClosesTheLane(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	sel := configuredSelector(t, provider)
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory")
-	}
-	factory := selection.Factory
-	_, outcome, err := factory.Open(context.Background(), t.TempDir()) // not a repository
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if outcome.State != git.OpenNotARepository {
-		t.Fatalf("outcome = %s, want notARepository", outcome.State)
-	}
-	if got := provider.lane(0).closeCount(); got != 1 {
-		t.Fatalf("lane closed %d times, want 1 — a refusing open must not leak the helper process", got)
-	}
-}
-
-// TestHelperDialFactory_ExecForbiddenClosesTheLane: a server that refuses
-// the exec is a helper that cannot start — the open answers the
-// execForbidden §6 outcome (remote-helper design §6), and the lane the
-// factory acquired is closed rather than leaked.
-func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
-	provider := &fakeLaneProvider{
-		peer:     func(io.Reader, io.Writer) int { return 0 },
-		startErr: errors.New("exec request failed"),
-	}
-	sel := configuredSelector(t, provider)
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory")
-	}
-	factory := selection.Factory
-	repo, outcome, err := factory.Open(context.Background(), "/some/cwd")
-	if err != nil {
-		t.Fatalf("open error = %v, want the execForbidden outcome, not an error", err)
-	}
-	if repo != nil {
-		t.Fatal("open returned a repo for a refused exec")
-	}
-	if outcome.State != git.OpenExecForbidden || outcome.Message == "" {
-		t.Fatalf("outcome = %+v, want execForbidden with a message naming the recovery", outcome)
-	}
-	if got := provider.lane(0).closeCount(); got != 1 {
-		t.Fatalf("lane closed %d times, want 1", got)
-	}
-}
-
-// TestHelperSelectionNoAnswerYetIsRefusedNeverAsked is ADR-0068 at the
-// git.open selection: a machine with no helper-tier answer at all gets the
-// SAME Refused the panel renders for raw or a denied answer — never the
-// ask, because git.open may not raise a machine's tier — and not a byte is
-// written to the host. No install lease is acquired, no platform probe is
-// even needed to decide that. The refusal names what would change it: the
-// connect-time ask ADR-0068 puts elsewhere.
-func TestHelperSelectionNoAnswerYetIsRefusedNeverAsked(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
-
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
-	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for a machine with no answer", selection)
-	}
-	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
-		t.Fatalf("selection = %+v, want the Refused reason naming what would change it", selection)
-	}
-	if !strings.Contains(selection.Refusal.Message, "reconnect") {
-		t.Errorf("refusal = %q, want it to name reconnecting as what would change it — "+
-			"git.open must say what it cannot do, never offer to ask", selection.Refusal.Message)
-	}
-	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("no-answer-yet wrote %d uploads, want 0 — a refusal must not leave a footprint", provider.install.uploadCount())
-	}
-	if got := provider.laneCount(); got != 0 {
-		t.Fatalf("no-answer-yet brought up %d helper lanes, want 0", got)
-	}
-	if got := installs.All(); len(got) != 0 {
-		t.Fatalf("no-answer-yet recorded %d installs, want 0", len(got))
-	}
-}
-
-// TestHelperSelectionAHostRecordedRawWritesNothing: a host whose record says
-// raw is never asked and never written to (consent design §4.2) — there is no
-// per-connection mode to consult at all any more (ADR-727g63tr decision 1), so
-// the host's record is the only answer. The selection answers the resolver's
-// Refused as a reason with no earned state, and git.open's not-available error
-// carries it.
-func TestHelperSelectionAHostRecordedRawWritesNothing(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
-	endStandOnCleanup(t, provider, reg)
-	reg.modes = newTestHostModes(t)
-	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Raw)
-
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for a host recorded raw", selection)
-	}
-	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
-		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
-	}
-	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("a host recorded raw wrote %d uploads, want 0", provider.install.uploadCount())
-	}
-}
-
-// TestHelperSelectionRecordsTheFootprintObservation: the footprint screen's
-// data is written only when the install actually succeeded — after a grant,
-// the selection installs and the observation store lists the machine.
-func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	source := stubArtifacts(t)
-	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
-
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory after a grant")
-	}
-	got := installs.All()
-	if len(got) != 1 {
-		t.Fatalf("install observations = %d, want 1 after a successful install", len(got))
-	}
-	if got[0].Fingerprint != "SHA256:test-host" || got[0].Identity == "" || got[0].Hash == "" {
-		t.Fatalf("observation = %+v, want fingerprint, identity and hash recorded", got[0])
-	}
-}
-
-// TestHelperSelectionExplicitScriptIsNotOfferedTheBinary: a machine at
-// explicit script has ANSWERED — "the shell tiers, and do not offer me the
-// binary" (D8: script is an answer, not a gap; ADR-0033). It is neither
-// silently upgraded nor asked, and nothing is written to the host. The
-// refusal names the modes that would offer it, so the user is told what to
-// change rather than left with a dead panel.
-//
-// This assertion was the other way round until ADR-0033, and could not have
-// been otherwise: while silence also resolved to script, refusing here would
-// have refused every user who never opened a connection's settings.
-func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	source := stubArtifacts(t)
-	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
-	endStandOnCleanup(t, provider, reg)
-	reg.modes = newTestHostModes(t)
-	mustRecordHostMode(t, reg.modes, "SHA256:test-host", hostmode.Script)
-
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory != nil {
-		t.Fatalf("selection = %+v, want no factory for a host recorded script — it was never upgraded", selection)
-	}
-	if selection.Refusal == nil {
-		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")
-	}
-	if !strings.Contains(selection.Refusal.Message, "Helper") {
-		t.Errorf("refusal = %q, want it to name a mode that DOES offer the helper — "+
-			"a refusal the user cannot act on is the dead end this bead exists to remove",
-			selection.Refusal.Message)
-	}
-	if provider.install != nil && provider.install.uploadCount() != 0 {
-		t.Fatalf("explicit script wrote %d uploads, want 0", provider.install.uploadCount())
-	}
-}
-
-// TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled is the
-// remote half of the level-1 design's D11, asserted where the coordinator
-// still decides it: what a lane is opened with is the machine's install
-// DIRECTORY and the generation that was installed.
-//
-// The COMMAND is not the coordinator's any more — that is the whole of
-// nocx-50w7p.10 and the reason this assertion changed shape. The helper builds
-// `<dir>/nocx-helper bridge <generation>` from these two facts (D3: an argv is
-// the capability this level exists not to hand out), and
-// internal/helper/sshsvc's lane test asserts what they turn into, against a
-// fixture that records the command it was asked to run.
-//
-// What is asserted HERE is that the two facts name the right thing: a wrong
-// generation would reach a DIFFERENT build's sessions while two coexist on one
-// host (D4), and a wrong directory would run a binary nobody installed. The
-// directory is compared against deploy's own layout rather than a literal,
-// because that layout is the one expression that says where an install is.
-func TestTheLaneNamesTheInstallAndTheGenerationTheCoordinatorInstalled(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
-	sel := configuredSelector(t, provider)
-	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if selection.Factory == nil {
-		t.Fatal("selection returned no factory")
-	}
-	repo, outcome, err := selection.Factory.Open(context.Background(), fixtureRepo(t))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if outcome.State != git.OpenOK {
-		t.Fatalf("open outcome = %s, want ok", outcome.State)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-
-	if provider.laneCount() != 1 {
-		t.Fatalf("lanes opened = %d, want the one this open rides", provider.laneCount())
-	}
-	asked := provider.asked(0)
-
-	// The generation is the content hash the installer wrote (D21) — the same
-	// value the handshake then verifies the far helper's hello-ok against —
-	// and it is a content hash by the wire's own validator, so the assertion
-	// above cannot pass on a value nothing would accept. The negative is in
-	// place so the line has teeth.
-	if string(asked.generation) != syntheticArtifactHash {
-		t.Fatalf("the lane names generation %q, want the hash the installer wrote (%q)",
-			string(asked.generation), syntheticArtifactHash)
-	}
-	const genCheckDir = "/tmp"
-	if _, err := endpoint.Path(genCheckDir, asked.generation); errors.Is(err, endpoint.ErrBadGeneration) {
-		t.Fatalf("the generation the lane was given is not a content hash: %v", err)
-	}
-	for _, notAHash := range []string{"", "short", "not-hex-at-all-not-hex-at-all"} {
-		if _, err := endpoint.Path(genCheckDir, proto.GenerationID(notAHash)); !errors.Is(err, endpoint.ErrBadGeneration) {
-			t.Fatalf("endpoint.Path(%q) = %v, want ErrBadGeneration — the assertion above "+
-				"means nothing unless this check has teeth", notAHash, err)
-		}
-	}
-
-	// The machine's directory is where THAT generation lives: the install
-	// lease's home, the platform the probe answered (the fake's "Linux
-	// x86_64") and deploy's own key for the build.
-	_, platform, available, perr := probeHelperPlatformAt(context.Background(), "host.example", nil,
-		provider, stubArtifacts(t))
-	if perr != nil || !available {
-		t.Fatalf("the platform probe this test compares against did not answer: available=%v err=%v", available, perr)
-	}
-	wantDir := path.Dir(deploy.InstalledPath("/home/u", platform, syntheticArtifactHash))
-	if asked.machine.Dir != wantDir {
-		t.Fatalf("the lane names install directory %q, want %q — deploy's own layout under the "+
-			"home the install lease answered", asked.machine.Dir, wantDir)
-	}
-}
-
-// TestHelperSessionsRedialsAfterCarrierLoss proves that inventory remains
-// available when the SSH carrier dies but the helper daemon still exists.
-// The binding keeps the hostHelper registered; only its client is lost.
+// A carrier can end while the daemon's sessions survive on the host (D1).
+// From carrier loss until the next inventory answer the registry must retain
+// the hosted entry, redial its lane, and use the replacement for later teardown.
 func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
-	logger := logtest.Slog(t)
-	daemon := helpersession.New(helpersession.Options{
-		Generation: proto.GenerationID(syntheticArtifactHash),
-		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
-		Log:        logger,
-	})
-	t.Cleanup(daemon.Close)
-	peer := func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger(t))
-		h.Register(hostsvc.New(localgit.NewFactory()))
-		h.Register(daemon)
-		release := daemon.Bind(h)
-		defer release()
-		if err := h.Serve(context.Background()); err != nil {
-			return 1
-		}
-		return 0
-	}
-	provider := &fakeLaneProvider{peer: peer}
-	factory := configuredSelector(t, provider)
-	sel := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
-	dir := fixtureRepo(t)
-	repo, outcome, err := sel.Factory.Open(context.Background(), dir)
-	if err != nil || outcome.State != git.OpenOK {
-		t.Fatalf("open: %v %+v", err, outcome)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-
-	selectedFactory, ok := sel.Factory.(*sessionFactory)
-	if !ok {
-		t.Fatal("selection factory has unexpected type")
-	}
-	reg := selectedFactory.reg
-	h := reg.hosts["s1"]
+	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	store, _ := testConsentStores(t)
+	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
+	h := registerHostedCarrier(t, reg, "s1", "host.example", "SHA256:test-host")
 	h.mu.Lock()
-	carrier := h.client
+	c := h.client
 	h.mu.Unlock()
-	if carrier == nil {
-		t.Fatal("open did not retain a helper client")
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
 	}
-	var spawned proto.SpawnResult
-	callErr := carrier.Call(context.Background(), proto.ServiceSession, proto.OpSpawn,
-		proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24}, &spawned)
-	if callErr != nil {
-		t.Fatalf("spawn daemon session: %v", callErr)
-	}
-	closeErr := carrier.Close()
-	if closeErr != nil {
-		t.Fatalf("close carrier: %v", closeErr)
-	}
-	select {
-	case <-carrier.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("closed carrier did not report loss")
-	}
-
-	entries, err := reg.sessions(context.Background())
-	if err != nil {
-		t.Fatalf("inventory after carrier loss: %v", err)
-	}
-	if len(entries) != 1 || entries[0].HostSessionID.Session != spawned.Entry.Session.Session {
-		t.Fatalf("inventory after carrier loss = %+v, want daemon session %q",
-			entries, spawned.Entry.Session.Session)
+	if _, err := reg.sessions(t.Context()); err != nil {
+		t.Fatalf("inventory after loss: %v", err)
 	}
 	if got := provider.laneCount(); got != 2 {
-		t.Fatalf("inventory used %d helper lanes, want 2 after redial", got)
+		t.Fatalf("inventory used %d lanes, want 2", got)
 	}
-	if err := reg.CloseHelpersFor(context.Background(), "SHA256:test-host"); err != nil {
-		t.Fatalf("uninstall after carrier loss: %v", err)
+	if err := reg.CloseHelpersFor(t.Context(), "SHA256:test-host"); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := reg.hosts["s1"]; ok {
-		t.Fatal("uninstall left the carrier-loss helper registered")
+	if _, ok := reg.hostFor("s1"); ok {
+		t.Fatal("uninstall left carrier registered")
+	}
+}
+
+// Hosted selection installs the artifact (D7); a repeat open of a complete
+// install uploads nothing. The lane names the install DIRECTORY and generation,
+// not an argv: the helper builds the command (D3). A wrong generation reaches a
+// different build's sessions; a wrong directory names a binary nobody installed.
+// Compare with deploy's layout so the test does not invent another install path.
+func TestHostedOpenInstallsArtifactAndNamesItsGenerationOnTheLane(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	c := newCoordinator(t, provider)
+	first := openHostedFixture(t, c, "pane-1")
+	if provider.install == nil || !provider.install.hasCompleteInstall("/home/u") {
+		t.Fatal("hosted open did not complete the helper install")
+	}
+	before := provider.install.uploadCount()
+	second := openHostedFixture(t, c, "pane-2")
+	if got := provider.install.uploadCount() - before; got != 0 {
+		t.Fatalf("second hosted open uploaded %d files, want 0", got)
+	}
+	if first.Generation != syntheticArtifactHash || second.Generation != first.Generation {
+		t.Fatalf("opened generations %q, %q", first.Generation, second.Generation)
+	}
+	wantDir := path.Dir(deploy.InstalledPath("/home/u", deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, syntheticArtifactHash))
+	for i := range 2 {
+		asked := provider.asked(i)
+		if string(asked.generation) != syntheticArtifactHash || asked.machine.Dir != wantDir {
+			t.Fatalf("lane %d names %+v generation %q, want %q/%q", i, asked.machine, asked.generation, wantDir, syntheticArtifactHash)
+		}
+	}
+}
+
+// A destination with no available helper artifact must decline hosted delivery
+// before taking an install lease or opening a lane. The ordinary opener can
+// still serve the pane; declining is not permission to deploy another binary.
+func TestHostedOpenRefusesUnavailableArtifactWithoutInstalling(t *testing.T) {
+	provider := &fakeLaneProvider{}
+	c := newCoordinator(t, provider)
+	c.reg.source = refusingSource{}
+	_, selected, err := c.reg.OpenHosted(t.Context(), remoteConfigFor(), "")
+	if err != nil || selected {
+		t.Fatalf("unavailable hosted helper selected=%v err=%v", selected, err)
+	}
+	if provider.install != nil || provider.laneCount() != 0 {
+		t.Fatal("unavailable artifact installed or opened a helper")
 	}
 }

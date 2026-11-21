@@ -1825,39 +1825,23 @@ func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
 }
 
-// GitOpenRefusal is the honest non-factory answer the selection carries for
-// one SSH session (remote-helper design §6): a §6 state
-// (unsupportedPlatform, deployFailed, execForbidden) with the message
-// naming what to do about it. State "" is the resolver's Refused — raw, a
-// denied answer, nothing to offer — a machine that has no earned state,
-// and git.open answers the not-available error carrying the reason.
+// GitOpenRefusal carries a helper selection refusal. The far-helper axis
+// supplies Message and leaves State empty, so git.open returns an RPC error.
+// State retains the legacy result-state contract until the renderer migration
+// in nocx-oalo1.6.3 removes it together with its transport branch.
 type GitOpenRefusal struct {
 	State   git.OpenState
 	Message string
 }
 
-// GitOpenSelection is the composition root's selection for one SSH session
-// (ADR-0068): a factory to open through, or a refusal naming the §6 state
-// and what to do about it. git.open never asks — the helper's tier is
-// decided at the connection, or at connect (ADR-0068) — so a machine with
-// no helper-tier answer is a Refusal here, exactly like raw or a denied
-// answer. Refusal and Factory are mutually exclusive.
+// GitOpenSelection is the composition root's current answer for an SSH pane:
+// either a helper-backed factory or a refusal. Selection never starts an
+// install or asks for consent (ADR-0068, ADR-727g63tr).
+// Refusal and Factory are mutually exclusive.
 type GitOpenSelection struct {
 	Factory git.RepoFactory
-	// Refusal — the honest refusal when the machine cannot be served:
-	// unsupportedPlatform, deployFailed or execForbidden with the message
-	// naming what to do, or State "" with the reason for the resolver's
-	// Refused (raw, a denied answer, or no helper-tier answer yet — each
-	// naming the connection setting that would change it). Set means
-	// Factory is nil.
 	Refusal *GitOpenRefusal
 }
-
-// GitFactoryFor resolves the helper-backed factory selection git.open uses
-// for an SSH session — the composition root's answer to "is a helper
-// available for this host, and may it be used" (ADR-0068). Refusal answers
-// its state instead of opening; a selection with neither answers the
-// not-available error.
 
 // HostedSessionOpen is the synchronous result of selecting a helper-owned
 // session. Host, Account and Generation are facts used by later projections;
@@ -1960,13 +1944,15 @@ func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {
 	return func(s *WSServer) { s.helperSessionOpener = opener }
 }
 
-// It must be side-effect-free: git.open consults it twice (the handler's
-// refusal decision, then the open), and the two calls must agree.
+// GitFactoryFor reads the live helper selection for an SSH pane without side
+// effects. The handler and the open currently consult it separately, so a
+// connection-axis change can invalidate the earlier selection. The factory
+// must revalidate availability when opening; a selection is not a lease.
 type GitFactoryFor func(sess session.Session) GitOpenSelection
 
 // WithGitHelperFactory attaches the helper-backed factory selection for SSH
 // sessions (the remote-helper design). The composition root wires it from
-// the helper's install configuration and the consent store; when absent,
+// the pane's connection binding and the far-helper registry; when absent,
 // git.open answers the not-available error for SSH sessions.
 func WithGitHelperFactory(f GitFactoryFor) WSServerOption {
 	return func(s *WSServer) { s.gitHelperFor = f }

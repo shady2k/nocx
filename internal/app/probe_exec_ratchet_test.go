@@ -75,10 +75,9 @@ var execSeamFiles = map[string]string{
 	// The declaration, and the interface's own doc says why it still exists
 	// and what bounds it.
 	"internal/ssh/ssh_discovery.go": "the seam's declaration",
-	// The install path's one-command conversion (deploy's platform probe). Its
-	// file is owned by another task, which is why the seam was kept rather than
-	// retyped with the rest.
-	"internal/app/helper_git.go": "the platform probe's conversion into deploy's one-command seam",
+	// The install path's one-command conversion (deploy's platform probe),
+	// carried with the hosted-shell seam it now lives beside.
+	"internal/app/hosted_shell_carrier.go": "the platform probe's conversion into deploy's one-command seam",
 	// The composition root's dispatch: which lease the install path's probe is
 	// served by.
 	"internal/app/helper_sshchan.go": "the dispatch that serves that lane from this machine's helper",

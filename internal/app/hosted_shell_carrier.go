@@ -130,7 +130,12 @@ func newHostedShellRegistry(lanes helperInstallProvider, source deploy.ArtifactS
 // failure and the success paths all release exactly once.
 type probeHold struct {
 	lease ssh.DiscoveryConn
-	once  sync.Once
+	// hostKey is the machine's host key as the probe's dial confirmed it. It
+	// travels with the hold because the open path needs it after selection —
+	// a profile that trusts the host through known_hosts carries no pin — and
+	// the dialect that confirmed it is the only one that can state it.
+	hostKey string
+	once    sync.Once
 }
 
 func (h *probeHold) release() {
@@ -138,6 +143,16 @@ func (h *probeHold) release() {
 		return
 	}
 	h.once.Do(func() { _ = h.lease.Close() })
+}
+
+// fingerprint answers the confirmed host key, or "" for a nil hold or a probe
+// that never got a key. Nil-safe because every decline and failure arm carries
+// a nil hold.
+func (h *probeHold) fingerprint() string {
+	if h == nil {
+		return ""
+	}
+	return h.hostKey
 }
 
 // probeHelperPlatformHeld is the same probe with its lease LEFT OPEN, and it is
@@ -186,11 +201,11 @@ func probeHelperPlatformHeld(ctx context.Context, host string, opts []ssh.Connec
 	// NO deferred Close here, and that absence IS this function: the reference
 	// travels back to the caller, which releases it once the interval it
 	// belongs to is over (probeHold's own comment).
-	hold := &probeHold{lease: probe}
 	fingerprint := ""
 	if fp, ok := probe.(interface{ HostKeyFingerprint() string }); ok {
 		fingerprint = fp.HostKeyFingerprint()
 	}
+	hold := &probeHold{lease: probe, hostKey: fingerprint}
 	platform, err := deploy.Probe(ctx, probeExec{probe})
 	if err != nil {
 		return hold, fingerprint, deploy.Platform{}, false, err

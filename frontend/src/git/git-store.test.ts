@@ -897,6 +897,28 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
     expect(store.state()).toBe('ready')
   })
+
+  it('keeps local Git out of the axis gate: no epoch, no axis, the rules it always had', async () => {
+    // The gate is an SSH rule (a local tab has no connection observation at
+    // all), so the generation guard must not touch it: a same-cwd re-scope
+    // keeps the live binding, and a verified cwd change is still the only
+    // thing that re-asks.
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+
+    store.rescope({ ...LOCAL_ORIGIN, paneId: 5 })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
+    expect(store.state()).toBe('ready')
+  })
 })
 
 describe('a machine with no helper-tier answer', () => {

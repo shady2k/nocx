@@ -548,7 +548,10 @@ describe('files tree store', () => {
     await expect(reveal).resolves.toBe(false)
     expect(store.phase()).toBe('failed')
 
-    store.rescope(LOCAL_A)
+    // The Retry is the header refresh, not another origin: a repeated origin
+    // with the same context must not re-open behind the person's back
+    // (ALX-1019).
+    store.refresh()
     const retry = store.revealPath('/docs')
     retryOpening.resolve(OPEN_RESULT)
     await expect(retry).resolves.toBe(true)
@@ -2063,6 +2066,48 @@ describe('a Files panel nobody is looking at does no work', () => {
     expect(open).toHaveBeenCalledTimes(2)
     expect(store.phase()).toBe('ready')
     expect(store.openError()).toBeNull()
+  })
+
+  it('S9: a wake with the same open context after a failed files.open starts nothing', async () => {
+    // ALX-1019: a quality sample republishes the origin without changing the
+    // context files.open is about (session, kind, verified cwd, follow). The
+    // failed open's Retry card stays; nothing re-opens it on the person's
+    // behalf.
+    const open = vi.fn().mockRejectedValueOnce(NOT_STARTED).mockResolvedValue(OPEN_RESULT)
+    const store = shownStore(makeServices({ open }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.phase()).toBe('failed')
+    expect(open).toHaveBeenCalledTimes(1)
+
+    store.rescope({ ...LOCAL_A, paneId: 99 })
+    await settle()
+    store.rescope({ ...LOCAL_A, paneId: 100 })
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('did not start')
+  })
+
+  it('S9: a live binding is not re-listed or re-revealed by a same-context origin', async () => {
+    // The live-binding half of the same rule: the tree stays, the binding
+    // stays, and a cwd that has not moved issues no second reveal.
+    const list = vi.fn().mockImplementation(revealTreeList())
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const store = shownStore(makeServices({ list, open }))
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
+    await settle()
+    expect(store.revealTarget()).toBe('/home/alice')
+    const listsBefore = list.mock.calls.length
+
+    store.rescope({ ...LOCAL_A, cwd: '/home/alice', paneId: 99 })
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(list.mock.calls.length).toBe(listsBefore)
+    expect(store.revealTarget()).toBe('/home/alice')
+    expect(store.phase()).toBe('ready')
   })
 
   it('re-asks a background call that did not start when the panel is shown again', async () => {

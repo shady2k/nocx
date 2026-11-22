@@ -1351,7 +1351,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
 
   function rescope(next: ActiveOrigin | null): void {
     const prev = origin()
-    const prevBinding = binding()
     // NOTHING ON SCREEN DOES NO WORK. The origin is recorded — it is where
     // the panel would open — and no binding, listing, watch or reveal is
     // started for it. `setVisible(true)` starts the scope from this record
@@ -1365,52 +1364,45 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       if (next === null) releaseScope()
       return
     }
-    // Rule 1: the same session scope keeps its binding and its tree — a
-    // later OSC 7 cwd must not re-root the tree, and neither may a viewer
-    // tab that answers the origin it was opened from (design §5.4): the
-    // viewer is the same machine with a different paneId, and re-opening
-    // there would close the very binding the viewer is reading through.
-    // Only a different session, a different kind, or a dead binding
-    // (dispose, or an origin that went null and came back) re-opens.
+    // Rule 1: the same session scope keeps its binding and its tree, whatever
+    // its phase — in flight, ready or failed. A later OSC 7 report must not
+    // re-root the tree, a repeated origin after a failed files.open must not
+    // retry behind the person's back (the panel's Retry is the retry), and
+    // neither may a viewer tab that answers the origin it was opened from
+    // (design §5.4): the viewer is the same machine with a different paneId,
+    // and re-opening there would close the very binding the viewer is reading
+    // through. Only a different session, a different kind, or a dead scope
+    // (dispose, or an origin that went null and came back) re-opens —
+    // `restartScope` is the one open, and `refresh()` is its explicit caller.
     if (
       prev !== null &&
       next !== null &&
       prev.sessionId === next.sessionId &&
       prev.kind === next.kind &&
-      prevBinding !== null
+      untrack(phase) !== 'no-origin'
     ) {
       // The stored origin stays CURRENT even though the scope does not
       // re-open: openFile hands it to the viewer, and the reveal check
       // reads the live cwd. A stale cwd here would reach the viewer.
       setOrigin(next)
-      // Same scope: the tree does not move, but a VERIFIED cwd change on
-      // the origin the panel follows REVEALS — the chain from the root
-      // down to the new cwd is expanded and the target selected. This is
-      // the product rule: the terminal owns "where am I", and the panel,
-      // rooted at /, follows by revealing, never by re-rooting. An
+      // Same scope: the tree does not move, but a VERIFIED cwd CHANGE on the
+      // origin the panel follows REVEALS — the chain from the root down to
+      // the new cwd is expanded and the target selected. This is the product
+      // rule: the terminal owns "where am I", and the panel, rooted at /,
+      // follows by revealing, never by re-rooting. The (cwd, verified) pair
+      // that did NOT move issues nothing: the wake that republished the
+      // origin is not a reason to walk the tree again (ALX-1019). An
       // unverified or absent cwd reveals nothing (AD-5: no silent $HOME
       // guess); an origin with no opinion — a viewer tab's frozen origin —
       // reveals nothing either: it is "stay exactly as you are".
-      if (next.cwdVerified && next.cwd !== null && next.cwdFollow) {
+      if (
+        (next.cwd !== prev.cwd || next.cwdVerified !== prev.cwdVerified) &&
+        next.cwdVerified &&
+        next.cwd !== null &&
+        next.cwdFollow
+      ) {
         void revealPath(next.cwd)
       }
-      return
-    }
-    // An open already in flight for the same session: re-opening would
-    // mint a second binding that supersedes the first (nocx-myts leaks
-    // it). The stored origin is STILL updated to the newest answer — the
-    // in-flight open reveals from the LIVE origin on success, and a
-    // stale cwd here would make it reveal the wrong path, or nothing at
-    // all: the unverified startup cwd is exactly what an early OSC 7
-    // races against.
-    if (
-      prev !== null &&
-      next !== null &&
-      prev.sessionId === next.sessionId &&
-      prev.kind === next.kind &&
-      phase() === 'opening'
-    ) {
-      setOrigin(next)
       return
     }
     restartScope(next)
@@ -1942,8 +1934,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (phase() === 'no-origin') return
     if (binding() === null) {
       // The binding is gone (open failed, or disposed): re-establish the
-      // scope — the header refresh is the retry for a failed open too.
-      if (phase() === 'failed') rescope(o)
+      // scope — the header refresh is the retry for a failed open too, and
+      // it is the one caller that opens without the context moving.
+      if (phase() === 'failed') restartScope(o)
       return
     }
     // One cycle for the whole tree: every expanded directory is re-listed

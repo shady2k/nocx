@@ -109,7 +109,6 @@ func waitForJoined(t *testing.T, v *Vault, n int) {
 // requester attached.
 func sealedVault(t *testing.T, req *fakeUnlockRequester) *Vault {
 	t.Helper()
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "hunter2")
 	v.Seal()
@@ -123,7 +122,6 @@ func sealedVault(t *testing.T, req *fakeUnlockRequester) *Vault {
 }
 
 func TestEnsureUnsealed_UnsealedReturnsNilWithoutPrompt(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "hunter2")
 	req := &fakeUnlockRequester{entered: make(chan struct{}, 1)}

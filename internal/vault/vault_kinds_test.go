@@ -9,7 +9,6 @@ import (
 )
 
 func TestCreateNamed_APITokenAppearsInInventoryWithMeaningfulKind(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -38,7 +37,6 @@ func TestCreateNamed_APITokenAppearsInInventoryWithMeaningfulKind(t *testing.T) 
 }
 
 func TestCreateNamed_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -59,7 +57,6 @@ func TestCreateNamed_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.
 }
 
 func TestRenameSecret_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -89,7 +86,6 @@ func TestRenameSecret_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing
 }
 
 func TestCreateNamed_AcceptsNameContainingRowPrefixLater(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()

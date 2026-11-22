@@ -62,7 +62,6 @@ import {
   startSshd,
   type SshdFixture,
 } from './sshd-fixture'
-import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
@@ -300,6 +299,35 @@ function holdFarRedial(remoteHome: string): RedialHold {
   }
 }
 
+/** One captured WebSocket frame, in the order it crossed the socket. */
+interface WireFrame {
+  readonly direction: 'sent' | 'received'
+  readonly payload: string
+}
+
+interface RpcFrame {
+  readonly id?: unknown
+  readonly method?: unknown
+  readonly params?: unknown
+  readonly result?: unknown
+  readonly error?: unknown
+}
+
+function parseRpcFrame(payload: string): RpcFrame | null {
+  try {
+    const value: unknown = JSON.parse(payload)
+    return typeof value === 'object' && value !== null ? (value as RpcFrame) : null
+  } catch {
+    return null
+  }
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
 test('a serving helper opens the repository and says nothing on the head', async ({ page }) => {
   test.setTimeout(180_000)
   const wired = await wire(page, { mode: 'helper' })
@@ -432,6 +460,19 @@ test('a helper killed with the transport up offers Refresh on both surfaces, and
   page,
 }) => {
   test.setTimeout(240_000)
+  // THE WIRE IS THE WITNESS THAT THE PRESS REACHED THE BACKEND. The socket
+  // exists only for newer connections, so the listener is installed before
+  // the app is brought up — registering it beside the click would capture
+  // nothing.
+  const frames: WireFrame[] = []
+  page.on('websocket', (ws) => {
+    ws.on('framesent', (e) => {
+      if (typeof e.payload === 'string') frames.push({ direction: 'sent', payload: e.payload })
+    })
+    ws.on('framereceived', (e) => {
+      if (typeof e.payload === 'string') frames.push({ direction: 'received', payload: e.payload })
+    })
+  })
   // THE SHELL IS DELIBERATELY NOT HELPER-HOSTED. A mode change applies to a
   // host's connections at once, while a shell already open keeps the
   // integration it opened with (ADR-727g63tr decision 1): opening by Script
@@ -490,6 +531,73 @@ test('a helper killed with the transport up offers Refresh on both surfaces, and
 
       // THE PERSON'S PRESS, while the automatic return is still parked.
       await page.locator('[data-testid="git-helper-refresh"]').click()
+
+      // THE GATE COMES DOWN ON A CONFIRMED REFRESH, NOT ON A CLICK. Find the
+      // request this press sent, check the epoch it carried against the last
+      // observation this pane received — a stale epoch is refused by the
+      // driver — and only then release the parked dial.
+      await expect
+        .poll(() =>
+          frames.some(
+            (f) =>
+              f.direction === 'sent' &&
+              parseRpcFrame(f.payload)?.method === 'connection.helperRefresh',
+          ),
+        )
+        .toBe(true)
+      const pressIndex = frames.findIndex(
+        (f) =>
+          f.direction === 'sent' && parseRpcFrame(f.payload)?.method === 'connection.helperRefresh',
+      )
+      const press = parseRpcFrame(frames[pressIndex]!.payload)!
+      const params = recordOrNull(press.params)
+      const paneId = params?.paneId
+      expect(
+        typeof paneId,
+        `helper refresh carried no paneId: ${frames[pressIndex]!.payload}`,
+      ).toBe('string')
+      expect(typeof params?.connectionEpoch, 'helper refresh carried no epoch').toBe('number')
+
+      // Ordered frames make "the last observation" exact: a pane.connection
+      // received after the request went out cannot be what the press read.
+      let observedEpoch: number | null = null
+      for (const frame of frames.slice(0, pressIndex)) {
+        if (frame.direction !== 'received') continue
+        const received = parseRpcFrame(frame.payload)
+        if (received?.method !== 'pane.connection') continue
+        const receivedParams = recordOrNull(received.params)
+        if (receivedParams === null) continue
+        if (
+          receivedParams.paneId === paneId &&
+          typeof receivedParams.connectionEpoch === 'number'
+        ) {
+          observedEpoch = receivedParams.connectionEpoch
+        }
+      }
+      expect(
+        observedEpoch,
+        `no pane.connection for ${String(paneId)} before the press`,
+      ).not.toBeNull()
+      expect(params?.connectionEpoch).toBe(observedEpoch)
+
+      await expect
+        .poll(
+          () => {
+            return frames.some((f) => {
+              if (f.direction !== 'received') return false
+              const received = parseRpcFrame(f.payload)
+              const result = recordOrNull(received?.result)
+              return (
+                received !== null &&
+                received.id === press.id &&
+                received.error === undefined &&
+                result?.refreshed === true
+              )
+            })
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(true)
 
       // The moment of the automatic return, CHOSEN here rather than slept
       // for: the parked dial proceeds and the axis comes back.

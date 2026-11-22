@@ -1098,6 +1098,331 @@ describe('a wake that keeps the open context never re-opens Git (ALX-1019)', () 
   })
 })
 
+// ── The opening context: one key, one generation, one answer ─────────────
+//
+// ALX-1031. The context git.open is about is a KEY — session, kind, verified
+// cwd, an axis that permits opening — and one instance of it is one
+// generation. The paneId is not part of it: a viewer tab or a quality sample
+// republishes the same context under another one, and an answer to the same
+// context is the same answer. A binding a re-open carries belongs to the
+// store, so an instance that ends can release it.
+
+const closeCallsWith = (close: ReturnType<typeof vi.fn>, bindingId: string): number =>
+  close.mock.calls.filter((c) => c[0] === bindingId).length
+
+describe('the opening context key and the answer it accepts (ALX-1031)', () => {
+  it('G1: the verified cwd is lost while git.open is in flight — noCwd stays, the late success is closed and no read starts', async () => {
+    const pending = deferred<GitOpenResult>()
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise), close })
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+    await settle()
+    expect(store.state()).toBe('noCwd')
+
+    pending.resolve(openOk({ bindingId: 'b-late' }))
+    await settle()
+
+    // The lost cwd ended the instance: the answer to it cannot re-bind the
+    // panel to the directory nobody verified any more...
+    expect(store.state()).toBe('noCwd')
+    expect(store.phase()).toBe('ready')
+    expect(store.binding()).toBeNull()
+    // ...and its binding is closed exactly once, never leaked.
+    expect(closeCallsWith(close, 'b-late')).toBe(1)
+    // And it starts no read under the context it no longer is.
+    expect(mockHandle(services, 'status')).not.toHaveBeenCalled()
+    expect(mockHandle(services, 'log')).not.toHaveBeenCalled()
+    expect(mockHandle(services, 'remote')).not.toHaveBeenCalled()
+  })
+
+  it('G2: the same, but the late answer FAILS — noCwd stays and no failure card replaces it', async () => {
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+    await settle()
+
+    pending.reject(new Error('git: could not read the worktree'))
+    await settle()
+
+    expect(store.state()).toBe('noCwd')
+    expect(store.openError()).toBeNull()
+    expect(store.phase()).not.toBe('failed')
+  })
+
+  it('G3: the same verified cwd coming back opens exactly once, and only that answer lands', async () => {
+    const first = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce(openOk({ bindingId: 'b-second' }))
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+    await settle()
+    // The context comes back — a key the panel may open again.
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(2)
+
+    // The superseded answer lands last and cannot touch the live one.
+    first.resolve(openOk({ bindingId: 'b-first' }))
+    await settle()
+    expect(store.binding()).toEqual({ bindingId: 'b-second', toplevel: '/home/dev/repo' })
+    expect(store.state()).toBe('ready')
+    expect(closeCallsWith(close, 'b-first')).toBe(1)
+  })
+
+  it('G4: another paneId while git.open is in flight is the same context — the answer binds and its inline status paints', async () => {
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    // A viewer tab or a quality sample: the same connection, another pane.
+    store.rescope({ ...LOCAL_ORIGIN, paneId: 4 })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+
+    pending.resolve(openOk({ status: statusFixture({ branch: 'from-the-answer' }) }))
+    await settle()
+
+    expect(store.state()).toBe('ready')
+    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
+    // The status baked into the open's answer is applied — no separate read.
+    expect(store.status()?.branch).toBe('from-the-answer')
+    expect(mockHandle(services, 'status')).not.toHaveBeenCalled()
+  })
+
+  it('G4 (ssh): the same holds on a serving helper axis', async () => {
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+
+    pending.resolve(openOk({ status: statusFixture({ branch: 'over-ssh' }) }))
+    await settle()
+
+    expect(store.state()).toBe('ready')
+    expect(store.status()?.branch).toBe('over-ssh')
+  })
+
+  it('G5: status, log and remote reads keep applying when another paneId arrives under the same key', async () => {
+    const { store, services } = await openStore()
+    const status = deferred<GitStatusResult>()
+    const log = deferred<GitLogResult>()
+    const remote = deferred<GitRemoteResult>()
+    mockHandle(services, 'status').mockReturnValueOnce(status.promise)
+    mockHandle(services, 'log').mockReturnValueOnce(log.promise)
+    mockHandle(services, 'remote').mockReturnValueOnce(remote.promise)
+
+    store.refresh()
+    await settle()
+    store.rescope({ ...LOCAL_ORIGIN, paneId: 4 })
+    await settle()
+
+    status.resolve(statusResult({ branch: 'read-status' }))
+    log.resolve(logResult({ entries: [], total: 0 }))
+    remote.resolve({ state: 'ok', url: 'git@example.com:repo.git' })
+    await settle()
+
+    expect(store.status()?.branch).toBe('read-status')
+    expect(store.logState()).toBe('loaded')
+    expect(store.log()?.total).toBe(0)
+    expect(store.remoteState()).toBe('ok')
+    expect(store.remoteUrl()).toBe('git@example.com:repo.git')
+  })
+
+  it('G6: a mutation in flight lands when another paneId arrives under the same key, and its lane frees', async () => {
+    const { store, services } = await openStore()
+    const staged = deferred<{ status: Status }>()
+    mockHandle(services, 'stage').mockReturnValueOnce(staged.promise)
+
+    store.stage(['a.txt'])
+    expect(store.mutationInFlight()).toBe(true)
+    store.rescope({ ...LOCAL_ORIGIN, paneId: 4 })
+    await settle()
+
+    staged.resolve(statusResult({ branch: 'after-stage' }))
+    await settle()
+
+    expect(store.status()?.branch).toBe('after-stage')
+    expect(store.mutationInFlight()).toBe(false)
+  })
+
+  it('G7: a read in flight when the cwd changes is dropped by the generation', async () => {
+    const { store, services } = await openStore()
+    const status = deferred<GitStatusResult>()
+    mockHandle(services, 'status').mockReturnValueOnce(status.promise)
+
+    store.refresh()
+    await settle()
+    // The same session, a new verified cwd: a new context instance.
+    mockHandle(services, 'open').mockResolvedValueOnce(
+      openOk({ bindingId: 'b2', toplevel: '/home/dev/other' }),
+    )
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+
+    status.resolve(statusResult({ branch: 'stale-status' }))
+    await settle()
+
+    expect(store.status()?.branch).not.toBe('stale-status')
+  })
+
+  it('G9a: a cd re-open in flight, then the cwd is lost — the carried binding closes exactly once', async () => {
+    const reopened = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(reopened.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('P')
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope({ ...NEW_CWD_ORIGIN, cwdVerified: false })
+    await settle()
+
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(store.state()).toBe('noCwd')
+
+    // The superseded answer arrives and closes only what it minted.
+    reopened.resolve(openOk({ bindingId: 'P-late', toplevel: '/home/dev/repo/sub' }))
+    await settle()
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(closeCallsWith(close, 'P-late')).toBe(1)
+  })
+
+  it('G9b: a cd re-open in flight, then the axis stops serving — the carried binding closes exactly once', async () => {
+    const reopened = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(reopened.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('P')
+
+    store.rescope({ ...SSH_ORIGIN, cwd: '/home/bob/sub' })
+    await settle()
+
+    store.rescope({
+      ...SSH_ORIGIN,
+      cwd: '/home/bob/sub',
+      connection: connectionAxis({
+        state: 'unavailable',
+        reason: 'helper-lost',
+        action: 'refresh',
+      }),
+    })
+    await settle()
+    expect(store.state()).toBe('helperBlocked')
+    expect(closeCallsWith(close, 'P')).toBe(1)
+
+    reopened.resolve(openOk({ bindingId: 'P-late' }))
+    await settle()
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(store.binding()).toBeNull()
+  })
+
+  it('G9c: a second cd while the first re-open is in flight — a different toplevel closes the carried binding once', async () => {
+    const second = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(new Promise<never>(() => {}))
+      .mockReturnValueOnce(second.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    store.rescope({ ...LOCAL_ORIGIN, cwd: '/home/dev/repo/other' })
+    await settle()
+    expect(open).toHaveBeenCalledTimes(3)
+
+    second.resolve(openOk({ bindingId: 'B', toplevel: '/home/dev/somewhere-else' }))
+    await settle()
+
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(store.binding()).toEqual({ bindingId: 'B', toplevel: '/home/dev/somewhere-else' })
+  })
+
+  it('G9c (same toplevel): the same second cd keeps the carried binding instead of churning it', async () => {
+    const second = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(new Promise<never>(() => {}))
+      .mockReturnValueOnce(second.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    store.rescope({ ...LOCAL_ORIGIN, cwd: '/home/dev/repo/other' })
+    await settle()
+
+    // The answer names the repository the carried binding already is.
+    second.resolve(openOk({ bindingId: 'B', toplevel: '/home/dev/repo' }))
+    await settle()
+
+    expect(store.binding()).toEqual({ bindingId: 'P', toplevel: '/home/dev/repo' })
+    expect(closeCallsWith(close, 'P')).toBe(0)
+    expect(closeCallsWith(close, 'B')).toBe(1)
+  })
+
+  it('G9d: dispose closes a binding a re-open is carrying, exactly once', async () => {
+    const reopened = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(reopened.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    store.dispose()
+    expect(closeCallsWith(close, 'P')).toBe(1)
+
+    reopened.resolve(openOk({ bindingId: 'P-late' }))
+    await settle()
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(closeCallsWith(close, 'P-late')).toBe(1)
+  })
+})
+
 describe('a machine with no helper-tier answer', () => {
   // ADR-0068 removed the git panel's consent card: the connection, or the
   // connect-time ask, decides the helper — never a feature surface — so
@@ -1445,6 +1770,34 @@ describe('git.changed and dispose', () => {
     const handler = mockHandle(services, 'subscribeGitChanged').mock.calls[0][0]
     handler({ bindingId: 'b1', reason: 'sessionClosed' })
     expect(store.state()).toBe('noPane')
+    expect(store.binding()).toBeNull()
+  })
+
+  it('a session-close notification for a binding a re-open is carrying ends the instance and drops it', async () => {
+    const reopened = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(reopened.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const services = makeServices({ open, close })
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+
+    // A cd holds P while its re-open is in flight.
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(store.binding()).toBeNull()
+
+    const handler = mockHandle(services, 'subscribeGitChanged').mock.calls[0][0]
+    handler({ bindingId: 'P', reason: 'sessionClosed' })
+    expect(store.state()).toBe('noPane')
+    expect(closeCallsWith(close, 'P')).toBe(1)
+
+    reopened.resolve(openOk({ bindingId: 'P-late' }))
+    await settle()
+    expect(closeCallsWith(close, 'P-late')).toBe(1)
     expect(store.binding()).toBeNull()
   })
 

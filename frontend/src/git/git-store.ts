@@ -8,14 +8,20 @@
 // The rules that make it correct, each with the failure it stops:
 //
 // 1. RESPONSES CARRY THE SCOPE THEY WERE ISSUED FOR, PLUS AN EPOCH (D17).
-//    Every request captures {paneId, generation, bindingId, epoch}; a
-//    response applies only if the first three still match the store AND its
-//    epoch is not older than the newest already applied for its class.
-//    generation bumps on every re-scope; epoch bumps before EVERY
-//    status-producing request — each poll, each manual refresh, each
-//    mutation. The epoch is what orders a poll issued BEFORE a mutation
-//    that lands AFTER it: the two requests carry identical scope, and a
-//    guard that cannot distinguish them cannot order them.
+//    Every request captures {generation, bindingId, epoch}; a response
+//    applies only if the scope still matches the store AND its epoch is not
+//    older than the newest already applied for its class. THE SCOPE IS THE
+//    GENERATION, AND THE GENERATION IS ONE INSTANCE OF THE OPENING CONTEXT
+//    (ALX-1031): the context's key is the session, the kind, the VERIFIED
+//    cwd and the axis that permits opening — never the paneId, because a
+//    viewer tab or a quality sample republishes the same context under
+//    another one, and an answer to the same context is the same answer.
+//      generation bumps exactly when a context is entered, left or forced;
+//      epoch bumps before EVERY status-producing request — each poll, each
+//      manual refresh, each mutation. The epoch is what orders a poll issued
+//      BEFORE a mutation that lands AFTER it: the two requests carry
+//      identical scope, and a guard that cannot distinguish them cannot
+//      order them.
 //    The status, log and remote are independent facts, so each class
 //    tracks its OWN applied epoch. The control plane delivers responses in
 //    completion order, not issue order (a faster backend command's answer
@@ -280,9 +286,12 @@ function sideState(st: Status | null, path: string, side: GitDiffSide): string |
   return null
 }
 
-/** The scope a response was issued for (rule 1). */
+/** The scope a response was issued for (rule 1): the context instance it
+ *  was issued under, the binding it read, and the epoch that orders it
+ *  against the other requests of its class. `paneId` is deliberately absent
+ *  — it is not part of the opening context, so it cannot be compared by
+ *  accident (ALX-1031). */
 interface ScopeCtx {
-  paneId: number
   generation: number
   bindingId: string | null
   epoch: number
@@ -341,16 +350,19 @@ function axisAllowsOpen(o: ActiveOrigin): boolean {
   return o.kind !== 'ssh' || o.connection?.helper?.state === 'serving'
 }
 
-/** The context git.open is about: the session, how it was opened, and the
- *  VERIFIED directory. An observation republished on the same connection
- *  changes none of them, and must not be read as a new open (ALX-1019). */
-function sameOpenContext(a: ActiveOrigin, b: ActiveOrigin): boolean {
-  return (
-    a.sessionId === b.sessionId &&
-    a.kind === b.kind &&
-    a.cwd === b.cwd &&
-    a.cwdVerified === b.cwdVerified
-  )
+/** The opening key (ALX-1031): the session, how it was opened, the VERIFIED
+ *  directory, and the axis that permits opening it. Nothing else is part of
+ *  it — not the paneId (a viewer tab or a quality sample is the same
+ *  context), not a connection epoch (a newer observation of the same axis is
+ *  not a new permission to open), and not the cwd of a tab with no opinion.
+ *
+ *  Null when this origin may not open anything at all: an axis that does not
+ *  serve, or a cwd nobody verified. And the string is opaque on purpose: it
+ *  answers "same context?" and never says what the context is. */
+function openingKey(o: ActiveOrigin): string | null {
+  if (!axisAllowsOpen(o)) return null
+  if (!o.cwdVerified || o.cwd === null) return null
+  return `${o.sessionId}\u0000${o.kind}\u0000${o.cwd}`
 }
 
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
@@ -387,8 +399,18 @@ export function createGitStore(
   /** True between dispose() and the next rescope(): late responses from a
    *  previous life of this store must not touch the reset state. */
   let closed = true
-  /** Bumps on every re-scope — the tab-switch half of rule 1. */
+  /** One instance of the opening context (ALX-1031): bumps when a context is
+   *  entered, left or forced to re-open, and every answer issued for the
+   *  previous instance is stale by it. */
   let generation = 0
+  /** The key of the context this instance is about; null while the origin may
+   *  not open anything (no verified cwd, an axis that does not serve, no
+   *  origin at all). Republishes of the same key never move the generation. */
+  let instanceKey: string | null = null
+  /** The live binding a re-open of the SAME session inherits, held here and
+   *  not in the open's closure: an instance that ends must be able to release
+   *  it, and a closure dies with the request that made it (ALX-1031). */
+  let carried: GitBinding | null = null
   /** Bumps before EVERY status-producing request — the ordering half of
    *  rule 1 (D17). */
   let epoch = 0
@@ -511,27 +533,27 @@ export function createGitStore(
     }
   })
 
-  /** The response's request is still the view's current scope: same tab,
-   *  same generation, and — once a binding exists — the same binding.
-   *  Untracked: a response applies to the state it lands in, never
-   *  re-derived for a state that replaced it (files-store rule 2). */
+  /** The response's request is still the view's current scope: the same
+   *  instance of the opening context and — once a binding exists — the same
+   *  binding. Untracked: a response applies to the state it lands in, never
+   *  re-derived for a state that replaced it (files-store rule 2).
+   *
+   *  A republished key does not move the generation (ALX-1031), so a read
+   *  issued under the same context keeps applying however many observations
+   *  arrived in between — and a paneId is never compared, because it is not
+   *  part of the context. */
   function scopeCurrent(ctx: ScopeCtx): boolean {
     if (closed) return false
-    const o = untrack(origin)
-    const b = untrack(binding)
-    if (o === null || ctx.paneId !== o.paneId) return false
+    if (untrack(origin) === null) return false
     if (ctx.generation !== generation) return false
+    const b = untrack(binding)
     if (ctx.bindingId !== null && (b === null || ctx.bindingId !== b.bindingId)) return false
     return true
   }
 
-  /** A git.open response applies only if it is still the newest scope
-   *  request: the open that establishes a binding wins by generation. The
-   *  pane is deliberately not part of this test — a wake that republished
-   *  the SAME open context under another paneId (a viewer tab, or a quality
-   *  sample) must not turn the open it did not restart into a stale answer
-   *  (ALX-1019). A different session or cwd opens a new scope and bumps the
-   *  generation, which is what makes the old answer stale. */
+  /** The open answer, read the same way: the instance that issued it is still
+   *  the instance now. Its binding is not in the test — an open establishes
+   *  one, so it was issued before any existed. */
   function openCurrent(ctx: { generation: number }): boolean {
     if (closed) return false
     return untrack(origin) !== null && ctx.generation === generation
@@ -575,11 +597,43 @@ export function createGitStore(
 
   /** The binding is gone (session closed, deleted, or a close raced us):
    *  re-resolve through git.open against the CURRENT origin — the answer
-   *  decides what the panel is showing (design §5.5). */
+   *  decides what the panel is showing (design §5.5). A forced re-open is a
+   *  new instance like any other, so it goes through the one path that ends
+   *  one; and it RELEASES the live binding rather than carrying it, because
+   *  the read that got here was told that very binding is unknown. */
   function reResolve(): void {
     const o = untrack(origin)
     if (o === null) return
-    openScope(o)
+    scopeTo(o, true)
+  }
+
+  /** One instance of the opening context ends (ALX-1031). The generation
+   *  moves, so no answer issued for that context can apply again; the poll
+   *  schedule is dropped; and every binding the instance holds is released —
+   *  always the one an earlier re-open carried, and the live one too unless
+   *  the next context is a re-open of the SAME session under a real key,
+   *  which inherits it (`carryLive`, the same-toplevel rule of D4).
+   *
+   *  What the panel keeps on screen is the caller's decision: the repository
+   *  answers (state, version, environment) belong to the state the instance
+   *  leaves, and only the branch that names that state resets them. */
+  function endInstance(carryLive: boolean): void {
+    generation++
+    resetPollSchedule()
+    const live = untrack(binding)
+    if (carryLive) {
+      if (live !== null) carried = live
+    } else if (live !== null) {
+      void services.close(live.bindingId).catch(() => {})
+    }
+    if (!carryLive && carried !== null) {
+      const leftover = carried
+      carried = null
+      void services.close(leftover.bindingId).catch(() => {})
+    }
+    setBinding(null)
+    resetLog()
+    resetRemote()
   }
 
   function clearPollTimer(): void {
@@ -641,7 +695,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { generation, bindingId: b.bindingId, epoch }
     const scheduleVersion = pollScheduleVersion
     pollInFlight = true
     // The POLL is the panel's own repeating work and is background: a refusal
@@ -731,7 +785,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { generation, bindingId: b.bindingId, epoch }
     setRemoteState('loading')
     services.remote(b.bindingId).then(
       (res) => {
@@ -779,7 +833,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { generation, bindingId: b.bindingId, epoch }
     setLogState('loading')
     services.log(b.bindingId).then(
       (res) => {
@@ -813,31 +867,36 @@ export function createGitStore(
     )
   }
 
+  /** Issue git.open for the instance `scopeTo` has just begun. The instance
+   *  itself — the generation bump and the released or carried bindings — is
+   *  settled by `endInstance`; this only asks and applies. */
   function openScope(o: ActiveOrigin): void {
-    const prev = untrack(binding)
-    generation++
-    resetPollSchedule()
-    setBinding(null)
     setPhase('opening')
     setOpenError(null)
     epoch++ // the open's inline status is a status-producing response too
     // bindingId null: the open is not scoped to a binding — its response
     // either establishes one or is stale by generation (rule 1, open half).
-    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: null, epoch }
-    resetLog()
-    resetRemote()
+    const ctx: ScopeCtx = { generation, bindingId: null, epoch }
     services
       .open(o.sessionId, o.cwd ?? undefined)
       .then((res) => {
         if (!openCurrent(ctx)) {
-          // Stale: a newer open superseded this one. A successful open has
-          // already registered a live binding on the backend — dropping
-          // the response without closing it would leak it (nocx-myts).
+          // Stale: a newer instance superseded this one. A successful open
+          // has already registered a live binding on the backend — dropping
+          // the response without closing it would leak it (nocx-myts). The
+          // binding this open carried, if any, was released when its
+          // instance ended.
           if (res.state === 'ok' && res.bindingId !== undefined) {
             void services.close(res.bindingId).catch(() => {})
           }
           return
         }
+        // The live binding this re-open inherited, if any: the same-toplevel
+        // rule of D4, read from the store's state rather than a closure. The
+        // answer is current, so no instance ended since this open was issued,
+        // so this IS the binding the open carried (ALX-1031).
+        const prev = carried
+        carried = null
         if (res.state !== 'ok') {
           // cd'd out, git vanished, git too old, or a refusal a SERVING
           // helper still answered. The old binding, if any, is superseded:
@@ -874,12 +933,10 @@ export function createGitStore(
           return
         }
         // ok. git owns repository identity: the answer, not the path,
-        // decides whether to re-bind (D4). Same toplevel → keep the live
-        // binding (diff tabs hold it) and close the freshly-minted one
-        // this re-ask created; different toplevel (or none before) → adopt.
+        // decides whether to re-bind (D4). Same toplevel → keep the carried
+        // binding (diff tabs hold it) and close the freshly-minted one this
+        // re-ask created; different toplevel (or none carried) → adopt.
         if (prev !== null && prev.toplevel === res.toplevel) {
-          // The binding was cleared when the open was issued; prev is still
-          // live, so the keep case restores it.
           setBinding(prev)
           if (res.bindingId !== undefined && res.bindingId !== prev.bindingId) {
             void services.close(res.bindingId).catch(() => {})
@@ -966,112 +1023,97 @@ export function createGitStore(
     scopeTo(next, false)
   }
 
+  /** THE ONE PLACE AN INSTANCE OF THE OPENING CONTEXT ENDS (ALX-1031).
+   *
+   *  A context is a key: session, kind, verified cwd and an axis that
+   *  permits opening. Republishing the same key — a wake, a quality sample,
+   *  another paneId, a newer observation of the same axis — is not a
+   *  transition: the origin is recorded (the pane is the view's, not the
+   *  context's) and nothing is asked. Everything else ends the instance
+   *  through `endInstance` and then branches on what the new one is: no
+   *  origin, an origin that may not open, or a real key that opens.
+   *
+   *  `force` is the explicit Refresh/Retry: the same key, opened again —
+   *  and the live binding released rather than carried, because the caller
+   *  is here precisely because the open it holds is not trusted (a failed
+   *  open, a refusal, or a read answered unknownBinding). */
   function scopeTo(next: ActiveOrigin | null, force: boolean): void {
-    // A frozen origin (a diff tab) has no opinion: activating it must
-    // never re-bind the panel to a cwd snapshot that may be stale (design
-    // §5.4). The panel keeps showing the shell's repository as it was.
+    // A frozen origin (a diff tab, a viewer) has no opinion: activating it
+    // must never re-bind the panel to a cwd snapshot that may be stale
+    // (design §5.4). It is not a transition at all — the panel keeps showing
+    // the shell's repository as it was, and Files merely records where it
+    // would be.
     if (next !== null && !next.cwdFollow) return
     const prev = untrack(origin)
+    const key = next === null ? null : openingKey(next)
+    if (!force && key !== null && key === instanceKey) {
+      setOrigin(next)
+      return
+    }
     if (next === null) {
       if (prev === null) return
-      const b = untrack(binding)
-      if (b !== null) void services.close(b.bindingId).catch(() => {})
-      setBinding(null)
+      endInstance(false)
+      instanceKey = null
       setOpenState(null)
+      setOpenError(null)
       setStatus(null)
       setStatusStale(false)
       resetRepositoryState()
       setOrigin(null)
       setPhase('no-origin')
-      resetLog()
-      resetRemote()
       return
     }
-    // THE FAR HELPER GATES AN SSH TAB (ADR-727g63tr decision 2; task
-    // .6.3c-1). Only `serving` reaches git.open: `starting` — including a
-    // connection whose first observation has not arrived — is the launch
-    // label, and a paused or unavailable axis closes whatever binding was
-    // live and lets the panel draw the axis's own sentence and action.
-    const helper = next.kind === 'ssh' ? next.connection?.helper : undefined
-    const serving = next.kind !== 'ssh' || helper?.state === 'serving'
-    if (!serving) {
-      // THE PERMISSION THAT ISSUED AN OPEN HAS ENDED. A git.open sent while
-      // the axis served may still be in flight, and leaving serving closes
-      // only the binding already accepted. Bumping the scope is what makes
-      // the late answer stale: a success then closes the binding the backend
-      // minted instead of adopting it (and starting reads) under a blocked
-      // axis, a failure no longer replaces the axis's own sentence with the
-      // "Could not reach git" card, and an adopted binding no longer
-      // suppresses the re-open on the way back to serving (ALX-998).
-      generation++
+    // AN ORIGIN THAT MAY NOT OPEN: an axis that is not serving (the far
+    // helper gates an SSH tab, ADR-727g63tr decision 2), or a cwd nobody
+    // verified (AD-5: no silent $HOME guess). Nothing is asked and the
+    // panel draws the card that says why. A republished observation of the
+    // SAME such state is not a transition either — nothing can be in flight
+    // under it, and the card it shows comes from the origin.
+    if (key === null && !force) {
       const live = untrack(binding)
-      if (live !== null) void services.close(live.bindingId).catch(() => {})
-      const prevHelper = prev?.connection?.helper
       const changed =
         prev === null ||
         prev.sessionId !== next.sessionId ||
         prev.kind !== next.kind ||
-        helperKey(prevHelper) !== helperKey(helper) ||
+        helperKey(prev.kind === 'ssh' ? prev.connection?.helper : undefined) !==
+          helperKey(next.kind === 'ssh' ? next.connection?.helper : undefined) ||
         live !== null ||
+        carried !== null ||
         untrack(phase) !== 'ready'
-      setBinding(null)
-      setOrigin(next)
-      if (!changed) return
+      if (!changed) {
+        setOrigin(next)
+        return
+      }
+    }
+    // A re-open of the SAME session under a real key inherits the live
+    // binding, so the answer can keep it when it names the same toplevel
+    // (D4). Leaving the context, a different session, and a forced re-open
+    // all release it.
+    const carryLive = !force && key !== null && prev !== null && prev.sessionId === next.sessionId
+    endInstance(carryLive)
+    instanceKey = key
+    setOrigin(next)
+    if (key === null) {
+      // The axis's own card, or noCwd. The axis is the only one of the two
+      // that withdraws the repository answers: a cwd the shell has not
+      // reported yet says nothing about which git this machine has, and the
+      // noCwd card needs none of them.
       setOpenState(null)
       setOpenError(null)
       setStatus(null)
       setStatusStale(false)
-      setGitVersion(null)
-      setEnvState(null)
-      setEnvReason(null)
       resetRepositoryState()
-      resetLog()
-      resetRemote()
-      // The discriminator's other half: the axis states render from state(),
-      // never from the opening spinner or the failed card.
+      if (next.kind === 'ssh' && !axisAllowsOpen(next)) {
+        setGitVersion(null)
+        setEnvState(null)
+        setEnvReason(null)
+      }
       setPhase('ready')
       return
     }
-    // The frontend's own guard, decided BEFORE any backend call (AD-5):
-    // a session with no verified cwd never reaches git.open — local or
-    // SSH alike. An SSH tab WITH a verified cwd reaches git.open and the
-    // answer decides the state (remote-helper design §6); the old remote
-    // guard that never asked is gone.
-    if (!next.cwdVerified || next.cwd === null) {
-      const b = untrack(binding)
-      if (b !== null) void services.close(b.bindingId).catch(() => {})
-      setBinding(null)
-      setOpenState(null)
-      setStatus(null)
-      setStatusStale(false)
-      resetRepositoryState()
-      setOrigin(next)
-      setPhase('ready')
-      resetLog()
-      resetRemote()
-      return
-    }
-    // NOTHING THE OPEN IS ABOUT HAS MOVED: the same session, kind and
-    // verified cwd under an axis that may open. The origin is recorded (the
-    // paneId may differ) and whatever the open answered is kept — in flight,
-    // ok, notARepository, gitUnavailable, gitTooOld or failed. The ONE
-    // exception is an explicit Refresh/Retry, which forces the open below.
-    // `phase` is read live: 'no-origin' is the state BEFORE any scope, where
-    // there is nothing to keep.
-    if (
-      !force &&
-      prev !== null &&
-      axisAllowsOpen(prev) &&
-      sameOpenContext(prev, next) &&
-      untrack(phase) !== 'no-origin'
-    ) {
-      setOrigin(next)
-      return
-    }
-    // This scope commits to the live state: from here, responses apply
+    // This instance commits to the live state: from here, responses apply
     // under rule 1 until dispose() closes the store again.
     closed = false
-    setOrigin(next)
     openScope(next)
   }
 
@@ -1146,7 +1188,7 @@ export function createGitStore(
     if (o === null || b === null) return null
     resetPollSchedule()
     epoch++
-    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { generation, bindingId: b.bindingId, epoch }
     setMutationInFlight(true)
     setMutationError(null)
     setMutationRefused(null)
@@ -1360,19 +1402,23 @@ export function createGitStore(
 
   const unsubChanged = services.subscribeGitChanged((p) => {
     const b = untrack(binding)
-    if (b === null || p.bindingId !== b.bindingId) return
-    // The session that owned the binding closed. The panel drops to noPane:
+    const held = b !== null && p.bindingId === b.bindingId
+    const carriedHeld = carried !== null && p.bindingId === carried.bindingId
+    if (!held && !carriedHeld) return
+    // The session that owned the binding closed: the context is gone, so the
+    // instance ends with it — a binding a re-open is carrying included, or
+    // the next context would inherit a dead one. The panel drops to noPane:
     // the active-origin accessor follows the tab change, and the next
     // rescope re-opens against whatever is in front.
-    setPhase('no-origin')
-    setOrigin(null)
-    setBinding(null)
+    endInstance(false)
+    instanceKey = null
     setOpenState(null)
+    setOpenError(null)
     setStatus(null)
     setStatusStale(false)
     resetRepositoryState()
-    resetLog()
-    resetRemote()
+    setPhase('no-origin')
+    setOrigin(null)
   })
 
   // ── The D7 staleness seam (worker G's GitDiffDeps.onDiffStale) ────────
@@ -1400,19 +1446,18 @@ export function createGitStore(
   function dispose(): void {
     closed = true
     setVisible(false)
-    const b = binding()
     unsubChanged()
-    if (b !== null) void services.close(b.bindingId).catch(() => {})
+    // The instance ends and releases everything it holds — the live binding
+    // and the one a re-open may be carrying (ALX-1031).
+    endInstance(false)
+    instanceKey = null
     staleSubs.clear()
     setPhase('no-origin')
     setOrigin(null)
-    setBinding(null)
     setOpenState(null)
     setStatus(null)
     setStatusStale(false)
     resetRepositoryState()
-    resetLog()
-    resetRemote()
   }
 
   return {

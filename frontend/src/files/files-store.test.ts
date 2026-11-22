@@ -2279,3 +2279,100 @@ describe('the opening context key and the answer it accepts (ALX-1031)', () => {
     expect(store.origin()?.sessionId).toBe('session-b')
   })
 })
+
+// ── ALX-1043: a hidden panel still decides a transition ───────────────────
+//
+// `rescope` decided the transition only in its visible branch; the hidden one
+// recorded the new origin and considered nothing. So a `files.open` for the
+// old session passed `openCurrent` under the new origin and bound, listed and
+// watched a machine that was no longer in front. The one predicate now decides
+// both branches, and a different scope while hidden releases the instance
+// through `releaseScope` — nothing is opened until the panel is shown again.
+
+describe('ALX-1043: a hidden panel decides the transition too', () => {
+  it('F5: an open in flight when the hidden scope changes is released, never listed or watched', async () => {
+    const openingA = deferred<typeof OPEN_RESULT>()
+    const open = vi
+      .fn()
+      .mockReturnValueOnce(openingA.promise)
+      .mockResolvedValueOnce({ ...OPEN_RESULT, bindingId: 'bB' })
+    const close = vi.fn().mockResolvedValue({})
+    const list = vi.fn().mockResolvedValue(listOk('C:/', []))
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ open, close, list, watch }))
+
+    store.setVisible(true)
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    // The sidebar goes away while A's open is still in flight, and the tab
+    // moves to another machine.
+    store.setVisible(false)
+    store.rescope(SSH_B)
+    await settle()
+
+    openingA.resolve({ ...OPEN_RESULT, bindingId: 'bA' })
+    await settle()
+
+    // The superseded answer closes the binding it minted...
+    expect(closeCallsWith(close, 'bA')).toBe(1)
+    // ...and nothing is listed or watched for the machine we left.
+    expect(list).not.toHaveBeenCalled()
+    expect(watch).not.toHaveBeenCalled()
+    expect(store.phase()).toBe('no-origin')
+
+    store.setVisible(true)
+    await settle()
+    expect(open.mock.calls.filter((c) => c[0] === 'session-b')).toHaveLength(1)
+    expect(list.mock.calls.every((c) => c[0] === 'bB')).toBe(true)
+  })
+
+  it('F6: a hidden Ready binding is released when the scope changes, and B starts on show', async () => {
+    const open = vi.fn().mockResolvedValue({ ...OPEN_RESULT, bindingId: 'bA' })
+    const close = vi.fn().mockResolvedValue({})
+    const store = createFilesTreeStore(makeServices({ open, close }))
+
+    store.setVisible(true)
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('bA')
+
+    store.setVisible(false)
+    store.rescope(SSH_B)
+    await settle()
+
+    expect(closeCallsWith(close, 'bA')).toBe(1)
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(store.phase()).toBe('no-origin')
+
+    store.setVisible(true)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(open).toHaveBeenLastCalledWith('session-b', '/', 'background')
+  })
+
+  it('F7: a hidden panel keeps the binding for a diff tab of the same session', async () => {
+    const open = vi.fn().mockResolvedValue({ ...OPEN_RESULT, bindingId: 'bA' })
+    const close = vi.fn().mockResolvedValue({})
+    const store = createFilesTreeStore(makeServices({ open, close }))
+
+    store.setVisible(true)
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('bA')
+
+    store.setVisible(false)
+    open.mockClear()
+    close.mockClear()
+
+    store.rescope(FROZEN_A)
+    await settle()
+
+    expect(open).not.toHaveBeenCalled()
+    expect(close).not.toHaveBeenCalled()
+    expect(store.binding()?.bindingId).toBe('bA')
+    expect(store.origin()?.paneId).toBe(7)
+    expect(store.phase()).toBe('ready')
+  })
+})

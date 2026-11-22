@@ -1367,6 +1367,23 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       })
   }
 
+  /** THE ONE SCOPE PREDICATE (ALX-1043): two origins are the same tree when
+   *  they name the same session and kind and this store still holds that
+   *  scope. The cwd only reveals and the paneId is a view, so neither is part
+   *  of it (ALX-1031). Both `rescope` branches — hidden and visible — decide
+   *  the transition by this predicate and by nothing else; a second notion of
+   *  "same scope" is how a hidden panel recorded a new origin without
+   *  releasing the instance that answered for the old one. */
+  function sameScope(prev: ActiveOrigin | null, next: ActiveOrigin | null): boolean {
+    return (
+      prev !== null &&
+      next !== null &&
+      prev.sessionId === next.sessionId &&
+      prev.kind === next.kind &&
+      untrack(phase) !== 'no-origin'
+    )
+  }
+
   function rescope(next: ActiveOrigin | null): void {
     const prev = origin()
     // NOTHING ON SCREEN DOES NO WORK. The origin is recorded — it is where
@@ -1378,27 +1395,37 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // Not disposed by this: the store is live and recording where it will
       // open; it simply has no reason to open yet.
       closed = false
+      if (next === null) {
+        setOrigin(null)
+        releaseScope()
+        return
+      }
+      // A DIFFERENT scope is still a transition while nothing is on screen.
+      // An answer for the old one — a `files.open` already in flight — must
+      // not land under the new origin and list or watch the machine the
+      // person has left. Nothing is opened here: the generation is raised
+      // and the binding released by `releaseScope`, and `setVisible` starts
+      // the recorded scope through `ensureScope`.
+      if (sameScope(prev, next)) {
+        setOrigin(next)
+        return
+      }
+      releaseScope()
       setOrigin(next)
-      if (next === null) releaseScope()
       return
     }
-    // Rule 1: the same session scope keeps its binding and its tree, whatever
-    // its phase — in flight, ready or failed. A later OSC 7 report must not
+    // Rule 1: the same scope keeps its binding and its tree, whatever its
+    // phase — in flight, ready or failed. A later OSC 7 report must not
     // re-root the tree, a repeated origin after a failed files.open must not
     // retry behind the person's back (the panel's Retry is the retry), and
-    // neither may a viewer tab that answers the origin it was opened from
-    // (design §5.4): the viewer is the same machine with a different paneId,
-    // and re-opening there would close the very binding the viewer is reading
-    // through. Only a different session, a different kind, or a dead scope
-    // (dispose, or an origin that went null and came back) re-opens —
-    // `restartScope` is the one open, and `refresh()` is its explicit caller.
-    if (
-      prev !== null &&
-      next !== null &&
-      prev.sessionId === next.sessionId &&
-      prev.kind === next.kind &&
-      untrack(phase) !== 'no-origin'
-    ) {
+    // neither may a viewer tab or a diff tab that answers the origin it was
+    // opened from (design §5.4): the viewer is the same machine with a
+    // different paneId, and re-opening there would close the very binding
+    // the viewer is reading through. Only a different session, a different
+    // kind, or a dead scope (dispose, or an origin that went null and came
+    // back) re-opens — `restartScope` is the one open, and `refresh()` is
+    // its explicit caller.
+    if (sameScope(prev, next) && prev !== null && next !== null) {
       // The stored origin stays CURRENT even though the scope does not
       // re-open: openFile hands it to the viewer, and the reveal check
       // reads the live cwd. A stale cwd here would reach the viewer.

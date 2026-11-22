@@ -194,6 +194,13 @@ type boundsRecorder struct {
 	confirmDone   chan struct{}
 	confirmErrors chan error
 	stopConfirm   sync.Once
+	// stopped is set under mu before confirmations is closed, and checked
+	// under mu by offerConfirmation before it sends: the close and the offer
+	// are the two halves of one decision, so a delivery that lands after the
+	// recorder stopped (the shell's own prompt redraw, a frame still in the
+	// client's read loop) is refused instead of sent on a closed channel
+	// (nocx-oalo1.6.9).
+	stopped bool
 }
 
 func (r *boundsRecorder) onRows(o client.OutputRows) {
@@ -240,10 +247,17 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 // pending acknowledgements are one cumulative mark, not a queue of RPCs.
 func (r *boundsRecorder) offerConfirmation(upTo uint64) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.confirmations == nil {
+		return
+	}
 	if upTo > r.confirmMark {
 		r.confirmMark = upTo
 	}
-	r.mu.Unlock()
+	// The send runs under mu, and stopConfirmations closes only after it set
+	// stopped under mu: a sender can therefore never be in flight when the
+	// channel closes. The select's default case coalesces a pending offer; it
+	// never protected against a closed channel.
 	select {
 	case r.confirmations <- struct{}{}:
 	default:
@@ -251,9 +265,11 @@ func (r *boundsRecorder) offerConfirmation(upTo uint64) {
 }
 
 func (r *boundsRecorder) startConfirmations(confirm func(context.Context, uint64) error) {
+	r.mu.Lock()
 	r.confirmations = make(chan struct{}, 1)
 	r.confirmDone = make(chan struct{})
 	r.confirmErrors = make(chan error, 1)
+	r.mu.Unlock()
 	go func() {
 		defer close(r.confirmDone)
 		var sent uint64
@@ -275,9 +291,21 @@ func (r *boundsRecorder) startConfirmations(confirm func(context.Context, uint64
 	}()
 }
 
+// stopConfirmations refuses every later offer and then closes the channel.
+// It is safe to call more than once and before startConfirmations.
 func (r *boundsRecorder) stopConfirmations() {
-	r.stopConfirm.Do(func() { close(r.confirmations) })
-	<-r.confirmDone
+	r.stopConfirm.Do(func() {
+		r.mu.Lock()
+		r.stopped = true
+		ch, done := r.confirmations, r.confirmDone
+		r.mu.Unlock()
+		if ch != nil {
+			close(ch)
+		}
+		if done != nil {
+			<-done
+		}
+	})
 }
 
 func (r *boundsRecorder) onEnd(e client.IntervalEnd) {
@@ -525,6 +553,39 @@ func TestBoundsConfirmationsCoalesceWhileARequestIsInFlight(t *testing.T) {
 	if rec.sawIncomplete || rec.sawLoss != 0 {
 		t.Fatalf("incomplete=%v lost=%d", rec.sawIncomplete, rec.sawLoss)
 	}
+}
+
+// TestAnAcknowledgementOfferedAfterTheRecorderStoppedIsRefused is the
+// window nocx-oalo1.6.9 is about, narrowed to one call: the recorder stops
+// confirming while a rows delivery is still in the client's read loop, and
+// that delivery reaches offerConfirmation after the channel has closed. Sending
+// on a closed channel panics, and the select's default case never protected it,
+// so the old fixture failed the package on load rather than on an assertion.
+func TestAnAcknowledgementOfferedAfterTheRecorderStoppedIsRefused(t *testing.T) {
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	startsACommand(t, e, pub, lane, h, 2, "one row")
+
+	rec := &boundsRecorder{sid: session.ID(sid), ws: e.ws}
+	confirmed := make(chan uint64, 1)
+	rec.startConfirmations(func(_ context.Context, mark uint64) error {
+		select {
+		case confirmed <- mark:
+		default:
+		}
+		return nil
+	})
+	rec.onRows(client.OutputRows{FromRow: 0, Rows: []emulator.Row{aStreamRow("stored")}})
+	select {
+	case <-confirmed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the store's confirmation never reached the confirmer: the offer path this test stops was not exercised")
+	}
+
+	// The last interval has been measured and the ack drained; the shell's
+	// prompt redraw is still on its way.
+	rec.stopConfirmations()
+	rec.onRows(client.OutputRows{FromRow: 1, Rows: []emulator.Row{aStreamRow("late")}})
 }
 
 func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {

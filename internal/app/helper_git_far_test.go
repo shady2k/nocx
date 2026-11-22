@@ -57,7 +57,7 @@ func (s *gitFarSeams) Install(context.Context, farhelper.Target, farhelper.Platf
 
 func (s *gitFarSeams) Dial(ctx context.Context, _ farhelper.Target, _ farhelper.Installed) (*helperclient.Client, error) {
 	s.dials.Add(1)
-	lane := newFakeLaneConn(s.peer)
+	lane := newFakeLaneConn(s.t.Name(), s.peer)
 	c, err := helperclient.Dial(ctx, helperclient.Config{Exec: lane, ExpectHash: syntheticArtifactHash, Log: discardLogger(s.t)})
 	if err != nil {
 		_ = lane.Close()
@@ -120,7 +120,7 @@ func TestGitAcquiresFarHelperIndependentlyOfHostedShell(t *testing.T) {
 			var shell *coordinator
 			var shellID session.ID
 			if hosted {
-				provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+				provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 				shell = newCoordinator(t, provider)
 				binding := openHostedFixture(t, shell, "pane")
 				shellID = session.ID(binding.SessionID)

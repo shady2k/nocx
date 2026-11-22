@@ -85,7 +85,7 @@ func TestAFarOpenThatNeverAnswersNamesItsStageAndWhoClosedIt(t *testing.T) {
 		Log:        sl,
 	})
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc), home: t.TempDir()}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc), home: t.TempDir()}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, sl)
 	endStandOnCleanup(t, provider, reg)

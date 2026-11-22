@@ -71,7 +71,7 @@ func TestAFrameThatCannotBeWrittenIsRetriedByTheLocalHelperOpen(t *testing.T) {
 		}
 		return 0
 	}
-	lane := &writesFail{lane: newFakeLaneConn(peer)}
+	lane := &writesFail{lane: newFakeLaneConn(t.Name(), peer)}
 	t.Cleanup(func() { _ = lane.Close() })
 	c, err := helperclient.Dial(context.Background(), helperclient.Config{
 		Exec:       lane,

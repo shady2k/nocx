@@ -118,7 +118,7 @@ func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.St
 // connection's stored mode no longer decides whether this asks — a host nobody
 // answered for is auto (ADR-0033), whatever the profile says.
 func TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
@@ -151,7 +151,7 @@ func TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough(t *testing.T
 // the fingerprint the probe reports, the SAME connection resolves silently
 // to the helper — the second half of "asked exactly once per fingerprint".
 func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	r := newTestRegistry(t, provider, store)
@@ -171,7 +171,7 @@ func TestOpenHoldingLease_GrantedResolvesWithoutAsking(t *testing.T) {
 // attachment's identity: subsequent consent and host settings reads use the
 // verified host key even though the helper, not the coordinator, dialed it.
 func TestOpenHoldingLease_GrantedMachineRetainsItsFingerprint(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	source := stubArtifacts(t)
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
@@ -200,7 +200,7 @@ func TestOpenHoldingLease_GrantedMachineRetainsItsFingerprint(t *testing.T) {
 // because a connection says nothing about the method any more. A host with no
 // record meets the ask, and no lane, install or session exists before it.
 func TestOpenHoldingLease_AHostWithNoRecordAsksBeforeAnythingIsInstalled(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
@@ -236,7 +236,7 @@ func TestOpenHoldingLease_AHostWithNoRecordAsksBeforeAnythingIsInstalled(t *test
 // silently, with no ask and a helper-hosted session, whatever the connection
 // says.
 func TestOpenHoldingLease_AHostRecordedHelperIsServedSilently(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	// fakeProbeConn.HostKeyFingerprint is the fixed "SHA256:fake" (helper_git_test.go).
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	r := newTestRegistry(t, provider, store)
@@ -258,7 +258,7 @@ func TestOpenHoldingLease_AHostRecordedHelperIsServedSilently(t *testing.T) {
 // host's — so a host recorded raw is never asked about the helper, even when
 // the connection's own stored mode is helper.
 func TestOpenHoldingLease_AHostRecordedRawNeverAsks(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Raw)

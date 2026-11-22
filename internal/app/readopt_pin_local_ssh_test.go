@@ -62,7 +62,7 @@ func TestReadoptedGitRefusesAnotherTrustedHostKeyAfterClientLoss(t *testing.T) {
 			}
 
 			svc := sharedHelperService(t)
-			fake := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+			fake := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 			first := newCoordinator(t, fake)
 			opened, selected, err := first.reg.OpenHosted(ctx, session.Config{
 				Kind: session.KindRemote, Host: destination, Cwd: t.TempDir(),

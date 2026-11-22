@@ -83,7 +83,7 @@ func TestAFrameFailingBecauseTheCoordinatorStopsIsLeftRatherThanHalted(t *testin
 func TestACompletionDeliveredDuringShutdownIsAppliedOnceByTheNextCoordinator(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	store := newMemCursorStore()
 
 	first := newCursorKeepingCoordinator(t, provider, store)

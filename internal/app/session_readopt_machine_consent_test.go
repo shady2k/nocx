@@ -50,7 +50,7 @@ func secondRunWithHostMode(t *testing.T, provider *fakeLaneProvider, binding con
 // open and the panels, not the permission a live helper channel rides on.
 func TestTB1aAGrantedMachineIsReadoptedThoughTheHostsSavedMethodIsRaw(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -73,7 +73,7 @@ func TestTB1aAGrantedMachineIsReadoptedThoughTheHostsSavedMethodIsRaw(t *testing
 // Script is an answer about new opens, not a withdrawal of the machine's grant.
 func TestTB1bStagingAReadoptionIgnoresTheHostsSavedScriptMethod(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -97,7 +97,7 @@ func TestTB1bStagingAReadoptionIgnoresTheHostsSavedScriptMethod(t *testing.T) {
 // refused.
 func TestTB1cADeniedMachineStopsReadoptionWhateverTheHostsMethodSays(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -138,7 +138,7 @@ func TestTB1cADeniedMachineStopsReadoptionWhateverTheHostsMethodSays(t *testing.
 // a Raw method for a decision the machine never made.
 func TestTB1dAnUnansweredMachineIsNotReadoptedThoughTheHostsSavedMethodIsRaw(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()

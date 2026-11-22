@@ -54,7 +54,7 @@ func TestHostKeyPinHelperGitBridgeRefusesAnotherPooledHostKey(t *testing.T) {
 		fakeRemoteSession: &fakeRemoteSession{id: "pinned-git", host: destination, fingerprint: sessionPin},
 		opts:              opts,
 	}
-	provider := pinnedGitLaneProvider{fakeLaneProvider: &fakeLaneProvider{}, bridge: stand.helper}
+	provider := pinnedGitLaneProvider{fakeLaneProvider: &fakeLaneProvider{owner: t.Name()}, bridge: stand.helper}
 	store, _ := testConsentStoresFor(t, sessionPin)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, nil, reg)

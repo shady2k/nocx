@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	iofs "io/fs"
 	"log/slog"
@@ -168,22 +169,71 @@ type fakeLaneConn struct {
 	mu     sync.Mutex
 	closed int
 
-	// openedBy is the test that asked this stand for a lane, captured where
-	// the lane is made rather than where it leaks: by the time TestMain reads
-	// the dump, the goroutines are all that is left of it and the test that
-	// owns them is gone (nocx-y3kfq).
+	// openedBy is the test that asked this stand for a lane, NAMED by the
+	// fixture that owns the stand rather than read from whoever opens it. A
+	// lane is opened on the server's goroutine when a test drives the open
+	// over the socket, and that stack holds no test's frames — which is why
+	// the stack-walking answer was "?" for exactly the leaks this report
+	// exists to name (nocx-y3kfq).
 	openedBy string
 }
 
-// laneConns is every fake lane this package's stands have made. The reports
-// at the end of the run read it to say WHICH test left one open instead of
-// only which shape is still parked.
-var laneConns struct {
+// laneRegistry is every fake lane whose helper peer has NOT returned yet. A
+// lane is forgotten when its peer ends — its pipes are gone with it — so what
+// remains is exactly what an end-of-run report needs, and a run with
+// -count=N does not accumulate one entry per lane it ever opened
+// (nocx-y3kfq).
+type laneRegistry struct {
 	mu    sync.Mutex
 	conns []*fakeLaneConn
 }
 
-func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
+// laneConns is the package's one registry. The reports at the end of the run
+// read it to say WHICH test left a lane open instead of only which shape is
+// still parked.
+var laneConns laneRegistry
+
+func (r *laneRegistry) add(f *fakeLaneConn) {
+	r.mu.Lock()
+	r.conns = append(r.conns, f)
+	r.mu.Unlock()
+}
+
+// forget drops a lane whose peer has returned: both halves of its wire are
+// gone by then, so it cannot be the leak the report looks for.
+func (r *laneRegistry) forget(f *fakeLaneConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, c := range r.conns {
+		if c == f {
+			r.conns = append(r.conns[:i], r.conns[i+1:]...)
+			return
+		}
+	}
+}
+
+// liveLanes is a snapshot of the lanes still in flight.
+func (r *laneRegistry) liveLanes() []*fakeLaneConn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*fakeLaneConn(nil), r.conns...)
+}
+
+// count is how many lanes the registry holds now.
+func (r *laneRegistry) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.conns)
+}
+
+// newFakeLaneConn makes a lane for the test its owner names. owner is
+// required: attribution read from the creating goroutine's stack works only
+// where a test's own frame is in it, and a lane is opened on the server's
+// goroutine whenever an open arrives over the socket (nocx-y3kfq).
+func newFakeLaneConn(owner string, peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
+	if owner == "" {
+		panic("newFakeLaneConn: a fake lane must name the test that owns it")
+	}
 	toPeerR, toPeerW := io.Pipe()
 	fromPeerR, fromPeerW := io.Pipe()
 	f := &fakeLaneConn{
@@ -191,36 +241,45 @@ func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLane
 		stdout:   fromPeerR,
 		stderr:   bytes.NewReader(nil),
 		exited:   make(chan struct{}),
-		openedBy: testFrameInStack(),
+		openedBy: owner,
 	}
-	laneConns.mu.Lock()
-	laneConns.conns = append(laneConns.conns, f)
-	laneConns.mu.Unlock()
+	laneConns.add(f)
 	go func() {
 		code := peer(toPeerR, fromPeerW)
 		_ = fromPeerW.Close()
 		f.exitCode = code
 		close(f.exited)
+		laneConns.forget(f)
 	}()
 	return f
 }
 
-// unopenedLanes are the fake lanes whose helper peer is still running: the
-// lane was never closed, or its close never reached the peer. It is the same
-// fact Wait is parked on, read from the fixture's own side so the report can
-// name the test.
-func unopenedLanes() []*fakeLaneConn {
-	laneConns.mu.Lock()
-	defer laneConns.mu.Unlock()
-	var left []*fakeLaneConn
-	for _, c := range laneConns.conns {
+// leakLine is one line of the leak report: the lane whose helper peer is still
+// running, the test that opened it, and how many times it was closed. The last
+// two separate "opened and never closed" from "closed, but the peer never
+// returned".
+func (f *fakeLaneConn) leakLine() string {
+	return fmt.Sprintf("  a fake lane opened by %s never ended: it was closed %d time(s), "+
+		"and its helper peer is still running", f.openedBy, f.closeCount())
+}
+
+// laneLeakReport is the leak report's lane half, one line per fake lane whose
+// helper peer is still running. The registry forgets a lane when its peer
+// returns, so every line here is a lane somebody opened and did not end.
+func laneLeakReport() []string {
+	left := laneConns.liveLanes()
+	lines := make([]string, 0, len(left))
+	for _, c := range left {
 		select {
 		case <-c.exited:
+			// Its peer returned: the registry forgets it one statement later,
+			// and a lane whose peer is gone is not a leak.
+			continue
 		default:
-			left = append(left, c)
 		}
+		lines = append(lines, c.leakLine())
 	}
-	return left
+	return lines
 }
 
 func (f *fakeLaneConn) Stdin() io.WriteCloser { return f.stdin }
@@ -348,6 +407,10 @@ type laneRequest struct {
 // helper would have opened: this double stands in for this machine's helper,
 // not for the coordinator's own dial).
 type fakeLaneProvider struct {
+	// owner is the test this stand answers for, named where the stand is made
+	// so a lane opened on the server's goroutine is still attributed to it
+	// (nocx-y3kfq).
+	owner    string
 	peer     func(in io.Reader, out io.Writer) int
 	startErr error
 
@@ -419,7 +482,7 @@ func (p *fakeLaneProvider) LaneConn(ctx context.Context, _ string, machine proto
 			return nil, ctx.Err()
 		}
 	}
-	c := newFakeLaneConn(p.peer)
+	c := newFakeLaneConn(p.owner, p.peer)
 	c.startErr = p.startErr
 	p.mu.Lock()
 	p.conns = append(p.conns, c)
@@ -449,7 +512,7 @@ func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.C
 
 func TestFakeLaneProviderConcurrentInstallLeasesShareOneFilesystem(t *testing.T) {
 	const callers = 32
-	provider := &fakeLaneProvider{}
+	provider := &fakeLaneProvider{owner: t.Name()}
 	start := make(chan struct{})
 	leases := make(chan ssh.HelperInstallConn, callers)
 	var wg sync.WaitGroup
@@ -1023,7 +1086,7 @@ func registerHostedCarrier(t *testing.T, reg *helperRegistry, sid session.ID, ho
 // removed (D25), without disturbing another machine. The verified host-key
 // fingerprint, not a hostname or a Git binding, identifies the affected entries.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
@@ -1051,7 +1114,7 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 // whether deleting the executable is safe. On refusal, every affected carrier
 // must remain registered and unfrozen so a repaired daemon can be tried again.
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
-	provider := &fakeLaneProvider{peer: helperPeerWithoutSession(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: helperPeerWithoutSession(t)}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
@@ -1090,7 +1153,7 @@ func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T
 // From carrier loss until the next inventory answer the registry must retain
 // the hosted entry, redial its lane, and use the replacement for later teardown.
 func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
@@ -1121,7 +1184,7 @@ func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
 // different build's sessions; a wrong directory names a binary nobody installed.
 // Compare with deploy's layout so the test does not invent another install path.
 func TestHostedOpenInstallsArtifactAndNamesItsGenerationOnTheLane(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	c := newCoordinator(t, provider)
 	first := openHostedFixture(t, c, "pane-1")
 	if provider.install == nil || !provider.install.hasCompleteInstall("/home/u") {
@@ -1148,7 +1211,7 @@ func TestHostedOpenInstallsArtifactAndNamesItsGenerationOnTheLane(t *testing.T) 
 // before taking an install lease or opening a lane. The ordinary opener can
 // still serve the pane; declining is not permission to deploy another binary.
 func TestHostedOpenRefusesUnavailableArtifactWithoutInstalling(t *testing.T) {
-	provider := &fakeLaneProvider{}
+	provider := &fakeLaneProvider{owner: t.Name()}
 	c := newCoordinator(t, provider)
 	c.reg.source = refusingSource{}
 	_, selected, err := c.reg.OpenHosted(t.Context(), remoteConfigFor(), "")

@@ -100,7 +100,7 @@ func TestHostModeUsesAuthenticatedLeaseBeforePublishing(t *testing.T) {
 }
 
 func TestHostModeProbeFailureWithoutKeyDoesNotChooseKnownHostsEntry(t *testing.T) {
-	r := newTestRegistry(t, &fakeLaneProvider{probeFail: errors.New("probe unavailable")}, nil)
+	r := newTestRegistry(t, &fakeLaneProvider{owner: t.Name(), probeFail: errors.New("probe unavailable")}, nil)
 	mustRecordHostMode(t, r.modes, "SHA256:script", hostmode.Script)
 	mustRecordHostMode(t, r.modes, "SHA256:raw", hostmode.Raw)
 	cfg := remoteConfigFor()

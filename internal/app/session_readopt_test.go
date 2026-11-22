@@ -495,7 +495,7 @@ func routesFor(p content.PendingSession) *stubRoutes {
 // keyed to the pane it was the pipe of, and without spawning a second shell.
 func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
@@ -572,7 +572,7 @@ func TestAFreshCoordinatorTakesBackTheSessionStillRunningOnItsHost(t *testing.T)
 // gracefully — an accident of a different code path, not a guarantee.
 func TestAReadoptedSessionAnswersItsOwnHostKeyFingerprint(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
@@ -639,7 +639,7 @@ func closeHelperSession(t *testing.T, svc *helpersession.Service, p content.Pend
 // because that verdict is what stops a recording being deleted.
 func TestAnUnreachableHostNeverReadsAsTheSessionBeingGone(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -680,7 +680,7 @@ func TestAnUnreachableHostNeverReadsAsTheSessionBeingGone(t *testing.T) {
 // does not exist".
 func TestAGenerationThatIsGoneIsNotTheSessionBeingGone(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -713,7 +713,7 @@ func TestAGenerationThatIsGoneIsNotTheSessionBeingGone(t *testing.T) {
 // finished session would be kept for the retention age.
 func TestAHelperThatAnswersAndDoesNotHoldItStillProducesAbsent(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -745,7 +745,7 @@ func TestAHelperThatAnswersAndDoesNotHoldItStillProducesAbsent(t *testing.T) {
 // exact hazard nocx-k6p18.15's ordering exists to prevent.
 func TestAConnectionThatNowLeadsElsewhereIsNotAsked(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -780,7 +780,7 @@ func TestAConnectionThatNowLeadsElsewhereIsNotAsked(t *testing.T) {
 // itself and not as a generic unreachable host.
 func TestASealedVaultIsReportedAsItselfAndNotAsAbsent(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -808,7 +808,7 @@ func TestASealedVaultIsReportedAsItselfAndNotAsAbsent(t *testing.T) {
 // connection is dialled to guess with.
 func TestASessionWithNoRouteIsLeftExactlyWhereItWas(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	binding.ProfileID = ""
@@ -839,7 +839,7 @@ func TestASessionWithNoRouteIsLeftExactlyWhereItWas(t *testing.T) {
 // in the registry pretending it was adopted.
 func TestATransportThatRefusesLeavesTheSessionLiveAndUnadopted(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 
@@ -874,7 +874,7 @@ func TestATransportThatRefusesLeavesTheSessionLiveAndUnadopted(t *testing.T) {
 // deleted by the arrival of a second nocx.
 func TestASessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	// first does NOT quit: it is still running, still attached, still holding
@@ -928,7 +928,7 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 	// The daemon ends with the test, so the sessions it holds do too
 	// (nocx-1ebrs.66.1.29).
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -996,7 +996,7 @@ func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
 	// The daemon ends with the test, so the sessions it holds do too
 	// (nocx-1ebrs.66.1.29).
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1066,7 +1066,7 @@ func waitForHelperExit(t *testing.T, svc *helpersession.Service, p content.Pendi
 func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 	const machine = "SHA256:test-host"
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1112,7 +1112,7 @@ func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 func TestConsentStandingLetsTheSameBindingBeTakenBack(t *testing.T) {
 	const machine = "SHA256:test-host"
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1142,7 +1142,7 @@ func TestConsentStandingLetsTheSameBindingBeTakenBack(t *testing.T) {
 // reading the host.
 func TestATransportRefusingAfterTheAdoptTakesTheSessionBackOut(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1176,7 +1176,7 @@ func TestATransportRefusingAfterTheAdoptTakesTheSessionBackOut(t *testing.T) {
 // spawns anything.
 func TestTwoSessionsOnOneHostAreBothTakenBack(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	one := openHostedFixture(t, first, "pane-1")
 	two := openHostedFixture(t, first, "pane-2")
@@ -1224,7 +1224,7 @@ func TestTwoSessionsOnOneHostAreBothTakenBack(t *testing.T) {
 // emphatically not `absent`.
 func TestAHostThatNeverAnswersIsBoundedAndNeverReadsAsGone(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()
@@ -1266,7 +1266,7 @@ func TestAHostThatNeverAnswersIsBoundedAndNeverReadsAsGone(t *testing.T) {
 // answer is taken back rather than being cut off by its own guard.
 func TestTheBoundDoesNotCutOffAHostThatAnswers(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()

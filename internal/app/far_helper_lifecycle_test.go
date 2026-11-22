@@ -212,7 +212,7 @@ func startFarStand(t *testing.T, spawner interface {
 		}
 		return 0
 	}
-	provider := &fakeLaneProvider{peer: peer, home: t.TempDir()}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: peer, home: t.TempDir()}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
@@ -441,7 +441,7 @@ func TestAFarHelperThatDiedIsReplacedByTheNextOpen(t *testing.T) {
 		}
 		return 0
 	}
-	provider := &fakeLaneProvider{peer: peer, home: t.TempDir()}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: peer, home: t.TempDir()}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})

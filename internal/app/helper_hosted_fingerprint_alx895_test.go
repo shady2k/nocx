@@ -94,7 +94,7 @@ func alx895ConnectionAt(t *testing.T, source *farHelperConnections, id string) f
 // the confirmed key to farConnections. Without it the axis reads an unanswered
 // machine (consent-pending) for ever.
 func TestRemoteHelperOpenRecordsTheAuthenticatedFingerprint(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	remote := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, remote.modes, "SHA256:fake", hostmode.Helper)
@@ -154,7 +154,7 @@ func TestRemoteHelperOpenRecordsTheAuthenticatedFingerprint(t *testing.T) {
 // pair: when the far host declines, the local opener still learns the key from
 // its own authenticated lease and records it exactly as before.
 func TestScriptOpenRecordsTheAuthenticatedFingerprintFromTheLocalBranch(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	remote := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, remote.modes, "SHA256:fake", hostmode.Script)

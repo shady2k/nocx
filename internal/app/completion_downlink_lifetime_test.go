@@ -307,7 +307,7 @@ func TestACompletionAfterAReadoptedRestartReachesTheHelperOnTheSSHRoute(t *testi
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
 	rec := &recordingCompletions{Service: svc, arrived: make(chan struct{}, 16)}
-	provider := &fakeLaneProvider{peer: sharedRecordingPeer(t, svc, rec)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedRecordingPeer(t, svc, rec)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -427,7 +427,7 @@ func TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
 	rec := &recordingCompletions{Service: svc, arrived: make(chan struct{}, 16)}
-	provider := &fakeLaneProvider{peer: sharedRecordingPeer(t, svc, rec)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedRecordingPeer(t, svc, rec)}
 
 	source := stubArtifacts(t)
 	store, _ := testConsentStores(t)

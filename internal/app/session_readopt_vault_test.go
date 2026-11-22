@@ -185,7 +185,7 @@ func passwordPendingSessions(n int) []content.PendingSession {
 func TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithNPendingSessions(t *testing.T) {
 	const n = 3
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	coord := newCoordinator(t, provider)
 
 	v := sealedVaultForReadopt(t)
@@ -233,7 +233,7 @@ func TestReconcileSessions_PreListenPassRefusesPromptlyEvenWithNPendingSessions(
 func TestReconcileSessions_IfPresenceIsPrimedTooEarlyEachSessionCostsItsBound(t *testing.T) {
 	const n = 3
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	coord := newCoordinator(t, provider)
 
 	v := sealedVaultForReadopt(t)
@@ -274,7 +274,7 @@ func TestReconcileSessions_IfPresenceIsPrimedTooEarlyEachSessionCostsItsBound(t 
 // than the retry.
 func TestReconcileSessions_ASessionLeftPendingIsTakenBackOnceAttachedAndUnsealed(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	// A REAL session, opened while the vault is unsealed (a person is
 	// present, exactly as they were when they first connected this saved
@@ -398,7 +398,7 @@ func (r *suspendingUnlockRequester) RequestUnlock(ctx context.Context, _ string)
 // wire, the attempt returned, the unseal done.
 func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMissed(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	v := freshlySetUpVaultForReadopt(t)
 	first := newCoordinator(t, provider)
@@ -484,7 +484,7 @@ func TestReconcileSessions_APollOfShortAttemptsCatchesARawUnsealASuspendedOneMis
 }
 
 func TestCanceledReadoptReadinessDoesNotLeaveAStagedHelper(t *testing.T) {
-	second := newCoordinator(t, &fakeLaneProvider{})
+	second := newCoordinator(t, &fakeLaneProvider{owner: t.Name()})
 	pass := &readoptPass{registry: second.reg, routes: &stubRoutes{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -501,7 +501,7 @@ func TestCanceledReadoptReadinessDoesNotLeaveAStagedHelper(t *testing.T) {
 }
 
 func TestFailedReadoptDiscardsAnUnconsumedStagedHelper(t *testing.T) {
-	second := newCoordinator(t, &fakeLaneProvider{})
+	second := newCoordinator(t, &fakeLaneProvider{owner: t.Name()})
 	sid := session.ID("session")
 	second.reg.mu.Lock()
 	second.reg.pendingReadopts[sid] = &hostedShellCarrier{f: &hostedShellBinding{reg: second.reg, sid: sid}, lanes: second.reg.lanes, log: second.reg.log}

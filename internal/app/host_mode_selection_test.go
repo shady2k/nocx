@@ -53,7 +53,7 @@ func askOf(t *testing.T, err error) *transport.ErrHelperConsentNeeded {
 func TestProbeFailureKeepsRecordedHostMode(t *testing.T) {
 	for _, mode := range []hostmode.Mode{hostmode.Raw, hostmode.Script} {
 		t.Run(string(mode), func(t *testing.T) {
-			provider := &fakeLaneProvider{uname: "malformed"}
+			provider := &fakeLaneProvider{owner: t.Name(), uname: "malformed"}
 			store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 			r := newTestRegistry(t, provider, store)
 			mustRecordHostMode(t, r.modes, "SHA256:fake", mode)
@@ -72,7 +72,7 @@ func TestProbeFailureKeepsRecordedHostMode(t *testing.T) {
 
 func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 	t.Run("the host's script answers both profiles", func(t *testing.T) {
-		provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+		provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 		store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 		r := newTestRegistry(t, provider, store)
 		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Script)
@@ -100,7 +100,7 @@ func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 	})
 
 	t.Run("the host's helper answers both profiles", func(t *testing.T) {
-		provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+		provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 		store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 		r := newTestRegistry(t, provider, store)
 		mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)
@@ -130,7 +130,7 @@ func TestTwoProfilesToOneHostResolveTheHostsOneMode(t *testing.T) {
 // test because the pairing is the property — an ask that records nothing is a
 // dialog raised on every connect forever.
 func TestAHostWithNoRecordAsksAndAnsweringRecordsIt(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeerWithSpawner(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeerWithSpawner(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
@@ -166,7 +166,7 @@ func TestAHostWithNoRecordAsksAndAnsweringRecordsIt(t *testing.T) {
 // SECOND connection to it — from another profile, storing a mode that would
 // itself have asked (ADR-0105) — is silent.
 func TestAnsweringTheAskOnceStopsTheSecondOpenAsking(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
@@ -205,7 +205,7 @@ func (refusingDocumentStore) Delete(string) error            { return errors.New
 // here is that the product never falls back into the dialog because a disk was
 // full.
 func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 	r.modes = hostmode.NewStore(log.NewSlogAdapter(discardLogger(t)), refusingDocumentStore{}, "host-modes.json")
@@ -242,7 +242,7 @@ func TestAFailedHostRecordWriteStillAnswersThisOpen(t *testing.T) {
 // written and not that an open ever reads it.
 func TestTheEditorsChoiceIsWhatTheNextOpenUses(t *testing.T) {
 	const fingerprint = "SHA256:editor"
-	provider := &fakeLaneProvider{peer: realHelperPeer(t), fingerprint: fingerprint}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t), fingerprint: fingerprint}
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	r := newTestRegistry(t, provider, store)
 
@@ -311,7 +311,7 @@ func TestFailedHostModeWriteReopensPreviouslySavedMethod(t *testing.T) {
 	if err := modes.Set("SHA256:fake", hostmode.Script); !errors.Is(err, hostmode.ErrNotSaved) {
 		t.Fatalf("write = %v", err)
 	}
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	r := newTestRegistry(t, provider, nil)
 	r.modes = modes
 	cfg := remoteConfigFor()
@@ -330,7 +330,7 @@ func TestFailedHostModeWriteReopensPreviouslySavedMethod(t *testing.T) {
 }
 
 func TestHelperInstallPinMismatchWritesNothing(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t), installFail: refusalWith("host-key-pin-mismatch", nil)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t), installFail: refusalWith("host-key-pin-mismatch", nil)}
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	r := newTestRegistry(t, provider, store)
 	mustRecordHostMode(t, r.modes, "SHA256:fake", hostmode.Helper)

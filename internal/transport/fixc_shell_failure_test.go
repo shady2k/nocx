@@ -188,6 +188,20 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 	if closed || ended {
 		t.Fatal("shell recovery closed another pane on healthy connection")
 	}
+	// OWNERSHIP IS ANNOUNCED, NOT MERELY ACHIEVED (nocx-oalo1.6.14). openInto
+	// adds the session to the socket's state BEFORE it acks, and pane.opened is
+	// that ack — so the frame the renderer attaches the replacement on is also
+	// the first moment ownership is guaranteed. The pane.connection naming the
+	// replacement is published earlier, from inside OpenHosted, so reading the
+	// socket's sessions after THAT frame was reading a premise before the event
+	// that produces it.
+	var opened paneOpened
+	if err := json.Unmarshal(readNotification(t, conn, "pane.opened", wantWithin), &opened); err != nil {
+		t.Fatalf("decode pane.opened: %v", err)
+	}
+	if opened.Open.SessionID != string(replacementID) {
+		t.Fatalf("pane.opened names session %q, want the replacement %q", opened.Open.SessionID, replacementID)
+	}
 	state.mu.Lock()
 	attached := state.sessions[replacementID]
 	state.mu.Unlock()

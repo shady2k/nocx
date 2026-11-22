@@ -42,7 +42,6 @@ func TestClose_ReturnsWhenTheAutoSealGoroutineWasNeverStarted(t *testing.T) {
 // provably reached and provably not passed — and Close is asked, from another
 // goroutine, whether it has returned. It must not have.
 func TestClose_WaitsForTheAutoSealGoroutineToExit(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock, release := useHeldFakeAutoSealTimer(t, v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")

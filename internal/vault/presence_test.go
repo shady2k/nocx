@@ -45,7 +45,6 @@ func unsealedVaultWithClient(t *testing.T) *Vault {
 // of the caller's choosing — the tests that are about the window itself.
 func unsealedVaultWithClientAndWindow(t *testing.T, window time.Duration) *Vault {
 	t.Helper()
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 	v.SetDetachWindow(window)
 	mustSetup(t, v, "hunter2")
@@ -161,7 +160,6 @@ func TestClientsAttached_SealAndUnlockCycleRepeats(t *testing.T) {
 // Sealing an already-sealed vault on a detach is a no-op, and a detach on a
 // vault nobody ever set up must not invent state.
 func TestClientsAttached_DetachOnAnUninitializedVaultIsHarmless(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 
 	v.ClientsAttached(1)
@@ -701,7 +699,6 @@ func TestClientsAttached_CloseEndsAnArmedDeparture(t *testing.T) {
 // not seal on the first blink of a socket. Without this the constant could
 // be dropped to zero and every test above would still pass on its own setter.
 func TestNewVaultTakesTheShippedDetachWindow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 	v.mu.Lock()
 	got := v.detachWindow

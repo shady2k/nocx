@@ -25,7 +25,6 @@ import (
 // store while it was being refused.
 
 func TestSetup_EmptyPassphraseRefusedWithReadySystemProvider(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, sys, fp)
@@ -64,7 +63,6 @@ func TestSetup_EmptyPassphraseRefusedWithReadySystemProvider(t *testing.T) {
 // The paired "and on a normal machine it succeeds" for the refusal above — a
 // refusal test alone cannot report that the remaining path still works.
 func TestSetup_WithPassphraseMintsBothEnvelopesAndTouchesNoKeystore(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, sys, fp)
@@ -123,7 +121,6 @@ func TestSetup_WithPassphraseMintsBothEnvelopesAndTouchesNoKeystore(t *testing.T
 // The assertion is at the seam rather than in a comment: a provider that
 // records every Put, driven through the whole lifecycle a vault has.
 func TestKeystoreHoldsNoVerificationMaterial(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -174,7 +171,6 @@ func TestKeystoreHoldsNoVerificationMaterial(t *testing.T) {
 // that silently drops every Put — which is the shape of test that reports a
 // property it never measured.
 func TestKeystoreHoldsExactlyTheSecretsAPersonCreated(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)

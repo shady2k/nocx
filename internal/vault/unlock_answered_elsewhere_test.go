@@ -32,7 +32,6 @@ import (
 // about "the read proceeds" needs: a secret to read once the vault is open.
 func sealedVaultWithASecret(t *testing.T) (*Vault, credential.SecretID) {
 	t.Helper()
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "hunter2")
 	id, err := v.Create(context.Background(), credential.NewSecret("s3cret"))

@@ -14,14 +14,7 @@ import (
 // one function that reads them.
 func testKDF() kdfParams { return kdfParams{MemoryKiB: 1, Time: 1, Threads: 1} }
 
-// loweredCost is the old spelling, kept for the tests that called it only to
-// say "not the production cost".
-func loweredCost(t *testing.T) {
-	t.Helper()
-}
-
 func TestNewRootKey(t *testing.T) {
-	loweredCost(t)
 	k1, err := newRootKey()
 	if err != nil {
 		t.Fatalf("newRootKey: %v", err)
@@ -39,7 +32,6 @@ func TestNewRootKey(t *testing.T) {
 }
 
 func TestRootKeyEnvelopeRoundTrip(t *testing.T) {
-	loweredCost(t)
 	root, err := newRootKey()
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +50,6 @@ func TestRootKeyEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestEnvelopeWrongPassphrase(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "correct", testKDF())
 	if _, err := unwrapWithPassphrase(e, "wrong"); err != ErrUnsealFailed {
@@ -67,7 +58,6 @@ func TestEnvelopeWrongPassphrase(t *testing.T) {
 }
 
 func TestEnvelopeTamperedCiphertext(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "hunter2", testKDF())
 	e.Ciphertext[15] ^= 0xFF // flip a byte in the payload
@@ -77,7 +67,6 @@ func TestEnvelopeTamperedCiphertext(t *testing.T) {
 }
 
 func TestEnvelopeTamperedSalt(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "hunter2", testKDF())
 	e.Salt[0] ^= 0xFF
@@ -87,7 +76,6 @@ func TestEnvelopeTamperedSalt(t *testing.T) {
 }
 
 func TestEnvelopeTamperedMemory(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "hunter2", testKDF())
 	// Set to a different value than was used at wrap time (1).
@@ -98,7 +86,6 @@ func TestEnvelopeTamperedMemory(t *testing.T) {
 }
 
 func TestEnvelopeTamperedTime(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "hunter2", testKDF())
 	e.Time = 2
@@ -108,7 +95,6 @@ func TestEnvelopeTamperedTime(t *testing.T) {
 }
 
 func TestEnvelopeTamperedThreads(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "hunter2", testKDF())
 	e.Threads = 2
@@ -121,7 +107,6 @@ func TestEnvelopeTamperedThreads(t *testing.T) {
 // not in a package constant: write an envelope with one Memory and another
 // with a different Memory, then unwrap both.
 func TestEnvelopeMixedParameters(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 
 	// Wrap with Memory=1 KiB
@@ -154,7 +139,6 @@ func TestEnvelopeMixedParameters(t *testing.T) {
 }
 
 func TestEnvelopeZeroMemoryRejected(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "pass", testKDF())
 	e.Memory = 0
@@ -164,7 +148,6 @@ func TestEnvelopeZeroMemoryRejected(t *testing.T) {
 }
 
 func TestEnvelopeInvalidSaltRejected(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "pass", testKDF())
 	e.Salt = []byte("short") // < 16 bytes
@@ -174,7 +157,6 @@ func TestEnvelopeInvalidSaltRejected(t *testing.T) {
 }
 
 func TestEnvelopeEmptyCiphertextRejected(t *testing.T) {
-	loweredCost(t)
 	root, _ := newRootKey()
 	e, _ := wrapWithPassphrase(root, "pass", testKDF())
 	e.Ciphertext = nil
@@ -190,7 +172,6 @@ func TestEnvelopeEmptyCiphertextRejected(t *testing.T) {
 var crockfordPattern = regexp.MustCompile(`^[0-9a-hjkmnp-tv-z]+(-[0-9a-hjkmnp-tv-z]+)*$`)
 
 func TestNewRecoveryCodeFormat(t *testing.T) {
-	loweredCost(t)
 	code, e, err := newRecoveryCode(testKDF())
 	if err != nil {
 		t.Fatalf("newRecoveryCode: %v", err)
@@ -221,7 +202,6 @@ func TestNewRecoveryCodeFormat(t *testing.T) {
 }
 
 func TestNewRecoveryCodeUnique(t *testing.T) {
-	loweredCost(t)
 	seen := make(map[string]bool, 100)
 	for i := 0; i < 100; i++ {
 		code, _, err := newRecoveryCode(testKDF())
@@ -236,7 +216,6 @@ func TestNewRecoveryCodeUnique(t *testing.T) {
 }
 
 func TestRecoveryCodeWrongCode(t *testing.T) {
-	loweredCost(t)
 	code, e, err := newRecoveryCode(testKDF())
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +234,6 @@ func TestRecoveryCodeWrongCode(t *testing.T) {
 
 // TestRecoveryCodeEntropy ensures the raw entropy is at least 128 bits.
 func TestRecoveryCodeEntropy(t *testing.T) {
-	loweredCost(t)
 	code, _, err := newRecoveryCode(testKDF())
 	if err != nil {
 		t.Fatal(err)

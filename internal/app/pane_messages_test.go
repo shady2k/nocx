@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1802,6 +1803,13 @@ func TestARestartReportsDeliveryStateLost(t *testing.T) {
 // pane whose participant is repeatedly revoked and re-registered from
 // another goroutine, watchdogged rather than timed: a hang fails the test,
 // a slow machine does not.
+//
+// The watchdog watches PROGRESS, not throughput (nocx-oalo1.6.10). A thousand
+// iterations take as long as the machine allows, and the previous one-shot
+// five-second budget for the whole schedule declared a deadlock on a loaded
+// machine while the schedule was still advancing. What no lock order may do is
+// stop an iteration from starting for a whole watchdogBound, so that is what
+// fails the test.
 func TestNoDeadlockUnderConcurrentRevocation(t *testing.T) {
 	const iterations = 1000
 	registrar, _ := newGroupTwoCallersRecord()
@@ -1813,10 +1821,13 @@ func TestNoDeadlockUnderConcurrentRevocation(t *testing.T) {
 	keys := happyKeys(reader, "hi")
 	pm := newTestPaneMessages(t, hub, reader, keys)
 
+	var progress atomic.Uint64
+	var deliveries sync.WaitGroup
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < iterations; i++ {
+			progress.Add(1)
 			w, err := registrar.Register(ctx, workers.RegisterRequest{
 				CoordinatorSession: controller, Role: workers.RoleWorker,
 				Task: "t", Command: "agent", Environment: "env-local",
@@ -1827,15 +1838,45 @@ func TestNoDeadlockUnderConcurrentRevocation(t *testing.T) {
 			sessionID := string(w.Participant.ID)
 			access := hub.Bind(controller, session.Identity{InstanceID: "backend-A", Epoch: 1}, EndpointAuthority{AdmissionEpoch: 1})
 			id := fmt.Sprintf("id-%d", i)
-			go func() { _, _ = pm.Send(ctx, access, sessionID, "hi", "now", id, "") }()
+			deliveries.Add(1)
+			go func() {
+				defer deliveries.Done()
+				_, _ = pm.Send(ctx, access, sessionID, "hi", "now", id, "")
+			}()
 			_, _ = registrar.Close(ctx, controller, w.Participant.ID)
 		}
 	}()
 
+	stall := watchdogBound / 20
+	ticker := time.NewTicker(stall)
+	defer ticker.Stop()
+	seen, since := progress.Load(), time.Now()
+	for waiting := true; waiting; {
+		select {
+		case <-done:
+			waiting = false
+		case <-ticker.C:
+			if at := progress.Load(); at != seen {
+				seen, since = at, time.Now()
+				continue
+			}
+			if time.Since(since) >= watchdogBound {
+				t.Fatalf("timed out: a concurrent revocation deadlocked a delivery (no progress for %s)", watchdogBound)
+			}
+		}
+	}
+
+	// A delivery the loop started is part of the schedule too: the lock order
+	// under test is between those deliveries and the revocation, and a
+	// goroutine blocked for good in paneMessages.Send never advances the
+	// loop's own counter. Every delivery must return, and a stuck one is
+	// reported by the same bound.
+	returned := make(chan struct{})
+	go func() { deliveries.Wait(); close(returned) }()
 	select {
-	case <-done:
+	case <-returned:
 	case <-time.After(watchdogBound):
-		t.Fatal("timed out: a concurrent revocation deadlocked a delivery")
+		t.Fatal("timed out: a concurrent revocation deadlocked a delivery (it never returned)")
 	}
 }
 

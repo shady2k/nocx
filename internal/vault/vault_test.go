@@ -403,7 +403,6 @@ func mustSetup(t *testing.T, v *Vault, passphrase string) SetupResult {
 // ---------------------------------------------------------------------------
 
 func TestSetup_WithPassphrase(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	result := mustSetup(t, v, "hunter2")
@@ -416,7 +415,6 @@ func TestSetup_WithPassphrase(t *testing.T) {
 }
 
 func TestSetup_EmptyPassphraseNoSystemProvider(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	_, err := v.Setup(context.Background(), SetupRequest{})
@@ -430,7 +428,6 @@ func TestSetup_EmptyPassphraseNoSystemProvider(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSetup_PassphraseDocumentFields(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, fp)
 	mustSetup(t, v, "hunter2")
@@ -455,7 +452,6 @@ func TestSetup_PassphraseDocumentFields(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCreate_Concurrent(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -507,7 +503,6 @@ func TestCreate_Concurrent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSeal_RejectsSlowPut(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	slowProv := newTestProvider(ProviderFile)
 	// The Put is held open by a gate, not by a sleep: the test has to seal
@@ -562,7 +557,6 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGet_HonestLimit(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -595,7 +589,6 @@ func TestGet_HonestLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestState_Transitions(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -621,7 +614,6 @@ func TestState_Transitions(t *testing.T) {
 }
 
 func TestStateGating_SecretStore(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -673,7 +665,6 @@ func TestStateGating_SecretStore(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCreate_JournalBeforePut(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	panicking := &panickingProvider{testProvider: newTestProvider(ProviderFile)}
 	v, _, _ := testVault(t, sys, panicking)
@@ -699,7 +690,6 @@ func TestCreate_JournalBeforePut(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGet_NoSilentFallback(t *testing.T) {
-	loweredCost(t)
 	var sysGotCalled atomic.Bool
 
 	sys := newTestProvider(ProviderSystem)
@@ -734,7 +724,6 @@ func TestGet_NoSilentFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGet_MalformedReference(t *testing.T) {
-	loweredCost(t)
 	var providerCalled atomic.Bool
 
 	sys := newTestProvider(ProviderSystem)
@@ -775,7 +764,6 @@ func TestGet_MalformedReference(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCreate_NoPlaintextInLogs(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, capH := testVault(t, sys, fp)
@@ -796,7 +784,6 @@ func TestCreate_NoPlaintextInLogs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDelete_Basic(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -823,7 +810,6 @@ func TestDelete_Basic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestUnseal_PassphraseRoundTrip(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, fp)
 	mustSetup(t, v, "hunter2")
@@ -874,7 +860,6 @@ func TestUnseal_PassphraseRoundTrip(t *testing.T) {
 // Defect 1: Create clears journal entry after successful Put instead of
 // advancing to PhaseSecretWritten.
 func TestCreate_AdvanceToPhaseSecretWritten(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -925,11 +910,17 @@ func TestCreate_AdvanceToPhaseSecretWritten(t *testing.T) {
 // which is the LAST failing step before the commit point and therefore the
 // one that has unwound the most state by the time it returns.
 func TestSetup_MutexNotHeldOnError(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	fp.dataKeyFail = errors.New("injected data key failure")
 	v, _, _ := testVault(t, fp)
 
+	// The wait below is a multiple of what one derivation costs HERE, because
+	// the cost itself is the production one and there is no knob to lower it
+	// (nocx-ouru5.1.16): a fixed five seconds was close to the cost of Setup
+	// on a loaded machine, so it reported a held mutex that was only slow key
+	// derivation (nocx-oalo1.6.12). Ten derivations is far above the two Setup
+	// performs, even under the load the measurement itself ran in.
+	setupGuard := 10 * oneWrapCost(t)
 	done := make(chan struct{}, 1)
 	go func() {
 		_, _ = v.Setup(context.Background(), SetupRequest{Passphrase: "hunter2"})
@@ -937,10 +928,12 @@ func TestSetup_MutexNotHeldOnError(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Setup hung — mutex held on error return path")
+	case <-time.After(setupGuard):
+		t.Fatalf("Setup did not return within %s (ten measured derivations): it hung, rather than deriving slowly", setupGuard)
 	}
 
+	// State takes one in-memory mutex and reads a field, so a guard of seconds
+	// here is a hang guard and nothing else — no KDF cost is behind it.
 	stCh := make(chan State, 1)
 	go func() {
 		stCh <- v.State()
@@ -952,8 +945,23 @@ func TestSetup_MutexNotHeldOnError(t *testing.T) {
 	}
 }
 
+// oneWrapCost measures one production-cost passphrase wrap, the derivation a
+// Setup performs twice, so a test can bound a wait at a multiple of what the
+// machine it runs on actually costs.
+func oneWrapCost(t *testing.T) time.Duration {
+	t.Helper()
+	root, err := newRootKey()
+	if err != nil {
+		t.Fatalf("newRootKey: %v", err)
+	}
+	started := time.Now()
+	if _, err := wrapWithPassphrase(root, "measure-kdf-cost", defaultKDFParams()); err != nil {
+		t.Fatalf("wrapWithPassphrase: %v", err)
+	}
+	return time.Since(started)
+}
+
 func TestUnseal_DetectsConcurrentSeal(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -993,7 +1001,6 @@ func TestUnseal_DetectsConcurrentSeal(t *testing.T) {
 }
 
 func TestGet_RejectsResultAfterSeal(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1037,7 +1044,6 @@ func TestGet_RejectsResultAfterSeal(t *testing.T) {
 // initialised, so a failed NewDataKey leaves the document saying
 // "initialised" with a bricked vault.
 func TestSetup_DocumentNotSavedBeforeProviderInit(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := &testFileProvider{testProvider: newTestProvider(ProviderFile)}
 	fp.dataKeyFail = errors.New("injected data key failure")
@@ -1061,7 +1067,6 @@ func TestSetup_DocumentNotSavedBeforeProviderInit(t *testing.T) {
 // fails after the key was stored. The fix best-effort deletes the OS key,
 // restores the in-memory document, and wipes the root.
 func TestSetup_OrphanCleanupOnSaveFail(t *testing.T) {
-	loweredCost(t)
 	tmpDir := t.TempDir()
 	realStore := storage.NewDocumentStore(tmpDir)
 	store := &failingDocStore{DocumentStore: realStore}
@@ -1106,7 +1111,6 @@ func TestSetup_OrphanCleanupOnSaveFail(t *testing.T) {
 // Defect 7: Concurrent Setup is not serialised — two callers both pass the
 // uninitialised check because the mutex is released.
 func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1168,7 +1172,6 @@ func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
 // the OS-held root key, and without an explicit check this property would have
 // gone with it.
 func TestSetup_CancelledContextChangesNothing(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	v, store, _ := testVault(t, sys, newTestFileProvider(ProviderFile))
 
@@ -1198,7 +1201,6 @@ func TestSetup_CancelledContextChangesNothing(t *testing.T) {
 }
 
 func TestSetup_RecoveryCodeRoundTrip(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, fp)
 
@@ -1240,7 +1242,6 @@ func TestSetup_RecoveryCodeRoundTrip(t *testing.T) {
 // that Delete returns an error when a Seal happens (the initial state check
 // catches it; the re-check at journal time is defense-in-depth).
 func TestDelete_SealBeforeDelete(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1260,7 +1261,6 @@ func TestDelete_SealBeforeDelete(t *testing.T) {
 }
 
 func TestExists_PropagatesProviderErrors(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1368,7 +1368,6 @@ func TestReconcile_ReportsMalformedOp(t *testing.T) {
 // Defect 12: The plaintext-in-logs check only checks attribute equality,
 // missing plaintext inside error messages or rendered output.
 func TestCreate_NoPlaintextInRenderedLogs(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestProvider(ProviderFile)
 	v, _, capH := testVault(t, sys, fp)
@@ -1388,7 +1387,6 @@ func TestCreate_NoPlaintextInRenderedLogs(t *testing.T) {
 
 // Defect 4b: Exists must also re-check the generation after provider call.
 func TestExists_RejectsResultAfterSeal(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1431,7 +1429,6 @@ func TestExists_RejectsResultAfterSeal(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChangePassphrase_WithOldPassphrase(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, sys, fp)
@@ -1492,7 +1489,6 @@ func TestChangePassphrase_WithOldPassphrase(t *testing.T) {
 }
 
 func TestChangePassphrase_WithRecoveryCode(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	result := mustSetup(t, v, "sekret")
@@ -1521,7 +1517,6 @@ func TestChangePassphrase_WithRecoveryCode(t *testing.T) {
 }
 
 func TestChangePassphrase_WrongOldPassphrase(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1538,7 +1533,6 @@ func TestChangePassphrase_WrongOldPassphrase(t *testing.T) {
 }
 
 func TestChangePassphrase_WrongRecoveryCode(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1554,7 +1548,6 @@ func TestChangePassphrase_WrongRecoveryCode(t *testing.T) {
 }
 
 func TestChangePassphrase_NoAuthFactor(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1570,7 +1563,6 @@ func TestChangePassphrase_NoAuthFactor(t *testing.T) {
 }
 
 func TestChangePassphrase_EmptyNewPassphrase(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1586,7 +1578,6 @@ func TestChangePassphrase_EmptyNewPassphrase(t *testing.T) {
 }
 
 func TestChangePassphrase_Uninitialized(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1602,7 +1593,6 @@ func TestChangePassphrase_Uninitialized(t *testing.T) {
 }
 
 func TestChangePassphrase_Sealed(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1628,7 +1618,6 @@ func TestChangePassphrase_Sealed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegenerateRecovery_WithPassphrase(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, store, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1658,7 +1647,6 @@ func TestRegenerateRecovery_WithPassphrase(t *testing.T) {
 }
 
 func TestRegenerateRecovery_WrongPassphrase(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1671,7 +1659,6 @@ func TestRegenerateRecovery_WrongPassphrase(t *testing.T) {
 }
 
 func TestRegenerateRecovery_EmptyPassphrase(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1684,7 +1671,6 @@ func TestRegenerateRecovery_EmptyPassphrase(t *testing.T) {
 }
 
 func TestRegenerateRecovery_Uninitialized(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1697,7 +1683,6 @@ func TestRegenerateRecovery_Uninitialized(t *testing.T) {
 }
 
 func TestRegenerateRecovery_Sealed(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1718,7 +1703,6 @@ func TestRegenerateRecovery_Sealed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSetDefaultProvider_Valid(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1734,7 +1718,6 @@ func TestSetDefaultProvider_Valid(t *testing.T) {
 }
 
 func TestSetDefaultProvider_Unregistered(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1756,7 +1739,6 @@ func TestSetDefaultProvider_Unregistered(t *testing.T) {
 }
 
 func TestSetDefaultProvider_NonWritable(t *testing.T) {
-	loweredCost(t)
 	ro := &readOnlyProvider{id: ProviderSystem, inner: newTestProvider(ProviderSystem)}
 	v, _, _ := testVault(t, ro)
 	mustSetup(t, v, "test-pass")
@@ -1777,7 +1759,6 @@ func TestSetDefaultProvider_NonWritable(t *testing.T) {
 }
 
 func TestSetDefaultProvider_Uninitialized(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1790,7 +1771,6 @@ func TestSetDefaultProvider_Uninitialized(t *testing.T) {
 }
 
 func TestSetDefaultProvider_Sealed(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -1811,7 +1791,6 @@ func TestSetDefaultProvider_Sealed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChangePassphrase_SaveFails(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, docStore, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1848,7 +1827,6 @@ func TestChangePassphrase_SaveFails(t *testing.T) {
 }
 
 func TestRegenerateRecovery_SaveFails(t *testing.T) {
-	loweredCost(t)
 	fp := newTestFileProvider(ProviderFile)
 	v, docStore, _ := testVault(t, fp)
 	mustSetup(t, v, "sekret")
@@ -1874,7 +1852,6 @@ func TestRegenerateRecovery_SaveFails(t *testing.T) {
 }
 
 func TestSetDefaultProvider_SaveFails(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, docStore, _ := testVault(t, sys, fp)
@@ -1933,7 +1910,6 @@ func TestSetAutoSeal_InvalidValues(t *testing.T) {
 }
 
 func TestSetAutoSeal_Persistence(t *testing.T) {
-	loweredCost(t)
 	v, store, _ := testVault(t, newTestProvider(ProviderFile))
 	// Ensure vault document exists by setting up.
 	mustSetup(t, v, "hunter2")
@@ -1988,7 +1964,6 @@ func setupAndDrainAutoSeal(t *testing.T, v *Vault, clock *fakeAutoSealClock, pas
 }
 
 func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")
@@ -2008,7 +1983,6 @@ func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
 }
 
 func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")
@@ -2041,7 +2015,6 @@ func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
 }
 
 func TestAutoSeal_SealStopsTimer(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")
@@ -2062,7 +2035,6 @@ func TestAutoSeal_SealStopsTimer(t *testing.T) {
 }
 
 func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")
@@ -2125,7 +2097,6 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 }
 
 func TestAutoSeal_OffDoesNotArm(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
 	setupAndDrainAutoSeal(t, v, clock, "pass")
@@ -2162,7 +2133,6 @@ func TestAutoSeal_OffDoesNotArm(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSnapshot_AutoSealMinutes(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	mustSetup(t, v, "pass")
 
@@ -2181,7 +2151,6 @@ func TestSnapshot_AutoSealMinutes(t *testing.T) {
 }
 
 func TestSnapshot_HasPassphrase(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 
 	// Before setup: no passphrase envelope.
@@ -2207,7 +2176,6 @@ func TestSnapshot_HasPassphrase(t *testing.T) {
 // a user resets because they cannot unlock, so an implementation that needed
 // the root key would refuse exactly when it is wanted.
 func TestVault_Purge_FromSealedReturnsToUninitialized(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "correct horse battery staple")
 	v.Seal()
@@ -2227,7 +2195,6 @@ func TestVault_Purge_FromSealedReturnsToUninitialized(t *testing.T) {
 // back on the next start. Reconstructing from the same store is the only
 // assertion that can tell "forgot in memory" from "gone".
 func TestVault_Purge_DoesNotSurviveAReconstruct(t *testing.T) {
-	loweredCost(t)
 	v, store, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "correct horse battery staple")
 
@@ -2252,7 +2219,6 @@ func TestVault_Purge_DoesNotSurviveAReconstruct(t *testing.T) {
 // Re-running an interrupted reset must succeed rather than report that there
 // is nothing to purge. There is no journal here; re-running IS the recovery.
 func TestVault_Purge_IsIdempotent(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem), newTestFileProvider(ProviderFile))
 	mustSetup(t, v, "correct horse battery staple")
 
@@ -2269,7 +2235,6 @@ func TestVault_Purge_IsIdempotent(t *testing.T) {
 // because of it would leave the user locked out with no way back — so the
 // error is reported AND the vault is still cleared.
 func TestVault_Purge_ReportsAFailedProviderAndStillClearsTheVault(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(
 		t,
 		newTestProvider(ProviderSystem),
@@ -2315,7 +2280,6 @@ func (p *refusingPurgeProvider) PurgeAll(_ context.Context) error {
 // advances to PhaseSecretWritten, and the journal entry carries the metadata
 // from PhasePrepared — the name joins the sequence, never a second path.
 func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -2369,7 +2333,6 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 // the durable proof that lets Reconcile keep the secret, and a nameless
 // record renders by fallback.
 func TestCreate_RecordsNamelessPasswordKind(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2394,7 +2357,6 @@ func TestCreate_RecordsNamelessPasswordKind(t *testing.T) {
 // Delete removes the catalogue record with the metadata-first journal write:
 // no dangling row after the secret is gone.
 func TestDelete_RemovesRecord(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2419,7 +2381,6 @@ func TestDelete_RemovesRecord(t *testing.T) {
 // RenameSecret addresses a row by its renderer-addressable handle and sets
 // the name on the vault's own record. It must never accept a SecretID.
 func TestRenameSecret_RecordRow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2450,7 +2411,6 @@ func TestRenameSecret_RecordRow(t *testing.T) {
 // RenameSecret resolves rows that were never recorded — pre-ADR-0016
 // references — through the credential metadata, and gives them a record.
 func TestRenameSecret_UnrecordedRefRow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2477,7 +2437,6 @@ func TestRenameSecret_UnrecordedRefRow(t *testing.T) {
 }
 
 func TestRenameSecret_RejectsEmptyName(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2498,7 +2457,6 @@ func TestRenameSecret_RejectsEmptyName(t *testing.T) {
 }
 
 func TestRenameSecret_UnknownRow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2509,7 +2467,6 @@ func TestRenameSecret_UnknownRow(t *testing.T) {
 }
 
 func TestRenameSecret_RejectsSecretID(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2539,7 +2496,6 @@ func TestRenameSecret_RejectsSecretID(t *testing.T) {
 // the secret keeps working, and the catalogue record (name, kind) is
 // untouched.
 func TestReplaceSecret_OverwritesValueKeepsReference(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2589,7 +2545,6 @@ func TestReplaceSecret_OverwritesValueKeepsReference(t *testing.T) {
 // It overwrites the value; it does not mint a record (nothing about the
 // metadata changed).
 func TestReplaceSecret_UnrecordedRefRow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2629,7 +2584,6 @@ func TestReplaceSecret_UnrecordedRefRow(t *testing.T) {
 // The renderer may not name a secret (nocx-jb20.1): replace addresses rows by
 // the row handle, and a SecretID sent in its place must be refused.
 func TestReplaceSecret_RejectsSecretID(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2645,7 +2599,6 @@ func TestReplaceSecret_RejectsSecretID(t *testing.T) {
 }
 
 func TestReplaceSecret_UnknownRow(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 	defer v.Close()
@@ -2656,7 +2609,6 @@ func TestReplaceSecret_UnknownRow(t *testing.T) {
 }
 
 func TestReplaceSecret_RejectsSealedVault(t *testing.T) {
-	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
 	mustSetup(t, v, "test-pass")
 
@@ -2676,7 +2628,6 @@ func TestReplaceSecret_RejectsSealedVault(t *testing.T) {
 // (spec §4.2): a replace that times out may still land, and the entry is what
 // makes the outcome reconcilable.
 func TestReplaceSecret_JournalBeforePut(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	v, _, _ := testVault(t, sys)
 	mustSetup(t, v, "test-pass")
@@ -2717,7 +2668,6 @@ func TestReplaceSecret_JournalBeforePut(t *testing.T) {
 // pretending nothing happened: the write may have landed despite the error
 // (a keyring timeout), and the entry is what reconciliation acts on.
 func TestReplaceSecret_ProviderFailureLeavesJournalEntry(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	v, _, _ := testVault(t, sys)
 	mustSetup(t, v, "test-pass")
@@ -2752,7 +2702,6 @@ func TestReplaceSecret_ProviderFailureLeavesJournalEntry(t *testing.T) {
 // name must never both claim it, and the renderer must never predict that
 // openrouter.ai-2 is free.
 func TestCreateNamedResolved_ResolvesCollisionsAtomically(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
@@ -2815,7 +2764,6 @@ func TestCreateNamedResolved_ResolvesCollisionsAtomically(t *testing.T) {
 // An empty requested name stays empty: the fallback label path is
 // untouched by collision resolution.
 func TestCreateNamedResolved_EmptyNameStaysEmpty(t *testing.T) {
-	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)

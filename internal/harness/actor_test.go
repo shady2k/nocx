@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+// turnHangGuard bounds one actor turn in this file. The turns here start
+// /bin/sh under the race detector, which costs a second on an idle machine and
+// several on one shared with other work (nocx-oalo1.6.11), so a one-second
+// context stopped being a hang guard and started being a budget the test had
+// to outrun. This is far above the cost of the work and still far below the
+// package's own -timeout, which stays the outer bound.
+const turnHangGuard = 2 * time.Minute
+
 type shellProtocol struct{}
 
 func (shellProtocol) Start(context.Context, TurnSpec) (Launch, error) {
@@ -155,7 +163,7 @@ func (oversizedProtocol) Start(context.Context, TurnSpec) (Launch, error) {
 }
 
 func TestSessionBoundsLines(t *testing.T) {
-	ctx, stop := context.WithTimeout(context.Background(), time.Second)
+	ctx, stop := context.WithTimeout(context.Background(), turnHangGuard)
 	defer stop()
 	m := NewSessionManager(Base{MaxLineBytes: 32}, oversizedProtocol{})
 	defer func() { _ = m.Close(ctx) }()
@@ -176,7 +184,7 @@ func (p brokenProtocol) NewCodec(SessionInfo, Launch) Codec { return p }
 func (brokenProtocol) Decode([]byte) (Decoded, error) { return Decoded{}, errors.New("invalid line") }
 
 func TestProtocolFailureRestartsSession(t *testing.T) {
-	ctx, stop := context.WithTimeout(context.Background(), time.Second)
+	ctx, stop := context.WithTimeout(context.Background(), turnHangGuard)
 	defer stop()
 	m := NewSessionManager(Base{}, brokenProtocol{})
 	defer func() { _ = m.Close(ctx) }()

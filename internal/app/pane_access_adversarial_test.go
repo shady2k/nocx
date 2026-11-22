@@ -773,10 +773,20 @@ func newHeldIntentStand(t *testing.T) *heldIntentStand {
 	const generation = "6q1uh19heldrev00000000000000000"
 
 	spawner := &heldIntentSpawner{}
+	// The clock a retained snapshot is aged by is the TEST's, not the
+	// scheduler's: the helper keeps a snapshot for snapshotMaxAge (2 s), and
+	// the two calls the read path makes — Snapshot, then a target minted from
+	// it — are separated by more than that on a loaded machine with nothing
+	// wrong (nocx-oalo1.6.10). It is frozen rather than driven, because the
+	// ordering this test is about is the revocation's; the one deadline that
+	// must still move is the intent's CommitBy, and that comes from
+	// internal/monoclock (owner.go's nowMono), which this seam never touches.
+	standNow := time.Now()
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(generation),
 		Spawner:    spawner,
 		Log:        logger,
+		Now:        func() time.Time { return standNow },
 	})
 	serverConn, clientConn := net.Pipe()
 	peer := helperhost.New(serverConn, serverConn, generation, "instance-a", logger)

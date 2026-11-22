@@ -89,10 +89,15 @@ export interface ActiveOrigin {
    * `paneId` is the BACKEND's pane id (the key `pane.connection` and
    * `connection.helperRefresh` are addressed by), not the tab's numeric id
    * above; the two are different identities that happen to share a name.
+   *
+   * The observation's `connectionEpoch` is deliberately NOT copied here.
+   * It belongs to the press and is read from the pane's ConnectionStore at
+   * the moment of the press (ALX-1019): a copy in the origin snapshot made
+   * every quality sample look like a new open context to the surfaces that
+   * follow the origin.
    */
   connection?: {
     paneId: string
-    connectionEpoch: number
     helper: import('./generated/pane.connection').PaneConnection['helper']
   } | null
   /**

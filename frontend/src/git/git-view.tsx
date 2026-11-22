@@ -76,9 +76,9 @@ export interface GitViewDeps {
    *  like the files view. */
   activeOrigin: () => ActiveOrigin | null
   /** The helper axis's one action. Wired at the composition root to the
-   *  connection client's `refreshHelper`, which presses with the epoch of
-   *  the observation the button was drawn from. */
-  onRefreshHelper: (paneId: string, connectionEpoch: number) => void
+   *  active pane's `pressHelperRefresh`, which reads the live observation
+   *  epoch at the moment of the press. */
+  onRefreshHelper: (paneId: string) => void
   /** The axis's settings action: open the saved connection's editor on its
    *  host-integration field. */
   onHostSettings: (profileId: string) => void

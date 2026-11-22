@@ -334,6 +334,25 @@ function helperKey(helper: PaneConnection['helper'] | undefined): string {
   return `${helper.state}:${reason}:${helper.action}`
 }
 
+/** Whether this origin's axis lets git.open be asked at all: a local tab
+ *  has no helper and is always allowed, an SSH tab only while the helper
+ *  serves (ADR-727g63tr decision 2). */
+function axisAllowsOpen(o: ActiveOrigin): boolean {
+  return o.kind !== 'ssh' || o.connection?.helper?.state === 'serving'
+}
+
+/** The context git.open is about: the session, how it was opened, and the
+ *  VERIFIED directory. An observation republished on the same connection
+ *  changes none of them, and must not be read as a new open (ALX-1019). */
+function sameOpenContext(a: ActiveOrigin, b: ActiveOrigin): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.kind === b.kind &&
+    a.cwd === b.cwd &&
+    a.cwdVerified === b.cwdVerified
+  )
+}
+
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
  *  JSON comparison is the cheapest honest equality here because it includes
  *  every field (including optional count fields) without maintaining a second
@@ -507,11 +526,15 @@ export function createGitStore(
   }
 
   /** A git.open response applies only if it is still the newest scope
-   *  request: the open that establishes a binding wins by generation. */
-  function openCurrent(ctx: { paneId: number; generation: number }): boolean {
+   *  request: the open that establishes a binding wins by generation. The
+   *  pane is deliberately not part of this test — a wake that republished
+   *  the SAME open context under another paneId (a viewer tab, or a quality
+   *  sample) must not turn the open it did not restart into a stale answer
+   *  (ALX-1019). A different session or cwd opens a new scope and bumps the
+   *  generation, which is what makes the old answer stale. */
+  function openCurrent(ctx: { generation: number }): boolean {
     if (closed) return false
-    const o = untrack(origin)
-    return o !== null && ctx.paneId === o.paneId && ctx.generation === generation
+    return untrack(origin) !== null && ctx.generation === generation
   }
 
   function messageOf(e: unknown): string {
@@ -936,7 +959,14 @@ export function createGitStore(
     setFilter('')
   }
 
+  /** The public re-scope. `scopeTo` is the same path with the one extra
+   *  thing an explicit Refresh/Retry needs: permission to open even though
+   *  the open context has not moved. */
   function rescope(next: ActiveOrigin | null): void {
+    scopeTo(next, false)
+  }
+
+  function scopeTo(next: ActiveOrigin | null, force: boolean): void {
     // A frozen origin (a diff tab) has no opinion: activating it must
     // never re-bind the panel to a cwd snapshot that may be stale (design
     // §5.4). The panel keeps showing the shell's repository as it was.
@@ -1021,16 +1051,19 @@ export function createGitStore(
       resetRemote()
       return
     }
-    // Same session AND same verified cwd AND a live binding: nothing moved —
-    // record the newer origin (the paneId may differ) and keep everything,
-    // including the commit form, which survives a view switch.
-    const b = untrack(binding)
+    // NOTHING THE OPEN IS ABOUT HAS MOVED: the same session, kind and
+    // verified cwd under an axis that may open. The origin is recorded (the
+    // paneId may differ) and whatever the open answered is kept — in flight,
+    // ok, notARepository, gitUnavailable, gitTooOld or failed. The ONE
+    // exception is an explicit Refresh/Retry, which forces the open below.
+    // `phase` is read live: 'no-origin' is the state BEFORE any scope, where
+    // there is nothing to keep.
     if (
+      !force &&
       prev !== null &&
-      next.sessionId === prev.sessionId &&
-      next.cwd === prev.cwd &&
-      next.cwdVerified === prev.cwdVerified &&
-      b !== null
+      axisAllowsOpen(prev) &&
+      sameOpenContext(prev, next) &&
+      untrack(phase) !== 'no-origin'
     ) {
       setOrigin(next)
       return
@@ -1081,8 +1114,10 @@ export function createGitStore(
     resetPollSchedule()
     if (phase() === 'failed' || untrack(binding) === null) {
       // The Retry for a failed open, and the re-ask after a refusing answer
-      // (git init in the shell deserves a working Refresh).
-      rescope(o)
+      // (git init in the shell deserves a working Refresh). This is the one
+      // caller allowed to open without a context change: `rescope` is
+      // idempotent for the same context by design (ALX-1019).
+      scopeTo(o, true)
       return
     }
     if (phase() === 'ready') {

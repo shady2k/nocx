@@ -106,8 +106,9 @@ export interface GitPanelProps {
   /** The ACTIVE tab's origin — a reactive accessor, never a capture. */
   activeOrigin: () => ActiveOrigin | null
   /** The helper axis's one action: redial a helper that was serving and is
-   *  gone, with the epoch of the observation whose button was pressed. */
-  onRefreshHelper: (paneId: string, connectionEpoch: number) => void
+   *  gone. The epoch belongs to the press and is read by the pane that owns
+   *  the observation, so the surface names only the pane it was drawn for. */
+  onRefreshHelper: (paneId: string) => void
   /** The other axis action: open the saved connection's editor on its
    *  host-integration field. */
   onHostSettings: (profileId: string) => void
@@ -622,7 +623,14 @@ export function GitPanel(props: GitPanelProps) {
         <Button
           size="sm"
           data-testid="git-helper-refresh"
-          onClick={() => props.onRefreshHelper(connection.paneId, connection.connectionEpoch)}
+          onClick={() => {
+            // The tab may have changed between this button's paint and the
+            // press: the live origin is the authority, so a press aimed at
+            // a pane that is no longer in front is dropped here (ALX-1019).
+            const live = props.activeOrigin()?.connection?.paneId
+            if (live !== connection.paneId) return
+            props.onRefreshHelper(connection.paneId)
+          }}
         >
           {t('helper.refresh', 'Refresh')}
         </Button>

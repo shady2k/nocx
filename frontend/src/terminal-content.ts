@@ -100,7 +100,7 @@ import { ConnectionClient } from './connection/connection-client'
 import type { PaneConnection } from './generated/pane.connection'
 import { ConnectionStore } from './connection/connection-store'
 import { mountConnectionHead, type ConnectionHeadHandle } from './connection/connection-head'
-import { savedProfileId } from './connection/helper-axis'
+import { helperAxis, savedProfileId } from './connection/helper-axis'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import { connectionLabel } from './connection-label'
@@ -2114,19 +2114,14 @@ export class TerminalContent extends BasePaneContent {
   /** Tell origin-following surfaces that the helper axis moved. The key
    *  names every field a surface may branch on — the backend instance (a
    *  replacement coordinator republishes the same state under a new one),
-   *  the state, the reason, the action — AND the epoch.
+   *  the state, the reason and the action — and nothing a surface must not
+   *  wake for (the epoch, the transport's own stage).
    *
-   *  The epoch is here because it is part of the answer a surface draws: the
-   *  axis's one action presses with the epoch of the observation that
-   *  offered it, and the driver refuses a stale one. A quality sample
-   *  publishes a new observation with a new epoch and the same axis, and a
-   *  visible Refresh still reads `activeOrigin()`; leaving the epoch out of
-   *  the key left that button pressing an epoch the backend had replaced
-   *  (ALX-998). The wake costs the two surfaces no work they would not do:
-   *  Git's rescope keeps the live binding for a same-scope epoch change, and
-   *  Files reveals only a changed cwd (revealPath is a no-op when the target
-   *  has not moved). Everything else a surface must not wake for — the
-   *  transport's own stage — is still absent from the key. */
+   *  THE EPOCH IS NOT ONE OF THEM (ALX-1019). It belongs to the press, not to
+   *  the snapshot: the axis's one action reads it from the pane's
+   *  ConnectionStore at the moment of the press, as the head already did.
+   *  Publishing it here made every quality sample wake the origin surfaces,
+   *  and the Git panel then treated the wake as a new open context. */
   private _publishAxisChange(observation: PaneConnection | null): void {
     const helper = observation?.helper
     if (observation === null || helper === undefined) {
@@ -2136,7 +2131,7 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     const reason = 'reason' in helper ? helper.reason : ''
-    const key = `${observation.instanceId}:${observation.connectionEpoch}:${helper.state}:${reason}:${helper.action}`
+    const key = `${observation.instanceId}:${helper.state}:${reason}:${helper.action}`
     if (key === this._lastAxisKey) return
     this._lastAxisKey = key
     this.hooks.onActiveOriginChange?.()
@@ -2518,6 +2513,14 @@ export class TerminalContent extends BasePaneContent {
     if (this._paneWalkedToRemoteChild) return this.locationLine()
     return ''
   }
+  /** The BACKEND's pane id — the key `pane.connection` and
+   *  `connection.helperRefresh` are addressed by — distinct from the tab's
+   *  numeric id. The composition root compares it before forwarding a
+   *  surface's press to this pane's connection (ALX-1019). */
+  get backendPaneId(): string {
+    return this.pane.paneId
+  }
+
   /** The machine this tab's content speaks for (B.9) — the session it was
    *  opened with, answered only while that session is live and in front.
    *  Null when there is no honest answer: no session yet, or a session
@@ -2548,7 +2551,6 @@ export class TerminalContent extends BasePaneContent {
         this.sshOpts !== undefined && observation !== null
           ? {
               paneId: observation.paneId,
-              connectionEpoch: observation.connectionEpoch,
               helper: observation.helper,
             }
           : null,
@@ -2563,6 +2565,28 @@ export class TerminalContent extends BasePaneContent {
       // "This machine" for a local session rather than nothing at all.
       machine: machineName(this._user, this._host),
     }
+  }
+
+  /** The helper axis's ONE press, wherever it is made from.
+   *
+   *  The epoch is the observation's own, read from the pane's
+   *  ConnectionStore at the moment of the press — the store owns it, and the
+   *  origin snapshot no longer carries a copy (ALX-1019). The head and the
+   *  Git panel both come through here; a press the backend refuses is a
+   *  stale press (a newer observation already replaced the button the
+   *  person saw), so it is logged and never turned into a dialog. */
+  pressHelperRefresh(): void {
+    const observation = this._connectionStore.current()?.observation
+    const axis = helperAxis(observation?.helper ?? null)
+    if (observation === null || observation === undefined || axis?.action !== 'refresh') return
+    void this._connectionClient
+      .refreshHelper(observation.paneId, observation.connectionEpoch)
+      .catch((err: unknown) => {
+        log.warn('nocx: the helper refresh press was not accepted', {
+          pane: this.pane.paneId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
   }
 
   /** This tab's session and the session that opened it, as the backend
@@ -3383,13 +3407,10 @@ export class TerminalContent extends BasePaneContent {
       // on the next pane.connection. A refusal is a stale press — the newer
       // observation has already replaced the button the person saw — so it
       // is logged and never turned into a dialog.
-      onRefreshHelper: (paneId, connectionEpoch) => {
-        void this._connectionClient.refreshHelper(paneId, connectionEpoch).catch((err: unknown) => {
-          log.warn('nocx: the helper refresh press was not accepted', {
-            pane: this.pane.paneId,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        })
+      // The head decides WHICH action is offered; the press itself is the
+      // pane's one method, which reads the live epoch from the store.
+      onRefreshHelper: () => {
+        this.pressHelperRefresh()
       },
       onHostSettings: () => {
         const profileId = this.sshOpts?.profileId ?? ''

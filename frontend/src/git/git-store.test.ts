@@ -50,10 +50,8 @@ const OTHER_ORIGIN: ActiveOrigin = {
 
 const connectionAxis = (
   helper: import('../generated/pane.connection').PaneConnection['helper'],
-  connectionEpoch = 1,
 ): NonNullable<ActiveOrigin['connection']> => ({
   paneId: 'backend-pane-3',
-  connectionEpoch,
   helper,
 })
 
@@ -748,7 +746,7 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     // re-opening on every heartbeat would mint a binding per poll.
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis({ state: 'serving', action: 'none' }, 2),
+      connection: connectionAxis({ state: 'serving', action: 'none' }),
     })
     await settle()
     expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
@@ -763,10 +761,11 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
 
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis(
-        { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
-        2,
-      ),
+      connection: connectionAxis({
+        state: 'unavailable',
+        reason: 'helper-lost',
+        action: 'refresh',
+      }),
     })
     await settle()
     expect(store.state()).toBe('helperBlocked')
@@ -776,7 +775,7 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     // The redial's hello arrives as the next serving observation.
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis({ state: 'serving', action: 'none' }, 3),
+      connection: connectionAxis({ state: 'serving', action: 'none' }),
     })
     await settle()
     expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
@@ -798,10 +797,11 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
 
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis(
-        { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
-        2,
-      ),
+      connection: connectionAxis({
+        state: 'unavailable',
+        reason: 'helper-lost',
+        action: 'refresh',
+      }),
     })
     await settle()
     expect(store.state()).toBe('helperBlocked')
@@ -820,7 +820,7 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     // The return to serving is what opens the repository — exactly once.
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis({ state: 'serving', action: 'none' }, 3),
+      connection: connectionAxis({ state: 'serving', action: 'none' }),
     })
     await settle()
     expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
@@ -837,7 +837,7 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
 
     store.rescope({
       ...SSH_ORIGIN,
-      connection: connectionAxis({ state: 'paused', reason: 'connection', action: 'none' }, 2),
+      connection: connectionAxis({ state: 'paused', reason: 'connection', action: 'none' }),
     })
     await settle()
 
@@ -917,6 +917,183 @@ describe('the far helper axis gates git.open (ADR-727g63tr, task .6.3c-1)', () =
     store.rescope(NEW_CWD_ORIGIN)
     await settle()
     expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
+    expect(store.state()).toBe('ready')
+  })
+})
+
+// ── A wake is not a new open context (ALX-1019) ──────────────────────────
+//
+// A quality sample republishes the same connection under a new epoch. The
+// epoch is the press's, not the open's: it no longer rides the origin
+// snapshot, and a repeated origin with the same (session, kind, verified
+// cwd) context must record the new origin and leave whatever the open
+// answered alone — in flight, ok, notARepository, gitUnavailable, gitTooOld
+// or failed. An explicit Retry/Refresh is the one caller that forces an
+// open, and a changed context still opens by itself.
+
+describe('a wake that keeps the open context never re-opens Git (ALX-1019)', () => {
+  it('S1: a repeated origin while git.open is in flight keeps ONE open, and its answer lands', async () => {
+    const pending = deferred<GitOpenResult>()
+    const services = makeServices({ open: vi.fn().mockReturnValue(pending.promise) })
+    const store = track(createGitStore(services))
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    // A quality sample: the same connection, a new observation object and a
+    // new paneId on the tab — nothing git.open was issued for has moved.
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+
+    pending.resolve(openOk())
+    await settle()
+    expect(store.state()).toBe('ready')
+    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
+  })
+
+  it('S2: after notARepository a repeated origin opens nothing and the phase never returns to opening', async () => {
+    const services = makeServices({
+      open: vi.fn().mockResolvedValue({ state: 'notARepository' }),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('notARepository')
+    expect(store.phase()).toBe('ready')
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    // Synchronous look: the old path re-entered 'opening' before the answer.
+    expect(store.phase()).not.toBe('opening')
+    await settle()
+    store.rescope({ ...SSH_ORIGIN, paneId: 5 })
+    await settle()
+
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.state()).toBe('notARepository')
+    expect(store.phase()).toBe('ready')
+  })
+
+  it('S3: the same for gitUnavailable', async () => {
+    const services = makeServices({
+      open: vi.fn().mockResolvedValue({ state: 'gitUnavailable' }),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('gitUnavailable')
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    expect(store.phase()).not.toBe('opening')
+    await settle()
+
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.state()).toBe('gitUnavailable')
+  })
+
+  it('S4: a failed open keeps its Retry card on a repeated origin, without a second open', async () => {
+    const services = makeServices({
+      open: vi.fn().mockRejectedValue(new Error('the helper refused the open')),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('the helper refused')
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('the helper refused')
+  })
+
+  it('S5: Refresh after notARepository forces exactly one new open', async () => {
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce({ state: 'notARepository' })
+      .mockResolvedValue(openOk())
+    const store = track(createGitStore(makeServices({ open })))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    const afterFirst = open.mock.calls.length
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+    store.refresh()
+    await settle()
+
+    expect(open.mock.calls.length).toBe(afterFirst + 1)
+    expect(store.state()).toBe('ready')
+  })
+
+  it('S5: Retry after a failed open forces exactly one new open', async () => {
+    const open = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('the helper refused the open'))
+      .mockResolvedValue(openOk())
+    const store = track(createGitStore(makeServices({ open })))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    const afterFirst = open.mock.calls.length
+    expect(store.phase()).toBe('failed')
+
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+    store.refresh()
+    await settle()
+
+    expect(open.mock.calls.length).toBe(afterFirst + 1)
+    expect(store.state()).toBe('ready')
+  })
+
+  it('S6: a changed verified cwd in the same session still opens by itself', async () => {
+    const open = vi.fn().mockResolvedValue({ state: 'notARepository' })
+    const store = track(createGitStore(makeServices({ open })))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    store.rescope({ ...SSH_ORIGIN, paneId: 4 })
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+
+    store.rescope({ ...SSH_ORIGIN, cwd: '/home/bob/sub' })
+    await settle()
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(open).toHaveBeenLastCalledWith('s3', '/home/bob/sub')
+  })
+
+  it('S7: a late answer after helper-lost is closed and the return to serving opens once', async () => {
+    const first = deferred<GitOpenResult>()
+    const open = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(openOk())
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope({
+      ...SSH_ORIGIN,
+      connection: connectionAxis({
+        state: 'unavailable',
+        reason: 'helper-lost',
+        action: 'refresh',
+      }),
+    })
+    await settle()
+    expect(store.state()).toBe('helperBlocked')
+
+    first.resolve(openOk())
+    await settle()
+    expect(store.binding()).toBeNull()
+    expect(close).toHaveBeenCalledWith('b1')
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(2)
     expect(store.state()).toBe('ready')
   })
 })

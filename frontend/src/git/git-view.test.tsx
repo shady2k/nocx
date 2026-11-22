@@ -11,7 +11,7 @@
 // starts in, reaches the client), the row action owning its click, and the
 // D14 absence (mutation controls ABSENT from an SSH tab's DOM, not disabled).
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { createSignal } from 'solid-js'
+import { batch, createSignal } from 'solid-js'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { createGitView } from './git-view'
@@ -60,7 +60,6 @@ const SSH_ORIGIN: ActiveOrigin = {
   host: 'srv',
   connection: {
     paneId: 'backend-pane-3',
-    connectionEpoch: 1,
     helper: { state: 'serving', action: 'none' },
   },
 }
@@ -160,7 +159,7 @@ interface SharedMount {
 }
 
 interface AxisDeps {
-  onRefreshHelper?: (paneId: string, connectionEpoch: number) => void
+  onRefreshHelper?: (paneId: string) => void
   onHostSettings?: (profileId: string) => void
   activeProfileId?: () => string | null
 }
@@ -331,7 +330,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 3,
         helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
       },
     })
@@ -358,7 +356,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 4,
         helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
       },
     })
@@ -378,7 +375,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 5,
         helper: { state: 'starting', action: 'none' },
       },
     })
@@ -388,7 +384,7 @@ describe('the panel renders what the store says', () => {
     expect(panel.textContent).toContain('Waiting for the nocx helper')
   })
 
-  it('a lost helper offers Refresh on the panel with the observation epoch', async () => {
+  it('a lost helper offers Refresh on the panel, naming the pane it was drawn for', async () => {
     const onRefreshHelper = vi.fn()
     const { panel, setActiveOrigin } = mountApp(fakeServices(), undefined, undefined, undefined, {
       onRefreshHelper,
@@ -397,7 +393,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 9,
         helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
       },
     })
@@ -405,14 +400,15 @@ describe('the panel renders what the store says', () => {
     const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="git-helper-refresh"]')
     expect(refresh?.textContent).toBe('Refresh')
     refresh?.click()
-    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3', 9)
+    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3')
   })
 
-  it('the same helper-lost Refresh presses with the newest epoch, without re-opening Git', async () => {
-    // ALX-998: a quality sample bumps the connection epoch without moving
-    // the axis, and the button the person still sees must press with THAT
-    // epoch — the driver refuses a stale one. The update is not a new
-    // permission: the binding stays closed and git.open is not asked again.
+  it('the same helper-lost Refresh stays a press, without re-opening Git', async () => {
+    // ALX-998/ALX-1019: a quality sample republishes the same axis with a
+    // new epoch. The epoch is read by the pane's ConnectionStore at press
+    // time (terminal-content.test.tsx holds that half), so the panel's
+    // button is a press and the update is not a new permission: the binding
+    // stays closed and git.open is not asked again.
     const onRefreshHelper = vi.fn()
     const open = vi.fn().mockResolvedValue(openOk())
     const close = vi.fn().mockResolvedValue({ closed: true })
@@ -420,11 +416,10 @@ describe('the panel renders what the store says', () => {
     const { panel, setActiveOrigin } = mountApp(services, undefined, undefined, undefined, {
       onRefreshHelper,
     })
-    const lost = (connectionEpoch: number): ActiveOrigin => ({
+    const lost = (): ActiveOrigin => ({
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch,
         helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
       },
     })
@@ -433,18 +428,48 @@ describe('the panel renders what the store says', () => {
     await settle()
     expect(open).toHaveBeenCalledTimes(1)
 
-    setActiveOrigin(lost(9))
+    setActiveOrigin(lost())
     await settle()
     expect(close).toHaveBeenCalledWith('b1')
     expect(panel.querySelector('[data-testid="git-helper-refresh"]')).not.toBeNull()
 
-    setActiveOrigin(lost(12))
+    setActiveOrigin(lost())
     await settle()
     expect(open).toHaveBeenCalledTimes(1)
     const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="git-helper-refresh"]')
     expect(refresh).not.toBeNull()
     refresh?.click()
-    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3', 12)
+    expect(onRefreshHelper).toHaveBeenCalledWith('backend-pane-3')
+  })
+
+  it('S11: a press whose pane is no longer in front calls nothing', async () => {
+    const onRefreshHelper = vi.fn()
+    const { panel, setActiveOrigin } = mountApp(fakeServices(), undefined, undefined, undefined, {
+      onRefreshHelper,
+    })
+    const lost = (paneId: string): ActiveOrigin => ({
+      ...SSH_ORIGIN,
+      connection: {
+        paneId,
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      },
+    })
+
+    setActiveOrigin(lost('backend-pane-3'))
+    await settle()
+    const stale = panel.querySelector<HTMLButtonElement>('[data-testid="git-helper-refresh"]')
+    expect(stale?.textContent).toBe('Refresh')
+
+    // The tab in front changed after this button was painted. The press is
+    // the one that lands while the DOM still holds the old button (batched,
+    // as a synchronous tab switch would): the paneId the panel captured and
+    // the live origin now disagree, so the press must be dropped.
+    batch(() => {
+      setActiveOrigin({ ...lost('backend-pane-4'), paneId: 4, sessionId: 's4' })
+      stale!.click()
+    })
+    await settle()
+    expect(onRefreshHelper).not.toHaveBeenCalled()
   })
 
   it('an ad-hoc tab is told to save the connection rather than offered a settings door', async () => {
@@ -453,7 +478,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 6,
         helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
       },
     })
@@ -477,7 +501,6 @@ describe('the panel renders what the store says', () => {
       ...SSH_ORIGIN,
       connection: {
         paneId: 'backend-pane-3',
-        connectionEpoch: 7,
         helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
       },
     })

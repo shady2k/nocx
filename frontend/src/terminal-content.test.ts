@@ -6508,7 +6508,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     }
   })
 
-  it('carries the far helper axis on an SSH origin and fires when the axis changes', async () => {
+  it('S8: a quality sample with the same axis does not wake the origin surfaces', async () => {
     // ADR-727g63tr: the axis is a fact of the CONNECTION, published on the
     // observation. The origin carries the member verbatim so a panel can
     // gate on it; it never derives a state of its own.
@@ -6532,7 +6532,6 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       const starting = content.activeOrigin()?.connection
       expect(starting?.helper).toEqual({ state: 'starting', action: 'none' })
       expect(starting?.paneId).toBe(paneIdOf(content))
-      expect(starting?.connectionEpoch).toBeGreaterThan(0)
 
       publishConnection(client, content, {
         helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
@@ -6545,20 +6544,66 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
         action: 'refresh',
       })
 
-      // THE EPOCH IS PART OF THE ANSWER (ALX-998). A quality sample
-      // publishes a new observation — a new connectionEpoch — without moving
-      // the axis, and the visible Refresh must press with THAT epoch: the
-      // driver refuses a stale one while the head reads the live store. The
-      // surfaces are woken for it and decide it is not a new permission
-      // (Git keeps its binding, Files reveals only a changed cwd), which is
-      // cheaper than a button carrying an epoch the backend will reject.
-      const epoch = content.activeOrigin()?.connection?.connectionEpoch ?? 0
+      // THE EPOCH IS THE PRESS'S, NOT THE SNAPSHOT'S (ALX-1019). A quality
+      // sample publishes a new observation — a new connectionEpoch — without
+      // moving the axis. The press reads the live epoch from the pane's
+      // ConnectionStore at the moment of the press, so the origin snapshot
+      // carries no copy and the surfaces that follow the origin are not
+      // woken for a change none of them can act on.
+      const epoch = connectionEpochs.get(paneIdOf(content)) ?? 0
       publishConnection(client, content, {
         helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
         transport: { state: 'connected', stateMs: 200, plainShells: 1 },
       })
-      expect(onActiveOriginChange).toHaveBeenCalledTimes(4)
-      expect(content.activeOrigin()?.connection?.connectionEpoch).toBeGreaterThan(epoch)
+      expect(connectionEpochs.get(paneIdOf(content))).toBeGreaterThan(epoch)
+      expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
+      expect(content.activeOrigin()?.connection).not.toHaveProperty('connectionEpoch')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('S10: the head and the one press method redial with the live observation epoch', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSSHSessionByHost.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'p1', host: 'h' }, attachToDocument: true },
+      client,
+    )
+    try {
+      publishConnection(client, content, {
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      })
+      // The quality sample the Git panel used to wake for: same axis, new
+      // epoch. Both presses below must carry the NEW one.
+      publishConnection(client, content, {
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      })
+      const liveEpoch = connectionEpochs.get(paneIdOf(content)) ?? 0
+      const presses = () =>
+        client.dispatcher.call.mock.calls.filter((c) => c[0] === 'connection.helperRefresh')
+
+      const head = tab.pane.querySelector<HTMLButtonElement>(
+        '[data-testid="connection-head"] .ui-button',
+      )
+      expect(head?.textContent).toBe('Refresh')
+      head!.click()
+      await vi.waitFor(() => expect(presses()).toHaveLength(1))
+      expect(presses()[0]?.[1]).toEqual({
+        paneId: paneIdOf(content),
+        connectionEpoch: liveEpoch,
+      })
+
+      // The Git panel presses through the same method; this is that method
+      // (the panel's prop call is covered in git-view.test.tsx).
+      content.pressHelperRefresh()
+      await vi.waitFor(() => expect(presses()).toHaveLength(2))
+      expect(presses()[1]?.[1]).toEqual({
+        paneId: paneIdOf(content),
+        connectionEpoch: liveEpoch,
+      })
     } finally {
       teardown()
     }

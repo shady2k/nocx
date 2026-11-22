@@ -87,7 +87,6 @@ import type { GitCommitResult } from '../generated/git.commit'
 import type { GitLogResult } from '../generated/git.log'
 import type { Status } from '../generated/git.status'
 import type { GitError } from '../generated/git.error'
-import type { PaneConnection } from '../generated/pane.connection'
 
 /** The panel's phases — the interstitial and failure scaffolding around the
  *  eight render states. The view renders 'opening' as a spinner and 'failed'
@@ -334,15 +333,6 @@ function isUnknownBinding(e: unknown): boolean {
   return gitErrorReasonOf(e.data) === 'unknown-binding'
 }
 
-/** The fields of the helper axis that change what a surface may do. The
- *  epoch is deliberately absent: a newer observation of the same axis is not
- *  a new permission to open a repository. */
-function helperKey(helper: PaneConnection['helper'] | undefined): string {
-  if (helper === undefined) return 'none'
-  const reason = 'reason' in helper ? helper.reason : ''
-  return `${helper.state}:${reason}:${helper.action}`
-}
-
 /** Whether this origin's axis lets git.open be asked at all: a local tab
  *  has no helper and is always allowed, an SSH tab only while the helper
  *  serves (ADR-727g63tr decision 2). */
@@ -350,19 +340,34 @@ function axisAllowsOpen(o: ActiveOrigin): boolean {
   return o.kind !== 'ssh' || o.connection?.helper?.state === 'serving'
 }
 
-/** The opening key (ALX-1031): the session, how it was opened, the VERIFIED
- *  directory, and the axis that permits opening it. Nothing else is part of
- *  it — not the paneId (a viewer tab or a quality sample is the same
- *  context), not a connection epoch (a newer observation of the same axis is
- *  not a new permission to open), and not the cwd of a tab with no opinion.
+/** Whether this origin may open a repository at all: an axis that serves
+ *  and a cwd somebody verified (AD-5: no silent $HOME guess). */
+function opens(o: ActiveOrigin): boolean {
+  return axisAllowsOpen(o) && o.cwdVerified && o.cwd !== null
+}
+
+/** THE context key (ALX-1031, ALX-1043): one state for every origin, and
+ *  every state has one. It is the session, how it was opened, the KIND of
+ *  state the origin is in, and — only when it may open — the VERIFIED
+ *  directory.
  *
- *  Null when this origin may not open anything at all: an axis that does not
- *  serve, or a cwd nobody verified. And the string is opaque on purpose: it
- *  answers "same context?" and never says what the context is. */
-function openingKey(o: ActiveOrigin): string | null {
-  if (!axisAllowsOpen(o)) return null
-  if (!o.cwdVerified || o.cwd === null) return null
-  return `${o.sessionId}\u0000${o.kind}\u0000${o.cwd}`
+ *  The kind is what the earlier key was missing. An origin that may not open
+ *  is still a context: an axis that does not serve, or a cwd nobody
+ *  verified, is a state the panel can stay in, and a republished observation
+ *  of the SAME state must not be read as a transition. So the key answers
+ *  for it too — `axis` or `noCwd` — and `instanceKey` is never null while
+ *  there is an origin.
+ *
+ *  Nothing else is part of it — not the paneId (a viewer tab or a quality
+ *  sample is the same context), not a connection epoch (a newer observation
+ *  of the same axis is not a new permission to open), and not the cwd of a
+ *  tab with no opinion. The string is opaque on purpose: it answers "same
+ *  context?" and never says what the context is. */
+function contextKey(o: ActiveOrigin): string {
+  const head = `${o.sessionId}\u0000${o.kind}\u0000`
+  if (!axisAllowsOpen(o)) return `${head}axis`
+  if (!o.cwdVerified || o.cwd === null) return `${head}noCwd`
+  return `${head}open\u0000${o.cwd}`
 }
 
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
@@ -403,9 +408,11 @@ export function createGitStore(
    *  entered, left or forced to re-open, and every answer issued for the
    *  previous instance is stale by it. */
   let generation = 0
-  /** The key of the context this instance is about; null while the origin may
-   *  not open anything (no verified cwd, an axis that does not serve, no
-   *  origin at all). Republishes of the same key never move the generation. */
+  /** The key of the context this instance is about (contextKey). It is
+   *  assigned for ANY non-null origin, including one that may not open — a
+   *  republished observation of a noCwd or non-serving state is the same
+   *  context and must not move the generation. Null only when there is no
+   *  origin at all: the initial state, `git.changed` and `dispose`. */
   let instanceKey: string | null = null
   /** The live binding a re-open of the SAME session inherits, held here and
    *  not in the open's closure: an instance that ends must be able to release
@@ -607,17 +614,29 @@ export function createGitStore(
     scopeTo(o, true)
   }
 
-  /** One instance of the opening context ends (ALX-1031). The generation
-   *  moves, so no answer issued for that context can apply again; the poll
-   *  schedule is dropped; and every binding the instance holds is released —
-   *  always the one an earlier re-open carried, and the live one too unless
-   *  the next context is a re-open of the SAME session under a real key,
-   *  which inherits it (`carryLive`, the same-toplevel rule of D4).
+  /** One instance of the opening context ends (ALX-1031, ALX-1043). The
+   *  generation moves, so no answer issued for that context can apply again;
+   *  the poll schedule is dropped.
+   *
+   *  The two bindings it may hold are decided SEPARATELY, because they
+   *  answer different questions. `carryLive` — the next context is an
+   *  ordinary re-open of the SAME session — moves the live binding into
+   *  `carried`, where the answer's same-toplevel rule (D4) keeps it for the
+   *  diff tabs that hold it. Otherwise the live binding is closed.
+   *
+   *  `keepCarried` — the next context is still an open of that session,
+   *  FORCED or not — leaves a binding an earlier re-open was already
+   *  carrying. A force (Refresh, Retry, unknownBinding) is why the open is
+   *  being asked again, not a reason to release a verified binding the tabs
+   *  hold; only leaving the session (or `git.changed`/`dispose`) closes it.
+   *  One flag could not express both: it closed a carried binding on every
+   *  forced retry, which is how a failed re-open lost the repository diff
+   *  tabs were reading.
    *
    *  What the panel keeps on screen is the caller's decision: the repository
    *  answers (state, version, environment) belong to the state the instance
    *  leaves, and only the branch that names that state resets them. */
-  function endInstance(carryLive: boolean): void {
+  function endInstance(carryLive: boolean, keepCarried: boolean): void {
     generation++
     resetPollSchedule()
     const live = untrack(binding)
@@ -626,7 +645,7 @@ export function createGitStore(
     } else if (live !== null) {
       void services.close(live.bindingId).catch(() => {})
     }
-    if (!carryLive && carried !== null) {
+    if (!keepCarried && carried !== null) {
       const leftover = carried
       carried = null
       void services.close(leftover.bindingId).catch(() => {})
@@ -1023,20 +1042,23 @@ export function createGitStore(
     scopeTo(next, false)
   }
 
-  /** THE ONE PLACE AN INSTANCE OF THE OPENING CONTEXT ENDS (ALX-1031).
+  /** THE ONE PLACE AN INSTANCE OF THE CONTEXT KEY ENDS (ALX-1031, ALX-1043).
    *
-   *  A context is a key: session, kind, verified cwd and an axis that
-   *  permits opening. Republishing the same key — a wake, a quality sample,
-   *  another paneId, a newer observation of the same axis — is not a
+   *  EVERY origin has a key (contextKey) and there is exactly ONE transition
+   *  test: the key against the instance's. Republishing the same key — a
+   *  wake, a quality sample, another paneId, a newer observation of the same
+   *  axis, or a repeat of the same noCwd/non-serving state — is not a
    *  transition: the origin is recorded (the pane is the view's, not the
    *  context's) and nothing is asked. Everything else ends the instance
    *  through `endInstance` and then branches on what the new one is: no
-   *  origin, an origin that may not open, or a real key that opens.
+   *  origin, a context that may not open, or a context that opens.
    *
-   *  `force` is the explicit Refresh/Retry: the same key, opened again —
-   *  and the live binding released rather than carried, because the caller
-   *  is here precisely because the open it holds is not trusted (a failed
-   *  open, a refusal, or a read answered unknownBinding). */
+   *  `force` is the explicit Refresh/Retry: the same key asked again. The
+   *  live binding is released rather than carried, because the caller is
+   *  here precisely because the open it holds is not trusted (a failed open,
+   *  a refusal, or a read answered unknownBinding); a binding a previous
+   *  re-open was already carrying stays, because it is the repository the
+   *  diff tabs hold and this force has nothing to say about it. */
   function scopeTo(next: ActiveOrigin | null, force: boolean): void {
     // A frozen origin (a diff tab, a viewer) has no opinion: activating it
     // must never re-bind the panel to a cwd snapshot that may be stale
@@ -1045,14 +1067,18 @@ export function createGitStore(
     // would be.
     if (next !== null && !next.cwdFollow) return
     const prev = untrack(origin)
-    const key = next === null ? null : openingKey(next)
-    if (!force && key !== null && key === instanceKey) {
+    const key = next === null ? null : contextKey(next)
+    // THE TRANSITION, and the only one: same key, not forced, is the same
+    // context. Every state has a key, so a noCwd or non-serving republish
+    // lands here too and cannot reset a draft; and a return to a verified
+    // cwd is not "no key before" but a DIFFERENT key, so it opens.
+    if (!force && key === instanceKey) {
       setOrigin(next)
       return
     }
     if (next === null) {
       if (prev === null) return
-      endInstance(false)
+      endInstance(false, false)
       instanceKey = null
       setOpenState(null)
       setOpenError(null)
@@ -1063,39 +1089,20 @@ export function createGitStore(
       setPhase('no-origin')
       return
     }
-    // AN ORIGIN THAT MAY NOT OPEN: an axis that is not serving (the far
-    // helper gates an SSH tab, ADR-727g63tr decision 2), or a cwd nobody
-    // verified (AD-5: no silent $HOME guess). Nothing is asked and the
-    // panel draws the card that says why. A republished observation of the
-    // SAME such state is not a transition either — nothing can be in flight
-    // under it, and the card it shows comes from the origin.
-    if (key === null && !force) {
-      const live = untrack(binding)
-      const changed =
-        prev === null ||
-        prev.sessionId !== next.sessionId ||
-        prev.kind !== next.kind ||
-        helperKey(prev.kind === 'ssh' ? prev.connection?.helper : undefined) !==
-          helperKey(next.kind === 'ssh' ? next.connection?.helper : undefined) ||
-        live !== null ||
-        carried !== null ||
-        untrack(phase) !== 'ready'
-      if (!changed) {
-        setOrigin(next)
-        return
-      }
-    }
-    // A re-open of the SAME session under a real key inherits the live
+    // A re-open of the SAME session under an opening key carries the live
     // binding, so the answer can keep it when it names the same toplevel
-    // (D4). Leaving the context, a different session, and a forced re-open
-    // all release it.
-    const carryLive = !force && key !== null && prev !== null && prev.sessionId === next.sessionId
-    endInstance(carryLive)
+    // (D4). Leaving the session ends both bindings; a force releases the
+    // live one but keeps a carried one (endInstance's two decisions).
+    const sameSessionOpen = opens(next) && prev !== null && prev.sessionId === next.sessionId
+    endInstance(sameSessionOpen && !force, sameSessionOpen)
     instanceKey = key
     setOrigin(next)
-    if (key === null) {
-      // The axis's own card, or noCwd. The axis is the only one of the two
-      // that withdraws the repository answers: a cwd the shell has not
+    if (!opens(next)) {
+      // AN ORIGIN THAT MAY NOT OPEN: an axis that is not serving (the far
+      // helper gates an SSH tab, ADR-727g63tr decision 2), or a cwd nobody
+      // verified (AD-5: no silent $HOME guess). Nothing is asked and the
+      // panel draws the card that says why. The axis is the only one of the
+      // two that withdraws the repository answers: a cwd the shell has not
       // reported yet says nothing about which git this machine has, and the
       // noCwd card needs none of them.
       setOpenState(null)
@@ -1410,7 +1417,7 @@ export function createGitStore(
     // the next context would inherit a dead one. The panel drops to noPane:
     // the active-origin accessor follows the tab change, and the next
     // rescope re-opens against whatever is in front.
-    endInstance(false)
+    endInstance(false, false)
     instanceKey = null
     setOpenState(null)
     setOpenError(null)
@@ -1449,7 +1456,7 @@ export function createGitStore(
     unsubChanged()
     // The instance ends and releases everything it holds — the live binding
     // and the one a re-open may be carrying (ALX-1031).
-    endInstance(false)
+    endInstance(false, false)
     instanceKey = null
     staleSubs.clear()
     setPhase('no-origin')

@@ -20,6 +20,7 @@ import type { GitCommitResult } from '../generated/git.commit'
 import type { GitPanelServices } from './git-client'
 import type { GitLogResult } from '../generated/git.log'
 import type { GitRemoteResult } from '../generated/git.remote'
+import type { GitChangedNotification } from '../generated/git.changed'
 import { createGitStore, type GitStore } from './git-store'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -1420,6 +1421,493 @@ describe('the opening context key and the answer it accepts (ALX-1031)', () => {
     await settle()
     expect(closeCallsWith(close, 'P')).toBe(1)
     expect(closeCallsWith(close, 'P-late')).toBe(1)
+  })
+})
+
+// ── ALX-1043: the key is total, the transition is one comparison ──────────
+//
+// The class of defect: a state with no key let a separate predicate decide,
+// and it looked for signs of a live instance. In a Ready refusal there are
+// none, so the loss of the cwd was not a transition and the return to the
+// same verified cwd matched the stale instance key — git.open never went out
+// and the panel sat on "Not a repository" forever. The key now exists for
+// EVERY origin; the transition in scopeTo is one comparison.
+
+describe('ALX-1043: a context that may not open is a context too', () => {
+  const G10_CASES: { label: string; origin: ActiveOrigin; answer: GitOpenResult['state'] }[] = [
+    { label: 'notARepository (local)', origin: LOCAL_ORIGIN, answer: 'notARepository' },
+    { label: 'gitUnavailable (local)', origin: LOCAL_ORIGIN, answer: 'gitUnavailable' },
+    { label: 'gitTooOld (local)', origin: LOCAL_ORIGIN, answer: 'gitTooOld' },
+    { label: 'notARepository over a serving helper', origin: SSH_ORIGIN, answer: 'notARepository' },
+  ]
+
+  for (const c of G10_CASES) {
+    it(`G10: ${c.label} — a lost cwd is noCwd, and the same cwd back opens once more`, async () => {
+      const open = vi
+        .fn()
+        .mockResolvedValueOnce({ state: c.answer })
+        .mockResolvedValueOnce(
+          openOk({
+            bindingId: 'b-second',
+            status: statusFixture({ branch: 'second-answer' }),
+          }),
+        )
+      const store = track(createGitStore(makeServices({ open })))
+
+      store.rescope(c.origin)
+      await settle()
+      expect(store.state()).toBe(c.answer)
+      expect(store.phase()).toBe('ready')
+      expect(open).toHaveBeenCalledTimes(1)
+
+      // The shell reported a cwd nobody verified: a DIFFERENT context, so a
+      // transition, and the refusal's answer is reset with it.
+      store.rescope({ ...c.origin, cwdVerified: false })
+      await settle()
+      expect(store.state()).toBe('noCwd')
+      expect(store.phase()).toBe('ready')
+      expect(open).toHaveBeenCalledTimes(1)
+
+      // The same verified cwd comes back: it is a context key again — not
+      // the stale instance's key, and not "no key before".
+      store.rescope(c.origin)
+      await settle()
+      expect(open).toHaveBeenCalledTimes(2)
+      expect(store.state()).toBe('ready')
+      expect(store.binding()).toEqual({ bindingId: 'b-second', toplevel: '/home/dev/repo' })
+      expect(store.status()?.branch).toBe('second-answer')
+    })
+  }
+
+  it('G11: a repeated noCwd observation is not a transition — no open, no close', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope(NO_CWD_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('noCwd')
+
+    // Another paneId, a new observation object, a changed — still
+    // unverified — cwd: the same noCwd key.
+    store.rescope({ ...NO_CWD_ORIGIN, paneId: 4, cwd: '/somewhere/unverified' })
+    await settle()
+    store.rescope({ ...NO_CWD_ORIGIN, paneId: 5 })
+    await settle()
+
+    expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
+    expect(mockHandle(services, 'close')).not.toHaveBeenCalled()
+    expect(store.state()).toBe('noCwd')
+  })
+
+  it('G11 (axis): a repeated non-serving observation is not a transition either', async () => {
+    const helper = {
+      state: 'unavailable',
+      reason: 'helper-lost',
+      action: 'refresh',
+    } as const
+    const origin: ActiveOrigin = { ...SSH_ORIGIN, connection: connectionAxis(helper) }
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope(origin)
+    await settle()
+    expect(store.state()).toBe('helperBlocked')
+
+    // A new tab paneId and a new CONNECTION epoch (another backend pane id),
+    // same axis: nothing git.open is about has moved.
+    store.rescope({
+      ...origin,
+      paneId: 4,
+      connection: { paneId: 'backend-pane-9', helper: { ...helper } },
+    })
+    await settle()
+
+    expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
+    expect(mockHandle(services, 'close')).not.toHaveBeenCalled()
+    expect(store.state()).toBe('helperBlocked')
+  })
+
+  it('G13: a Refresh before the cd re-open lands opens again and keeps the carried binding', async () => {
+    const first = deferred<GitOpenResult>()
+    const second = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('P')
+
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.refresh()
+    await settle()
+    expect(open).toHaveBeenCalledTimes(3)
+
+    // The superseded answer closes only what it minted...
+    first.resolve(openOk({ bindingId: 'R1', toplevel: '/home/dev/repo' }))
+    await settle()
+    // ...and the current one names the repository the carried binding is:
+    // keep it and close the fresh one.
+    second.resolve(openOk({ bindingId: 'R2', toplevel: '/home/dev/repo' }))
+    await settle()
+
+    // The carried binding is the one the diff tabs hold: never closed.
+    expect(closeCallsWith(close, 'P')).toBe(0)
+    expect(closeCallsWith(close, 'R1')).toBe(1)
+    expect(closeCallsWith(close, 'R2')).toBe(1)
+    expect(store.binding()).toEqual({ bindingId: 'P', toplevel: '/home/dev/repo' })
+    expect(store.state()).toBe('ready')
+  })
+
+  it('G14: the same with a different toplevel — the carried binding is superseded once', async () => {
+    const first = deferred<GitOpenResult>()
+    const second = deferred<GitOpenResult>()
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    store.refresh()
+    await settle()
+
+    first.resolve(openOk({ bindingId: 'R1', toplevel: '/home/dev/repo' }))
+    await settle()
+    second.resolve(openOk({ bindingId: 'R2', toplevel: '/home/dev/other' }))
+    await settle()
+
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(closeCallsWith(close, 'R2')).toBe(0)
+    expect(store.binding()).toEqual({ bindingId: 'R2', toplevel: '/home/dev/other' })
+  })
+
+  it('G15 (a): Retry after a refused cd re-open keeps the binding the diff tabs hold', async () => {
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockRejectedValueOnce(new Error('git.open: the helper refused the open'))
+      .mockResolvedValueOnce(openOk({ bindingId: 'R2', toplevel: '/home/dev/repo' }))
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('failed')
+
+    store.refresh()
+    await settle()
+    expect(open).toHaveBeenCalledTimes(3)
+
+    expect(closeCallsWith(close, 'P')).toBe(0)
+    expect(closeCallsWith(close, 'R2')).toBe(1)
+    expect(store.binding()).toEqual({ bindingId: 'P', toplevel: '/home/dev/repo' })
+    expect(store.phase()).toBe('ready')
+  })
+
+  it('G15 (b): leaving the session after a refused cd re-open closes the carried binding once', async () => {
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+      .mockRejectedValueOnce(new Error('git.open: the helper refused the open'))
+      .mockResolvedValueOnce(openOk({ bindingId: 'b-other' }))
+    const close = vi.fn().mockResolvedValue({ closed: true })
+    const store = track(createGitStore(makeServices({ open, close })))
+
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    store.rescope(NEW_CWD_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('failed')
+
+    store.rescope(OTHER_ORIGIN)
+    await settle()
+
+    expect(closeCallsWith(close, 'P')).toBe(1)
+    expect(store.binding()).toEqual({ bindingId: 'b-other', toplevel: '/home/dev/repo' })
+    expect(store.origin()?.sessionId).toBe('s2')
+  })
+})
+
+// ── THE TRANSITION MATRIX (ALX-1043) ──────────────────────────────────────
+//
+// One row per row of the gate table: the state the store is in, the event,
+// and the requests it may issue. The Files half of the same table is F5–F7
+// in files-store.test.ts — a different store, hence a different table.
+// Adding a row to the gate table means adding a row here.
+
+interface MatrixOutcome {
+  opens: number
+  closed: string[]
+}
+
+interface MatrixRow {
+  name: string
+  expected: MatrixOutcome
+  run: () => Promise<MatrixOutcome>
+}
+
+const closedIds = (close: ReturnType<typeof vi.fn>): string[] =>
+  close.mock.calls.map((call) => String(call[0]))
+
+describe('the transition matrix: state, event, requests (ALX-1043)', () => {
+  const ROWS: MatrixRow[] = [
+    {
+      name: 'Opening with a carried binding, the cwd is lost: both bindings close, nothing opens',
+      expected: { opens: 2, closed: ['P'] },
+      run: async () => {
+        const reopened = deferred<GitOpenResult>()
+        const open = vi
+          .fn()
+          .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+          .mockReturnValueOnce(reopened.promise)
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope(NEW_CWD_ORIGIN)
+        await settle()
+        store.rescope({ ...NEW_CWD_ORIGIN, cwdVerified: false })
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Ready-ok with a live binding, the cwd is lost: it closes, nothing opens',
+      expected: { opens: 1, closed: ['P'] },
+      run: async () => {
+        const open = vi.fn().mockResolvedValue(openOk({ bindingId: 'P' }))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Ready refusal, the cwd is lost: nothing is held, nothing opens',
+      expected: { opens: 1, closed: [] },
+      run: async () => {
+        const open = vi.fn().mockResolvedValue({ state: 'notARepository' })
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Failed open, the cwd is lost: nothing is held, nothing opens',
+      expected: { opens: 1, closed: [] },
+      run: async () => {
+        const open = vi.fn().mockRejectedValue(new Error('git.open failed'))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope({ ...LOCAL_ORIGIN, cwdVerified: false })
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'noCwd, a repeated observation (new paneId, wake): nothing opens, nothing closes',
+      expected: { opens: 0, closed: [] },
+      run: async () => {
+        const services = makeServices()
+        const store = track(createGitStore(services))
+        store.rescope(NO_CWD_ORIGIN)
+        await settle()
+        store.rescope({ ...NO_CWD_ORIGIN, paneId: 4, cwd: '/still/unverified' })
+        await settle()
+        store.rescope({ ...NO_CWD_ORIGIN, paneId: 5 })
+        await settle()
+        return {
+          opens: mockHandle(services, 'open').mock.calls.length,
+          closed: closedIds(mockHandle(services, 'close')),
+        }
+      },
+    },
+    {
+      name: 'a non-serving axis, a repeated observation (new paneId, new epoch): nothing opens',
+      expected: { opens: 0, closed: [] },
+      run: async () => {
+        const helper = { state: 'unavailable', reason: 'helper-lost', action: 'refresh' } as const
+        const origin: ActiveOrigin = { ...SSH_ORIGIN, connection: connectionAxis(helper) }
+        const services = makeServices()
+        const store = track(createGitStore(services))
+        store.rescope(origin)
+        await settle()
+        store.rescope({
+          ...origin,
+          paneId: 4,
+          connection: { paneId: 'backend-pane-9', helper: { ...helper } },
+        })
+        await settle()
+        return {
+          opens: mockHandle(services, 'open').mock.calls.length,
+          closed: closedIds(mockHandle(services, 'close')),
+        }
+      },
+    },
+    {
+      name: 'noCwd, the previous verified cwd comes back: git.open once',
+      expected: { opens: 1, closed: [] },
+      run: async () => {
+        const open = vi.fn().mockResolvedValue(openOk({ bindingId: 'P' }))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(NO_CWD_ORIGIN)
+        await settle()
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Opening with a carried binding, Refresh: one forced open, the carried binding stays',
+      expected: { opens: 3, closed: [] },
+      run: async () => {
+        const open = vi
+          .fn()
+          .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+          .mockReturnValueOnce(new Promise<never>(() => {}))
+          .mockReturnValueOnce(new Promise<never>(() => {}))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope(NEW_CWD_ORIGIN)
+        await settle()
+        store.refresh()
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Failed open with a carried binding, Retry: one forced open, the carried binding stays',
+      expected: { opens: 3, closed: [] },
+      run: async () => {
+        const open = vi
+          .fn()
+          .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+          .mockRejectedValueOnce(new Error('git.open failed'))
+          .mockReturnValueOnce(new Promise<never>(() => {}))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const store = track(createGitStore(makeServices({ open, close })))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope(NEW_CWD_ORIGIN)
+        await settle()
+        store.refresh()
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'Ready-ok with a live binding, unknownBinding: it closes and git.open is forced',
+      expected: { opens: 2, closed: ['P'] },
+      run: async () => {
+        const open = vi
+          .fn()
+          .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+          .mockResolvedValueOnce(openOk({ bindingId: 'R' }))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const services = makeServices({
+          open,
+          close,
+          stage: vi
+            .fn()
+            .mockRejectedValueOnce(
+              new RpcError('git: unknown binding "P"', -32602, { reason: 'unknown-binding' }),
+            ),
+        })
+        const store = track(createGitStore(services))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.stage(['a.txt'])
+        await settle()
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'a live binding, git.changed: it closes and the panel drops to no-origin',
+      expected: { opens: 1, closed: ['P'] },
+      run: async () => {
+        let changed: (p: GitChangedNotification) => void = () => {
+          throw new Error('not subscribed')
+        }
+        const open = vi.fn().mockResolvedValue(openOk({ bindingId: 'P' }))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const services = makeServices({
+          open,
+          close,
+          subscribeGitChanged: vi.fn((handler: (p: GitChangedNotification) => void) => {
+            changed = handler
+            return () => {}
+          }),
+        })
+        const store = track(createGitStore(services))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        changed({ bindingId: 'P', reason: 'sessionClosed' })
+        await settle()
+        expect(store.state()).toBe('noPane')
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+    {
+      name: 'a carried binding, git.changed: it closes and the panel drops to no-origin',
+      expected: { opens: 2, closed: ['P'] },
+      run: async () => {
+        let changed: (p: GitChangedNotification) => void = () => {
+          throw new Error('not subscribed')
+        }
+        const open = vi
+          .fn()
+          .mockResolvedValueOnce(openOk({ bindingId: 'P' }))
+          .mockReturnValueOnce(new Promise<never>(() => {}))
+        const close = vi.fn().mockResolvedValue({ closed: true })
+        const services = makeServices({
+          open,
+          close,
+          subscribeGitChanged: vi.fn((handler: (p: GitChangedNotification) => void) => {
+            changed = handler
+            return () => {}
+          }),
+        })
+        const store = track(createGitStore(services))
+        store.rescope(LOCAL_ORIGIN)
+        await settle()
+        store.rescope(NEW_CWD_ORIGIN)
+        await settle()
+        changed({ bindingId: 'P', reason: 'sessionClosed' })
+        await settle()
+        expect(store.state()).toBe('noPane')
+        return { opens: open.mock.calls.length, closed: closedIds(close) }
+      },
+    },
+  ]
+
+  it.each(ROWS)('$name', async (row) => {
+    const outcome = await row.run()
+    expect(outcome).toEqual(row.expected)
   })
 })
 

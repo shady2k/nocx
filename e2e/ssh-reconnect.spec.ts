@@ -85,10 +85,20 @@ import { readStand } from './stand'
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
 const HEAD = '.pane.active [data-testid="connection-head"]'
-const RECONNECT = `${HEAD} .ui-button`
 const INDICATOR = '.pane.active .ui-connection-indicator'
 const BOUNDARY = '[data-reconnect-boundary="true"]'
 const RECONNECT_SETTING = '.ui-settings-row[data-key="ssh.reconnect"] select'
+
+/**
+ * The head's recovery offer, and only it. The head carries other buttons —
+ * `Refresh` and `Host settings` are the helper axis — so "a button in the
+ * head" is not the transport's offer; the accessible name is. Both names the
+ * offer can wear are here, because `shellOnly` is a different journey, not a
+ * different offer.
+ */
+function recoveryButton(page: Page) {
+  return page.locator(HEAD).getByRole('button', { name: /^(Reconnect|Retry shell)$/ })
+}
 
 /**
  * The connection's probe cadence, as a person's profile states it — and it is
@@ -294,7 +304,7 @@ test('a silently dead connection is reported to the pane, and the shell is not t
             .locator(HEAD)
             .getAttribute('data-state')
             .catch(() => null),
-          reconnect: await page.locator(RECONNECT).count(),
+          reconnect: await recoveryButton(page).count(),
           boundaries: await page.locator(BOUNDARY).count(),
         }),
         { timeout: 60_000 },
@@ -392,7 +402,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
               .getAttribute('data-condition')
               .catch(() => null),
             gone: state === 'failed' || state === 'ended' || state === 'reconnecting',
-            reconnect: await page.locator(RECONNECT).count(),
+            reconnect: await recoveryButton(page).count(),
             boundaries: await page.locator(BOUNDARY).count(),
           }
         },
@@ -425,7 +435,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
     w.proxy.pass()
     const sentBeforeReconnect = sent.length
 
-    await page.getByRole('button', { name: 'Reconnect', exact: true }).click()
+    await recoveryButton(page).click()
     await expect.poll(() => opened.length).toBeGreaterThan(0)
     const replacement = opened.at(-1)!
     expect(replacement.generation).toBeGreaterThan(0)
@@ -463,7 +473,7 @@ test('a connection that is cut is offered a way back, and the reconnect keeps th
   }
 })
 
-test('a host that is merely answering late is marked slow and offered nothing', async ({
+test('a host that is merely answering late is marked slow and offers no transport recovery', async ({
   page,
 }, testInfo) => {
   test.setTimeout(150_000)
@@ -490,7 +500,7 @@ test('a host that is merely answering late is marked slow and offered nothing', 
     // The promise this test exists for. The host is struggling, the session is
     // alive, and the product must not offer to replace it — nor mark the tab
     // as lost.
-    await expect(page.locator(RECONNECT)).toHaveCount(0)
+    await expect(recoveryButton(page)).toHaveCount(0)
     await expect(page.locator(BOUNDARY)).toHaveCount(0)
     await expect(page.locator('.nocx-tab-warning[aria-label="Connection lost"]')).toHaveCount(0)
 

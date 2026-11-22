@@ -241,15 +241,12 @@ describe('files tree store', () => {
     expect(store.phase()).toBe('ready')
   })
 
-  it('a listing answered after the scope moved still clears the row it made busy', async () => {
-    // THE BUSY FLAG BELONGS TO THE REQUEST THAT SET IT (nocx-4y82c.1.6). A row
-    // spun for the whole of a person's 30 s wait on CI: the directory asked
-    // for its listing, the panel re-scoped to the same session under a new
+  it('a listing answered after another paneId arrived still applies, and clears the row it made busy', async () => {
+    // A PANE IS A VIEW OF ONE TREE (ALX-1031). The directory asked for its
+    // listing, the panel took an observation of the SAME session under a new
     // paneId (a viewer tab, design §5.4 — the binding and the tree STAY), and
-    // the answer then arrived for a scope that was no longer current. The
-    // store drops such an answer's CONTENT, which is right, and used to drop
-    // its SETTLEMENT with it, leaving the row busy forever. Nothing else ever
-    // clears that flag, so the row was stuck for as long as the panel lived.
+    // the answer arrived afterwards. It is the same context's answer: it
+    // applies, and the row it made busy settles with it (nocx-4y82c.1.6).
     const listing = deferred<FilesListResult>()
     const list = vi
       .fn()
@@ -264,8 +261,6 @@ describe('files tree store', () => {
     await settle()
     expect(nodeRows(store, 'docs').busy, 'the directory is enumerating').toBe(true)
 
-    // Same session, same binding, same tree — a DIFFERENT pane: the viewer
-    // tab opened from this one answers its source session (design §5.4).
     store.rescope({ ...LOCAL_A, paneId: 99 })
     await settle()
 
@@ -273,12 +268,14 @@ describe('files tree store', () => {
     await settle()
 
     expect(nodeRows(store, 'docs').busy, 'the settled listing left the row busy').toBe(false)
+    expect(nodeRows(store, 'docs').children.map((c) => c.name)).toEqual(['a.txt'])
+    expect(nodeRows(store, 'docs').state).toBe('ok')
   })
 
-  it('a listing that FAILS after the scope moved still clears the row it made busy', async () => {
-    // The rejection half of the same rule (nocx-4y82c.1.6): an error path may
-    // legitimately refuse to render another scope's failure, and it may never
-    // leave the flag it took standing.
+  it('a listing that FAILS after another paneId arrived still clears the row it made busy', async () => {
+    // The rejection half of the same rule: the failure belongs to the same
+    // context, so it reaches the row — and either way the flag the request
+    // took is cleared.
     const listing = deferred<FilesListResult>()
     const list = vi
       .fn()
@@ -299,6 +296,8 @@ describe('files tree store', () => {
     await settle()
 
     expect(nodeRows(store, 'docs').busy, 'the failed listing left the row busy').toBe(false)
+    expect(nodeRows(store, 'docs').state).toBe('error')
+    expect(nodeRows(store, 'docs').error).toContain('the far side went away')
   })
 
   it('expanding a directory reaches files.list and commits its entries', async () => {
@@ -2156,5 +2155,127 @@ describe('a Files panel nobody is looking at does no work', () => {
     await settle()
     expect(docs.state).toBe('ok')
     expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'n.md')).toBe(true)
+  })
+})
+
+// ── The opening context: one key, one generation, one answer (ALX-1031) ──
+//
+// The Files key is (session, kind) — the tree is rooted at `/` and a cwd only
+// reveals, so neither the cwd nor the paneId is a transition. The membership
+// of a read is its binding; the generation orders answers per node, and
+// `refresh()` raises it to do so. A superseded SUCCESSFUL open closes its own
+// binding, because the backend registered it.
+
+const closeCallsWith = (close: ReturnType<typeof vi.fn>, bindingId: string): number =>
+  close.mock.calls.filter((c) => c[0] === bindingId).length
+
+const FROZEN_A: ActiveOrigin = { ...LOCAL_A, paneId: 7, cwdFollow: false }
+
+describe('the opening context key and the answer it accepts (ALX-1031)', () => {
+  it('F1: files.open in flight, then a diff tab of the SAME session — the answer binds, lists and watches, and reveals nothing', async () => {
+    const opening = deferred<typeof OPEN_RESULT>()
+    const open = vi.fn().mockReturnValueOnce(opening.promise)
+    const list = vi
+      .fn()
+      .mockResolvedValue(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = shownStore(makeServices({ open, list, watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    // A diff tab of the same session answers its source origin: cwdFollow is
+    // false and the paneId is another one — the same tree, not a transition.
+    store.rescope(FROZEN_A)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+
+    opening.resolve(OPEN_RESULT)
+    await settle()
+
+    expect(store.phase()).toBe('ready')
+    expect(store.binding()?.bindingId).toBe('b1')
+    expect(list).toHaveBeenCalledWith('b1', '/', 0, FILES_PAGE_SIZE, 'background')
+    expect(store.root()?.children.map((c) => c.name)).toEqual(['docs'])
+    expect(watch).toHaveBeenCalled()
+    // The frozen origin is "stay exactly as you are": nothing is revealed.
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(store.revealTarget()).toBeNull()
+  })
+
+  it('F2: the same, but files.open fails — the failed phase with its Retry, and no request behind the person’s back', async () => {
+    const opening = deferred<typeof OPEN_RESULT>()
+    const open = vi.fn().mockReturnValueOnce(opening.promise)
+    const store = shownStore(makeServices({ open }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.rescope(FROZEN_A)
+    await settle()
+
+    opening.reject(new Error('files.open: the session went away'))
+    await settle()
+
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('went away')
+
+    // The same context republished — the shell tab again, then the diff tab —
+    // is not a retry: the panel's Retry is the retry.
+    store.rescope(LOCAL_A)
+    await settle()
+    store.rescope(FROZEN_A)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(store.phase()).toBe('failed')
+  })
+
+  it('F3: a nested listing in flight when a diff tab of the same session arrives applies, and settles', async () => {
+    const listing = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+      .mockReturnValueOnce(listing.promise)
+    const store = shownStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.toggle(nodeRows(store, 'docs'))
+    await settle()
+    expect(nodeRows(store, 'docs').busy).toBe(true)
+
+    store.rescope(FROZEN_A)
+    await settle()
+
+    listing.resolve(listOk('C:/docs', [entry({ name: 'a.txt', path: '/docs/a.txt' })]))
+    await settle()
+
+    expect(nodeRows(store, 'docs').busy).toBe(false)
+    expect(nodeRows(store, 'docs').children.map((c) => c.name)).toEqual(['a.txt'])
+  })
+
+  it('F4: a superseded successful open closes its binding exactly once and leaves the live session alone', async () => {
+    const openingA = deferred<typeof OPEN_RESULT>()
+    const open = vi
+      .fn()
+      .mockReturnValueOnce(openingA.promise)
+      .mockResolvedValueOnce({ ...OPEN_RESULT, bindingId: 'bB' })
+    const close = vi.fn().mockResolvedValue({})
+    const store = shownStore(makeServices({ open, close }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    // Another machine while A's open is still in flight.
+    store.rescope(SSH_B)
+    await settle()
+    expect(store.binding()?.bindingId).toBe('bB')
+    expect(store.phase()).toBe('ready')
+
+    openingA.resolve({ ...OPEN_RESULT, bindingId: 'bA' })
+    await settle()
+
+    expect(closeCallsWith(close, 'bA')).toBe(1)
+    expect(store.binding()?.bindingId).toBe('bB')
+    expect(store.phase()).toBe('ready')
+    expect(store.origin()?.sessionId).toBe('session-b')
   })
 })

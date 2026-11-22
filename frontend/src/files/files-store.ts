@@ -11,15 +11,16 @@
 //    from the root down to the new cwd, expand, select — never collapse).
 //    Only a different tab or a dead binding re-opens.
 // 2. STALE RESPONSES ARE DROPPED, AND NOTHING CLIENT-MINTED GOES ON THE
-//    WIRE. Every request captures the {paneId, generation, bindingId} triple
-//    it was issued for; a response applies only if that triple still matches
-//    the view's current state (the tab switch guard — a files.list for tab A,
-//    still in flight when the user activates tab B, must never paint A's
-//    listing into B's tree) AND the response's generation is not older than
-//    what has already been applied to that node (the ordering guard — a
-//    refresh re-list that landed first must not be overwritten by the expand
-//    that started before it). The generation counter bumps on every re-scope
-//    and every refresh cycle.
+//    WIRE. Every request captures the {generation, bindingId} scope it was
+//    issued for; a response applies only if it still belongs to the view's
+//    current scope (the binding — a files.list for session A, still in flight
+//    when the user activates session B, must never paint A's listing into
+//    B's tree) AND its generation is not older than what has already been
+//    applied to that node (the ordering guard — a refresh re-list that landed
+//    first must not be overwritten by the expand that started before it). The
+//    generation counter grows on every re-scope and every refresh cycle, so
+//    it orders answers and never decides which context owns them: a paneId
+//    belongs to a view, not to a tree (ALX-1031).
 // 3. CYCLE DETECTION COSTS NO EXTRA CALL. Every successful list returns the
 //    listed directory's `canonical`; the store compares it against the
 //    canonicals it already holds for the directory's expanded ancestors
@@ -303,8 +304,13 @@ export interface FilesTreeStore {
   dispose(): void
 }
 
+/** The scope a list or watch response was issued for. `paneId` is
+ *  deliberately absent (ALX-1031): a pane is a view of one context, and a
+ *  viewer tab or a diff tab of the same session is the same tree — the
+ *  membership test is the binding. The generation stays because it orders
+ *  answers per node (`appliedGeneration`), a different question from which
+ *  instance a read belongs to. */
 interface ListCtx {
-  paneId: number
   generation: number
   bindingId: string | null
 }
@@ -712,11 +718,17 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     return eligibleFilterDirs().every((dir) => validFilterProjection(dir) !== null)
   }
 
+  /** The response's request is still the view's scope: a live origin and —
+   *  once a binding exists — the same binding. That is the whole membership
+   *  test in this store (ALX-1031): the generation orders responses per
+   *  directory (rule 2, `appliedGeneration`) and `refresh()` raises it to do
+   *  so, so it cannot also say which instance a read belongs to. The two
+   *  roles are deliberately kept apart, and a paneId is not consulted at all:
+   *  a diff or viewer tab of the same session is the same tree. */
   function scopeCurrent(ctx: ListCtx): boolean {
     if (closed) return false
-    const o = untrack(origin)
+    if (untrack(origin) === null) return false
     const b = untrack(binding)
-    if (o === null || ctx.paneId !== o.paneId) return false
     if (ctx.bindingId !== null && (b === null || ctx.bindingId !== b.bindingId)) return false
     return true
   }
@@ -725,10 +737,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  request: the open that establishes a binding wins by generation. Same
    *  untracked read as scopeCurrent — a one-shot guard, never a reactive
    *  derivation. */
-  function openCurrent(ctx: { paneId: number; generation: number }): boolean {
+  function openCurrent(ctx: { generation: number }): boolean {
     if (closed) return false
-    const o = untrack(origin)
-    return o !== null && ctx.paneId === o.paneId && ctx.generation === generation
+    return untrack(origin) !== null && ctx.generation === generation
   }
 
   function messageOf(e: unknown): string {
@@ -914,7 +925,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const o = untrack(origin)
     const b = untrack(binding)
     if (o === null || b === null) return null
-    return { paneId: o.paneId, generation, bindingId: b.bindingId }
+    return { generation, bindingId: b.bindingId }
   }
 
   /** The last (binding, visibility) pair the backend was actually told, so
@@ -1271,12 +1282,19 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // instead), and the provider's fallback machinery is not reachable
     // from the panel — the panel is a file manager from / whether or not
     // the shell reports where it is.
-    const ctx = { paneId: o.paneId, generation }
+    const ctx = { generation }
     openedSession = o.sessionId
     const opening = services.open(o.sessionId, '/', 'background')
     opening
       .then((res) => {
-        if (!openCurrent(ctx)) return
+        if (!openCurrent(ctx)) {
+          // Stale: a newer scope superseded this open. A SUCCESSFUL open has
+          // already registered a live binding on the backend — dropping the
+          // answer without closing it leaks that binding for as long as the
+          // session lives (ALX-1031). Nothing else about it is applied.
+          void services.close(res.bindingId, 'background').catch(() => {})
+          return
+        }
         setBinding({
           bindingId: res.bindingId,
           endpointId: res.endpointId,
@@ -1300,7 +1318,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         const b = untrack(binding)
         const r = untrack(root)
         if (b !== null && r !== null) {
-          const listCtx: ListCtx = { paneId: o.paneId, generation, bindingId: b.bindingId }
+          const listCtx: ListCtx = { generation, bindingId: b.bindingId }
           void issueList(r, 0, FILES_PAGE_SIZE, listCtx, 'background').then(async () => {
             if (!scopeCurrent(listCtx)) {
               cancelReveal()
@@ -1510,8 +1528,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  Resolves true when the reached target is expandable, including a
    *  non-cyclic directory symlink, and false otherwise. Idempotent: the path
    *  already revealed reports true and a matching walk shares its result.
-   *  Every step rides the {paneId, generation, bindingId} discipline (rules 2
-   *  and 3): a reveal in flight when the origin changes must drop. */
+   *  Every step rides the {generation, bindingId} discipline (rules 2 and 3):
+   *  a reveal in flight when the scope changes must drop. */
   /** Start a reveal requested while a new binding was opening. The queued
    *  promise stays owned by the caller while revealPath mints the walk after
    *  the root's first listing is ready. */

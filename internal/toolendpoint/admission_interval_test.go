@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ENDING AN INTERVAL IS EXACT, AND ONE SESSION'S IS NOT ANOTHER'S.
@@ -145,6 +147,20 @@ func awaitAdmitted(t *testing.T, endpoint *Endpoint, want ...string) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// awaitNoAdmitted waits for the endpoint to hold no admission record at all. A
+// record published by a decision that then failed is removed by the serve
+// loop's DEFERRED cleanup, which runs after the refusal is written and the
+// socket closed — so the refusal reaching the caller does not mean the record
+// is gone yet (nocx-oalo1.6.13). Read once at that moment, the assertion is a
+// report about a moment rather than about the state the cleanup leaves; this
+// waits for the state and still fails if it never arrives.
+func awaitNoAdmitted(t *testing.T, endpoint *Endpoint) {
+	t.Helper()
+	waittest.WaitForDetail(t, "the endpoint to forget the failed admission",
+		func() string { return fmt.Sprintf("admitted sessions = %v", endpoint.AdmittedSessions()) },
+		func() bool { return len(endpoint.AdmittedSessions()) == 0 })
 }
 
 func TestRetiringAnIntervalEndsOneSessionsConnectionAndNoOther(t *testing.T) {
@@ -383,7 +399,7 @@ func TestAPublishedAdmissionThatThenFailsLeavesNoRecord(t *testing.T) {
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("a failed admission was neither served nor refused: %v", err)
 	}
-	if admitted := endpoint.AdmittedSessions(); len(admitted) != 0 {
-		t.Fatalf("admitted sessions = %v, want none: the decision failed after publishing", admitted)
-	}
+	// Nothing published here can be forgotten by anyone else: this serve loop
+	// never starts. Its own cleanup does it, after the refusal.
+	awaitNoAdmitted(t, endpoint)
 }

@@ -676,90 +676,13 @@ func calledObject(expr ast.Expr, info *types.Info) types.Object {
 	return nil
 }
 
-func isFarhelperClientArgument(arg ast.Expr, info *types.Info) bool {
-	selector, ok := unparen(arg).(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != "Client" {
-		return false
-	}
-	id, ok := unparen(selector.X).(*ast.Ident)
-	if !ok {
-		return false
-	}
-	obj := info.Uses[id]
-	if obj == nil {
-		obj = info.Defs[id]
-	}
-	if obj == nil {
-		return false
-	}
-	typ := info.TypeOf(id)
-	if typ == nil {
-		typ = obj.Type()
-	}
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != nocxInternal+"farhelper" || named.Obj().Name() != "Lease" {
-		return false
-	}
-	return true
-}
-
 func (c *collector) connectorArgumentFact(call *ast.CallExpr, index int, arg ast.Expr, label, rel string, p *packages.Package, info *types.Info) {
-	obj := calledObject(call.Fun, info)
-	if obj == nil {
-		if ident, ok := unparen(call.Fun).(*ast.Ident); ok && p.Types != nil {
-			obj = p.Types.Scope().Lookup(ident.Name)
-		}
-	}
-	if obj == nil {
-		if ident, ok := unparen(call.Fun).(*ast.Ident); ok {
-			obj = info.Uses[ident]
-			if obj != nil && obj.Pkg() == nil {
-				obj = nil
-			}
-		}
-	}
-	if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == nocxInternal+"git/helper" && fn.Name() == "NewFactory" {
-		if !isFarhelperClientArgument(arg, info) {
-			pos := p.Fset.Position(arg.Pos())
-			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: nocxInternal + "git/helper.NewFactory"})
-		}
+	fn, ok := calledObject(call.Fun, info).(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != discoveryConnectorPath || fn.Name() != "NewScheduler" {
 		return
 	}
-	var sig *types.Signature
-	if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == discoveryConnectorPath {
-		sig, _ = fn.Type().(*types.Signature)
-	} else if tv, ok := info.Types[unparen(call.Fun)]; ok {
-		sig, _ = tv.Type.Underlying().(*types.Signature)
-	}
-	if sig == nil {
-		if ident, ok := unparen(call.Fun).(*ast.Ident); ok {
-			for _, file := range p.Syntax {
-				ast.Inspect(file, func(node ast.Node) bool {
-					assign, ok := node.(*ast.AssignStmt)
-					if !ok {
-						return true
-					}
-					for i, lhs := range assign.Lhs {
-						name, ok := lhs.(*ast.Ident)
-						if !ok || name.Name != ident.Name || i >= len(assign.Rhs) {
-							continue
-						}
-						if rhs, ok := unparen(assign.Rhs[i]).(*ast.SelectorExpr); ok {
-							obj = info.Uses[rhs.Sel]
-						}
-					}
-					return true
-				})
-			}
-			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == discoveryConnectorPath {
-				sig, _ = fn.Type().(*types.Signature)
-			}
-		}
-	}
-	if sig == nil || index >= sig.Params().Len() {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || index >= sig.Params().Len() {
 		return
 	}
 	param, ok := sig.Params().At(index).Type().(*types.Named)
@@ -767,17 +690,15 @@ func (c *collector) connectorArgumentFact(call *ast.CallExpr, index int, arg ast
 		return
 	}
 	argType := info.TypeOf(arg)
-	if argType == nil {
-		return
-	}
-	if farhelperOwns(argType) {
+	if argType == nil || farhelperOwns(argType) {
 		return
 	}
 	qualifier := func(pkg *types.Package) string { return pkg.Path() }
 	connectorType := types.TypeString(param, qualifier)
 	argumentType := types.TypeString(argType, qualifier)
+	pos := p.Fset.Position(arg.Pos())
 	c.add(Fact{
-		Rule: "panel-host-path", File: rel, Line: p.Fset.Position(arg.Pos()).Line,
+		Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column,
 		Func: label, Object: connectorType + "(" + argumentType + ")",
 	})
 }
@@ -804,6 +725,14 @@ func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Se
 	pos := p.Fset.Position(id.Pos())
 	path := obj.Pkg().Path()
 	fn, isFunc := obj.(*types.Func)
+	if path == nocxInternal+"git/helper" && fn != nil && fn.Name() == "NewFactory" {
+		detail := ""
+		if callee == nil {
+			detail = "constructor value"
+		}
+		c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".NewFactory", Detail: detail})
+		return
+	}
 	if path == discoveryConnectorPath && fn != nil && fn.Name() == "NewScheduler" && callee == nil {
 		c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".NewScheduler", Detail: "constructor value"})
 		return
@@ -903,7 +832,7 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 			methodOn(fn, "ProbeLease", "Inflate"), methodOn(fn, "ProbeLease", "CommandNames"):
 			// Every exec a lease carries, not only the ports sample: a panel
 			// that runs ANY probe for itself has taken the road C24 closes.
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
 		case methodOn(fn, "Client", "AcquireProbeLease"):
 			// The acquisition, because the execs above travel on the returned
 			// lease as often as not: a panel's adapter acquires the lease from
@@ -911,25 +840,24 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 			// the lease's own methods are resolved to the interface and never
 			// reach this walk. The concrete acquisition is the seam the
 			// product actually uses, and it is the road C24 closes.
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
 		}
 	case nocxInternal + "git/helper":
-		// NewFactory is checked at its call so the client argument, rather than
-		// the constructor reference, determines whether the site is licensed.
+		// NewFactory references are recorded in identFact, including constructor values.
 	case nocxInternal + "hostmode", nocxInternal + "helper/consent":
 		if isFunc && methodOn(fn, "Store", "Lookup") {
-			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
 		}
 	case nocxInternal + "ssh":
 		if isFunc && pkgLevel && receiverType(fn) == nil && fn.Name() == "NewFSConn" {
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: path + ".NewFSConn"})
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".NewFSConn"})
 		}
 	case nocxInternal + "helper/proto":
 		// A constant is not a function, so isFunc is false and the name is the
 		// whole identity; the object still has to be package-level, because a
 		// local constant of the same name is not the wire op.
 		if !isFunc && pkgLevel && obj.Name() == "OpSamplePorts" {
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: path + ".OpSamplePorts"})
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".OpSamplePorts"})
 		}
 	}
 }

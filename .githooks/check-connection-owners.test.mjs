@@ -26,6 +26,7 @@ import {
   evaluate,
   isAllowlisted,
   loadBaseline,
+  mergeFacts,
   toolchainForGoMod,
   unreasonedEntries,
   violationKey,
@@ -1162,13 +1163,18 @@ test('the full pass finds a cross-package store method call behind a parenthesiz
   )
 })
 
-test('the full pass resolves a scheduler constructor saved in a local (Ports)', () => {
+test('the full pass reports a scheduler constructor saved in a local (Ports)', () => {
   const src = schedulerFixture('app').replace(
     'func schedule() { _ = discovery.NewScheduler(testConnector{}, nil) }',
     'func schedule() { newScheduler := discovery.NewScheduler; _ = newScheduler(testConnector{}, nil) }',
   )
-  const facts = factsThroughTheFullPass({ 'internal/app/second.go': src }).filter((f) => f.rule === 'panel-host-path')
-  assert.ok(facts.some((f) => f.object.includes('testConnector')), 'the constructor argument is resolved through the local value')
+  const facts = factsThroughTheFullPass({ 'internal/app/second.go': src }).filter(
+    (f) => f.rule === 'panel-host-path',
+  )
+  assert.ok(
+    facts.some((f) => f.object.endsWith('.NewScheduler') && f.detail === 'constructor value'),
+    'saving the constructor is a finding without tracing a local variable',
+  )
 })
 
 test('the full pass resolves a dot-imported scheduler constructor (Ports)', () => {
@@ -1263,10 +1269,10 @@ const GIT_FACTORY_FIXTURE = `package app
 
 import (
 	"github.com/shady2k/nocx/internal/git/helper"
-	"github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/farhelper"
 )
 
-func factory(c *client.Client) { helper.NewFactory(c) }
+func factory(c farhelper.Lease) { helper.NewFactory(c) }
 `
 
 test('a duplicate licensed Dial in connectLocked is refused', () => {
@@ -1284,30 +1290,200 @@ func Dial(any, Config) (*Client, error) { return nil, nil }
     },
     (dir) => {
       const facts = analyze({ module: dir, scope: dir, pkgs: './internal/app' })
-      const rows = violationsFromFacts(facts).filter((f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'))
-      assert.equal(rows.length, 1, 'the product-labelled licensed first dial is exempt; the second is reported')
+      const rows = violationsFromFacts(facts).filter(
+        (f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'),
+      )
+      assert.equal(
+        rows.length,
+        1,
+        'the product-labelled licensed first dial is exempt; the second is reported',
+      )
     },
   )
 })
 
-test('sessionFactory.Open licenses only the Client acquired from farhelper (C23)', () => {
-  const facts = (source) => factsFor({
-    'internal/app/helper_git.go': `package app
-import (
- "context"
- "github.com/shady2k/nocx/internal/farhelper"
- "github.com/shady2k/nocx/internal/git/helper"
- "github.com/shady2k/nocx/internal/helper/client"
-)
-type sessionFactory struct { far *farhelper.Registry }
-func (f *sessionFactory) Open(ctx context.Context, c *client.Client, lease *farhelper.Lease) { helper.NewFactory(${source}) }
+test('Git constructor values are facts even when later called with a lease', () => {
+  withOwnerModule(
+    {
+      'internal/git/helper/factory.go': `package helper
+import "github.com/shady2k/nocx/internal/farhelper"
+func NewFactory(farhelper.Lease) {}
 `,
-  }).filter((f) => f.rule === 'helper-decider' && f.object === GIT_FACTORY)
-  assert.deepEqual(facts('lease.Client'), [])
-  assert.equal(facts('c').length, 1)
+      'internal/farhelper/lease.go': 'package farhelper; type Lease struct{}',
+      'internal/app/second.go': `package app
+import (
+ helpergit "github.com/shady2k/nocx/internal/git/helper"
+ "github.com/shady2k/nocx/internal/farhelper"
+)
+func build(lease farhelper.Lease) { factory := helpergit.NewFactory; factory(lease) }
+`,
+    },
+    (dir) => {
+      const facts = analyze({ module: dir, scope: dir }).filter((f) => f.object === GIT_FACTORY)
+      assert.equal(facts.length, 1)
+    },
+  )
 })
 
-test('a Git factory built on a helper client is a second decider (C23)', () => {
+test('an unrelated function taking Connector is not the Ports constructor', () => {
+  withOwnerModule(
+    {
+      'internal/discovery/seam.go': FIXTURE_DISCOVERY + '\nfunc Unrelated(Connector, any) {}',
+      'internal/app/second.go': `package app
+import "github.com/shady2k/nocx/internal/discovery"
+type connector struct{}
+func (connector) Lease() {}
+func run() { discovery.Unrelated(connector{}, nil) }
+`,
+    },
+    (dir) =>
+      assert.deepEqual(
+        panelFacts(analyze({ module: dir, scope: dir, pkgs: './internal/app' })),
+        [],
+      ),
+  )
+})
+
+test('all licensed connection facts have a one-position licence across build configurations', () => {
+  for (const entry of ALLOWLIST.filter((e) =>
+    ['helper-decider', 'panel-host-path'].includes(e.rule),
+  )) {
+    const first = {
+      rule: entry.rule,
+      file: entry.file,
+      func: entry.func,
+      object: entry.objects[0],
+      line: 1,
+      column: 10,
+    }
+    const second = { ...first, column: 40 }
+    const tagged = { ...first, line: 2 }
+    const facts = mergeFacts([
+      [first, second],
+      [first, second, tagged],
+    ])
+    assert.equal(facts.length, 3)
+    assert.equal(violationsFromFacts(facts).length, 2, entry.file)
+  }
+})
+
+test('licensed factory admits one direct call, not a value or a second direct call', () => {
+  for (const [body, expected] of [
+    ['helpergit.NewFactory(lease)', 0],
+    ['factory := helpergit.NewFactory; factory(lease)', 1],
+    ['helpergit.NewFactory(lease); helpergit.NewFactory(lease)', 1],
+  ]) {
+    withOwnerModule(
+      {
+        'internal/git/helper/factory.go': `package helper
+import "github.com/shady2k/nocx/internal/farhelper"
+func NewFactory(farhelper.Lease) {}
+`,
+        'internal/farhelper/lease.go': 'package farhelper; type Lease struct{}',
+        'internal/app/helper_git.go': `package app
+import (
+ helpergit "github.com/shady2k/nocx/internal/git/helper"
+ "github.com/shady2k/nocx/internal/farhelper"
+)
+type sessionFactory struct{}
+func (sessionFactory) Open(lease farhelper.Lease) { ${body} }
+`,
+      },
+      (dir) =>
+        assert.equal(
+          violationsFromFacts(analyze({ module: dir, scope: dir })).length,
+          expected,
+          body,
+        ),
+    )
+  }
+})
+
+test('same-line Lookup and AcquireProbeLease positions survive both builds, including tag-only uses', () => {
+  for (const [file, declaration, objectSource, body] of [
+    [
+      'internal/app/hosted_shell_carrier.go',
+      'func hostModeFor(s *hostmode.Store)',
+      {
+        'internal/hostmode/store.go':
+          'package hostmode; type Store struct{}; func (*Store) Lookup() {}',
+      },
+      's.Lookup(); s.Lookup()',
+    ],
+    [
+      'internal/app/helper_probeops.go',
+      'type helperLeaseAcquirer struct{}; func (helperLeaseAcquirer) AcquireProbeLease(s *client.Client)',
+      {
+        'internal/helper/client/client.go':
+          'package client; type Client struct{}; func (*Client) AcquireProbeLease() {}',
+      },
+      's.AcquireProbeLease(); s.AcquireProbeLease()',
+    ],
+  ]) {
+    const pkg = file.includes('probeops') ? 'helper/client' : 'hostmode'
+    const alias = pkg.split('/').at(-1)
+    for (const tagOnly of [false, true]) {
+      withOwnerModule(
+        {
+          ...objectSource,
+          [file]: `${tagOnly ? '//go:build nocx_local_ssh\n\n' : ''}package app
+import ${alias} "github.com/shady2k/nocx/internal/${pkg}"
+${declaration} { ${body} }
+`,
+        },
+        (dir) => {
+          const builds = ['', 'nocx_local_ssh'].map((tags) =>
+            analyze({ module: dir, scope: dir, tags }),
+          )
+          const facts = mergeFacts(builds)
+          assert.equal(facts.length, 2)
+          assert.equal(facts[0].line, facts[1].line)
+          assert.notEqual(facts[0].column, facts[1].column)
+          assert.equal(violationsFromFacts(facts).length, 1)
+          if (tagOnly) assert.equal(builds[0].length, 0)
+        },
+      )
+    }
+  }
+})
+
+test('a common licensed Lookup does not license a second position resolved only under the tag', () => {
+  withOwnerModule(
+    {
+      'internal/hostmode/store.go':
+        'package hostmode; type Store struct{}; func (*Store) Lookup() {}',
+      'internal/app/hosted_shell_carrier.go': `package app
+import "github.com/shady2k/nocx/internal/hostmode"
+func hostModeFor(s *hostmode.Store, second *extraStore) { s.Lookup(); second.Lookup() }
+`,
+      'internal/app/default.go': `//go:build !nocx_local_ssh
+
+package app
+type extraStore struct{}
+func (*extraStore) Lookup() {}
+`,
+      'internal/app/tagged.go': `//go:build nocx_local_ssh
+
+package app
+import "github.com/shady2k/nocx/internal/hostmode"
+type extraStore = hostmode.Store
+`,
+    },
+    (dir) => {
+      const common = analyze({ module: dir, scope: dir })
+      const tagged = analyze({ module: dir, scope: dir, tags: 'nocx_local_ssh' })
+      assert.equal(common.length, 1)
+      assert.equal(tagged.length, 2)
+      const facts = mergeFacts([common, tagged])
+      assert.equal(facts.length, 2)
+      assert.equal(facts[0].line, facts[1].line)
+      assert.notEqual(facts[0].column, facts[1].column)
+      assert.equal(violationsFromFacts(facts).length, 1)
+    },
+  )
+})
+
+test('a direct Git factory outside its licensed function is a second decider (C23)', () => {
   const rows = analyseOne({ 'internal/app/second.go': GIT_FACTORY_FIXTURE })
   assert.deepEqual(rulesOf(rows), ['helper-decider'])
   assert.equal(rows[0].object, GIT_FACTORY)

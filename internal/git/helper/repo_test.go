@@ -190,7 +190,7 @@ func dialHelper(t *testing.T, peer func(io.Reader, io.Writer) int) *client.Clien
 // repo, registering its close with the test.
 func openHelper(t *testing.T, c *client.Client, dir string) git.Repo {
 	t.Helper()
-	factory := helpergit.NewFactory(c)
+	factory := helpergit.NewFactory(*acquirePanelLease(t, c))
 	repo, outcome, err := factory.Open(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("helper open: %v", err)

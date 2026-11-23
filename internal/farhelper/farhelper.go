@@ -416,7 +416,7 @@ func (r *Registry) Acquire(ctx context.Context, connectionID string) (*Lease, er
 		switch e.phase {
 		case phaseServing:
 			if e.client != nil && e.servingCtx != nil {
-				lease := &Lease{Client: e.client, Ctx: e.servingCtx}
+				lease := &Lease{client: e.client, Ctx: e.servingCtx}
 				e.mu.Unlock()
 				return lease, nil
 			}
@@ -605,6 +605,15 @@ func (r *Registry) publish(connectionID string, status Status) {
 // moment the axis leaves serving; the client is this registry's to close, so a
 // holder must not close it.
 type Lease struct {
-	Client *client.Client
+	client *client.Client
 	Ctx    context.Context
+}
+
+// Client reads the registry-owned client. Only Acquire can supply it; a zero
+// lease carries no authority to reach a far host. Holders must not close it.
+func (l *Lease) Client() *client.Client {
+	if l == nil {
+		return nil
+	}
+	return l.client
 }

@@ -183,6 +183,14 @@ export const ALLOWED_DIRS = [
  */
 export const ALLOWLIST = [
   {
+    rule: 'helper-decider',
+    file: 'internal/app/helper_git.go',
+    func: 'github.com/shady2k/nocx/internal/app.sessionFactory.Open',
+    objects: ['github.com/shady2k/nocx/internal/git/helper.NewFactory'],
+    reason:
+      'the Git open consumes the concrete farhelper.Lease acquired for this connection (nocx-oalo1.6.4); only this direct constructor call is licensed',
+  },
+  {
     rule: 'xcrypto-ssh-import',
     file: 'internal/transport/ws.go',
     objects: [
@@ -527,15 +535,19 @@ export function analyze(opts = {}) {
 }
 
 /** Facts from both build configurations, deduplicated by position and object. */
-export function collectFacts() {
+export function mergeFacts(configurations) {
   const seen = new Map()
-  for (const tags of ['', 'nocx_local_ssh']) {
-    for (const f of analyze({ tags })) {
+  for (const facts of configurations) {
+    for (const f of facts) {
       const key = `${f.rule}:${f.file}:${f.line}:${f.column ?? 0}:${f.func}:${f.object}:${f.detail ?? ''}`
       if (!seen.has(key)) seen.set(key, f)
     }
   }
   return [...seen.values()]
+}
+
+export function collectFacts() {
+  return mergeFacts(['', 'nocx_local_ssh'].map((tags) => analyze({ tags })))
 }
 
 /**
@@ -549,8 +561,8 @@ export function violationsFromFacts(facts) {
     const exempt = RULE_EXEMPT_DIRS[f.rule]
     if (exempt) {
       if (exempt.some((dir) => f.file.startsWith(dir))) return false
-      if (!isAllowlisted(f.rule, f.file, f.func, f.object)) return true
-      if (f.rule !== 'helper-decider') return false
+      if (f.detail === 'constructor value' || !isAllowlisted(f.rule, f.file, f.func, f.object))
+        return true
       const key = `${f.rule}:${f.file}:${f.func}:${f.object}`
       if (licensed.has(key)) return true
       licensed.add(key)

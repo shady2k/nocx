@@ -542,7 +542,7 @@ export function collectFacts() {
   const seen = new Map()
   for (const tags of ['', 'nocx_local_ssh']) {
     for (const f of analyze({ tags })) {
-      const key = `${f.rule}:${f.file}:${f.line}:${f.func}:${f.object}:${f.detail ?? ''}`
+      const key = `${f.rule}:${f.file}:${f.line}:${f.column ?? 0}:${f.func}:${f.object}:${f.detail ?? ''}`
       if (!seen.has(key)) seen.set(key, f)
     }
   }
@@ -555,11 +555,17 @@ export function collectFacts() {
  * a violation.
  */
 export function violationsFromFacts(facts) {
+  const licensed = new Set()
   return (facts ?? []).filter((f) => {
     const exempt = RULE_EXEMPT_DIRS[f.rule]
     if (exempt) {
       if (exempt.some((dir) => f.file.startsWith(dir))) return false
-      return !isAllowlisted(f.rule, f.file, f.func, f.object)
+      if (!isAllowlisted(f.rule, f.file, f.func, f.object)) return true
+      if (f.rule !== 'helper-decider') return false
+      const key = `${f.rule}:${f.file}:${f.func}:${f.object}`
+      if (licensed.has(key)) return true
+      licensed.add(key)
+      return false
     }
     if (isTransportFile(f.file)) return f.rule === 'transport-re-export'
     return !isAllowlisted(f.rule, f.file, f.func, f.object)

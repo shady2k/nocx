@@ -72,6 +72,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -82,6 +83,7 @@ type Fact struct {
 	Rule   string `json:"rule"`
 	File   string `json:"file"`
 	Line   int    `json:"line"`
+	Column int    `json:"column,omitempty"`
 	Func   string `json:"func"`
 	Object string `json:"object"`
 	// Detail carries the constant network argument a net-dial fact was NOT
@@ -239,6 +241,7 @@ var nocxTrackedPkgs = map[string]bool{
 	nocxInternal + "git/helper":     true,
 	nocxInternal + "hostmode":       true,
 	nocxInternal + "ssh":            true,
+	discoveryConnectorPath:          true,
 }
 
 // nocxTargetNames are the names a C23/C24 fact is reached by through one of
@@ -300,7 +303,15 @@ func mentionsTarget(f *ast.File) bool {
 	)
 	aliases := map[string]kind{}
 	for _, imp := range f.Imports {
-		path := strings.Trim(imp.Path.Value, `"`)
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		// The backquoted-path case closes the C23/C24 candidate-filter gap.
+		// Do not broaden legacy external-package selection at the same time.
+		if strings.HasPrefix(imp.Path.Value, "`") && !nocxTrackedPkgs[path] {
+			continue
+		}
 		var k kind
 		switch {
 		case nocxTrackedPkgs[path]:
@@ -655,18 +666,94 @@ func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selec
 // connectorArgumentFact reports the concrete road into the Ports scheduler.
 // The parameter's declared type is the architectural seam; the argument's
 // static type distinguishes the legacy probes adapter from farhelper.
+func calledObject(expr ast.Expr, info *types.Info) types.Object {
+	switch e := unparen(expr).(type) {
+	case *ast.Ident:
+		return info.Uses[e]
+	case *ast.SelectorExpr:
+		return info.Uses[e.Sel]
+	}
+	return nil
+}
+
+func isFarhelperClientArgument(arg ast.Expr, info *types.Info) bool {
+	selector, ok := unparen(arg).(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Client" {
+		return false
+	}
+	id, ok := unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	obj := info.Uses[id]
+	if obj == nil {
+		obj = info.Defs[id]
+	}
+	if obj == nil {
+		return false
+	}
+	typ := obj.Type()
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	named, ok := typ.(*types.Named)
+	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == nocxInternal+"farhelper" && named.Obj().Name() == "Lease"
+}
+
 func (c *collector) connectorArgumentFact(call *ast.CallExpr, index int, arg ast.Expr, label, rel string, p *packages.Package, info *types.Info) {
-	sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "NewScheduler" {
+	obj := calledObject(call.Fun, info)
+	if obj == nil {
+		if ident, ok := unparen(call.Fun).(*ast.Ident); ok && p.Types != nil {
+			obj = p.Types.Scope().Lookup(ident.Name)
+		}
+	}
+	if obj == nil {
+		if ident, ok := unparen(call.Fun).(*ast.Ident); ok {
+			obj = info.Uses[ident]
+			if obj != nil && obj.Pkg() == nil {
+				obj = nil
+			}
+		}
+	}
+	if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == nocxInternal+"git/helper" && fn.Name() == "NewFactory" {
+		if !isFarhelperClientArgument(arg, info) {
+			pos := p.Fset.Position(arg.Pos())
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: nocxInternal + "git/helper.NewFactory"})
+		}
 		return
 	}
-	obj := info.Uses[sel.Sel]
-	fn, ok := obj.(*types.Func)
-	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != discoveryConnectorPath {
-		return
+	var sig *types.Signature
+	if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == discoveryConnectorPath {
+		sig, _ = fn.Type().(*types.Signature)
+	} else if tv, ok := info.Types[unparen(call.Fun)]; ok {
+		sig, _ = tv.Type.Underlying().(*types.Signature)
 	}
-	sig, ok := fn.Type().(*types.Signature)
-	if !ok || index >= sig.Params().Len() {
+	if sig == nil {
+		if ident, ok := unparen(call.Fun).(*ast.Ident); ok {
+			for _, file := range p.Syntax {
+				ast.Inspect(file, func(node ast.Node) bool {
+					assign, ok := node.(*ast.AssignStmt)
+					if !ok {
+						return true
+					}
+					for i, lhs := range assign.Lhs {
+						name, ok := lhs.(*ast.Ident)
+						if !ok || name.Name != ident.Name || i >= len(assign.Rhs) {
+							continue
+						}
+						if rhs, ok := unparen(assign.Rhs[i]).(*ast.SelectorExpr); ok {
+							obj = info.Uses[rhs.Sel]
+						}
+					}
+					return true
+				})
+			}
+			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == discoveryConnectorPath {
+				sig, _ = fn.Type().(*types.Signature)
+			}
+		}
+	}
+	if sig == nil || index >= sig.Params().Len() {
 		return
 	}
 	param, ok := sig.Params().At(index).Type().(*types.Named)
@@ -711,6 +798,10 @@ func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Se
 	pos := p.Fset.Position(id.Pos())
 	path := obj.Pkg().Path()
 	fn, isFunc := obj.(*types.Func)
+	if path == discoveryConnectorPath && fn != nil && fn.Name() == "NewScheduler" && callee == nil {
+		c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".NewScheduler", Detail: "constructor value"})
+		return
+	}
 	// A package-level object is one the package itself declares: a function,
 	// type, constant or var. A FIELD or METHOD is an object of the type it
 	// belongs to, and a reference to one (`req.Type`, `ch.Close()`) says
@@ -800,7 +891,7 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 		}
 		switch {
 		case pkgLevel && receiverType(fn) == nil && fn.Name() == "Dial":
-			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: path + ".Dial"})
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".Dial"})
 		case methodOn(fn, "ProbeLease", "Uname"), methodOn(fn, "ProbeLease", "Home"),
 			methodOn(fn, "ProbeLease", "SamplePorts"), methodOn(fn, "ProbeLease", "Completion"),
 			methodOn(fn, "ProbeLease", "Inflate"), methodOn(fn, "ProbeLease", "CommandNames"):

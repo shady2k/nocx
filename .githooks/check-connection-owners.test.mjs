@@ -1162,6 +1162,31 @@ test('the full pass finds a cross-package store method call behind a parenthesiz
   )
 })
 
+test('the full pass resolves a scheduler constructor saved in a local (Ports)', () => {
+  const src = schedulerFixture('app').replace(
+    'func schedule() { _ = discovery.NewScheduler(testConnector{}, nil) }',
+    'func schedule() { newScheduler := discovery.NewScheduler; _ = newScheduler(testConnector{}, nil) }',
+  )
+  const facts = factsThroughTheFullPass({ 'internal/app/second.go': src }).filter((f) => f.rule === 'panel-host-path')
+  assert.equal(facts.length, 1)
+})
+
+test('the full pass resolves a dot-imported scheduler constructor (Ports)', () => {
+  const facts = factsThroughTheFullPass({
+    'internal/app/second.go': `package app
+import (
+  "context"
+  . "github.com/shady2k/nocx/internal/discovery"
+  "github.com/shady2k/nocx/internal/ssh"
+)
+type testConnector struct{}
+func (testConnector) Lease(context.Context, string, ...ssh.ConnectOption) (Lease, error) { return nil, nil }
+func build() { _ = NewScheduler(testConnector{}, nil) }
+`,
+  }).filter((f) => f.rule === 'panel-host-path')
+  assert.equal(facts.length, 1)
+})
+
 test('the full pass sees a scheduler built through a parenthesized callee (Ports)', () => {
   const facts = factsThroughTheFullPass({
     'internal/app/second.go': schedulerFixture('app', '(discovery.NewScheduler)'),
@@ -1184,6 +1209,16 @@ test('the full pass finds a consent read that names only the store type (C23)', 
   )
   assert.deepEqual(rulesOf(rows), ['helper-decider'])
   assert.equal(rows[0].object, CONSENT_LOOKUP)
+})
+
+test('the full pass includes a backquoted aliased helper import (C23)', () => {
+  const facts = factsThroughTheFullPass({
+    'internal/app/second.go': `package app
+import hc \`github.com/shady2k/nocx/internal/helper/client\`
+func dial() { _, _ = hc.Dial(nil, hc.Config{}) }
+`,
+  })
+  assert.ok(facts.some((f) => f.rule === 'helper-decider' && f.object === HELPER_DIAL))
 })
 
 test('the full pass finds a ProbeLease exec called on a value (C24)', () => {
@@ -1233,6 +1268,15 @@ import (
 
 func factory(c *client.Client) { helper.NewFactory(c) }
 `
+
+test('a duplicate licensed Dial in connectLocked is refused', () => {
+  const facts = factsFor({ [HOSTED_CARRIER_FILE]: HOSTED_CARRIER_FIXTURE.replace(
+    'return client.Dial(nil, client.Config{})',
+    'first, err := client.Dial(nil, client.Config{}); _, _ = client.Dial(nil, client.Config{}); return first, err',
+  ) })
+  const rows = violationsFromFacts(facts).filter((f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'))
+  assert.ok(rows.length >= 1)
+})
 
 test('a Git factory built on a helper client is a second decider (C23)', () => {
   const rows = analyseOne({ 'internal/app/second.go': GIT_FACTORY_FIXTURE })

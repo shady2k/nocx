@@ -251,7 +251,7 @@ var nocxTrackedPkgs = map[string]bool{
 // method on it is spelled `s.Lookup`.
 var nocxTargetNames = map[string]bool{
 	"Dial": true, "Lookup": true, "NewFSConn": true, "OpSamplePorts": true,
-	"AcquireProbeLease": true, "NewFactory": true, "Store": true,
+	"AcquireProbeLease": true, "NewFactory": true, "NewScheduler": true, "Store": true,
 	// A ProbeLease's exec surface, and the type that carries it.
 	"Uname": true, "Home": true, "SamplePorts": true,
 	"Completion": true, "Inflate": true, "CommandNames": true, "ProbeLease": true,
@@ -692,12 +692,18 @@ func isFarhelperClientArgument(arg ast.Expr, info *types.Info) bool {
 	if obj == nil {
 		return false
 	}
-	typ := obj.Type()
+	typ := info.TypeOf(id)
+	if typ == nil {
+		typ = obj.Type()
+	}
 	if ptr, ok := typ.(*types.Pointer); ok {
 		typ = ptr.Elem()
 	}
 	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == nocxInternal+"farhelper" && named.Obj().Name() == "Lease"
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != nocxInternal+"farhelper" || named.Obj().Name() != "Lease" {
+		return false
+	}
+	return true
 }
 
 func (c *collector) connectorArgumentFact(call *ast.CallExpr, index int, arg ast.Expr, label, rel string, p *packages.Package, info *types.Info) {
@@ -908,13 +914,8 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
 		}
 	case nocxInternal + "git/helper":
-		// ALX-641: a Git factory may not be built on a foreign client. The
-		// factory carries the client it was built with to every later open, so
-		// one built on a client the far-helper axis did not choose keeps
-		// serving Git after that axis went unavailable or the host went raw.
-		if isFunc && pkgLevel && receiverType(fn) == nil && fn.Name() == "NewFactory" {
-			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: path + ".NewFactory"})
-		}
+		// NewFactory is checked at its call so the client argument, rather than
+		// the constructor reference, determines whether the site is licensed.
 	case nocxInternal + "hostmode", nocxInternal + "helper/consent":
 		if isFunc && methodOn(fn, "Store", "Lookup") {
 			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})

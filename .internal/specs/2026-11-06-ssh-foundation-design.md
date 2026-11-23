@@ -485,9 +485,9 @@ object licence, never baseline debt, so a dial added to another function of the 
 still a second decider. So are the composition root's Dialer seam for the axis
 (`(*farHelperDial).Dial` in `internal/app/far_helper.go`), which performs the dial the axis
 decided and reads neither the mode nor the consent, and the Git panel's factory
-(`sessionFactory.Open` in `internal/app/helper_git.go`), whose object argument is checked against the concrete `internal/farhelper.Lease.Client`
-returned by `Registry.Acquire` in `sessionFactory.Open`; the check establishes the value's
-provenance, not merely its `*client.Client` type or the factory constructor's location. The third object licence is the local
+(`sessionFactory.Open` in `internal/app/helper_git.go`), whose object argument must be the `Client` field on the concrete `internal/farhelper.Lease`
+returned by `Registry.Acquire` (the check resolves the lease type, not merely the shared
+`*client.Client` type or the factory constructor's location). The third object licence is the local
 helper's own door (`internal/helper/local`'s `openOnce`): a local helper is not a far-helper
 decision, and the licence names the function rather than the directory — `internal/helper/` is
 NOT exempt as a subtree, so a Git or pane road moved there is still a second decider. Files'

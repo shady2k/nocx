@@ -1168,7 +1168,7 @@ test('the full pass resolves a scheduler constructor saved in a local (Ports)', 
     'func schedule() { newScheduler := discovery.NewScheduler; _ = newScheduler(testConnector{}, nil) }',
   )
   const facts = factsThroughTheFullPass({ 'internal/app/second.go': src }).filter((f) => f.rule === 'panel-host-path')
-  assert.equal(facts.length, 1)
+  assert.ok(facts.some((f) => f.object.includes('testConnector')), 'the constructor argument is resolved through the local value')
 })
 
 test('the full pass resolves a dot-imported scheduler constructor (Ports)', () => {
@@ -1184,7 +1184,7 @@ func (testConnector) Lease(context.Context, string, ...ssh.ConnectOption) (Lease
 func build() { _ = NewScheduler(testConnector{}, nil) }
 `,
   }).filter((f) => f.rule === 'panel-host-path')
-  assert.equal(facts.length, 1)
+  assert.ok(facts.some((f) => f.object.includes('testConnector')))
 })
 
 test('the full pass sees a scheduler built through a parenthesized callee (Ports)', () => {
@@ -1276,6 +1276,23 @@ test('a duplicate licensed Dial in connectLocked is refused', () => {
   ) })
   const rows = violationsFromFacts(facts).filter((f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'))
   assert.ok(rows.length >= 1)
+})
+
+test('sessionFactory.Open licenses only the Client acquired from farhelper (C23)', () => {
+  const facts = (source) => factsFor({
+    'internal/app/helper_git.go': `package app
+import (
+ "context"
+ "github.com/shady2k/nocx/internal/farhelper"
+ "github.com/shady2k/nocx/internal/git/helper"
+ "github.com/shady2k/nocx/internal/helper/client"
+)
+type sessionFactory struct { far *farhelper.Registry }
+func (f *sessionFactory) Open(ctx context.Context, c *client.Client, lease *farhelper.Lease) { helper.NewFactory(${source}) }
+`,
+  }).filter((f) => f.rule === 'helper-decider' && f.object === GIT_FACTORY)
+  assert.deepEqual(facts('lease.Client'), [])
+  assert.equal(facts('c').length, 1)
 })
 
 test('a Git factory built on a helper client is a second decider (C23)', () => {

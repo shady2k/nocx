@@ -274,17 +274,6 @@ export const ALLOWLIST = [
       'dial added to another function of the same file is still a second decider',
   },
   {
-    rule: 'helper-decider',
-    file: 'internal/app/helper_git.go',
-    func: 'github.com/shady2k/nocx/internal/app.sessionFactory.Open',
-    objects: ['github.com/shady2k/nocx/internal/git/helper.NewFactory'],
-    reason:
-      "the Git panel's factory is built on the client internal/farhelper's axis decided for " +
-      'this connection (sessionFactory.Open takes it from farhelper.Registry.Acquire), which ' +
-      'is the only client ALX-641 allows a factory on. The licence names the function, so a ' +
-      'factory built anywhere else in this file is still a second decider',
-  },
-  {
     rule: 'panel-host-path',
     file: 'internal/app/helper_probeops.go',
     func: 'github.com/shady2k/nocx/internal/app.helperLeaseAcquirer.AcquireProbeLease',

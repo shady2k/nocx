@@ -166,6 +166,9 @@ function mount(
      *  beside the surface. Absent → ConnectionsView runs without a vault. */
     vaultController?: VaultController
     vaultClient?: VaultClient
+    /** The far helper axis's "Host settings" request, as main.tsx forwards it
+     *  (nocx-oalo1.6.3c-1). */
+    editProfileRequest?: { id: string; seq: number } | null
   },
 ) {
   const { client, connectionTest, trustHostKey, hostMode, setHostMode } =
@@ -208,6 +211,7 @@ function mount(
           secretSource={secretSource}
           onConnect={overrides?.onConnect}
           onNavigateToSecrets={overrides?.onNavigateToSecrets}
+          editProfileRequest={overrides?.editProfileRequest}
         />
         <Show when={vaultController && vaultClient}>
           <UnlockDialog
@@ -3024,6 +3028,21 @@ describe('the host integration method', () => {
   const RU_UNKNOWN_HOST_DESC =
     'Подключитесь к этой машине, прежде чем менять её метод интеграции здесь.'
   const DIALOG_TITLE = 'Edit Connection: prod-web'
+
+  it('opens a saved connection on Advanced → Integration method when the helper axis asks', async () => {
+    const { container } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      editProfileRequest: { id: 'ssh:p1', seq: 1 },
+    })
+    await waitForProfiles(container, 1)
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain(DIALOG_TITLE)
+    })
+    const field = container.querySelector<HTMLElement>('#profile-integration-method')
+    expect(field).not.toBeNull()
+    await vi.waitFor(() => expect(field?.closest('[hidden]')).toBeNull())
+    await vi.waitFor(() => expect(document.activeElement).toBe(field))
+  })
 
   it('T1: a delayed profile patch cannot invalidate B’s pending host read', async () => {
     const { container, client, hostMode, setHostMode } = mount({

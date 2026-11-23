@@ -44,7 +44,7 @@ function observation(over: Partial<PaneConnection> = {}): PaneConnection {
     connectionEpoch: 1,
     generation: 1,
     instanceId: 'instance-1',
-    helper: { state: 'starting', action: 'none' },
+    helper: { state: 'serving', action: 'none' },
     transport: { state: 'opening', stage: 'tcp', stateMs: 2000 },
     attempt: { shown: 'none', candidate: 'none', reason: '' },
     observedAt: '2026-11-14T00:00:00Z',
@@ -57,12 +57,24 @@ let wire: ReturnType<typeof source>
 let store: ConnectionStore
 let head: ConnectionHeadHandle | null
 
-function mount(onReconnect = vi.fn()): void {
+interface MountOpts {
+  onRefreshHelper?: (paneId: string, connectionEpoch: number) => void
+  onHostSettings?: () => void
+  profileId?: string | null
+}
+
+function mount(onReconnect = vi.fn(), opts: MountOpts = {}): void {
   wire = source()
   store = new ConnectionStore(wire, 'pane-1')
   target = document.createElement('div')
   document.body.appendChild(target)
-  head = mountConnectionHead(target, { store, onReconnect })
+  head = mountConnectionHead(target, {
+    store,
+    onReconnect,
+    onRefreshHelper: opts.onRefreshHelper ?? vi.fn(),
+    onHostSettings: opts.onHostSettings ?? vi.fn(),
+    profileId: opts.profileId === undefined ? 'profile-1' : opts.profileId,
+  })
 }
 
 const line = (): string => target.querySelector('.ui-connection-head__text')?.textContent ?? ''
@@ -199,6 +211,118 @@ describe('the connection head', () => {
     )
     head?.note(null)
     expect(line()).toBe('Connected · 1.4 s')
+  })
+
+  it('says the helper is starting quietly, and shows no button for it', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+        helper: { state: 'starting', action: 'none' },
+      }),
+    )
+    expect(line()).toBe('Connected · 1.4 s · Preparing the nocx helper')
+    expect(target.querySelector('.ui-button')).toBeNull()
+    expect(
+      target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-helper'),
+    ).toBe('starting')
+  })
+
+  it('says nothing about a serving helper', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+        helper: { state: 'serving', action: 'none' },
+      }),
+    )
+    expect(line()).toBe('Connected · 1.4 s')
+    expect(target.querySelector('.ui-button')).toBeNull()
+  })
+
+  it('offers Refresh for a helper that was serving and is gone, with the observation epoch', () => {
+    const onRefreshHelper = vi.fn()
+    mount(vi.fn(), { onRefreshHelper })
+    wire.deliver(
+      'pane.connection',
+      observation({
+        connectionEpoch: 7,
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+        helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      }),
+    )
+    expect(line()).toContain('The nocx helper stopped on this connection.')
+    const button = target.querySelector<HTMLButtonElement>('.ui-button')!
+    expect(button.textContent).toBe('Refresh')
+    button.click()
+    expect(onRefreshHelper).toHaveBeenCalledWith('pane-1', 7)
+  })
+
+  it('offers Host settings for a mode that keeps the helper away, and reaches the editor', () => {
+    const onHostSettings = vi.fn()
+    mount(vi.fn(), { onHostSettings })
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+        helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+      }),
+    )
+    expect(line()).toContain('Script integration')
+    expect(line()).not.toContain('mode-script')
+    const button = target.querySelector<HTMLButtonElement>('.ui-button')!
+    expect(button.textContent).toBe('Host settings')
+    button.click()
+    expect(onHostSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('an ad-hoc connection is told to save itself instead of being offered a settings door', () => {
+    mount(vi.fn(), { profileId: '' })
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        observedAt: '2026-11-14T00:00:03Z',
+        helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      }),
+    )
+    expect(line()).toContain('Save this connection to change how nocx integrates')
+    expect(target.querySelector('.ui-button')).toBeNull()
+  })
+
+  it('a failed install shows its sentence and no button (owner, 2026-11-16)', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 1400, plainShells: 1 },
+        helper: { state: 'unavailable', reason: 'install-failed', action: 'none' },
+      }),
+    )
+    expect(line()).toContain('could not be installed on this host')
+    expect(target.querySelector('.ui-button')).toBeNull()
+  })
+
+  it('a transport offer outranks the axis action: one button in the line', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 500, plainShells: 0 },
+        shellFailure: { code: -32603, message: 'the shell could not start' },
+        reconnect: { endsShells: 0 },
+        helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+      }),
+    )
+    const buttons = target.querySelectorAll('.ui-button')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0]?.textContent).toBe('Retry shell')
   })
 
   it('calls the press once and stays disabled until the next observation', () => {

@@ -747,31 +747,36 @@ test('on an SSH tab whose connection was set to Script at the connect-time ask, 
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
     await page.locator(VIEW_GIT).click()
 
-    // The git panel never asks (ADR-0068): git.open answers the SAME
-    // not-available error a raw or Script connection gets, rendered as the
-    // ordinary failed-open card — naming the setting that would change it
-    // (the host's Integration method set to Helper, or Auto to be offered the
-    // ask again) rather than offering to ask again itself. Script is an
-    // ANSWER under
-    // ADR-0069 (internal/app/helper_git.go's refusedHelperReason), not a
-    // decline recorded against the machine — there is no more "declined"
-    // to read back here; the connect-time ask no longer writes one.
+    // THE HELPER AXIS, NOT A FAILED OPEN (ADR-727g63tr decision 2; task
+    // .6.3c-1). Script is an answer, so the backend never offers a helper on
+    // this connection; the panel draws the axis's own sentence and the
+    // setting that would change it, and git.open is never asked at all. The
+    // sentence is the ONE fold the head and the panel share, and it never
+    // speaks the wire's token.
+    const scriptSentence = 'This host uses Script integration, so the nocx helper is not used.'
     await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
-    const errorCard = page.locator('[data-testid="git-error"]')
-    await expect(errorCard).toBeVisible({ timeout: 30_000 })
-    await expect(errorCard).toContainText('Script')
-    await expect(errorCard).toContainText('nocx helper')
+    const head = page.locator('[data-testid="connection-head"]')
+    await expect(head).toHaveAttribute('data-helper', 'unavailable', { timeout: 30_000 })
+    await expect(head).toContainText(scriptSentence)
+    const axis = page.locator('[data-testid="git-helper-axis"]')
+    await expect(axis).toBeVisible({ timeout: 30_000 })
+    await expect(axis).toContainText(scriptSentence)
+    await expect(page.locator('[data-testid="git-host-settings"]')).toBeVisible()
+    await expect(head).toContainText('Host settings')
+    await expect(page.locator('[data-testid="git-error"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="git-retry-open"]')).toHaveCount(0)
+    await expect(page.locator(PANEL)).not.toContainText('Could not reach git')
+    await expect(page.locator(PANEL)).not.toContainText('mode-script')
+    await expect(head).not.toContainText('mode-script')
 
     // No install/accept action anywhere in the panel: neither the removed
-    // consent testids nor any button whose label reads as one — only the
-    // ordinary Retry, which re-runs git.open and asks nobody anything.
+    // consent testids nor any button whose label reads as one.
     await expect(page.locator('[data-testid="git-consent-required"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="git-consent-accept"]')).toHaveCount(0)
     const buttons = await page.locator(`${PANEL} button`).allTextContents()
     for (const label of buttons) {
       expect(label).not.toMatch(/accept|allow|install|use the helper/i)
     }
-    await expect(page.locator('[data-testid="git-retry-open"]')).toBeVisible()
 
     // D14: what the panel cannot do it does not draw — with no helper the
     // mutation controls are ABSENT, not disabled.

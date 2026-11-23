@@ -277,6 +277,24 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connection.reconnectEnds': 'Переподключение завершит оболочек: {n}',
   'connection.typedNotSent':
     'Соединение завершилось раньше, чем удалось отправить нажатия. Ничего не доставлено.',
+  'helper.starting': 'Готовим helper nocx',
+  'helper.paused': 'Соединение приостановлено, поэтому helper nocx недоступен.',
+  'helper.modeRaw': 'Для этого хоста выбран режим Raw, поэтому helper nocx не используется.',
+  'helper.modeScript': 'Для этого хоста выбран режим Script, поэтому helper nocx не используется.',
+  'helper.lost': 'Helper nocx остановился на этом соединении.',
+  'helper.consentPending': 'Helper nocx ждёт разрешения на этом хосте.',
+  'helper.consentDenied': 'Helper nocx запрещён на этом хосте.',
+  'helper.unsupportedPlatform': 'Этот хост не может запустить helper nocx.',
+  'helper.installFailed': 'Не удалось установить helper nocx на этот хост.',
+  'helper.execForbidden': 'Хост отказался запускать helper nocx.',
+  'helper.versionMismatch': 'Helper nocx на этом хосте другой версии.',
+  'helper.connection': 'Helper nocx недоступен, пока соединение разорвано.',
+  'helper.refresh': 'Обновить',
+  'helper.hostSettings': 'Настройки хоста',
+  'helper.hostSettingsTitle': 'Открыть способ интеграции сохранённого подключения',
+  'helper.refreshTitle': 'Переподключить helper nocx на этом соединении',
+  'helper.saveConnection':
+    'Сохраните подключение, чтобы изменить способ интеграции nocx с его хостом.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
   'connections.password.bindingRecovery':
@@ -1128,14 +1146,15 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'git.row.unstage.title': 'Убрать из индекса',
   'git.row.stage.title': 'В индекс',
   'git.opening.label': 'Открытие репозитория',
+  'git.helperStarting.title': 'Ждём helper nocx',
+  'git.helperStarting.desc':
+    'Репозиторий откроется, когда helper nocx начнёт обслуживать это соединение.',
+  'git.helperBlocked.title': 'Git нужен helper nocx на этом соединении',
+  'git.helper.refused': 'Не удалось открыть репозиторий через helper nocx.',
   'git.unreachable.title': 'git недоступен',
   'git.retry': 'Повторить',
   'git.empty.title': 'Нет репозитория для показа',
   'git.empty.desc': 'Откройте вкладку терминала — репозиторий вашей оболочки появится здесь.',
-  'git.platform.title': 'Эта платформа не запускает helper nocx',
-  'git.deployFailed.title': 'Не удалось установить helper nocx',
-  'git.execForbidden.title': 'Хост отклонил helper nocx',
-  'git.versionMismatch.title': 'Helper nocx требует переустановки',
   'git.noWorkdir.title': 'Нет подтверждённого рабочего каталога',
   'git.noWorkdir.desc': 'У сеанса нет shell-интеграции — nocx не знает, где стоит оболочка.',
   'git.notRepo.title': 'Это не git-репозиторий',
@@ -1185,8 +1204,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'git.diff.reload': 'Перечитать',
   'git.diff.reload.reason': 'Перечитать diff из репозитория',
   'git.diff.gone': 'Терминал или подключение, давшие этот diff, исчезли',
-  'git.helper.refusedDesc':
-    'Хост отклонил команду, которая запустила бы helper, или ответил иначе. Проверьте хост и обновите, чтобы повторить.',
   'git.noGit.desc':
     'Установите git (или добавьте в PATH) и обновите — панель запускает бинарник git.',
 

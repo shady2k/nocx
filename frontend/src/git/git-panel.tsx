@@ -77,6 +77,7 @@ import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { GitMutationError, GitStore } from './git-store'
 import type { GitError } from '../generated/git.error'
+import { helperAxis, savedProfileId, withSavedConnection } from '../connection/helper-axis'
 
 /** The diff-tab opener seam (worker G's surface, design §5.4): the panel
  *  calls this fixed contract and never builds the tab itself. A no-op
@@ -104,6 +105,16 @@ export interface GitPanelProps {
   urlOpener: UrlOpener
   /** The ACTIVE tab's origin — a reactive accessor, never a capture. */
   activeOrigin: () => ActiveOrigin | null
+  /** The helper axis's one action: redial a helper that was serving and is
+   *  gone. The epoch belongs to the press and is read by the pane that owns
+   *  the observation, so the surface names only the pane it was drawn for. */
+  onRefreshHelper: (paneId: string) => void
+  /** The other axis action: open the saved connection's editor on its
+   *  host-integration field. */
+  onHostSettings: (profileId: string) => void
+  /** The saved connection this tab was opened from, or null for a
+   *  hand-typed one — which has no host record to edit. */
+  activeProfileId: () => string | null
   /** True while this view is on screen and the panel is expanded. */
   visible: () => boolean
 }
@@ -169,21 +180,19 @@ const TYPED_REFUSAL_SENTENCE: Partial<Record<GitError['reason'], () => string>> 
  *  failed mutation — nothing ran and nothing is stale (ADR-8eej3e66 stage 1).
  *  A failed commit's OUTPUT is likewise not a rejection: it is the commit
  *  state, shown in the panel (D11).
+ *
+ *  Nothing here reads the failure's TEXT (nocx-oalo1.6.3). A lost connection
+ *  is the dispatcher's typed TransportUnavailableError, carried by the store
+ *  as `connectionLost`; the backend's prose is appended only to the open
+ *  sentence, where it is a diagnostic and decides nothing.
  */
 function mutationFailureMessage(err: GitMutationError): string {
   if (err.reason !== null) {
     const typed = TYPED_REFUSAL_SENTENCE[err.reason]
     if (typed !== undefined) return typed()
   }
-  const r = err.message.toLowerCase()
-  if (
-    /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
-    r.includes('disconnected')
-  ) {
+  if (err.connectionLost) {
     return t('git.refusal.disconnected', 'The change could not be made — the connection was lost.')
-  }
-  if (r.includes('not available')) {
-    return t('git.refusal.gitUnavailable', 'The change could not be made — git is not available.')
   }
   // The open set: never pretend to a completeness we cannot have. The
   // sentence stays a person's; the backend's words are appended so the
@@ -595,6 +604,53 @@ export function GitPanel(props: GitPanelProps) {
 
   const mutationBusy = () => props.store.mutationInFlight()
 
+  // THE FAR HELPER'S AXIS, drawn from the ONE fold the head draws
+  // (connection/helper-axis.ts). The panel decides nothing about it: the
+  // sentence, tone and action are the contract member's answer, and the
+  // action is rendered only where the backend offered it.
+  const axis = () =>
+    withSavedConnection(
+      helperAxis(props.activeOrigin()?.connection?.helper ?? null),
+      props.activeProfileId(),
+    )
+  const axisConnection = () => props.activeOrigin()?.connection ?? null
+  const axisDescription = (): string | undefined => axis()?.sentence ?? undefined
+  const axisAction = () => {
+    const facts = axis()
+    const connection = axisConnection()
+    if (facts?.action === 'refresh' && connection !== null) {
+      return (
+        <Button
+          size="sm"
+          data-testid="git-helper-refresh"
+          onClick={() => {
+            // The tab may have changed between this button's paint and the
+            // press: the live origin is the authority, so a press aimed at
+            // a pane that is no longer in front is dropped here (ALX-1019).
+            const live = props.activeOrigin()?.connection?.paneId
+            if (live !== connection.paneId) return
+            props.onRefreshHelper(connection.paneId)
+          }}
+        >
+          {t('helper.refresh', 'Refresh')}
+        </Button>
+      )
+    }
+    const saved = savedProfileId(props.activeProfileId())
+    if (facts?.action === 'host-settings' && saved !== null) {
+      return (
+        <Button
+          size="sm"
+          data-testid="git-host-settings"
+          onClick={() => props.onHostSettings(saved)}
+        >
+          {t('helper.hostSettings', 'Host settings')}
+        </Button>
+      )
+    }
+    return undefined
+  }
+
   return (
     <div class="git-panel" data-testid="git-panel">
       <Switch>
@@ -630,48 +686,27 @@ export function GitPanel(props: GitPanelProps) {
             )}
           />
         </Match>
-        <Match when={props.store.state() === 'unsupportedPlatform'}>
-          <StatusCard
-            tone="warning"
-            title={t('git.platform.title', "This platform can't run the nocx helper")}
-            description={
-              props.store.refusalMessage() ??
-              'nocx builds no helper for this machine, so the repository cannot be opened here.'
-            }
-          />
+        <Match when={props.store.state() === 'helperStarting'}>
+          <div data-testid="git-helper-axis" data-helper="starting">
+            <StatusCard
+              tone="neutral"
+              title={t('git.helperStarting.title', 'Waiting for the nocx helper')}
+              description={t(
+                'git.helperStarting.desc',
+                'The repository opens when the nocx helper starts serving this connection.',
+              )}
+            />
+          </div>
         </Match>
-        <Match when={props.store.state() === 'deployFailed'}>
-          <StatusCard
-            tone="warning"
-            title={t('git.deployFailed.title', "Couldn't install the nocx helper")}
-            description={
-              props.store.refusalMessage() ??
-              'Uploading or installing the helper on this host failed. Check the host and refresh to retry.'
-            }
-          />
-        </Match>
-        <Match when={props.store.state() === 'execForbidden'}>
-          <StatusCard
-            tone="warning"
-            title={t('git.execForbidden.title', 'The host refused the nocx helper')}
-            description={
-              props.store.refusalMessage() ??
-              t(
-                'git.helper.refusedDesc',
-                'The host refused the command that would run the helper, or answered with something else. Check the host and refresh to retry.',
-              )
-            }
-          />
-        </Match>
-        <Match when={props.store.state() === 'helperVersionMismatch'}>
-          <StatusCard
-            tone="danger"
-            title={t('git.versionMismatch.title', 'The nocx helper needs reinstalling')}
-            description={
-              props.store.refusalMessage() ??
-              'The helper on this host answered with a different version than nocx installed. Reinstall it, then refresh.'
-            }
-          />
+        <Match when={props.store.state() === 'helperBlocked'}>
+          <div data-testid="git-helper-axis" data-helper={axis()?.state}>
+            <StatusCard
+              tone="warning"
+              title={t('git.helperBlocked.title', 'Git needs the nocx helper on this connection')}
+              description={axisDescription()}
+              action={axisAction()}
+            />
+          </div>
         </Match>
         <Match when={props.store.state() === 'noCwd'}>
           <StatusCard

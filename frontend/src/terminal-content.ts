@@ -97,8 +97,10 @@ import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from 
 import type { WakeObservation } from './wake-report'
 import { connectionWarning, type ConnectionCondition } from './connection-condition'
 import { ConnectionClient } from './connection/connection-client'
+import type { PaneConnection } from './generated/pane.connection'
 import { ConnectionStore } from './connection/connection-store'
 import { mountConnectionHead, type ConnectionHeadHandle } from './connection/connection-head'
+import { helperAxis, savedProfileId } from './connection/helper-axis'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import { connectionLabel } from './connection-label'
@@ -863,6 +865,11 @@ export interface TerminalContentHooks {
    *  onCwdChange: OSC 7 is one cause, and a cwd-only hook would
    *  silently miss the other three. */
   onActiveOriginChange?: () => void
+  /** Open the saved connection's editor on its host-integration field — the
+   *  far helper axis's `host-settings` action. Only a pane opened from a saved
+   *  profile answers it; an ad-hoc tab tells the person to save the
+   *  connection instead (the axis fold carries that sentence). */
+  onOpenHostSettings?: (profileId: string) => void
   /** The pane's own shell reported a VERIFIED directory it had not reported
    *  before (nocx-zkiv4). This is what a restore reopens the pane in, so it
    *  fires only for a cwd the shell itself sent (AD-5) and only while the
@@ -2020,6 +2027,14 @@ export class TerminalContent extends BasePaneContent {
   private _connectionUnsub: () => void = () => undefined
   private _connectionCondition: ConnectionCondition = 'reachable'
   private _openedUnsub: () => void = () => undefined
+  /** The last far-helper axis this pane published to origin-following
+   *  surfaces (ADR-727g63tr decision 2). The hook fires on a CHANGE of the
+   *  axis, not on every observation: a heartbeat that carries the same
+   *  state must not re-scope every panel, while a new backend instance or a
+   *  real state/reason/action move must. The epoch deliberately does not
+   *  participate — it is read fresh from the origin when an action needs
+   *  it. */
+  private _lastAxisKey = ''
   /** The session id whose screen seam this pane last installed, so a rebind
    *  removes that entry whatever `this.session` is at that instant. */
   private _boundSessionId: string | null = null
@@ -2083,6 +2098,7 @@ export class TerminalContent extends BasePaneContent {
     this._connectionMark?.set(observation, this._connectionCondition)
     this.hooks.onConnectionConditionChange?.(this._connectionCondition)
     this._publishTabMark()
+    this._publishAxisChange(observation)
     // INPUT QUEUED FOR THE OLD ANSWER MUST NOT OUTLIVE THE CONNECTION'S
     // (task 5.1's ordering defect): an outstanding intent can resolve after
     // the gate has closed, and the loop would present what still sits behind
@@ -2093,6 +2109,32 @@ export class TerminalContent extends BasePaneContent {
     }
     this._applyTypeAhead(previous)
     if (this._connectionGate() === 'send') void this.drainSessionCallQueue()
+  }
+
+  /** Tell origin-following surfaces that the helper axis moved. The key
+   *  names every field a surface may branch on — the backend instance (a
+   *  replacement coordinator republishes the same state under a new one),
+   *  the state, the reason and the action — and nothing a surface must not
+   *  wake for (the epoch, the transport's own stage).
+   *
+   *  THE EPOCH IS NOT ONE OF THEM (ALX-1019). It belongs to the press, not to
+   *  the snapshot: the axis's one action reads it from the pane's
+   *  ConnectionStore at the moment of the press, as the head already did.
+   *  Publishing it here made every quality sample wake the origin surfaces,
+   *  and the Git panel then treated the wake as a new open context. */
+  private _publishAxisChange(observation: PaneConnection | null): void {
+    const helper = observation?.helper
+    if (observation === null || helper === undefined) {
+      if (this._lastAxisKey === '') return
+      this._lastAxisKey = ''
+      this.hooks.onActiveOriginChange?.()
+      return
+    }
+    const reason = 'reason' in helper ? helper.reason : ''
+    const key = `${observation.instanceId}:${helper.state}:${reason}:${helper.action}`
+    if (key === this._lastAxisKey) return
+    this._lastAxisKey = key
+    this.hooks.onActiveOriginChange?.()
   }
 
   /** A replacement is an open answered by notification. Register and wire it
@@ -2449,7 +2491,17 @@ export class TerminalContent extends BasePaneContent {
   get portsTargetId(): string | null {
     if (this._paneWalkedToRemoteChild) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
-    return this.sshOpts.profileId || null
+    return this.savedProfileId()
+  }
+
+  /** The saved connection this tab was opened from, or null. Quick Connect and
+   *  a hand-typed host carry `''` — no profile — and the surfaces that must
+   *  tell "saved" from "ad-hoc" (the pane head, the Git panel) read THIS one
+   *  answer through helper-axis.ts's fold rather than testing the raw option.
+   *  `portsTargetId` asks it too: a ports target and an editable host record
+   *  are the same "this connection is saved" fact. */
+  savedProfileId(): string | null {
+    return savedProfileId(this.sshOpts?.profileId)
   }
 
   /** Why portsTargetId is null, when it is null because the pane went
@@ -2461,6 +2513,14 @@ export class TerminalContent extends BasePaneContent {
     if (this._paneWalkedToRemoteChild) return this.locationLine()
     return ''
   }
+  /** The BACKEND's pane id — the key `pane.connection` and
+   *  `connection.helperRefresh` are addressed by — distinct from the tab's
+   *  numeric id. The composition root compares it before forwarding a
+   *  surface's press to this pane's connection (ALX-1019). */
+  get backendPaneId(): string {
+    return this.pane.paneId
+  }
+
   /** The machine this tab's content speaks for (B.9) — the session it was
    *  opened with, answered only while that session is live and in front.
    *  Null when there is no honest answer: no session yet, or a session
@@ -2479,9 +2539,21 @@ export class TerminalContent extends BasePaneContent {
    *  files.open as rootPath (D2) and must surface an unverified one (AD-5). */
   activeOrigin(): Omit<ActiveOrigin, 'paneId'> | null {
     if (this.session === null || this._sessionExited) return null
+    const observation = this._connectionStore.current()?.observation ?? null
     return {
       sessionId: this.session.sessionId,
       kind: this.sshOpts === undefined ? 'local' : 'ssh',
+      // The axis rides the origin only for a pane that HAS a connection: a
+      // local tab has none, and an SSH tab speaks for its connection only
+      // after the backend has described it (ADR-ba6xet1b). The member is
+      // copied verbatim; this layer decides nothing about it.
+      connection:
+        this.sshOpts !== undefined && observation !== null
+          ? {
+              paneId: observation.paneId,
+              helper: observation.helper,
+            }
+          : null,
       // '' is "no cwd yet" inside the live session (a session opened with
       // no cwd, a fresh domain that has not reported yet, or a lane gap).
       cwd: this._cwd === '' ? null : this._cwd,
@@ -2493,6 +2565,28 @@ export class TerminalContent extends BasePaneContent {
       // "This machine" for a local session rather than nothing at all.
       machine: machineName(this._user, this._host),
     }
+  }
+
+  /** The helper axis's ONE press, wherever it is made from.
+   *
+   *  The epoch is the observation's own, read from the pane's
+   *  ConnectionStore at the moment of the press — the store owns it, and the
+   *  origin snapshot no longer carries a copy (ALX-1019). The head and the
+   *  Git panel both come through here; a press the backend refuses is a
+   *  stale press (a newer observation already replaced the button the
+   *  person saw), so it is logged and never turned into a dialog. */
+  pressHelperRefresh(): void {
+    const observation = this._connectionStore.current()?.observation
+    const axis = helperAxis(observation?.helper ?? null)
+    if (observation === null || observation === undefined || axis?.action !== 'refresh') return
+    void this._connectionClient
+      .refreshHelper(observation.paneId, observation.connectionEpoch)
+      .catch((err: unknown) => {
+        log.warn('nocx: the helper refresh press was not accepted', {
+          pane: this.pane.paneId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
   }
 
   /** This tab's session and the session that opened it, as the backend
@@ -3308,6 +3402,21 @@ export class TerminalContent extends BasePaneContent {
     this._connectionHead = mountConnectionHead(target, {
       store: this._connectionStore,
       onReconnect: () => void this.reconnectFromHead(),
+      // The axis action is the backend's offer; this layer only presses it
+      // with the epoch the button was drawn from, and the redial is observed
+      // on the next pane.connection. A refusal is a stale press — the newer
+      // observation has already replaced the button the person saw — so it
+      // is logged and never turned into a dialog.
+      // The head decides WHICH action is offered; the press itself is the
+      // pane's one method, which reads the live epoch from the store.
+      onRefreshHelper: () => {
+        this.pressHelperRefresh()
+      },
+      onHostSettings: () => {
+        const profileId = this.sshOpts?.profileId ?? ''
+        if (profileId !== '') this.hooks.onOpenHostSettings?.(profileId)
+      },
+      profileId: this.savedProfileId(),
     })
   }
 

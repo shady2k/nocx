@@ -35,6 +35,7 @@ import { Button } from '../ui/button'
 import { AlertTriangleIcon, CheckIcon, PlugIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { t } from '../i18n/locale-model'
+import { helperAxis, withSavedConnection, type HelperAxis } from './helper-axis'
 
 export interface ConnectionHeadHandle {
   /** The strip itself, so the pane can place it once its scrollback exists. */
@@ -62,6 +63,25 @@ interface HeadFacts {
   /** The stage word, when the state is one that has stages. It comes from the
    *  observation and nowhere else. */
   stage?: string
+  /** The far helper's axis, folded once (helper-axis.ts). Null when the
+   *  observation has not arrived, and null for serving because a serving
+   *  helper has nothing to say. */
+  axis?: HelperAxis | null
+}
+
+/** The helper axis rides the line the head already draws (design §5.8: one
+ *  line above the transcript), except when it serves: "the helper is fine" is
+ *  not news, and a green word about an invisible daemon is noise. */
+function withAxis(facts: HeadFacts, axis: HelperAxis | null): HeadFacts {
+  if (axis === null || axis.sentence === null) return { ...facts, axis }
+  return {
+    ...facts,
+    text: `${facts.text} \u00b7 ${axis.sentence}`,
+    // A warning outranks a healthy or muted transport tone; a failure keeps
+    // its own, because the failure is the larger fact.
+    tone: facts.tone === 'bad' ? facts.tone : axis.tone === 'warning' ? 'warn' : facts.tone,
+    axis,
+  }
 }
 
 const STAGE_WORDS: Record<string, string> = {
@@ -273,6 +293,19 @@ export interface ConnectionHeadDeps {
   /** Called on every press. The press's epoch is read from the store at the
    *  moment of the press, never captured at mount. */
   readonly onReconnect: () => void
+  /** The helper axis's one action: redial a helper that was serving and is
+   *  gone. The connectionEpoch is the observation's own — the one whose
+   *  button the person pressed. */
+  readonly onRefreshHelper: (paneId: string, connectionEpoch: number) => void
+  /** The other axis action: open the SAVED connection's host-integration
+   *  field. Meaningful only when `profileId` names a saved connection. */
+  readonly onHostSettings: () => void
+  /** The saved connection this pane was opened from, or null. An ad-hoc tab —
+   *  including Quick Connect's empty `profileId` — has no host record whose
+   *  mode could be edited, so the axis says to save the connection instead of
+   *  offering a door that does not exist. The fold that turns it into that
+   *  sentence is `withSavedConnection`, shared with the Git panel. */
+  readonly profileId: string | null
 }
 
 /**
@@ -335,7 +368,9 @@ export function mountConnectionHead(
         offer: { endsShells: 0, shellOnly: false },
       })
     const offer = deps.store.offer()
-    return withNote(factsFor(observation(), startedAt, now(), offer?.endsShells ?? null))
+    const base = withNote(factsFor(observation(), startedAt, now(), offer?.endsShells ?? null))
+    const axis = withSavedConnection(helperAxis(observation()?.helper ?? null), deps.profileId)
+    return withAxis(base, axis)
   }
 
   const unsubscribe = deps.store.onChange(() => {
@@ -365,11 +400,47 @@ export function mountConnectionHead(
     deps.onReconnect()
   }
 
+  /** The axis action's press. A refresh carries the epoch of the observation
+   *  that offered it — read now, from the same observation the button was
+   *  drawn from — and a settings press opens the saved connection's editor. */
+  const pressAxis = (): void => {
+    const current = observation()
+    const axis = withSavedConnection(helperAxis(current?.helper ?? null), deps.profileId)
+    if (current === null || axis === null || axis.action === null) return
+    if (axis.action === 'refresh') {
+      if (pressed()) return
+      setPressed(true)
+      deps.onRefreshHelper(current.paneId, current.connectionEpoch)
+      return
+    }
+    deps.onHostSettings()
+  }
+
   const disposeMark = render(() => <HeadMark facts={facts()} />, markHost)
   const disposeText = render(() => <>{facts().text}</>, textHost)
+  // ONE BUTTON IN THE LINE, AND THE TRANSPORT'S OFFER WINS (task .6.3c-1):
+  // Reconnect is about the pane's own way in, the axis action is about a
+  // daemon a panel needs; showing both in one line would put the smaller fact
+  // beside the larger one. The axis action stays visible in the Git panel.
   const disposeButton = render(
     () => (
-      <Show when={facts().offer !== null}>
+      <Show
+        when={facts().offer !== null}
+        fallback={
+          <Show when={facts().axis?.action !== null && facts().axis?.action !== undefined}>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={pressed()}
+              title={axisTitle(facts().axis)}
+              ariaLabel={axisLabel(facts().axis)}
+              onClick={pressAxis}
+            >
+              {axisLabel(facts().axis)}
+            </Button>
+          </Show>
+        }
+      >
         <Button
           variant="primary"
           size="sm"
@@ -401,6 +472,9 @@ export function mountConnectionHead(
     } else {
       delete frame.header.dataset.shellFailure
     }
+    const axis = current.axis ?? null
+    if (axis === null) delete frame.header.dataset.helper
+    else frame.header.dataset.helper = axis.state
   }
   const disposeState = createRoot((dispose) => {
     createEffect(applyState)
@@ -424,6 +498,17 @@ export function mountConnectionHead(
       frame.header.remove()
     },
   }
+}
+
+function axisLabel(axis: HelperAxis | null | undefined): string {
+  if (axis?.action === 'host-settings') return t('helper.hostSettings', 'Host settings')
+  return t('helper.refresh', 'Refresh')
+}
+
+function axisTitle(axis: HelperAxis | null | undefined): string {
+  if (axis?.action === 'host-settings')
+    return t('helper.hostSettingsTitle', 'Open the saved connection\u2019s integration method')
+  return t('helper.refreshTitle', 'Redial the nocx helper on this connection')
 }
 
 function offerLabel(offer: HeadFacts['offer']): string {

@@ -654,6 +654,10 @@ function main(): void {
   // standing answer the line is about (nocx-2019q). The same idea again — a
   // fact on screen names the one page that manages it.
   tm.onManagePermissions = () => openSettingsPane().openPage('policy')
+  // The far helper axis's `host-settings` action (ADR-727g63tr decision 2):
+  // the saved connection's editor, opened on the field that decides whether
+  // its host carries a helper at all.
+  tm.onOpenHostSettings = (profileId) => openSettingsPane().editConnection(profileId)
   tm.onActivity = reportActivity
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
@@ -1134,6 +1138,26 @@ function main(): void {
     services: gitServicesTracked,
     store: gitStore,
     activeOrigin,
+    // The axis action is the active pane's press. The panel names the pane
+    // its button was drawn for; the ACTIVE tab must still BE that pane, or
+    // the press is about a tab that is no longer in front and goes no
+    // further (ALX-1019). The epoch is read inside the pane, at press time.
+    onRefreshHelper: (paneId) => {
+      const content = tm.activeTerminalContent()
+      if (content === null || content.backendPaneId !== paneId) {
+        log.warn('nocx: the Git panel helper refresh press names a pane that is not in front', {
+          paneId,
+        })
+        return
+      }
+      content.pressHelperRefresh()
+    },
+    onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
+    // The tab's own opening option, read live: a saved profile has a host
+    // record whose mode can be edited, a hand-typed tab does not. The pane
+    // normalizes Quick Connect's empty id to null, so both surfaces draw the
+    // one answer (helper-axis.ts's savedProfileId).
+    activeProfileId: () => tm.activeTerminalContent()?.savedProfileId() ?? null,
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────

@@ -998,6 +998,10 @@ export class PaneManager {
    *  where standing answers are managed (nocx-2019q). Beside onOpenAgentSettings for
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
+  /** Open the saved connection's editor on its host-integration field — the
+   *  far helper axis's `host-settings` action (ADR-727g63tr decision 2).
+   *  Wired by main.tsx to the Settings tab's connection editor. */
+  onOpenHostSettings?: (profileId: string) => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -1902,6 +1906,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
+        onOpenHostSettings: this.onOpenHostSettings,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state, children) =>
           paneRef.current?.updatePaneObservation(state, children),
@@ -2082,6 +2087,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onOpenAgentSettings: this.onOpenAgentSettings,
         onManagePermissions: this.onManagePermissions,
+        onOpenHostSettings: this.onOpenHostSettings,
       },
     )
     const descriptor: ContentDescriptor = {

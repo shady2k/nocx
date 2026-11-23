@@ -94,30 +94,6 @@
     },
     {
       "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "includes:\"disconnected\"",
-      "count": 1,
-      "reason": "the Git panel's connection-loss sentence, matched from an error's prose. nocx-oalo1.6: the panel draws the backend's answer, and nocx-oalo1.5 gives it one condition to draw"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "includes:\"not available\"",
-      "count": 1,
-      "reason": "one of the Git panel's prose-matched refusals. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "symbol": "mutationFailureMessage",
-      "target": "test:/not connected|ws closed|closed|connection (lost|closed|reset|refused)/",
-      "count": 1,
-      "reason": "the Git panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Git answers its availability from the backend's answer, and this mapper goes with it"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
       "file": "frontend/src/key-material-input.tsx",
       "symbol": "save",
       "target": "===:\"invalid-key-passphrase\"",

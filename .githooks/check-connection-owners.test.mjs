@@ -1270,12 +1270,24 @@ func factory(c *client.Client) { helper.NewFactory(c) }
 `
 
 test('a duplicate licensed Dial in connectLocked is refused', () => {
-  const facts = factsFor({ [HOSTED_CARRIER_FILE]: HOSTED_CARRIER_FIXTURE.replace(
-    'return client.Dial(nil, client.Config{})',
-    'first, err := client.Dial(nil, client.Config{}); _, _ = client.Dial(nil, client.Config{}); return first, err',
-  ) })
-  const rows = violationsFromFacts(facts).filter((f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'))
-  assert.ok(rows.length >= 1)
+  withOwnerModule(
+    {
+      'internal/app/hosted_shell_carrier.go': HOSTED_CARRIER_FIXTURE.replace(
+        'return client.Dial(nil, client.Config{})',
+        'first, err := client.Dial(nil, client.Config{}); _, _ = client.Dial(nil, client.Config{}); return first, err',
+      ),
+      'internal/helper/client/client.go': `package client
+type Config struct{}
+type Client struct{}
+func Dial(any, Config) (*Client, error) { return nil, nil }
+`,
+    },
+    (dir) => {
+      const facts = analyze({ module: dir, scope: dir, pkgs: './internal/app' })
+      const rows = violationsFromFacts(facts).filter((f) => f.rule === 'helper-decider' && f.func.endsWith('.connectLocked'))
+      assert.equal(rows.length, 1, 'the product-labelled licensed first dial is exempt; the second is reported')
+    },
+  )
 })
 
 test('sessionFactory.Open licenses only the Client acquired from farhelper (C23)', () => {

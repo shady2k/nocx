@@ -454,8 +454,11 @@ func (g *prober) startProbe(at monoclock.Nanos) {
 		roundTrip, err := g.prober.Probe(context.Background())
 		// THE ANSWER IS RECORDED BEFORE ANYTHING ELSE, under the lock the
 		// deadline is read under: from here on, "the far side has answered" is
-		// an ordering fact and no clock can call it silence.
-		g.live.recordAnswer(seq, roundTrip, err)
+		// an ordering fact and no clock can call it silence. The clock's
+		// reading at the return is recorded with it, because a wake decides
+		// whether its signal is already answered on that moment and not on the
+		// order this loop's select saw.
+		g.live.recordAnswer(seq, g.clock.Now(), roundTrip, err)
 	}()
 }
 
@@ -488,6 +491,16 @@ func (g *prober) suspend(at monoclock.Nanos) {
 func (g *prober) woke(at monoclock.Nanos) {
 	g.st.suspendedAt = 0
 	g.live.suspended.Store(false)
+	if !g.st.probeSent && g.live.answeredAtOrAfter(at) {
+		// AN ANSWER NEWER THAN THE SIGNAL IS THE WAKE'S PROOF, whatever order
+		// this loop happened to see the two facts in (nocx-oalo1.6.15). A
+		// resume schedules the whole machine, and the parked probe this guard
+		// was waiting on can come back before the edge is applied: the answer
+		// is then the evidence the wake asked for, and a probe sent now would
+		// be a second proof of the same fact. No deadline is armed either —
+		// there is nothing left to wait for.
+		return
+	}
 	g.st.wokeAt = at
 	if !g.st.probeSent {
 		// The probe a wake sends is due at the signal: the loop's next pass

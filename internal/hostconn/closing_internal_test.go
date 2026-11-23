@@ -99,7 +99,7 @@ func TestAnAnsweredConnectionIsNotClosedForSilence(t *testing.T) {
 	sup, l, link := closingStand(t)
 
 	seq := l.beginProbe()
-	l.recordAnswer(seq, time.Millisecond, nil)
+	l.recordAnswer(seq, monoclock.Now(), time.Millisecond, nil)
 
 	if sup.endForSilence(l, sup.generation, "test") {
 		t.Fatal("a connection whose probe had answered was closed for silence")
@@ -129,7 +129,7 @@ func TestASilentConnectionIsFencedAndItsLateAnswerIsDropped(t *testing.T) {
 	if got := link.closeCount(); got != 1 {
 		t.Fatalf("the transport was closed %d time(s), want 1", got)
 	}
-	l.recordAnswer(seq, time.Millisecond, nil)
+	l.recordAnswer(seq, monoclock.Now(), time.Millisecond, nil)
 	if _, ok := l.takeAnswer(seq); ok {
 		t.Fatal("an answer was recorded on a connection already closed for silence")
 	}

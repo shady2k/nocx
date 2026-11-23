@@ -35,6 +35,9 @@ func TestMain(m *testing.M) {
 			for _, g := range left {
 				fmt.Fprintf(os.Stderr, "  %3d × %s (ends when %s)\n", g.count, g.frame, g.ends)
 			}
+			for _, line := range laneLeakReport() {
+				fmt.Fprintln(os.Stderr, line)
+			}
 			code = 1
 		}
 	}

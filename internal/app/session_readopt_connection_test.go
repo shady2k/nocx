@@ -72,7 +72,7 @@ func TestReadoptRestoresThePaneConnectionForEveryCarrier(t *testing.T) {
 				ctx := t.Context()
 				spawner := &lifecycleSpawner{}
 				svc := helperWithIntegratedShells(t, spawner)
-				provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+				provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 				first := newIntegratedCoordinator(t, provider)
 				binding := openHostedFixture(t, first.coordinator, "pane-restored")
 				shell, _ := spawner.theShell(t)

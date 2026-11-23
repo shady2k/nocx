@@ -10,7 +10,7 @@ import (
 )
 
 func TestHostKeyPinHostedCarrierPinsTheExistingSessionHost(t *testing.T) {
-	provider := &fakeLaneProvider{peer: realHelperPeer(t)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t)}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)
@@ -22,7 +22,7 @@ func TestHostKeyPinHostedCarrierPinsTheExistingSessionHost(t *testing.T) {
 
 func TestHostKeyPinHostedCarrierPinsTheReadoptedSessionHost(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
 	first.quit()

@@ -147,7 +147,7 @@ func TestBrokenConnectionBetweenHoldAndPublishWritesNothing(t *testing.T) {
 
 func TestHelperInstallMismatchOpensRawWithoutReusingHostMode(t *testing.T) {
 	stand := startPaneStand(t)
-	provider := &fakeLaneProvider{peer: realHelperPeer(t), installFail: refusalWith(proto.ErrCodeHostKeyPinMismatch, nil)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: realHelperPeer(t), installFail: refusalWith(proto.ErrCodeHostKeyPinMismatch, nil)}
 	remote := newTestRegistry(t, provider, seedGrantedDocument(t, t.TempDir(), "SHA256:fake"))
 	mustRecordHostMode(t, remote.modes, "SHA256:fake", hostmode.Helper)
 	stand.opener.modes = remote.modes

@@ -210,7 +210,7 @@ func startFarPaneStand(t *testing.T) *farPaneStand {
 	// The daemon ends with the test, so the sessions it holds do too
 	// (nocx-1ebrs.66.1.29).
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc), home: t.TempDir()}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc), home: t.TempDir()}
 	store, _ := testConsentStores(t)
 	reg := newHostedShellRegistry(provider, stubArtifacts(t), store, discardLogger(t))
 	endStandOnCleanup(t, provider, reg)

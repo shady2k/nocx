@@ -36,7 +36,7 @@ func TestWaitingForARetiringLocalHelperIsBounded(t *testing.T) {
 		}
 		return 0
 	}
-	lane := newFakeLaneConn(peer)
+	lane := newFakeLaneConn(t.Name(), peer)
 	t.Cleanup(func() { _ = lane.Close() })
 	c, err := helperclient.Dial(context.Background(), helperclient.Config{
 		Exec:       lane,

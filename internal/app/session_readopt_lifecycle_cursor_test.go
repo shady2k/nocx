@@ -155,7 +155,7 @@ func runBarrier(t *testing.T, shell *shellSide, c *integratedCoordinator, name s
 func TestACommandThatEndedWhileNoCoordinatorWasAttachedIsAppliedOnceOnReturn(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	store := newMemCursorStore()
 
 	first := newCursorKeepingCoordinator(t, provider, store)
@@ -199,7 +199,7 @@ func TestACommandThatEndedWhileNoCoordinatorWasAttachedIsAppliedOnceOnReturn(t *
 func TestACommandCrossingTwoRestartsHasEachLifecycleEventAppliedOnce(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	store := newMemCursorStore()
 
 	first := newCursorKeepingCoordinator(t, provider, store)
@@ -280,7 +280,7 @@ func TestACursorTheHelperNoLongerHoldsSettlesTheBlockTheLostRangeCouldHaveEnded(
 	// The daemon ends with the test, so the sessions it holds do too
 	// (nocx-1ebrs.66.1.29).
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	store := newMemCursorStore()
 
 	first := newCursorKeepingCoordinator(t, provider, store)
@@ -329,7 +329,7 @@ func TestACursorTheHelperNoLongerHoldsSettlesTheBlockTheLostRangeCouldHaveEnded(
 // that neither attaches nor adopts, where its lifecycle window now starts.
 func lifecycleBaseOf(t *testing.T, svc *helpersession.Service, sid string) uint64 {
 	t.Helper()
-	conn := newFakeLaneConn(sharedHelperPeer(t, svc))
+	conn := newFakeLaneConn(t.Name(), sharedHelperPeer(t, svc))
 	defer func() { _ = conn.Close() }()
 	c, err := client.Dial(context.Background(), client.Config{
 		Exec: conn, Command: "/scripted/helper", ExpectHash: syntheticArtifactHash, Log: discardLogger(t),

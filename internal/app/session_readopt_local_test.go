@@ -168,7 +168,7 @@ func TestALocalSessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
 	// A second coordinator's pass, over the same endpoint. Nothing of the
 	// holder is touched: the pass reads the binding a previous incarnation
 	// left and acts on what it finds.
-	other := newCoordinator(t, &fakeLaneProvider{})
+	other := newCoordinator(t, &fakeLaneProvider{owner: t.Name()})
 	adopter := &stubAdopter{}
 	pass := &readoptPass{
 		registry: other.reg, adopter: adopter,

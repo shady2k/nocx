@@ -125,7 +125,7 @@ func readoptLifecycleFixture(t *testing.T, spoken string) (content.PendingSessio
 	// The daemon ends with the test, so the sessions it holds do too
 	// (nocx-1ebrs.66.1.29).
 	t.Cleanup(svc.Close)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-lifecycle-window")
 	first.quit()
@@ -140,7 +140,7 @@ func readoptLifecycleFixture(t *testing.T, spoken string) (content.PendingSessio
 	// answer the real daemon while recording what the readopt asks of it.
 	route := &recordingLocalRoute{}
 	{
-		conn := newFakeLaneConn(sharedHelperPeer(t, svc))
+		conn := newFakeLaneConn(t.Name(), sharedHelperPeer(t, svc))
 		t.Cleanup(func() { _ = conn.Close() })
 		c, err := client.Dial(context.Background(), client.Config{
 			Exec:       conn,

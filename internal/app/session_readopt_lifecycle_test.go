@@ -219,7 +219,7 @@ func helperWithIntegratedShells(t testing.TB, spawner *lifecycleSpawner) *helper
 func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -279,7 +279,7 @@ func TestACommandRunAfterTheReturnProducesABlock(t *testing.T) {
 func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -317,7 +317,7 @@ func TestATakenBackPaneReportsItsIntegrationAndItsLane(t *testing.T) {
 func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -361,7 +361,7 @@ func TestAGenerationThatCannotHandBackTheChannelSaysSoInTheProduct(t *testing.T)
 // has nothing to have lost.
 func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) {
 	svc := sharedHelperService(t)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")
@@ -392,7 +392,7 @@ func TestAConventionalSessionTakenBackSaysNothingAboutIntegration(t *testing.T) 
 func TestTheAdoptedChannelDoesNotReplayCommandsThatAlreadyRan(t *testing.T) {
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first := newIntegratedCoordinator(t, provider)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")

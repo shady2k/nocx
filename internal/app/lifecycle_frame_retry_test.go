@@ -105,7 +105,7 @@ func TestAFrameTheStoreRefusesOnEveryAttemptHaltsTheLegAndIsAppliedOnceByTheNext
 
 	spawner := &lifecycleSpawner{}
 	svc := helperWithIntegratedShells(t, spawner)
-	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
+	provider := &fakeLaneProvider{owner: t.Name(), peer: sharedHelperPeer(t, svc)}
 
 	first, losses := newStoreKeepingCoordinator(t, provider, db, true)
 	binding := openHostedFixture(t, first.coordinator, "pane-1")

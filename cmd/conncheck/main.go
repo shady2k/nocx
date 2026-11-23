@@ -30,13 +30,34 @@
 //	                      var or func that hands out a net dial or ssh.Dial /
 //	                      NewClientConn, which would make every caller of it a
 //	                      second owner without naming one.
+//	helper-decider        a reference to the helper client's Dial, to the host
+//	                      mode store's Lookup, to the machine consent store's
+//	                      Lookup, or to git/helper's NewFactory: the two inputs,
+//	                      the one dial that decides whether a far helper serves a
+//	                      connection, and the Git factory that must be built on
+//	                      the client that decision produced (ALX-641, design
+//	                      §5.10 C23). The decision has one owner,
+//	                      internal/farhelper.
+//	panel-host-path       a reference to ssh.NewFSConn, to proto.OpSamplePorts,
+//	                      to a lease acquisition ((*client.Client).
+//	                      AcquireProbeLease), to a ProbeLease exec (Uname,
+//	                      Home, SamplePorts, Completion, Inflate,
+//	                      CommandNames), or to the argument of
+//	                      discovery.NewScheduler whose type is not the far
+//	                      helper's own: the roads by which a panel reaches a
+//	                      host without the far helper (design §5.10 C24). A
+//	                      panel takes the connection's helper client from
+//	                      internal/farhelper, and the connector it hands the
+//	                      scheduler is a concrete type declared THERE, by value
+//	                      or behind a pointer — a named interface declared in
+//	                      the same package is a shape, not the axis.
 //
 // WHAT IT CANNOT SEE, stated here because the check's header repeats it: a
-// dial behind an interface whose implementation lives elsewhere (the call is
-// a method on an interface the analyser cannot chase); a value copied into
-// another package through a field or a channel; a network named by a
-// variable that is not a constant; and code that does not compile. It also
-// does not read the renderer, which nocx-oalo1.3.5 owns.
+// call through an interface; a method value (for example `f := x().Lookup`)
+// in a file without a tracked import; or a value passed across packages in a
+// field or channel. For net dials, a network named by a non-constant variable
+// is also not exempted as unix. Code that does not compile cannot be analysed.
+// It does not read the renderer, which nocx-oalo1.3.5 owns.
 package main
 
 import (
@@ -72,6 +93,15 @@ type Fact struct {
 const (
 	sshPkg = "golang.org/x/crypto/ssh"
 	netPkg = "net"
+
+	// nocxModule is this module's own import prefix, and nocxInternal its
+	// packages. The two rules that fence the far helper (design §5.10's C23
+	// and C24) are facts about THIS repository's packages, so they carry no
+	// external import to resolve: go/types names the object and the policy
+	// decides where it may live.
+	nocxModule             = "github.com/shady2k/nocx/"
+	nocxInternal           = nocxModule + "internal/"
+	discoveryConnectorPath = "github.com/shady2k/nocx/internal/discovery"
 )
 
 func main() {
@@ -116,7 +146,7 @@ func main() {
 	// whole module, which is what makes the check affordable on a machine
 	// with no cgo toolchain.
 	if len(patterns) == 1 && patterns[0] == "./..." {
-		candidates, cerr := candidatePatterns(labelAbs)
+		candidates, cerr := candidatePatterns(root, labelAbs)
 		if cerr != nil {
 			fail(cerr)
 		}
@@ -126,9 +156,16 @@ func main() {
 	// archives a cgo build needs (libghostty-vt, webkit) are not something a
 	// check may demand of a machine whose only job is reading this tree.
 	cfg.Env = append(os.Environ(), "CGO_ENABLED=0")
-	pkgs, err := packages.Load(cfg, patterns...)
-	if err != nil {
-		fail(err)
+	// An empty candidate list is a tree with nothing to analyse, and it is NOT
+	// a licence to load the current directory: `go list` with no arguments
+	// answers ".", so a scope whose files carry no candidate would be analysed
+	// as the module root instead of as itself.
+	var pkgs []*packages.Package
+	if len(patterns) > 0 {
+		pkgs, err = packages.Load(cfg, patterns...)
+		if err != nil {
+			fail(err)
+		}
 	}
 
 	var loadErrs []string
@@ -190,17 +227,89 @@ var netObjectNames = map[string]bool{
 	"DialIP": true, "DialUnix": true, "Dialer": true,
 }
 
-// mentionsTarget reports whether a file NAMES an object the analysis could
-// report: a selector on the import alias of net (one of the dial names) or of
-// x/crypto/ssh (any name), or a dot-import of either. This is a candidate
-// filter only — every decision is still made by go/types — and it is
-// deliberately generous for x/crypto, whose objects are all in scope.
+// nocxTrackedPkgs are this module's own packages whose objects the C23/C24
+// rules name. A file that imports one of them is a candidate: the rule's fact
+// is a REFERENCE to an object of that package, and an object cannot be
+// referenced without importing the package. Generous on purpose — the
+// type-checked walk still decides, by identity.
+var nocxTrackedPkgs = map[string]bool{
+	nocxInternal + "helper/client":  true,
+	nocxInternal + "helper/consent": true,
+	nocxInternal + "helper/proto":   true,
+	nocxInternal + "git/helper":     true,
+	nocxInternal + "hostmode":       true,
+	nocxInternal + "ssh":            true,
+}
+
+// nocxTargetNames are the names a C23/C24 fact is reached by through one of
+// the tracked packages' aliases: the rule's own objects, and the types whose
+// methods the rule reports. The receiver type belongs here because
+// `*hostmode.Store` is what a file writes in order to hold the store, and the
+// method on it is spelled `s.Lookup`.
+var nocxTargetNames = map[string]bool{
+	"Dial": true, "Lookup": true, "NewFSConn": true, "OpSamplePorts": true,
+	"AcquireProbeLease": true, "NewFactory": true, "Store": true,
+	// A ProbeLease's exec surface, and the type that carries it.
+	"Uname": true, "Home": true, "SamplePorts": true,
+	"Completion": true, "Inflate": true, "CommandNames": true, "ProbeLease": true,
+	// The helper client type, whose lease acquisition the C24 rule reports.
+	"Client": true,
+}
+
+// nocxCallNames are the names whose CALL is a fact wherever the receiver came
+// from: a method is reached through a value, and the value's type may have been
+// named in another package.
+var nocxCallNames = map[string]bool{
+	"Lookup": true, "AcquireProbeLease": true, "NewFactory": true,
+	"Uname": true, "Home": true, "SamplePorts": true,
+	"Completion": true, "Inflate": true, "CommandNames": true,
+	"NewFSConn": true, "NewScheduler": true,
+}
+
+// mentionsTarget reports whether a file can carry a fact the analysis reports,
+// so that the type-checked load can skip the rest of the tree. It is a
+// candidate filter only — every decision is still made by go/types.
+//
+// For net and x/crypto/ssh the marker is a selector on the import's alias: an
+// object of either cannot be referenced without naming it, and the net names
+// are narrowed because a file importing net for SplitHostPort alone cannot
+// carry a dial.
+//
+// For this module's own packages there are two markers, and both are needed.
+// One is a selector on a tracked import's alias whose NAME the rules know
+// (nocxTargetNames). A method is reached through its receiver, not through its
+// package, so the second marker is a CALL of a name the rules know whatever
+// the receiver is: `s.Lookup`, `l.SamplePorts`, `a.client.AcquireProbeLease`
+// and `helper.Lookup` are all references the walk reports, and none of them
+// names a package. The receiver's type name is usually in the same file (a
+// parameter or a field must be typed), which is why the first marker alone
+// covers most of them; a value that arrives from another package's function is
+// why the second exists.
+//
+// This filter CANNOT be "any file importing a tracked package": one of them is
+// internal/helper/session, which imports internal/ssh and reaches
+// internal/emulator/ghostty, a package made of cgo files and therefore absent
+// from this load. A filter that admitted it would turn a clean tree into a load
+// failure on every developer's machine and in CI.
 func mentionsTarget(f *ast.File) bool {
-	aliases := map[string]bool{} // alias -> true when it names x/crypto/ssh
+	type kind string
+	const (
+		kindNet  kind = "net"
+		kindSSH  kind = "ssh"
+		kindNocx kind = "nocx"
+	)
+	aliases := map[string]kind{}
 	for _, imp := range f.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
-		isSSH := strings.HasPrefix(path, sshPkg)
-		if path != netPkg && !isSSH {
+		var k kind
+		switch {
+		case nocxTrackedPkgs[path]:
+			k = kindNocx
+		case strings.HasPrefix(path, sshPkg):
+			k = kindSSH
+		case path == netPkg:
+			k = kindNet
+		default:
 			continue
 		}
 		if imp.Name != nil {
@@ -210,35 +319,45 @@ func mentionsTarget(f *ast.File) bool {
 			case "_":
 				continue
 			}
-			aliases[imp.Name.Name] = isSSH
+			aliases[imp.Name.Name] = k
 			continue
 		}
 		parts := strings.Split(path, "/")
-		aliases[parts[len(parts)-1]] = isSSH
-	}
-	if len(aliases) == 0 {
-		return false
+		aliases[parts[len(parts)-1]] = k
 	}
 	found := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			// A method is reached through its receiver, so its call name is
+			// the candidate marker even when its concrete type is returned by
+			// another package. This may load a cgo-only package if it later
+			// acquires a matching method name; that must fail visibly rather
+			// than silently hide a fact.
+			sel, ok := unparen(x.Fun).(*ast.SelectorExpr)
+			if ok && nocxCallNames[sel.Sel.Name] {
+				found = true
+				return false
+			}
 			return true
-		}
-		id, ok := sel.X.(*ast.Ident)
-		if !ok {
+		case *ast.SelectorExpr:
+			id, ok := x.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			k, ok := aliases[id.Name]
+			if !ok {
+				return true
+			}
+			if k == kindSSH || (k == kindNet && netObjectNames[x.Sel.Name]) ||
+				(k == kindNocx && nocxTargetNames[x.Sel.Name]) {
+				found = true
+				return false
+			}
 			return true
-		}
-		isSSH, ok := aliases[id.Name]
-		if !ok {
-			return true
-		}
-		if isSSH || netObjectNames[sel.Sel.Name] {
-			found = true
-			return false
 		}
 		return true
 	})
@@ -246,10 +365,15 @@ func mentionsTarget(f *ast.File) bool {
 }
 
 // candidatePatterns answers the package patterns a full-tree run needs: one
-// per directory holding a file that imports net or x/crypto/ssh. The scan is
-// syntax-only and ignores build tags on purpose — a file behind a tag is
+// per directory holding a candidate file, found by walking the scope. The scan
+// is syntax-only and ignores build tags on purpose — a file behind a tag is
 // still a second owner, and the two passes decide whether it compiles.
-func candidatePatterns(scopeAbs string) ([]string, error) {
+//
+// The patterns are written relative to the MODULE root, because that is the
+// load's Dir; the scope only decides which directories are walked. The two are
+// the same in the ordinary run and differ for a fixture, whose files are
+// labelled as product paths while the module stays the repository's own.
+func candidatePatterns(root, scopeAbs string) ([]string, error) {
 	dirs := map[string]bool{}
 	err := filepath.WalkDir(scopeAbs, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -280,9 +404,12 @@ func candidatePatterns(scopeAbs string) ([]string, error) {
 	}
 	patterns := make([]string, 0, len(dirs))
 	for dir := range dirs {
-		rel, rerr := filepath.Rel(scopeAbs, dir)
+		rel, rerr := filepath.Rel(root, dir)
 		if rerr != nil {
 			return nil, rerr
+		}
+		if rel == ".." || strings.HasPrefix(rel, "../") {
+			return nil, fmt.Errorf("scope %s is outside the module root %s: its packages cannot be named from there", scopeAbs, root)
 		}
 		patterns = append(patterns, "./"+filepath.ToSlash(rel))
 	}
@@ -480,7 +607,8 @@ func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selec
 		// a dial nested in an argument is its own call and gets its own
 		// context when it is visited.
 		c.visitNode(x.Fun, x, nil, label, rel, p, info)
-		for _, arg := range x.Args {
+		for i, arg := range x.Args {
+			c.connectorArgumentFact(x, i, arg, label, rel, p, info)
 			c.visitNode(arg, nil, nil, label, rel, p, info)
 		}
 		return
@@ -521,6 +649,43 @@ func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selec
 			return false
 		}
 		return true
+	})
+}
+
+// connectorArgumentFact reports the concrete road into the Ports scheduler.
+// The parameter's declared type is the architectural seam; the argument's
+// static type distinguishes the legacy probes adapter from farhelper.
+func (c *collector) connectorArgumentFact(call *ast.CallExpr, index int, arg ast.Expr, label, rel string, p *packages.Package, info *types.Info) {
+	sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "NewScheduler" {
+		return
+	}
+	obj := info.Uses[sel.Sel]
+	fn, ok := obj.(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != discoveryConnectorPath {
+		return
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || index >= sig.Params().Len() {
+		return
+	}
+	param, ok := sig.Params().At(index).Type().(*types.Named)
+	if !ok || param.Obj().Pkg() == nil || param.Obj().Pkg().Path() != discoveryConnectorPath || param.Obj().Name() != "Connector" {
+		return
+	}
+	argType := info.TypeOf(arg)
+	if argType == nil {
+		return
+	}
+	if farhelperOwns(argType) {
+		return
+	}
+	qualifier := func(pkg *types.Package) string { return pkg.Path() }
+	connectorType := types.TypeString(param, qualifier)
+	argumentType := types.TypeString(argType, qualifier)
+	c.add(Fact{
+		Rule: "panel-host-path", File: rel, Line: p.Fset.Position(arg.Pos()).Line,
+		Func: label, Object: connectorType + "(" + argumentType + ")",
 	})
 }
 
@@ -583,6 +748,10 @@ func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Se
 		}
 		return
 	}
+	if strings.HasPrefix(path, nocxInternal) {
+		c.nocxFact(obj, fn, isFunc, pkgLevel, rel, label, pos)
+		return
+	}
 	if !strings.HasPrefix(path, sshPkg) {
 		return
 	}
@@ -612,6 +781,94 @@ func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Se
 		return
 	}
 	c.add(Fact{Rule: "xcrypto-ssh-import", File: rel, Line: pos.Line, Func: label, Object: objectName(obj)})
+}
+
+// nocxFact records a C23/C24 fact: a reference to one of this module's own
+// objects that either decides whether a far helper serves a connection or
+// reaches a host for a panel. The object go/types bound the identifier to is
+// the whole decision, so an alias, a dot import or a method value is the same
+// reference.
+func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel bool, rel, label string, pos token.Position) {
+	if obj == nil || obj.Pkg() == nil {
+		return
+	}
+	path := obj.Pkg().Path()
+	switch path {
+	case nocxInternal + "helper/client":
+		if !isFunc {
+			return
+		}
+		switch {
+		case pkgLevel && receiverType(fn) == nil && fn.Name() == "Dial":
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: path + ".Dial"})
+		case methodOn(fn, "ProbeLease", "Uname"), methodOn(fn, "ProbeLease", "Home"),
+			methodOn(fn, "ProbeLease", "SamplePorts"), methodOn(fn, "ProbeLease", "Completion"),
+			methodOn(fn, "ProbeLease", "Inflate"), methodOn(fn, "ProbeLease", "CommandNames"):
+			// Every exec a lease carries, not only the ports sample: a panel
+			// that runs ANY probe for itself has taken the road C24 closes.
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+		case methodOn(fn, "Client", "AcquireProbeLease"):
+			// The acquisition, because the execs above travel on the returned
+			// lease as often as not: a panel's adapter acquires the lease from
+			// a client it holds and calls every exec through an interface, so
+			// the lease's own methods are resolved to the interface and never
+			// reach this walk. The concrete acquisition is the seam the
+			// product actually uses, and it is the road C24 closes.
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+		}
+	case nocxInternal + "git/helper":
+		// ALX-641: a Git factory may not be built on a foreign client. The
+		// factory carries the client it was built with to every later open, so
+		// one built on a client the far-helper axis did not choose keeps
+		// serving Git after that axis went unavailable or the host went raw.
+		if isFunc && pkgLevel && receiverType(fn) == nil && fn.Name() == "NewFactory" {
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: path + ".NewFactory"})
+		}
+	case nocxInternal + "hostmode", nocxInternal + "helper/consent":
+		if isFunc && methodOn(fn, "Store", "Lookup") {
+			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Func: label, Object: methodObject(fn)})
+		}
+	case nocxInternal + "ssh":
+		if isFunc && pkgLevel && receiverType(fn) == nil && fn.Name() == "NewFSConn" {
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: path + ".NewFSConn"})
+		}
+	case nocxInternal + "helper/proto":
+		// A constant is not a function, so isFunc is false and the name is the
+		// whole identity; the object still has to be package-level, because a
+		// local constant of the same name is not the wire op.
+		if !isFunc && pkgLevel && obj.Name() == "OpSamplePorts" {
+			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Func: label, Object: path + ".OpSamplePorts"})
+		}
+	}
+}
+
+// methodOn reports whether fn is the named method OF the named type, in its own
+// package: a Lookup on some other type is not the store the rule names.
+func methodOn(fn *types.Func, typeName, methodName string) bool {
+	if fn.Name() != methodName {
+		return false
+	}
+	named, ok := deref(receiverType(fn)).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == fn.Pkg().Path() && named.Obj().Name() == typeName
+}
+
+// methodObject spells a method the way the baseline keys it: the package, the
+// receiver type and the name, with the pointer recorded when the receiver is
+// one.
+func methodObject(fn *types.Func) string {
+	recv := receiverType(fn)
+	named, ok := deref(recv).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return objectName(fn)
+	}
+	owner := named.Obj().Pkg().Path() + "." + named.Obj().Name()
+	if _, pointer := recv.(*types.Pointer); pointer {
+		owner = named.Obj().Pkg().Path() + ".(*" + named.Obj().Name() + ")"
+	}
+	return owner + "." + fn.Name()
 }
 
 // isDialerDialMethod reports whether fn is a dial method of net.Dialer itself
@@ -746,6 +1003,49 @@ func deref(t types.Type) types.Type {
 		return p.Elem()
 	}
 	return t
+}
+
+// unparen strips any number of parentheses. `(x.Lookup)(fp)` and
+// `(discovery.NewScheduler)(…)` are the same calls as their bare forms — only
+// the expression around the callee differs — so every question about a callee
+// asks it of the expression inside.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+// farhelperOwns reports whether a type belongs to the far helper's own package,
+// which is the owner the Ports seam (C24) is fenced AROUND. The pointer is the
+// ordinary shape of the wiring — `*farhelper.PortsConnector` handed to the
+// scheduler — so the type behind it is the type asked about.
+func farhelperOwns(t types.Type) bool {
+	named, ok := deref(t).(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	// A named INTERFACE is a shape, not the axis's connector: anything may
+	// implement it, so admitting one would licence a foreign connector behind a
+	// declaration that merely lives in farhelper (ALX-685).
+	if _, isInterface := named.Underlying().(*types.Interface); isInterface {
+		return false
+	}
+	return farhelperPath(named.Obj().Pkg().Path())
+}
+
+// farhelperPath reports whether an import path names the far helper's package.
+// The fence is the package's place in this tree, so the comparison is against
+// the whole path and nothing less: a neighbour called
+// `internal/farhelperlegacy` starts with the same letters and is somebody else,
+// and a package whose path merely ENDS in `/internal/farhelper` — a nested
+// `internal/app/internal/farhelper` — is somebody else too, however familiar
+// its name (ALX-750).
+func farhelperPath(path string) bool {
+	return path == nocxInternal+"farhelper"
 }
 
 // funcLabel answers the baseline's name for a function or method: the package

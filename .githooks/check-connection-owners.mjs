@@ -58,6 +58,31 @@
  *                        second owner without naming one. This is a SHAPE
  *                        check and it is deliberately not chased further (see
  *                        the limits below).
+ *   helper-decider       a reference to the helper client's Dial, to the host
+ *                        mode store's Lookup, to the machine consent store's
+ *                        Lookup, or to git/helper's NewFactory outside
+ *                        internal/farhelper: the two inputs and the one dial
+ *                        that decide whether a far helper serves a connection,
+ *                        and the Git factory that must be built on the client
+ *                        that decision produced (ALX-641, ADR-727g63tr
+ *                        decision 2, design §5.10 C23). The decision has one
+ *                        owner, and a second reader of the inputs is a second
+ *                        decider. The helper protocol's own local dial is
+ *                        licensed BY NAME below (internal/helper/local's
+ *                        openOnce), never by directory: a dial added beside it
+ *                        in the same package is still a second decider.
+ *   panel-host-path      a reference to ssh.NewFSConn, to proto.OpSamplePorts,
+ *                        to a lease acquisition ((*client.Client).
+ *                        AcquireProbeLease) or to a ProbeLease exec (Uname,
+ *                        Home, SamplePorts, Completion, Inflate, CommandNames)
+ *                        outside internal/farhelper: the roads by which a
+ *                        panel reaches a host without the far helper (design
+ *                        §5.10 C24). A panel takes the connection's helper
+ *                        client from internal/farhelper; the helper protocol's
+ *                        own packages are the road the far helper rides. The
+ *                        acquisition is here because the execs usually travel
+ *                        on the returned lease as an interface the analyser
+ *                        cannot chase — the acquisition is the concrete seam.
  *
  * Scope: every tracked non-test .go file except the transport packages, which
  * are `internal/ssh/`, `internal/helper/sshsvc/` (which serves the carrier over
@@ -87,6 +112,16 @@
  *   - A network named by a variable that is not a constant. A dial with a
  *     computed network string is reported, not exempted: the exemption is the
  *     constant "unix" and nothing else.
+ *   - For C23/C24, an exec on a lease held through THIS repository's own
+ *     interface: internal/app's probeCommands is an interface, so the adapter's
+ *     `l.lease.SamplePorts` resolves to the interface's method, which is not
+ *     the helper client's object. A panel that reaches a ProbeLease exec, a
+ *     helper-client dial, a Git factory or a store read directly is refused.
+ *     The acquisition that hands such an adapter the concrete lease IS reported
+ *     (`(*client.Client).AcquireProbeLease`), which is what keeps the road
+ *     visible instead of hiding behind the interface; what remains unreviewed
+ *     is only the adapter's own translation, the same division the transport
+ *     facts already make.
  *   - A tree that does not compile. A load error fails the check: a tree that
  *     cannot be analysed cannot be proven clean.
  *   - The renderer, which nocx-oalo1.3.5 owns and checks itself.
@@ -105,7 +140,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -139,9 +174,12 @@ export const ALLOWED_DIRS = [
 
 /**
  * Sites that are not an SSH connection and never become one, each with its
- * reason. `objects` names the x/crypto objects ONE file may use — the check
- * reads what those files actually reference, so an entry is exact and a new
- * object in the same file is a new finding.
+ * reason. `objects` names the objects ONE file may use — the check reads what
+ * those files actually reference, so an entry is exact and a new object in the
+ * same file is a new finding. `func`, when written, narrows the licence to one
+ * enclosing function: an entry that allowed a file would also licence a second
+ * caller in it, and the point of an exemption is to name the caller that is
+ * not a second owner.
  */
 export const ALLOWLIST = [
   {
@@ -224,6 +262,113 @@ export const ALLOWLIST = [
     file: 'internal/update/download.go',
     reason: 'the updater downloads an artefact over HTTPS; no SSH connection is involved',
   },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/hosted_shell_carrier.go',
+    func: 'github.com/shady2k/nocx/internal/app.hostedShellCarrier.connectLocked',
+    objects: ['github.com/shady2k/nocx/internal/helper/client.Dial'],
+    reason:
+      "a hosted shell's carrier stays in internal/app (architect, ALX-641 variant B): the " +
+      'pane screen, its inventory and the session bookkeeping ride this one helper client, ' +
+      'and the session closes it — no panel decides it. The entry names the FUNCTION, so a ' +
+      'dial added to another function of the same file is still a second decider',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/helper_git.go',
+    func: 'github.com/shady2k/nocx/internal/app.sessionFactory.Open',
+    objects: ['github.com/shady2k/nocx/internal/git/helper.NewFactory'],
+    reason:
+      "the Git panel's factory is built on the client internal/farhelper's axis decided for " +
+      'this connection (sessionFactory.Open takes it from farhelper.Registry.Acquire), which ' +
+      'is the only client ALX-641 allows a factory on. The licence names the function, so a ' +
+      'factory built anywhere else in this file is still a second decider',
+  },
+  {
+    rule: 'panel-host-path',
+    file: 'internal/app/helper_probeops.go',
+    func: 'github.com/shady2k/nocx/internal/app.helperLeaseAcquirer.AcquireProbeLease',
+    objects: ['github.com/shady2k/nocx/internal/helper/client.(*Client).AcquireProbeLease'],
+    reason:
+      'the helper lease serves completion, command enumeration, platform probing and helper ' +
+      'install/publication work beyond the Ports panel (nocx-50w7p.9); the composition root ' +
+      'only wires these consumers, so its named seam is licensed while the Ports connector is ' +
+      'guarded independently by the scheduler argument fact',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/helper/local/local.go',
+    func: 'github.com/shady2k/nocx/internal/helper/local.openOnce',
+    objects: ['github.com/shady2k/nocx/internal/helper/client.Dial'],
+    reason:
+      "the local helper's own reach for THIS machine's daemon over its unix socket " +
+      '(openOnce): a local helper is not a far-helper decision, and the licence names the ' +
+      'function so the protocol code beside it — a Git or pane road moved into ' +
+      'internal/helper — is still a second decider',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/far_helper.go',
+    func: 'github.com/shady2k/nocx/internal/app.farHelperDial.Dial',
+    objects: ['github.com/shady2k/nocx/internal/helper/client.Dial'],
+    reason:
+      "the composition root's Dialer seam for internal/farhelper (design §5.10: internal/app " +
+      'only wires): the axis decides and this adapter performs the dial it asked for, turning ' +
+      'a resolved destination into a lane and a hello. It reads no mode and no consent, so it ' +
+      'is a mechanism and not a decider (nocx-oalo1.6.2)',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/hosted_shell_carrier.go',
+    func: 'github.com/shady2k/nocx/internal/app.hostModeFor',
+    objects: ['github.com/shady2k/nocx/internal/hostmode.(*Store).Lookup'],
+    reason:
+      "the host's mode is read to STAMP an open (ADR-727g63tr decision 1: the mode is the " +
+      "host's, and every reader of the config takes it from there) and to decide whether the " +
+      'connect-time ask is due. Neither is a decision about whether a helper serves a live ' +
+      'connection',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/hosted_shell_carrier.go',
+    func: 'github.com/shady2k/nocx/internal/app.helperConsentAskForProbeFailure',
+    objects: ['github.com/shady2k/nocx/internal/helper/consent.(*Store).Lookup'],
+    reason:
+      "the connect-time ask's condition (ADR-0068, ADR-0105), reached from a failed platform " +
+      'probe: it reads whether the machine has already answered to decide whether to ASK, and ' +
+      'ADR-727g63tr leaves the ask at connect, owned by the open path',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/app/consent.go',
+    func: 'github.com/shady2k/nocx/internal/app.resolver.forMachine',
+    objects: ['github.com/shady2k/nocx/internal/helper/consent.(*Store).Lookup'],
+    reason:
+      'the machine-keyed half of the connect-time ladder (ADR-0068, ADR-0105): at connect it ' +
+      'answers whether to ask, and every other caller treats ConsentRequired as Refused. The ' +
+      "ask is the open path's by the owner's decision; internal/farhelper reads the recorded " +
+      'answer instead of consulting this ladder',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/transport/ws_host_mode.go',
+    func: 'github.com/shady2k/nocx/internal/transport.hostModeHandlers.handleHostMode',
+    objects: ['github.com/shady2k/nocx/internal/hostmode.(*Store).Lookup'],
+    reason:
+      'the connection editor reading the host record it also writes (ADR-727g63tr decision ' +
+      '1): it answers which method the host keeps, and decides nothing about whether a ' +
+      'helper serves a live connection',
+  },
+  {
+    rule: 'helper-decider',
+    file: 'internal/transport/ws_shell_footprint.go',
+    func: 'github.com/shady2k/nocx/internal/transport.footprintHandlers.handleFootprintHelperUninstall',
+    objects: ['github.com/shady2k/nocx/internal/helper/consent.(*Store).Lookup'],
+    reason:
+      'the footprint screen reads whether the machine had granted before it revokes, so a ' +
+      'failed local cleanup can restore the answer (ADR-0034): an uninstall, not a decision ' +
+      'about a connection',
+  },
 ]
 
 /** What each rule is for, printed beside a failure so the refusal explains itself. */
@@ -236,6 +381,32 @@ export const RULES = {
     'sends a keepalive outside the transport, where the connection has one prober',
   'transport-re-export':
     'hands a dial function out of a transport package, where every caller becomes an owner',
+  'helper-decider': 'decides whether a far helper serves a connection away from internal/farhelper',
+  'panel-host-path': 'reaches a host for a panel by a road other than the far helper',
+}
+
+/**
+ * The directories each C23/C24 rule exempts, by rule.
+ *
+ * `internal/farhelper` is the one owner both rules name. `internal/helper` is
+ * the helper protocol's own home and the binary that runs it — the op names in
+ * internal/helper/proto and internal/helper/client are the wire vocabulary the
+ * far helper rides, and internal/ssh is the transport doing its own SFTP.
+ *
+ * `helper-decider` does NOT exempt internal/helper as a directory. The only
+ * lawful helper-client dial there is `internal/helper/local`'s own reach for
+ * THIS machine's daemon, and it is licensed by NAME in ALLOWLIST
+ * (`openOnce`). A directory exemption licensed every package under
+ * internal/helper, so a Git or pane road moved there would have been dropped
+ * after the analyser found it — the licence would have hidden a real fact.
+ *
+ * An exemption here is a statement about a DIRECTORY, so it is kept as small as
+ * the protocol allows: a new fact outside these paths needs either
+ * internal/farhelper or an allowlist entry with a reason.
+ */
+export const RULE_EXEMPT_DIRS = {
+  'helper-decider': ['internal/farhelper/'],
+  'panel-host-path': ['internal/farhelper/', 'internal/helper/', 'internal/ssh/'],
 }
 
 /** Whether `file` is one of the transport packages. */
@@ -243,9 +414,10 @@ export function isTransportFile(file) {
   return ALLOWED_DIRS.some((dir) => file.startsWith(dir))
 }
 
-function allowlisted(rule, file, object) {
+export function isAllowlisted(rule, file, func, object) {
   return ALLOWLIST.some((entry) => {
     if (entry.rule !== rule || entry.file !== file) return false
+    if (entry.func && entry.func !== func) return false
     if (!entry.objects) return true // a site-level exemption (the net-dial entries)
     return entry.objects.includes(object)
   })
@@ -315,13 +487,28 @@ export function analysisEnv(env = process.env) {
   return { ...env, GOTOOLCHAIN: ANALYSIS_TOOLCHAIN }
 }
 
+/**
+ * analysisGOFLAGS answers GOFLAGS for one analysis. The overlay is spelled
+ * RELATIVE to the module root — the working directory of every go command the
+ * analysis starts — because GOFLAGS is split on spaces before any go command
+ * reads it. An absolute path in a clone under, say, `/home/dev/My Projects/nocx`
+ * arrives as `-overlay=/home/dev/My` plus `Projects/nocx/…` as a `non-flag`
+ * argument, and `go run` refuses before a fact is read (review #5, ALX-757).
+ */
+export function analysisGOFLAGS(module, overlay) {
+  return `-overlay=${relative(module, overlay)}`
+}
+
 // ─── the analysed facts ──────────────────────────────────────────────────
 
 /**
  * Run cmd/conncheck for one build-tag set and answer its facts. `opts.module`
  * and `opts.scope` exist for the tests: a fixture is a package inside the
  * module with its own root, so its file labels come out as the real product
- * paths and the policy applies unchanged.
+ * paths and the policy applies unchanged. `opts.overlay` is for a fixture whose
+ * package has to exist at a path it does not occupy on disk — the owner's own —
+ * and reaches the analyser's `go list` through GOFLAGS, the one place a build
+ * flag applies to every go command the analysis starts.
  */
 export function analyze(opts = {}) {
   const module = opts.module ?? PROJECT_ROOT
@@ -329,6 +516,8 @@ export function analyze(opts = {}) {
   const args = ['run', './cmd/conncheck', '-module', module, '-scope', scope]
   if (opts.tags) args.push('-tags', opts.tags)
   if (opts.pkgs) args.push('-pkgs', opts.pkgs)
+  const env = analysisEnv()
+  if (opts.overlay) env.GOFLAGS = analysisGOFLAGS(module, opts.overlay)
   let out
   try {
     out = execFileSync('go', args, {
@@ -336,7 +525,7 @@ export function analyze(opts = {}) {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: analysisEnv(),
+      env,
     })
   } catch (err) {
     const detail = (err.stderr ?? '').toString().trim() || err.message
@@ -367,8 +556,13 @@ export function collectFacts() {
  */
 export function violationsFromFacts(facts) {
   return (facts ?? []).filter((f) => {
+    const exempt = RULE_EXEMPT_DIRS[f.rule]
+    if (exempt) {
+      if (exempt.some((dir) => f.file.startsWith(dir))) return false
+      return !isAllowlisted(f.rule, f.file, f.func, f.object)
+    }
     if (isTransportFile(f.file)) return f.rule === 'transport-re-export'
-    return !allowlisted(f.rule, f.file, f.object)
+    return !isAllowlisted(f.rule, f.file, f.func, f.object)
   })
 }
 
@@ -453,6 +647,9 @@ export function unreasonedEntries(baseline) {
   return baseline.filter((entry) => typeof entry.reason !== 'string' || entry.reason.trim() === '')
 }
 
+/** The rules whose allowlist entries name objects, never a whole file. */
+const OBJECT_RULES = new Set(['xcrypto-ssh-import', 'helper-decider', 'panel-host-path'])
+
 /** An allowlist entry with no reason is a silent licence; refuse it. */
 export function allowlistProblems() {
   const problems = []
@@ -463,11 +660,15 @@ export function allowlistProblems() {
     if (!Object.hasOwn(RULES, entry.rule)) {
       problems.push(`${entry.file} is allowlisted for an unknown rule ${entry.rule}`)
     }
-    if (entry.rule === 'xcrypto-ssh-import' && !Array.isArray(entry.objects)) {
+    if (OBJECT_RULES.has(entry.rule) && !Array.isArray(entry.objects)) {
       problems.push(
-        `${entry.file} allowlists x/crypto with no object list: the library is allowed ` +
-          'object by object, so that a dial added to the same file is still reported',
+        `${entry.file} allowlists ${entry.rule} with no object list: this rule is allowed ` +
+          'object by object, so that a second reference added to the same file is still ' +
+          'reported',
       )
+    }
+    if (entry.func !== undefined && (typeof entry.func !== 'string' || entry.func.trim() === '')) {
+      problems.push(`${entry.file} allowlists an empty function name`)
     }
   }
   return problems
@@ -512,11 +713,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   if (fresh.length > 0) {
     console.error(
-      `${fresh.length} new site(s) decide a connection fact outside the SSH transport ` +
-        `(${ALLOWED_DIRS.join(', ')}). A fact about a connection has one owner, the backend's ` +
-        'connection manager behind the Carrier interface (ADR-ba6xet1b, design §5.1). Take it ' +
-        'through the transport, or add it deliberately: ' +
-        'node .githooks/update-connection-owners-baseline.mjs --allow-growth',
+      `${fresh.length} new site(s) decide a connection fact outside its one owner. A fact ` +
+        'about a connection has one owner — the backend connection manager behind the Carrier ' +
+        `interface (${ALLOWED_DIRS.join(', ')} for a transport fact, ADR-ba6xet1b, design §5.1) ` +
+        "— and so does the far helper's reachability and a panel's road to the host " +
+        '(internal/farhelper, ADR-727g63tr, design §5.10 C23/C24). Take it through the owner, ' +
+        'or add it deliberately: node .githooks/update-connection-owners-baseline.mjs --allow-growth',
     )
     for (const row of fresh) {
       const line = row.line === undefined ? '' : `:${row.line}`

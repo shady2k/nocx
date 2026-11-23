@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -206,7 +207,10 @@ func (r *laneRegistry) forget(f *fakeLaneConn) {
 	defer r.mu.Unlock()
 	for i, c := range r.conns {
 		if c == f {
-			r.conns = append(r.conns[:i], r.conns[i+1:]...)
+			// slices.Delete, not append: the append form leaves the removed
+			// lane's pointer in the array's last slot, so the registry keeps a
+			// closed lane and both its pipes alive past their end.
+			r.conns = slices.Delete(r.conns, i, i+1)
 			return
 		}
 	}
@@ -217,13 +221,6 @@ func (r *laneRegistry) liveLanes() []*fakeLaneConn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]*fakeLaneConn(nil), r.conns...)
-}
-
-// count is how many lanes the registry holds now.
-func (r *laneRegistry) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.conns)
 }
 
 // newFakeLaneConn makes a lane for the test its owner names. owner is

@@ -99,14 +99,28 @@ func TestALaneOpenedOffTheTestGoroutineIsReportedByItsTest(t *testing.T) {
 	})
 }
 
+// noneRegistered reports whether the registry has dropped every lane of lanes.
+func noneRegistered(lanes []*fakeLaneConn) bool {
+	for _, lane := range lanes {
+		if laneRegistered(lane) {
+			return false
+		}
+	}
+	return true
+}
+
 // TestEveryClosedLaneLeavesTheRegistry keeps the registry from growing with
-// the run: every lane this test opens is closed, and once its peer returns the
-// registry must be back to what it held before. That is also what -count=N
-// needs: a second round of the same test must not find the first round's
-// entries still there.
+// the run: every lane this test opens is registered while its peer runs, and
+// gone once it is closed and its peer has returned. That is also what
+// -count=N needs: a second round of the same test must not find the first
+// round's entries still there.
+//
+// The assertion is about the eight POINTERS this test opened, never about the
+// registry's size: another test's lane can be registered when this one starts
+// and be forgotten while it runs, so a count makes the same registry state
+// pass or fail depending on who else is alive (nocx-y3kfq).
 func TestEveryClosedLaneLeavesTheRegistry(t *testing.T) {
 	const cycles = 8
-	before := laneConns.count()
 	provider := &fakeLaneProvider{owner: t.Name(), peer: silentLanePeer}
 	lanes := make([]*fakeLaneConn, 0, cycles)
 	t.Cleanup(func() {
@@ -114,19 +128,16 @@ func TestEveryClosedLaneLeavesTheRegistry(t *testing.T) {
 			_ = lane.Close()
 		}
 		waittest.WaitFor(t, "this test's lanes to leave the registry", func() bool {
-			for _, lane := range lanes {
-				if laneRegistered(lane) {
-					return false
-				}
-			}
-			return true
+			return noneRegistered(lanes)
 		})
 	})
 	for range cycles {
 		lanes = append(lanes, openSilentLane(t, provider))
 	}
-	if grew := laneConns.count() - before; grew != cycles {
-		t.Fatalf("the registry grew by %d for %d open lanes, want %d", grew, cycles, cycles)
+	for i, lane := range lanes {
+		if !laneRegistered(lane) {
+			t.Fatalf("lane %d that this test opened is not in the registry", i)
+		}
 	}
 	for i, lane := range lanes {
 		if err := lane.Close(); err != nil {
@@ -134,9 +145,34 @@ func TestEveryClosedLaneLeavesTheRegistry(t *testing.T) {
 		}
 	}
 	waittest.WaitFor(t, "every closed lane to leave the registry", func() bool {
-		return laneConns.count() == before
+		return noneRegistered(lanes)
 	})
-	if grew := laneConns.count() - before; grew != 0 {
-		t.Fatalf("%d of this test's lanes are still registered after being closed and their peers returned", grew)
+}
+
+// TestAnEndedLaneIsNotReportedWhileItIsStillRegistered covers the window
+// between the peer's end and the registry's forget: the peer has returned and
+// closed its lane's ended channel, and forget has not dropped the entry yet.
+// laneLeakReport must not name that lane — a lane whose peer is gone is not a
+// leak — or the report claims a lane is still running as it ends
+// (nocx-y3kfq).
+//
+// The state is registered directly rather than waited for: the two statements
+// that produce it run back to back on the peer's goroutine, so nothing outside
+// can hold them apart, and a report read in that gap by luck is a test of the
+// scheduler rather than of the filter.
+func TestAnEndedLaneIsNotReportedWhileItIsStillRegistered(t *testing.T) {
+	lane := &fakeLaneConn{exited: make(chan struct{}), openedBy: t.Name()}
+	close(lane.exited)
+	laneConns.add(lane)
+	t.Cleanup(func() { laneConns.forget(lane) })
+
+	if !laneRegistered(lane) {
+		t.Fatal("the ended lane is not in the registry, so the window the report has to survive is not under test")
+	}
+	ended := lane.leakLine()
+	for _, line := range laneLeakReport() {
+		if line == ended {
+			t.Fatalf("laneLeakReport names a lane whose peer has returned as still running: %q", line)
+		}
 	}
 }

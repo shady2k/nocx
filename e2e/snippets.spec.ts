@@ -165,6 +165,17 @@ async function removeSnippet(page: Page, title: string): Promise<void> {
   // the row, so a count of zero over every row carrying this exact title is
   // the same fact the toast is about, observed rather than assumed.
   await expect(del).toHaveCount(0, { timeout: 10_000 })
+  // ...and the zero has to be the ANSWER of a library that loaded. A delete
+  // re-reads the list (store.remove → refresh), and a failed re-read is the
+  // soft degrade of design §11.5: Settings replaces the rows with
+  // "Couldn't load your snippets", which has no rows and no delete controls
+  // either — the same count the successful path shows. Read there, the zero
+  // confirms a deletion nobody saw (ALX-1522). `waitForSnippetsLoaded`
+  // rejects that state as well as the loading one, and it is asked AFTER
+  // the count above on purpose: until the re-read answers, the store still
+  // shows its previous, loaded list WITH this row in it, so asking first
+  // would pass having observed nothing.
+  await waitForSnippetsLoaded(page)
   await expect(rowsTitled(page, title)).toHaveCount(0, { timeout: 10_000 })
 }
 

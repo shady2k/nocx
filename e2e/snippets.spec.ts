@@ -59,6 +59,37 @@ const REFUSAL = '.ui-toast__message'
  *  once, with the palette closed behind it. */
 const ASK_FORM = '.nocx-dialog[open]'
 
+/** The settings page's own loading state: an EmptyState the section paints
+ *  until the store's first answer lands (snippets-settings.tsx). `.sn-root`
+ *  is on screen WHILE this is showing, so "the root is visible" is not "the
+ *  library is loaded" — the difference that let a cleanup read zero rows on
+ *  a list nobody had asked yet and conclude the record was gone (ALX-1519:
+ *  `snippets.list` answered 4 ms after the row count was taken). */
+async function waitForSnippetsLoaded(page: Page): Promise<void> {
+  await expect(page.locator('.sn-root')).toBeVisible({ timeout: 10_000 })
+  await expect(
+    page.locator('.sn-root .ui-empty-state__title').filter({ hasText: 'Loading snippets' }),
+  ).toHaveCount(0, { timeout: 10_000 })
+  // A library that could not be read is not an empty one (§11.5), and its
+  // "Retry" would never be pressed by a cleanup: treating the soft degrade
+  // as "already gone" is the same early exit in a different costume.
+  await expect(
+    page
+      .locator('.sn-root .ui-empty-state__title')
+      .filter({ hasText: "Couldn't load your snippets" }),
+  ).toHaveCount(0)
+}
+
+/** The rows whose TITLE is exactly `title`. A substring match is a different
+ *  question: `e2e fill` is the title of two different bodies in this file,
+ *  and a body that mentions a title must not answer for the record that is
+ *  not there. Anchored rather than `.first()`, because "no row" is a count
+ *  over all of them. */
+function rowsTitled(page: Page, title: string): Locator {
+  const exact = new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
+  return page.locator('.sn-root .ui-record-row__title').filter({ hasText: exact })
+}
+
 async function expectPaletteClosed(page: Page): Promise<void> {
   await expect(page.locator(PANEL)).toHaveCount(0, { timeout: 10_000 })
 }
@@ -84,7 +115,13 @@ async function pressChord(page: Page): Promise<void> {
 async function createSnippet(page: Page, title: string, body: string): Promise<void> {
   await page.keyboard.press('Meta+,')
   await page.locator('.ui-grouped-nav__item[data-item="snippets"]').click()
-  await expect(page.locator('.sn-root')).toBeVisible({ timeout: 10_000 })
+  await waitForSnippetsLoaded(page)
+
+  // Every scenario shares one backend, so a create is also a statement about
+  // what the previous cleanup left behind: this title is NOT in the loaded
+  // library. Read before the dialog opens, because after that the new row
+  // would answer the question it is asking.
+  await expect(rowsTitled(page, title)).toHaveCount(0, { timeout: 10_000 })
 
   // The library is NOT empty on a fresh stand — the service seeds two
   // records when it first writes the document — so the create affordance is
@@ -99,9 +136,10 @@ async function createSnippet(page: Page, title: string, body: string): Promise<v
   await page.keyboard.type(body)
   await dialog.getByRole('button', { name: 'Create snippet' }).click()
   await expect(dialog).toHaveCount(0, { timeout: 10_000 })
-  await expect(page.locator('.ui-record-row__title', { hasText: title })).toBeVisible({
-    timeout: 10_000,
-  })
+  // Exactly one row carries this title once the save is in the list — not
+  // "at least one", which is what a leftover beside the new record would
+  // also satisfy.
+  await expect(rowsTitled(page, title)).toHaveCount(1, { timeout: 10_000 })
 }
 
 /** Remove a snippet the same way, so a second run starts where this one
@@ -110,16 +148,24 @@ async function createSnippet(page: Page, title: string, body: string): Promise<v
 async function removeSnippet(page: Page, title: string): Promise<void> {
   await page.keyboard.press('Meta+,')
   await page.locator('.ui-grouped-nav__item[data-item="snippets"]').click()
-  await expect(page.locator('.sn-root')).toBeVisible({ timeout: 10_000 })
-  const del = page.locator(`[aria-label="Delete ${title}"]`)
+  // The absence below is a fact only once the library has answered. Before
+  // this wait, `.sn-root` was visible with "Loading snippets" on it, the row
+  // count read zero, and the cleanup returned while the record was still in
+  // the list — which is how one scenario's row survived into the next.
+  await waitForSnippetsLoaded(page)
+  const del = page.locator(`.sn-root [aria-label="Delete ${title}"]`)
   if ((await del.count()) === 0) return
-  await del.first().click()
+  await del.click()
   await page
     .getByRole('dialog')
     .filter({ hasText: `Delete "${title}"?` })
     .getByRole('button', { name: 'OK', exact: true })
     .click()
-  await expect(page.locator(`[aria-label="Delete ${title}"]`)).toHaveCount(0, { timeout: 10_000 })
+  // The record is gone when the LIST says so: the delete control belongs to
+  // the row, so a count of zero over every row carrying this exact title is
+  // the same fact the toast is about, observed rather than assumed.
+  await expect(del).toHaveCount(0, { timeout: 10_000 })
+  await expect(rowsTitled(page, title)).toHaveCount(0, { timeout: 10_000 })
 }
 
 /** Open a terminal tab and leave a program waiting on stdin: `read` holds

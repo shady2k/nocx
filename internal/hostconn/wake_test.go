@@ -139,6 +139,77 @@ func TestAParkedProbeIsNotDoubledByAWake(t *testing.T) {
 	})
 }
 
+// TestAWakeTheConnectionHasAnsweredSendsNoProbe — the order the guard's loop
+// happened to SEE the two facts in is not the order they happened in: a wake
+// stamped at or before the moment the far side's last answer arrived is
+// answered already, and the answer is its evidence.
+//
+// The window is real, not a test's: a resume schedules the whole machine, and
+// the guard may reach a wake edge only after the parked probe it was waiting on
+// has come back. Without this, that ordering sends a second probe for a proof
+// the connection has just given — the doubling the design rules out.
+func TestAWakeTheConnectionHasAnsweredSendsNoProbe(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link, wake, mgr, sup := wakeStand(t, clock)
+		defer wake.Close()
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
+
+		// The wake's probe, parked until the clock says five seconds are gone,
+		// so the answer it finally gives is one the guard has already waited
+		// past: reached through a state change a caller can read.
+		wake.Wake()
+		waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+		clock.Advance(hostconn.WakeProbeDeadline)
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		link.release()
+		waittest.WaitFor(t, "the parked probe's answer", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
+
+		// The second signal carries the reading the answer arrived at: the
+		// machine's clock did not move between them, which is exactly the
+		// window in which the guard cannot tell the two orders apart by
+		// itself. The guard is waited on for its own statement that it
+		// processed the edge, then given the idle moment, so the count below is
+		// read after the wake and every probe it caused have been handled.
+		syncGuard(t, sup, func() { sup.Wake(clock.Now()) })
+		synctest.Wait()
+		if calls := link.probeCalls.Load(); calls != 1 {
+			t.Fatalf("%d probes after a wake the connection had already answered, want 1: the answer is the signal's evidence", calls)
+		}
+	})
+}
+
+// TestAWakeAfterTheLastAnswerProbesAgain is the pair to the rule above: an
+// answer that predates the signal is not the signal's evidence, and the wake
+// asks for a new one at once.
+func TestAWakeAfterTheLastAnswerProbesAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := hostconntest.New()
+		link, wake, mgr, sup := wakeStand(t, clock)
+		defer wake.Close()
+		lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+		defer lease.Release()
+
+		wake.Wake()
+		waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+		clock.Advance(hostconn.WakeProbeDeadline)
+		waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
+		link.release()
+		waittest.WaitFor(t, "the parked probe's answer", func() bool {
+			return sup.Current().Kind == hostconn.Connected
+		})
+
+		// The machine wakes again, a second after that answer: the connection
+		// has to prove itself in the new five seconds.
+		clock.Advance(time.Second)
+		syncGuard(t, sup, func() { sup.Wake(clock.Now()) })
+		waittest.WaitFor(t, "the second wake's probe", func() bool { return link.probeCalls.Load() == 2 })
+	})
+}
+
 // TestAHelperOwnedConnectionWithoutAnAnswerAfterAWakeReconnects — thirty
 // seconds after the signal, and nothing is lost by closing it.
 func TestAHelperOwnedConnectionWithoutAnAnswerAfterAWakeReconnects(t *testing.T) {

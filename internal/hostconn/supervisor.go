@@ -719,6 +719,13 @@ type live struct {
 	// about the call, not about which goroutine the scheduler ran.
 	answerMu sync.Mutex
 	answer   probeAnswer
+	// answeredAt is the clock reading at which the last answer was recorded:
+	// the moment the far side's call returned, as the connection's clock reads
+	// it. A wake's evidence is decided on it (nocx-oalo1.6.15): the guard's
+	// loop can reach a wake edge after the answer to the probe that edge was
+	// waiting on has already come back, and the answer's own moment is what
+	// says whether it is newer than the signal.
+	answeredAt monoclock.Nanos
 	// answerNo is the number of the last probe begun; guarded by answerMu.
 	answerNo uint64
 	// ready is poked whenever an answer is recorded, so the guard's select
@@ -788,8 +795,9 @@ func (l *live) beginProbe() uint64 {
 
 // recordAnswer is the far side's call returning. It runs BEFORE anything else
 // the probe's goroutine does, under the lock the guard judges the deadline
-// under.
-func (l *live) recordAnswer(seq uint64, roundTrip time.Duration, err error) {
+// under; `at` is the clock's reading at the return, which is what a wake
+// compares its own moment with.
+func (l *live) recordAnswer(seq uint64, at monoclock.Nanos, roundTrip time.Duration, err error) {
 	l.answerMu.Lock()
 	// A FENCED CONNECTION HAS DECIDED (nocx-oalo1.4.3): the connection is being
 	// closed for its silence, and the answer to a probe sent before that fence
@@ -804,12 +812,23 @@ func (l *live) recordAnswer(seq uint64, roundTrip time.Duration, err error) {
 		l.answer.returned = true
 		l.answer.roundTrip = roundTrip
 		l.answer.err = err
+		l.answeredAt = at
 	}
 	l.answerMu.Unlock()
 	select {
 	case l.ready <- struct{}{}:
 	default:
 	}
+}
+
+// answeredAtOrAfter reports whether the far side's last answer was recorded at
+// or after `at` — the moment a wake signal was given, as the connection's clock
+// reads it. It is the wake's own question: "has this connection proved itself
+// since the signal?", which the order of two channel reads cannot answer.
+func (l *live) answeredAtOrAfter(at monoclock.Nanos) bool {
+	l.answerMu.Lock()
+	defer l.answerMu.Unlock()
+	return l.answeredAt != 0 && l.answeredAt >= at
 }
 
 // takeAnswer answers one probe's recorded answer, once. The second result is

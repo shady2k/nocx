@@ -628,7 +628,10 @@ func TestAWakeOverAParkedProbeReadsStalledInFiveSecondsAndIsNotDoubled(t *testin
 	}
 
 	// A second signal while that probe is parked: one probe is in flight, and a
-	// second would queue behind the mux's send lock and measure nothing.
+	// second would queue behind the mux's send lock and measure nothing. The
+	// guard decides that on the two MOMENTS it holds — the signal's and the
+	// answer's — so the answer does not depend on whether it reaches this edge
+	// before or after the parked probe comes back (nocx-oalo1.6.15).
 	stand.wake.Wake()
 
 	proxy.Release()

@@ -85,4 +85,7 @@ export const folderPickerLabels = (): FolderPickerLabels => ({
   upOne: t('kit.folderPicker.upOne', 'Up one level'),
   contents: t('kit.folderPicker.contents', 'Folder contents'),
   empty: t('kit.folderPicker.empty', 'This folder is empty'),
+  go: t('kit.folderPicker.goLabel', 'Go'),
+  pathPlaceholder: t('kit.folderPicker.pathPlaceholder', '/path/to/folder'),
+  cannotOpenPath: (path) => t('kit.folderPicker.cannotOpenPath', 'Cannot open {path}', { path }),
 })

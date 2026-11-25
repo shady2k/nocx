@@ -103,6 +103,12 @@ export interface FolderPickerLabels {
   upOne: string
   contents: string
   empty: string
+  /** The Go button beside the path field, which opens the typed path. */
+  go: string
+  /** The example the path field shows while it is empty. */
+  pathPlaceholder: string
+  /** The title of the failure card; the path it could not open is appended. */
+  cannotOpenPath: (path: string) => string
 }
 
 /* ── The one place this component reasons about the shape of a path ───────
@@ -228,14 +234,14 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
             value={answer()}
             onInput={setAnswer}
             autoFocus
-            placeholder="/path/to/folder"
+            placeholder={labels().pathPlaceholder}
           />
           <Button
             variant="default"
             disabled={chosen() === ''}
             onClick={() => void navigate(chosen())}
           >
-            Go
+            {labels().go}
           </Button>
           <Button
             variant="default"
@@ -253,7 +259,11 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
 
         <Show when={failure()}>
           {(f) => (
-            <StatusCard tone="danger" title={`Cannot open ${f().path}`} description={f().reason} />
+            <StatusCard
+              tone="danger"
+              title={labels().cannotOpenPath(f().path)}
+              description={f().reason}
+            />
           )}
         </Show>
 

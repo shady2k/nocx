@@ -2146,6 +2146,18 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'update.downloading.figure': '{percent}% · {done} of {total} MB',
   'update.link.releaseNotes': 'Release notes',
   'update.link.whatChanged': 'What changed',
+  'update.failure.download': 'The update could not be downloaded. Check your connection and try again.',
+  'update.failure.verify': 'The update could not be verified. Check for updates and download it again.',
+  'update.failure.unpack': 'The update could not be unpacked. Check free space and try again.',
+  'update.failure.replace': 'The update could not replace the app. Allow writes to the app’s folder and try again.',
+  'update.failure.notInstalled':
+    'This copy of nocx cannot be updated here. Install the latest release in a folder you can write to, then try again.',
+  'update.failure.blocked': 'The update is blocked by {path}, which is not nocx’s own. Move or remove it, then try again.',
+  'update.failure.generic': 'The update could not finish. Try again, or install the latest release manually.',
+  'update.failure.devBuild':
+    'this is a development build; self-update is not available — run a release build, or use the package manager that installed nocx',
+  'update.failure.appImage':
+    'this is not a distributed AppImage build — download the AppImage from the releases page, or use the package manager that installed nocx',
   'vault.copied': 'Copied',
   'vault.protection.sealed.desc':
     'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.',

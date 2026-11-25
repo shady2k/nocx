@@ -587,6 +587,7 @@ export function SecretsSection(props: SecretsSectionProps) {
         <Match when={loadState().kind === 'empty' || loadState().kind === 'loaded'}>
           <CollectionView
             searchValue={filter()}
+            actionsLabel={t('ui.collection.actions', 'Collection actions')}
             onSearch={setFilter}
             searchPlaceholder="Filter secrets"
             searchLabel="Filter secrets"

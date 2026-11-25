@@ -438,6 +438,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     <div class="sn-root">
       <CollectionView
         searchValue={searchQuery()}
+        actionsLabel={t('ui.collection.actions', 'Collection actions')}
         onSearch={setSearchQuery}
         searchPlaceholder="Filter snippets"
         searchLabel="Filter snippets"

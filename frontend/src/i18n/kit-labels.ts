@@ -17,6 +17,11 @@ import type { PersonMessageLabels } from '../ui/person-message'
 import type { FileReadoutLabels } from '../ui/file-readout'
 import type { FolderPickerLabels } from '../ui/folder-picker'
 import type { ConfirmLabels } from '../ui/dialog'
+import type { ToastHostLabels } from '../ui/toast'
+import type { OperationRowLabels } from '../ui/operation-row'
+import type { ConnectionOverlayLabels } from '../ui/connection-overlay'
+import type { CompletionDropdownLabels } from '../ui/completion-dropdown'
+import type { SecretPickerLabels } from '../ui/secret-picker'
 
 export const collisionLabels = (): CollisionLabels => ({
   title: t('kit.collision.title', 'File already exists'),
@@ -38,6 +43,58 @@ export const confirmLabels = (ok: string, cancel: string): ConfirmLabels => ({
   cancel,
   closeAria: t('ui.dialog.closeAria', 'Close dialog'),
   closeTitle: t('ui.dialog.closeTitle', 'Close'),
+})
+
+/** The words the toast host draws itself (ui/toast.tsx). */
+export const toastHostLabels = (): ToastHostLabels => ({
+  dismiss: t('ui.toast.dismiss', 'Dismiss notification'),
+  browserOpenFailed: t(
+    'ui.toast.browserOpenFailed',
+    'The browser could not be opened. Try again or open the release notes in your browser.',
+  ),
+})
+
+/** The words an operation row draws (ui/operation-row.tsx). The two names
+ *  are functions so the title is read at render, not captured here. */
+export const operationRowLabels = (): OperationRowLabels => ({
+  queued: t('ops.queued', 'Queued'),
+  progressOf: (title) => t('ops.row.progressOf', '{title} progress', { title }),
+  cancelOf: (title) => t('ops.row.cancelOf', 'Cancel {title}', { title }),
+})
+
+/** The words the connection overlay draws (ui/connection-overlay.tsx). */
+export const connectionOverlayLabels = (): ConnectionOverlayLabels => ({
+  status: t('ui.connection.status', 'Connection status'),
+  retry: t('ui.connection.retry', 'Retry'),
+})
+
+/** The words the completion dropdown draws (ui/completion-dropdown.ts): its
+ *  listbox name, and each row's source badge. */
+export const completionDropdownLabels = (): CompletionDropdownLabels => ({
+  listbox: t('ui.completion.listbox', 'completions'),
+  source: (source) => {
+    switch (source) {
+      case 'command':
+        return t('ui.completion.source.command', 'command')
+      case 'history':
+        return t('ui.completion.source.history', 'history')
+      case 'path':
+        return t('ui.completion.source.path', 'path')
+      case 'host':
+        return t('ui.completion.source.host', 'host')
+      case 'snippet':
+        return t('ui.completion.source.snippet', 'snippet')
+      case 'function':
+        return t('ui.completion.source.function', 'function')
+      default:
+        return undefined
+    }
+  },
+})
+
+/** The words the secret picker draws (ui/secret-picker.ts). */
+export const secretPickerLabels = (): SecretPickerLabels => ({
+  listbox: t('ui.secrets.listbox', 'vault secrets'),
 })
 
 export const fileReadoutLabels = (): FileReadoutLabels => ({

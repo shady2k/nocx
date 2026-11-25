@@ -3313,6 +3313,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     <div class="cm-root">
       <CollectionView
         searchValue={searchQuery()}
+        actionsLabel={t('ui.collection.actions', 'Collection actions')}
         onSearch={setSearchQuery}
         searchPlaceholder={t('connections.list.searchPlaceholder', 'Filter connections')}
         searchLabel={t('connections.list.searchPlaceholder', 'Filter connections')}

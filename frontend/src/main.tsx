@@ -60,6 +60,7 @@ import { startUpdateSchedule } from './update-schedule'
 import { createUpdateController } from './update-controller'
 import { shouldAnnounceUpdateStateFailure } from './update-degrade'
 import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connection-overlay'
+import { connectionOverlayLabels } from './i18n/kit-labels'
 import { IconButton } from './ui/icon-button'
 import {
   BellIcon,
@@ -284,6 +285,7 @@ function main(): void {
     state: () => connectionState(),
     onRetry: () => dispatcher.retryNow(),
     onHidden: () => focusActive(),
+    labels: connectionOverlayLabels(),
   })
 
   const profileClient = new ProfileClient(dispatcher)

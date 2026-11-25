@@ -243,7 +243,7 @@ import { devicePxToCssPx, displayDpr } from './painter/committed-metric'
 import { measureNaturalAdvance, measureNaturalLineHeight } from './scrollback/cell-metric'
 import { gridRows } from './scrollback/cell-metric'
 import { t } from './i18n/locale-model'
-import { blockReceiptLabels, confirmLabels } from './i18n/kit-labels'
+import { blockReceiptLabels, completionDropdownLabels, confirmLabels } from './i18n/kit-labels'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
 // An e2e spec reads the ACTIVE pane's cell model through
@@ -3792,6 +3792,7 @@ export class TerminalContent extends BasePaneContent {
         dropdown: new CompletionDropdown({
           onHover: (index) => this.completion?.select(index),
           onPick: (index) => this.completion?.acceptIndex(index),
+          labels: completionDropdownLabels(),
         }),
         env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
         recallIsOpen: () => this.recall?.isOpen ?? false,

@@ -39,6 +39,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'settings.worktrees.idleDays.label': 'Удалять неиспользуемые рабочие деревья после',
   'settings.worktrees.idleDays.description':
     'Рабочее дерево, созданное nocx и не использовавшееся так долго, удаляется ежедневной очисткой. Уходит только чек-аут: ветка и все коммиты остаются. Дерево с незакоммиченными изменениями не удаляется никогда.',
+  'settings.sessions.idleDays.label': 'Завершать сеансы без присмотра после',
+  'settings.sessions.idleDays.description': 'Завершает сеанс, если ни одно окно nocx не подключалось к нему так долго, даже если программа ещё работает. День — это 24 часа. Применяется только к вновь открытым сеансам.',
   'settings.history.retentionDays.label': 'Хранить историю',
   'settings.history.retentionDays.description':
     'Как долго хранится завершённая команда. Более старые команды удаляются из nocx — удаление не является безопасным стиранием, удалённые строки могут оставаться в свободном месте файла базы данных.',
@@ -834,88 +836,64 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'pw.ok': 'OK',
   'pw.cancel': 'Отмена',
   // ── Go-minted, no call site: sections, sentinel-zero sentences and the notifications routing family (internal/settings, internal/notify, internal/app) ──
-  'notifications.route.blockFinished.banner': 'Команда завершена → Баннер ОС',
-  'notifications.route.blockFinished.banner.description':
-    'Собственный реестр блоков nocx записал завершение команды. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.blockFinished.toast': 'Команда завершена → Тост в приложении',
-  'notifications.route.blockFinished.toast.description':
-    'Собственный реестр блоков nocx записал завершение команды. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.blockFinished': 'Команда завершена → Центр уведомлений',
-  'notifications.centre.blockFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.sessionEnded.banner': 'Сеанс завершён → Баннер ОС',
-  'notifications.route.sessionEnded.banner.description':
-    'Собственный реестр сеансов nocx записал завершение сеанса. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.sessionEnded.toast': 'Сеанс завершён → Тост в приложении',
-  'notifications.route.sessionEnded.toast.description':
-    'Собственный реестр сеансов nocx записал завершение сеанса. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.sessionEnded': 'Сеанс завершён → Центр уведомлений',
-  'notifications.centre.sessionEnded.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.transferFinished.banner': 'Передача файла завершена → Баннер ОС',
-  'notifications.route.transferFinished.banner.description':
-    'Собственный реестр передач nocx записал, что закачка или загрузка дошла до конца. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.transferFinished.toast': 'Передача файла завершена → Тост в приложении',
-  'notifications.route.transferFinished.toast.description':
-    'Собственный реестр передач nocx записал, что закачка или загрузка дошла до конца. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.transferFinished': 'Передача файла завершена → Центр уведомлений',
-  'notifications.centre.transferFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.programNotify.banner': 'Запрос уведомления от программы → Баннер ОС',
-  'notifications.route.programNotify.banner.description':
-    'Программа напечатала OSC 9 или OSC 777, чтобы попросить уведомление. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.programNotify.toast': 'Запрос уведомления от программы → Тост в приложении',
-  'notifications.route.programNotify.toast.description':
-    'Программа напечатала OSC 9 или OSC 777, чтобы попросить уведомление. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.programNotify': 'Запрос уведомления от программы → Центр уведомлений',
-  'notifications.centre.programNotify.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.bell.banner': 'Терминальный звонок → Баннер ОС',
-  'notifications.route.bell.banner.description':
-    'Программа напечатала BEL. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.bell.toast': 'Терминальный звонок → Тост в приложении',
-  'notifications.route.bell.toast.description':
-    'Программа напечатала BEL. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.bell': 'Терминальный звонок → Центр уведомлений',
-  'notifications.centre.bell.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.coordinatorStalled.banner':
-    'Координатор не читает своих workers → Баннер ОС',
-  'notifications.route.coordinatorStalled.banner.description':
-    'nocx писал координатору о почте его workers, и координатор не прочитал, либо координатор заблокирован на своём экране, пока его workers живы. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.coordinatorStalled.toast':
-    'Координатор не читает своих workers → Тост в приложении',
-  'notifications.route.coordinatorStalled.toast.description':
-    'nocx писал координатору о почте его workers, и координатор не прочитал, либо координатор заблокирован на своём экране, пока его workers живы. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.coordinatorStalled':
-    'Координатор не читает своих workers → Центр уведомлений',
-  'notifications.centre.coordinatorStalled.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.paneWorkFinished.banner': 'Работа, похоже, завершилась → Баннер ОС',
-  'notifications.route.paneWorkFinished.banner.description':
-    'nocx вывел из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.paneWorkFinished.toast': 'Работа, похоже, завершилась → Тост в приложении',
-  'notifications.route.paneWorkFinished.toast.description':
-    'nocx вывел из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.paneWorkFinished': 'Работа, похоже, завершилась → Центр уведомлений',
-  'notifications.centre.paneWorkFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.debounceSeconds.label': 'Схлопывать повторы за',
-  'notifications.debounceSeconds.description':
-    'После отправки уведомления дальнейшие того же вида от той же вкладки придерживаются на это время и приходят одной сводкой со числом. Первое уведомление не задерживается никогда — это объём всплеска, схлопывающегося за ним, а не ожидание перед ним. Изменение действует со следующего всплеска: уже идущее схлопывание сохраняет начатую длину.',
+  'settings.notifications.route.blockFinished.banner.label': 'Команда завершена → Баннер ОС',
+  'settings.notifications.route.blockFinished.banner.description': 'Журнал блоков nocx записал, что команда завершилась. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.blockFinished.toast.label': 'Команда завершена → Тост в приложении',
+  'settings.notifications.route.blockFinished.toast.description': 'Журнал блоков nocx записал, что команда завершилась. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.blockFinished.label': 'Команда завершена → Центр уведомлений',
+  'settings.notifications.centre.blockFinished.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.sessionEnded.banner.label': 'Сеанс завершён → Баннер ОС',
+  'settings.notifications.route.sessionEnded.banner.description': 'Реестр сеансов nocx записал, что сеанс завершился. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.sessionEnded.toast.label': 'Сеанс завершён → Тост в приложении',
+  'settings.notifications.route.sessionEnded.toast.description': 'Реестр сеансов nocx записал, что сеанс завершился. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.sessionEnded.label': 'Сеанс завершён → Центр уведомлений',
+  'settings.notifications.centre.sessionEnded.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.transferFinished.banner.label': 'Передача файла завершена → Баннер ОС',
+  'settings.notifications.route.transferFinished.banner.description': 'Реестр передач nocx записал, что загрузка или выгрузка дошла до конца. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.transferFinished.toast.label': 'Передача файла завершена → Тост в приложении',
+  'settings.notifications.route.transferFinished.toast.description': 'Реестр передач nocx записал, что загрузка или выгрузка дошла до конца. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.transferFinished.label': 'Передача файла завершена → Центр уведомлений',
+  'settings.notifications.centre.transferFinished.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.programNotify.banner.label': 'Запрос уведомления от программы → Баннер ОС',
+  'settings.notifications.route.programNotify.banner.description': 'Программа напечатала OSC 9 или OSC 777, чтобы запросить уведомление. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.programNotify.toast.label': 'Запрос уведомления от программы → Тост в приложении',
+  'settings.notifications.route.programNotify.toast.description': 'Программа напечатала OSC 9 или OSC 777, чтобы запросить уведомление. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.programNotify.label': 'Запрос уведомления от программы → Центр уведомлений',
+  'settings.notifications.centre.programNotify.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.bell.banner.label': 'Звонок терминала → Баннер ОС',
+  'settings.notifications.route.bell.banner.description': 'Программа напечатала BEL. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.bell.toast.label': 'Звонок терминала → Тост в приложении',
+  'settings.notifications.route.bell.toast.description': 'Программа напечатала BEL. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.bell.label': 'Звонок терминала → Центр уведомлений',
+  'settings.notifications.centre.bell.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.coordinatorStalled.banner.label': 'Координатор не читает своих рабочих → Баннер ОС',
+  'settings.notifications.route.coordinatorStalled.banner.description': 'nocx написал координатору о почте его рабочих, и координатор её не прочитал, либо координатор заблокирован на своём экране, пока его рабочие активны. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.coordinatorStalled.toast.label': 'Координатор не читает своих рабочих → Тост в приложении',
+  'settings.notifications.route.coordinatorStalled.toast.description': 'nocx написал координатору о почте его рабочих, и координатор её не прочитал, либо координатор заблокирован на своём экране, пока его рабочие активны. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.coordinatorStalled.label': 'Координатор не читает своих рабочих → Центр уведомлений',
+  'settings.notifications.centre.coordinatorStalled.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.paneWorkFinished.banner.label': 'Работа, кажется, завершена → Баннер ОС',
+  'settings.notifications.route.paneWorkFinished.banner.description': 'nocx по заголовку панели вывел, что её работа завершилась. Это вывод, поэтому он никогда не покидает этот компьютер. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.paneWorkFinished.toast.label': 'Работа, кажется, завершена → Тост в приложении',
+  'settings.notifications.route.paneWorkFinished.toast.description': 'nocx по заголовку панели вывел, что её работа завершилась. Это вывод, поэтому он никогда не покидает этот компьютер. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.paneWorkFinished.label': 'Работа, кажется, завершена → Центр уведомлений',
+  'settings.notifications.centre.paneWorkFinished.description': 'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.debounceSeconds.label': 'Объединять повторы за',
+  'settings.notifications.debounceSeconds.description': 'После отправки уведомления следующие уведомления того же вида из той же вкладки задерживаются на это время и приходят одной сводкой с числом их прибывших. Первое уведомление никогда не задерживается — это то, сколько пачки схлопывается за ним, а не ожидание перед ним. Изменение действует на следующую пачку: уже схлопывающаяся сохраняет длину, с которой началась.',
   'settings.section.answers': 'Ответы',
   'settings.section.clipboard': 'Буфер обмена',
   'settings.section.history': 'История',
   'settings.section.instructions': 'Инструкции',
   'settings.section.interface': 'Интерфейс',
+  'settings.section.notifications': 'Уведомления',
   'settings.section.pets': 'Питомцы',
+  'settings.section.sessions': 'Сеансы',
   'settings.section.terminal': 'Терминал',
   'settings.section.updates': 'Обновления',
   'settings.section.worktrees': 'Рабочие деревья',
-  'settings.section.notifications': 'Уведомления',
   'settings.history.retentionDays.zeroLabel': 'Не отключать автоматически',
   'settings.worktrees.idleDays.zeroLabel': 'Не удалять автоматически',
-  'settings.history.diskCeilingMiB.zeroLabel': 'Хранить до лимита места',
+  'settings.sessions.idleDays.zeroLabel': 'Никогда не завершать сеансы без присмотра',
   'settings.terminal.scrollbackLines.zeroLabel': 'Без прокрутки — только текущий экран',
 
   // ── API workbench (frontend/src/api/*) ──

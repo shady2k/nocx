@@ -2352,4 +2352,28 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── Session reattach and operations empty state (ipc.ts, operations-view.tsx) ──
   'ipc.reattach.unavailable': 'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
   'ops.empty.description': 'Uploads and other background work appear here while they run, and stay for a while after they finish.',
+  // ── Pane and connection toasts (panes.ts) ──────────────────────────────
+  'panes.openTab.failed': 'Could not open a tab: {message}',
+  'panes.connection.saved': 'Saved "{host}" as a connection',
+  'panes.save.failed': 'Could not save: {message}',
+  'panes.connection.opened': 'Opened "{host}" as a connection',
+  'panes.connect.failed': 'Could not connect to {host}: {message}',
+  'panes.createWorkspace.failed': 'Could not create the workspace: {message}',
+  // ── App-level toasts and the ports row (main.tsx) ──────────────────────
+  'main.ports.label': 'Ports: {state}',
+  'main.forward.started': 'Forwarding {destination} on {host}:{port}',
+  'main.copied': 'Copied "{title}" to the clipboard.',
+  'main.hostKey.untrusted': 'Could not trust the host key: {message}',
+  'main.decision.failed': 'Could not record the decision: {message}',
+  'main.updateState.unreadable': 'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
+  // ── Workspace colour names (layout/workspace-colours.ts) ──────────────
+  'workspaceColour.grey': 'Grey',
+  'workspaceColour.blue': 'Blue',
+  'workspaceColour.cyan': 'Cyan',
+  'workspaceColour.green': 'Green',
+  'workspaceColour.yellow': 'Yellow',
+  'workspaceColour.orange': 'Orange',
+  'workspaceColour.red': 'Red',
+  'workspaceColour.pink': 'Pink',
+  'workspaceColour.purple': 'Purple',
 }

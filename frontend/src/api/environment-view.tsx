@@ -194,9 +194,12 @@ export function EnvironmentView(props: EnvironmentViewProps) {
           >
             <TextField
               id="api-environment-name"
-              label="Name"
-              description="What the picker beside Send will call it — the name in the file, not the file's name."
-              placeholder="Production"
+              label={t('api.env.field.name', 'Name')}
+              description={t(
+                'api.env.field.nameDesc',
+                "What the picker beside Send will call it — the name in the file, not the file's name.",
+              )}
+              placeholder={t('api.env.field.namePlaceholder', 'Production')}
               value={props.name}
               onInput={props.onName}
               required
@@ -325,7 +328,10 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             <EditableRowList
               variant="table"
               ariaLabel={t('api.env.values.aria', 'Environment values')}
-              columns={[{ label: 'Name' }, { label: 'Value' }]}
+              columns={[
+                { label: t('api.env.field.name', 'Name') },
+                { label: t('api.env.field.value', 'Value') },
+              ]}
               rows={props.rows}
               addLabel="Add variable"
               emptyLabel="No variables yet. A URL written in {{baseUrl}} resolves against one of these."
@@ -336,7 +342,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                     <TextField
                       id={`api-environment-var-name-${i}`}
                       ariaLabel={`${t('api.env.var.nameAriaHead', 'Variable')} ${i + 1}${t('api.env.var.nameAriaTail', ' name')}`}
-                      placeholder="baseUrl"
+                      placeholder={t('api.env.field.varPlaceholder', 'baseUrl')}
                       value={row().name}
                       onInput={(v) => patchRow(i, { name: v })}
                     />
@@ -345,7 +351,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                     <SecretTextField
                       id={`api-environment-var-value-${i}`}
                       ariaLabel={`${t('api.env.var.valueAriaHead', 'Value')} ${i + 1}${t('api.env.var.valueAriaTail', ' value')}`}
-                      placeholder="https://api.example.com"
+                      placeholder={t('api.env.field.valuePlaceholder', 'https://api.example.com')}
                       value={row().value}
                       onInput={(v) => patchRow(i, { value: v })}
                       source={props.secretSource}

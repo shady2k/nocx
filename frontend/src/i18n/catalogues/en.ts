@@ -2178,4 +2178,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.pane.placeholder.folderPath': '/work/acme-api',
   'api.pane.placeholder.folder': 'reports',
   'api.pane.noEnvironment': 'No environment',
+  'api.env.field.name': 'Name',
+  'api.env.field.value': 'Value',
+  'api.env.field.nameDesc': "What the picker beside Send will call it — the name in the file, not the file's name.",
+  'api.env.field.namePlaceholder': 'Production',
+  'api.env.field.varPlaceholder': 'baseUrl',
+  'api.env.field.valuePlaceholder': 'https://api.example.com',
 }

@@ -1972,4 +1972,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.pane.placeholder.folderPath': '/work/acme-api',
   'api.pane.placeholder.folder': 'отчёты',
   'api.pane.noEnvironment': 'Нет окружения',
+  'api.env.field.name': 'Имя',
+  'api.env.field.value': 'Значение',
+  'api.env.field.nameDesc': 'Так будет называться окружение в выборе рядом с кнопкой «Отправить» — это имя внутри файла, а не имя файла.',
+  'api.env.field.namePlaceholder': 'Production',
+  'api.env.field.varPlaceholder': 'baseUrl',
+  'api.env.field.valuePlaceholder': 'https://api.example.com',
 }

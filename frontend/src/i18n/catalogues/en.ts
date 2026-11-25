@@ -2283,4 +2283,13 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'toolSurface.unavailable.body': 'The nocx worker tool surface is unavailable: {reason}.',
   'toolSurface.unavailable.noAnswer': 'the endpoint did not answer',
   'toolSurface.dismiss.aria': 'Dismiss',
+  // ── Name-and-colour dialog (name-colour-dialog.tsx) ─────────────────────
+  'nameColour.cancel': 'Cancel',
+  'nameColour.name': 'Name',
+  'nameColour.newWorkspace': 'New workspace',
+  'nameColour.renameWorkspace': 'Rename workspace',
+  'nameColour.renameTab': 'Rename tab',
+  // ── Notices' dismiss labels (publish-notice.tsx, unreconciled-notice.tsx)
+  'publish.dismiss.aria': 'Dismiss',
+  'unreconciled.dismiss.aria': 'Dismiss',
 }

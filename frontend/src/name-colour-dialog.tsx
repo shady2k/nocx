@@ -6,6 +6,7 @@ import { TextField } from './ui/text-field'
 import { Stack } from './ui/stack'
 import { SwatchPicker, type SwatchOption } from './ui/swatch-picker'
 import { WORKSPACE_COLOURS, leastUsedWorkspaceColour } from './layout/workspace-colours'
+import { t } from './i18n/locale-model'
 
 /**
  * The name-and-colour dialog: one form, and every subject in the strip that
@@ -99,7 +100,7 @@ const NameColourDialog: Component<{
       footer={
         <>
           <Button variant="default" onClick={() => props.onResolve(null)}>
-            Cancel
+            {t('nameColour.cancel', 'Cancel')}
           </Button>
           <Button
             variant="primary"
@@ -112,7 +113,7 @@ const NameColourDialog: Component<{
       }
     >
       <Stack>
-        <TextField label="Name" value={name()} onInput={setName} autoFocus selectOnFocus />
+        <TextField label={t('nameColour.name', 'Name')} value={name()} onInput={setName} autoFocus selectOnFocus />
         <SwatchPicker
           options={SWATCHES}
           value={colour()}
@@ -174,7 +175,7 @@ export function showWorkspaceCreateDialog(
   taken: readonly (string | null | undefined)[],
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'New workspace',
+    title: t('nameColour.newWorkspace', 'New workspace'),
     submitLabel: 'Create',
     colourLabel: 'Workspace colour',
     // A workspace's colour is its identity in the strip (§5.5): every one of
@@ -201,7 +202,7 @@ export function showWorkspaceEditDialog(
   colour: string | null,
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'Rename workspace',
+    title: t('nameColour.renameWorkspace', 'Rename workspace'),
     submitLabel: 'Save',
     colourLabel: 'Workspace colour',
     allowNone: false,
@@ -224,7 +225,7 @@ export function showTabEditDialog(
   colour: string | null,
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'Rename tab',
+    title: t('nameColour.renameTab', 'Rename tab'),
     submitLabel: 'Save',
     colourLabel: 'Tab colour',
     allowNone: true,

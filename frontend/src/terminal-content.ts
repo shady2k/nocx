@@ -242,7 +242,7 @@ import { createCellFit, type CellFit } from './scrollback/cell-fit'
 import { devicePxToCssPx, displayDpr } from './painter/committed-metric'
 import { measureNaturalAdvance, measureNaturalLineHeight } from './scrollback/cell-metric'
 import { gridRows } from './scrollback/cell-metric'
-import { t } from './i18n/locale-model'
+import { t, tPlural } from './i18n/locale-model'
 import { blockReceiptLabels } from './i18n/kit-labels'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
@@ -6267,7 +6267,7 @@ export class TerminalContent extends BasePaneContent {
       log.warn('nocx: session input stalled', { sid: session.sessionId })
       showToast({
         level: 'danger',
-        message: 'This connection has stopped accepting input — keystrokes are being dropped.',
+        message: t('terminal.input.stopped', 'This connection has stopped accepting input — keystrokes are being dropped.'),
       })
     })
     session.onReset(() => {
@@ -8776,7 +8776,7 @@ export class TerminalContent extends BasePaneContent {
       return {
         kind: 'speak',
         reason: 'native-mode',
-        message: 'Native input is active — enable command editor to ask the assistant.',
+        message: t('terminal.assistant.nativeInput', 'Native input is active — enable command editor to ask the assistant.'),
       }
     }
     const targets = this.inputTargets
@@ -8785,7 +8785,7 @@ export class TerminalContent extends BasePaneContent {
       return {
         kind: 'speak',
         reason: 'missing-assistant-target',
-        message: 'This pane has no assistant.',
+        message: t('terminal.noAssistant', 'This pane has no assistant.'),
       }
     }
     const frameHost = this.scrollback?.terminalLiveContainer
@@ -9088,8 +9088,8 @@ export class TerminalContent extends BasePaneContent {
         () =>
           IconButton({
             size: 'xs',
-            ariaLabel: 'Close the assistant and return to the program',
-            title: 'Close the assistant (Esc)',
+            ariaLabel: t('terminal.assistant.closeAria', 'Close the assistant and return to the program'),
+            title: t('terminal.assistant.closeTitle', 'Close the assistant (Esc)'),
             onClick: () => {
               this.stopCurrentSummonedAnswerAndDismiss()
             },
@@ -9199,7 +9199,7 @@ export class TerminalContent extends BasePaneContent {
         ResizeHandle({
           orientation: 'horizontal',
           pane: 'after',
-          ariaLabel: 'Resize the assistant against the frozen screen',
+          ariaLabel: t('terminal.assistant.resizeAria', 'Resize the assistant against the frozen screen'),
           get value() {
             return height()
           },
@@ -9603,8 +9603,10 @@ export class TerminalContent extends BasePaneContent {
     if (next === 'shell' && this._summoned) {
       showToast({
         level: 'warning',
-        message:
+        message: t(
+          'terminal.assistant.runningBlocked',
           'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
+        ),
       })
       return
     }
@@ -9760,7 +9762,7 @@ export class TerminalContent extends BasePaneContent {
         })
         showToast({
           level: 'danger',
-          message: 'The command could not be reached, so it may still be running.',
+          message: t('terminal.stop.unreached', 'The command could not be reached, so it may still be running.'),
         })
       },
     )
@@ -12487,7 +12489,7 @@ export class TerminalContent extends BasePaneContent {
         if (res.partial) {
           showToast({
             level: 'warning',
-            message: `"${res.name}" saved, but the history rewrite is still owed — retry to finish it.`,
+            message: t('terminal.secrets.savedPartial', '{name} saved, but the history rewrite is still owed — retry to finish it.', { name: `"${res.name}"` }),
           })
           receipt.markFailed(
             row.captureId,
@@ -12495,7 +12497,7 @@ export class TerminalContent extends BasePaneContent {
           )
           continue
         }
-        showToast({ level: 'success', message: `Stored "${res.name}" in the vault.` })
+        showToast({ level: 'success', message: t('terminal.secrets.storedName', 'Stored {name} in the vault.', { name: `"${res.name}"` }) })
         if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
       } catch (err) {
         // A capture the backend no longer holds cannot be retried, so the
@@ -12504,14 +12506,14 @@ export class TerminalContent extends BasePaneContent {
         if (isCaptureGone(err)) {
           showToast({
             level: 'warning',
-            message: 'This offer is no longer held — the command stays stored masked.',
+            message: t('terminal.secrets.offerGone', 'This offer is no longer held — the command stays stored masked.'),
           })
           if (receipt.removeRow(row.captureId)) this.retireReceipt(blockEl)
           continue
         }
         showToast({
           level: 'danger',
-          message: 'Could not save the secret — the command stays stored masked.',
+          message: t('terminal.secrets.saveFailed', 'Could not save the secret — the command stays stored masked.'),
         })
         receipt.markFailed(row.captureId, 'could not save — try again')
       }
@@ -12534,7 +12536,7 @@ export class TerminalContent extends BasePaneContent {
     }
     if (status.state === 'unsealed') return true
     if (status.state === 'sealed') {
-      showToast({ level: 'warning', message: 'Unlock the vault to save this key.' })
+      showToast({ level: 'warning', message: t('terminal.secrets.unlockVault', 'Unlock the vault to save this key.') })
       return false
     }
     // Setting up needs a passphrase, and a passphrase needs a dialog the
@@ -12566,7 +12568,7 @@ export class TerminalContent extends BasePaneContent {
       // once rather than letting it read as the feature having broken.
       showToast({
         level: 'info',
-        message: 'Dismissed — this key will not be offered again in this session.',
+        message: t('terminal.secrets.dismissedSession', 'Dismissed — this key will not be offered again in this session.'),
       })
     } catch (err) {
       if (isCaptureGone(err)) {
@@ -12576,7 +12578,7 @@ export class TerminalContent extends BasePaneContent {
       }
       showToast({
         level: 'danger',
-        message: 'Could not dismiss the offer — try again.',
+        message: t('terminal.secrets.dismissFailed', 'Could not dismiss the offer — try again.'),
       })
     }
   }
@@ -12614,14 +12616,14 @@ export class TerminalContent extends BasePaneContent {
       const names = (failure.names ?? []).join(', ')
       showToast({
         level: 'danger',
-        message: `Unknown secret${(failure.names ?? []).length === 1 ? '' : 's'}: ${names}. The command was not sent.`,
+        message: tPlural('terminal.secrets.unknownNames', (failure.names ?? []).length, 'Unknown secret: {names}. The command was not sent.'),
       })
       return
     }
     if (failure.reason === 'sealed') {
       showToast({
         level: 'danger',
-        message: 'The vault is locked. Unlock it and run the command again.',
+        message: t('terminal.secrets.vaultLocked', 'The vault is locked. Unlock it and run the command again.'),
       })
       return
     }
@@ -12750,7 +12752,7 @@ export class TerminalContent extends BasePaneContent {
     if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
     showToast({
       level: 'info',
-      message: `Dismissed — ${dest} will not be offered again as a connection.`,
+      message: t('terminal.connection.dismissedFor', 'Dismissed — {dest} will not be offered again as a connection.', { dest }),
     })
   }
 
@@ -12778,12 +12780,12 @@ export class TerminalContent extends BasePaneContent {
       if (this.receiptBlockEl === blockEl) this.receiptBlockEl = null
       showToast({
         level: 'success',
-        message: `Saved "${profile.name}" as a connection.`,
+        message: t('terminal.connection.savedName', 'Saved "{name}" as a connection.', { name: profile.name }),
       })
     } catch (err) {
       showToast({
         level: 'danger',
-        message: `Could not save connection: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('terminal.connection.saveError', 'Could not save connection: {error}', { error: err instanceof Error ? err.message : String(err) }),
       })
       receipt.markFailed(`conn-offer:${dest}`, 'could not save — try again')
     }

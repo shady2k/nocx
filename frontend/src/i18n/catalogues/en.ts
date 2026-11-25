@@ -164,6 +164,18 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.label': 'Work seems to have finished',
   'notify.kind.paneWorkFinished.description':
     "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine.",
+  // A delivery the notification centre could not make. The sentences are
+  // composed from keyed segments in the feed; the cause after "could not
+  // deliver it" is backend prose and stays raw English (ADR-nswp57x0).
+  'notify.delivery.failed.title': 'Not delivered',
+  'notify.delivery.failed.titleSeparator': ': ',
+  'notify.delivery.failed.body': '{channel} could not deliver it',
+  'notify.delivery.failed.causeSeparator': ': ',
+  'notify.delivery.more': {
+    one: '{count} more notification',
+    other: '{count} more notifications',
+  },
+  'notify.delivery.more.separator': ' — ',
 
   // ── Mechanism samples ───────────────────────────────────────────────────
   // A plain string: the base case every translated surface will use.

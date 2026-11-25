@@ -464,6 +464,8 @@ describe('Dialog panel height animation', () => {
     const props: DialogProps = {
       open: true,
       onClose: vi.fn(),
+      closeAria: 'Close dialog',
+      closeTitle: 'Close',
       title: 'Test Dialog',
       children: 'Dialog body content',
       ...overrides,

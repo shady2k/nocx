@@ -43,7 +43,7 @@ describe('three axes (nocx-atyf.1)', () => {
       }),
     )
     expect(actions).toHaveLength(1)
-    expect(actions[0]).toEqual({ kind: 'enable-editor', label: 'Enable command editor' })
+    expect(actions[0]).toEqual({ kind: 'enable-editor', labelKey: 'recovery.enableEditor' })
   })
 
   it('returns no actions when prerequisites are absent — never disabled-then-rejected', () => {

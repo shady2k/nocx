@@ -252,7 +252,7 @@ describe('Prompt', () => {
     const [open, setOpen] = createSignal(false)
     const { container } = render(() => (
       <>
-        <Dialog open onClose={() => undefined} title="New Connection">
+        <Dialog open onClose={() => undefined} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           Body
         </Dialog>
         <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
@@ -292,7 +292,7 @@ describe('Prompt', () => {
     const onDialogClose = vi.fn()
     const { container } = render(() => (
       <>
-        <Dialog open onClose={onDialogClose} title="New Connection">
+        <Dialog open onClose={onDialogClose} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           Body
         </Dialog>
         <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
@@ -318,7 +318,7 @@ describe('Prompt', () => {
     const [open, setOpen] = createSignal(false)
     render(() => (
       <>
-        <Dialog open onClose={() => undefined} title="New Connection">
+        <Dialog open onClose={() => undefined} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           Body
         </Dialog>
         <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
@@ -352,7 +352,7 @@ describe('Prompt', () => {
     const [promptOpen, setPromptOpen] = createSignal(false)
     const { container } = render(() => (
       <>
-        <Dialog open={dialogOpen()} onClose={() => setDialogOpen(false)} title="Connection">
+        <Dialog open={dialogOpen()} onClose={() => setDialogOpen(false)} closeAria="Close dialog" closeTitle="Close" title="Connection">
           Body
         </Dialog>
         <Prompt
@@ -384,7 +384,7 @@ describe('Prompt', () => {
     const [promptOpen, setPromptOpen] = createSignal(false)
     render(() => (
       <>
-        <Dialog open={dialogOpen()} onClose={() => setDialogOpen(false)} title="Connection">
+        <Dialog open={dialogOpen()} onClose={() => setDialogOpen(false)} closeAria="Close dialog" closeTitle="Close" title="Connection">
           Body
         </Dialog>
         <Prompt
@@ -420,7 +420,7 @@ describe('Prompt', () => {
     const [open, setOpen] = createSignal(false)
     render(() => (
       <>
-        <Dialog open onClose={() => undefined} title="New Connection">
+        <Dialog open onClose={() => undefined} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           <input id="host-field" />
         </Dialog>
         <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>
@@ -450,7 +450,7 @@ describe('Prompt', () => {
     const [mounted, setMounted] = createSignal(true)
     render(() => (
       <>
-        <Dialog open onClose={() => undefined} title="New Connection">
+        <Dialog open onClose={() => undefined} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           Body
         </Dialog>
         <Show when={mounted()}>
@@ -480,7 +480,7 @@ describe('Prompt', () => {
     const onDialogClose = vi.fn()
     render(() => (
       <>
-        <Dialog open onClose={onDialogClose} title="New Connection">
+        <Dialog open onClose={onDialogClose} closeAria="Close dialog" closeTitle="Close" title="New Connection">
           Body
         </Dialog>
         <Prompt open={open()} ariaLabel="Password" onClose={() => setOpen(false)} actions={null}>

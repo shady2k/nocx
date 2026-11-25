@@ -11,6 +11,7 @@ const rows = ['alpha', 'beta']
 function subject(overrides?: Partial<EditableRowListProps<string>>) {
   const props: EditableRowListProps<string> = {
     rows,
+    removeTitle: 'Remove',
     renderRow: (row) => <span>{row()}</span>,
     onRemove: vi.fn(),
     onAdd: vi.fn(),
@@ -38,6 +39,7 @@ describe('EditableRowList row identity', () => {
           rows={rows()}
           ariaLabel="Rows"
           addLabel="Add row"
+          removeTitle="Remove"
           removeLabel={(i) => `Remove row ${i + 1}`}
           onRemove={onRemove}
           onAdd={onAdd}

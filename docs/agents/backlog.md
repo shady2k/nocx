@@ -1,9 +1,11 @@
 # Backlog integration
 
-Maintained by `setup-shady2k-skills`. The checks are at setup protocol **0.68.0 from
-released plugin 0.143.0** (nocx-9z27m, 2026-11-13): only the five checks changed, the
-tracker mechanism, its recipe and the support modules stay as 0.137.0 shipped them, and
-the config gained the recorded practice below. The 0.66.0 update before it came from
+Maintained by `setup-shady2k-skills`. The checks are at setup protocol **0.70.0 from
+released plugin 0.145.0** (nocx-ftj4j). Task briefs read the approved
+[solution strategy](../architecture.md#solution-strategy) in the architecture
+document. The previous 0.68.0 update came from released plugin 0.143.0
+(nocx-9z27m, 2026-11-13) and recorded the GitHub Flow practice below.
+The 0.66.0 update before it came from
 released plugin 0.137.0, tracked by nocx-3an1s.3. That release
 includes the repairs for exact recording recovery (nocx-zjpwl), existing-hook
 upgrades (nocx-hm9qc), and the synchronized candidate-size proof (nocx-9v4x0);
@@ -203,15 +205,15 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` of released plugin 0.143.0 (setup protocol
-  0.68.0) for the five checks and of 0.137.0 for the rest, which 0.143.0 ships unchanged,
+  `skills/backlog/setup-shady2k-skills/` of released plugin 0.145.0 (setup protocol
+  0.70.0) for the five checks and of 0.137.0 for the support modules, which 0.145.0 ships unchanged,
   never edited here; the tracker recipe is `trackers/br.mjs` beside them.
   Compare each copy with that source. Run all five `--selftest` commands from
   the plugin directory, where their fixtures live; `check.mjs` additionally
   takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
-  The checks' only change from the prepared 0.61.0 copies is their version;
-  the recipe and all four support modules already match the released source.
-  No adapter schema, policy, config or exemption change is required by this refresh.
+  The recipe and all four support modules also match the released source.
+  The purpose check reads the solution strategy through the existing
+  `presentDocuments` configuration.
   The optional `check.mjs --at <revision>` guard requires the input's `source`
   to end in ` @ <revision>` matching that exact argument. The adapter emits
   the revision suffix for historical exports; existing hooks and CI do not
@@ -403,7 +405,7 @@ connect` runs this connector before it checks the backlog inputs.
 
   ```sh
   PLUGIN="$HOME/.omp/plugins/cache/plugins/shady2k___shady2k-skills___0.137.0"
-  SETUP="$PLUGIN/skills/backlog/setup-shady2k-skills"
+  SETUP="$HOME/.omp/plugins/cache/plugins/shady2k___shady2k-skills___0.145.0/skills/backlog/setup-shady2k-skills"
   REPO="$(git rev-parse --show-toplevel)"
   for f in check.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs \
       time-format.mjs document-format.mjs regular-file.mjs argv.mjs tracker-sync.mjs trackers/br.mjs; do
@@ -423,7 +425,7 @@ connect` runs this connector before it checks the backlog inputs.
   ```
 
   The mechanism's `version` output must be `0.137.0`; all five check versions must
-  be `0.68.0`, compared against 0.143.0's setup folder. Repository wrapper tests, recoverable real-entry-point proofs
+  be `0.70.0`, compared against 0.145.0's setup folder. Repository wrapper tests, recoverable real-entry-point proofs
   (including clone-connection failure diagnostics), review and PR checks remain
   required before acceptance. Real reboot and a second real machine are not
   proved by these isolated suites.

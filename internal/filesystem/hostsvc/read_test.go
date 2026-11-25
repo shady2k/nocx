@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,6 +319,24 @@ func TestReadRefusesASpecialFileWithoutBlocking(t *testing.T) {
 	}
 	svc := New(local.New(local.WithRoot(dir)))
 	assertNotRegular(t, svc, fifo, "fifo")
+}
+
+// TestReadRefusesASocket is the third special object, and the one open(2)
+// cannot serve at all: a unix socket answers ENXIO before a descriptor
+// exists, so the descriptor check never runs. The refusal must still name the
+// object — §5.10, the package README and kindName all promise `socket` —
+// because `internal` tells a person the helper broke rather than that they
+// clicked a socket.
+func TestReadRefusesASocket(t *testing.T) {
+	dir := tempDir(t)
+	socket := filepath.Join(dir, "s.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("unix sockets are unavailable here: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	svc := New(local.New(local.WithRoot(dir)))
+	assertNotRegular(t, svc, socket, "socket")
 }
 
 // TestReadRefusesADeviceWithoutBlocking is the same refusal for a character

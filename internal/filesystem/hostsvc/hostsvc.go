@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -262,6 +263,18 @@ func (s *Service) read(ctx context.Context, raw json.RawMessage) (any, error) {
 	// machine — the one the helper exists to read.
 	f, err := os.OpenFile(canonical, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		// A unix socket cannot be opened at all: open(2) answers ENXIO before
+		// any descriptor exists, so the fstat that names every other special
+		// object never runs. lstat is the ONLY way to name this one, and it is
+		// used for nothing else — the descriptor-is-the-object rule below
+		// stands for every open that succeeds, and an ENXIO on anything that
+		// is not a socket is returned unchanged rather than turned into a
+		// refusal this op did not observe.
+		if errors.Is(err, syscall.ENXIO) {
+			if info, lerr := os.Lstat(canonical); lerr == nil && info.Mode()&os.ModeSocket != 0 {
+				return nil, &notRegular{path: p.Path, kind: kindName(info.Mode())}
+			}
+		}
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()

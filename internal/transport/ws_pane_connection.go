@@ -151,6 +151,11 @@ type paneRecord struct {
 	connectionSequence uint64
 	// Filled only by this open's binding callback, never by delayed notifications.
 	bindingGeneration uint64
+	// socketGone says the cancellation below came from the connection's
+	// teardown, not from the pane. An open whose answer is already in the
+	// socket's queue keeps its session (AD-9, nocx-oalo1.6.16), so the two
+	// cancellations must be told apart by whoever evaluates the record next.
+	socketGone bool
 }
 
 // bindPane records that this connection is the one a pane's notifications go
@@ -228,6 +233,12 @@ func (s *WSServer) unbindPane(paneID string) {
 
 // unbindPanesFor drops every pane this connection opened. A pane's state lives
 // on its connection, and a pane whose window is gone has nobody to draw it.
+//
+// THE RECORD SAYS WHICH CANCELLATION THIS IS. Deleting it cancels the pane's
+// lifetime, and an open still running for that pane reads the cancellation —
+// but a lost socket is not a pane leaving: an answer already in the outbound
+// queue keeps its session (AD-9, nocx-oalo1.6.16), and only the connection's
+// part goes away. unbindPane, the pane's own departure, stamps nothing.
 func (s *WSServer) unbindPanesFor(wconn *wsConn) {
 	if wconn == nil {
 		return
@@ -236,10 +247,35 @@ func (s *WSServer) unbindPanesFor(wconn *wsConn) {
 	defer s.paneMu.Unlock()
 	for paneID, rec := range s.paneRecords {
 		if rec.wconn == wconn {
+			rec.socketGone = true
 			rec.cancel()
 			delete(s.paneRecords, paneID)
 		}
 	}
+}
+
+// paneBindingLost answers what is left of an open's binding: whether the pane
+// superseded or left it, and whether its SOCKET went.
+//
+// The two are different answers and only the record can tell them apart. A
+// superseded binding is a pane whose newer open owns the pane now, and a pane
+// that left has no further use for a shell: both end the session. A socket
+// that went does not — the session outlives its client (AD-9), so the caller
+// keeps the session and drops only its own part.
+func (s *WSServer) paneBindingLost(paneID string, rec *paneRecord, generation uint64) (lost, socketGone bool) {
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	return s.paneBindingLostLocked(paneID, rec, generation)
+}
+
+func (s *WSServer) paneBindingLostLocked(paneID string, rec *paneRecord, generation uint64) (lost, socketGone bool) {
+	if rec.socketGone {
+		return false, true
+	}
+	if s.paneRecords[paneID] != rec || rec.bindingGeneration != generation {
+		return true, false
+	}
+	return rec.ctx.Err() != nil, false
 }
 
 // PublishPaneConnection sends one observation to the renderer that opened the

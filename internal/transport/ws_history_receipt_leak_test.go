@@ -29,8 +29,8 @@ func TestCloseSession_ClearsPendingHistoryReceipts(t *testing.T) {
 
 	closing := session.ID("00000000000000000000000000000010")
 	staying := session.ID("00000000000000000000000000000011")
-	s.getOrCreateRx(closing)
-	s.getOrCreateRx(staying)
+	s.getOrCreateRxAt(closing, 0)
+	s.getOrCreateRxAt(staying, 0)
 
 	const lost = lifecycle.AttemptID("attempt-lost")
 	const kept = lifecycle.AttemptID("attempt-kept")

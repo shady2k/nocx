@@ -66,11 +66,12 @@ import (
 // disconnect and a reattached connection becomes the new subscriber. Exactly
 // one monitorExit goroutine is started per session (via monitorOnce).
 type sessionRx struct {
-	ring        *outputRing
-	mu          sync.Mutex // protects subscriber, subState
-	subscriber  *wsConn    // current attached connection (nil if none)
-	subState    *connState // subscriber's connection-scoped state
-	monitorOnce sync.Once
+	ring           *outputRing
+	mu             sync.Mutex // protects subscriber, subState
+	subscriber     *wsConn    // current attached connection (nil if none)
+	subState       *connState // subscriber's connection-scoped state
+	monitorOnce    sync.Once
+	closeRequested atomic.Bool // expected exit intent, retained even after rx removal
 	// deliveryMu linearizes binary PTY frames and effects before they enter
 	// the shared outbound queue. Effects wait in this bounded list until the
 	// per-pump cursor reaches their exact stream offset.
@@ -231,6 +232,25 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 	}
 	rx.mu.Unlock()
 	return false
+}
+
+// ifNoSubscriber runs report while the subscriber slot is still empty, and
+// reports whether it ran.
+//
+// THE SLOT AND THE REPORT ARE ONE STEP (nocx-oalo1.6.16). "Nobody holds this
+// session any more" stops being true the moment an attach takes it, and a
+// report sent afterwards would overwrite the geometry the new client owns with
+// the default. Holding the slot's lock across the report is what makes the
+// departed client's measurement either first (and superseded by the attach's
+// own) or not made at all — never last.
+func (rx *sessionRx) ifNoSubscriber(report func()) bool {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	if rx.subscriber != nil {
+		return false
+	}
+	report()
+	return true
 }
 
 func (rx *sessionRx) beginDelivery(wconn *wsConn, offset uint64) {
@@ -425,6 +445,15 @@ type WSServer struct {
 	// heartbeatReadWindow bounds how long a half-open connection may hold its
 	// session before an inbound frame proves the peer is still present.
 	heartbeatReadWindow time.Duration
+	// openStep is the test's hold on one open, at a named step. It exists
+	// because the intervals this package has to keep ordered — the answer's
+	// acceptance against a withdrawal, the subscriber install against a
+	// socket's teardown, the open's cleanup against a closer's — are between
+	// two goroutines of the real server, and a fake can widen none of them:
+	// a barrier can only stop the open where it already is. Production never
+	// sets it (only a _test.go file assigns it), so every call below is a nil
+	// check. See ws_open_commit_point_test.go.
+	openStep func(step string)
 
 	// Per-launch capability token (bead nocx-hl3).
 	token       string
@@ -1021,35 +1050,22 @@ type WSServer struct {
 	gitBindings  map[string]*gitBinding             // bindingID → bookkeeping
 	gitBySession map[session.ID]map[string]struct{} // sessionID → bindingIDs
 
-	// ringsMu protects rx and stopped. One sessionRx per session;
+	// ringsMu protects receiver and session-end admission. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
 	// so no new rings are created after the server begins shutting down.
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+	// unanswered tracks sessions returned by the dial of a renderer open,
+	// through answer acceptance or removal by that open's end owner.
+	unanswered map[session.ID]session.Identity
 	// sessionRecorders.Add shares the stopped fence under ringsMu; the group
 	// outlives rx removal so Stop drains recorders for ended sessions too.
 	sessionRecorders sync.WaitGroup
-	// closeRequested holds the session ids whose end somebody asked for:
-	// written before the registry close by every caller that ends a session
-	// on purpose — the "close" handler, the layout chain's own close
-	// (closeSessionsForPanes) and anything outside this package that ends
-	// one, through NoteCloseRequested — read and cleared by monitorExit when
-	// that close produces the exit. It is the only thing that can tell a
-	// teardown apart from a loss, because a forced teardown leaves no shell
-	// report and ExitOutcome correctly refuses to invent one — so both
-	// arrive as ExitInterrupted.
-	//
-	// The interval, both ends: an id is in this map from just before the
-	// registry close the asking caller runs until the monitorExit woken by
-	// that close takes it out (takeCloseRequested). Exactly one
-	// monitorExit exists per session (sessionRx.monitorOnce) and it always
-	// runs — at the latest when Stop closes the registry — so an entry left
-	// by a close whose registry close failed is cleared by the session's
-	// eventual end, and no id can be entered twice (ids are unique per
-	// session). Guarded by ringsMu, the mutex that already owns the other
-	// session-keyed transport state.
-	closeRequested map[session.ID]struct{}
+	// closing reserves the registry end while a transport closer is working.
+	// Once it returns, the registry (not a tombstone) rejects a late open.
+	// Guarded by ringsMu with receiver admission.
+	closing map[session.ID]struct{}
 	// lanesMu guards lanes: the per-session resize lanes (ws_session_ops.go).
 	// One lane per session that has been resized or closed; entries are
 	// never deleted (a closed lane is the tombstone that refuses every
@@ -2001,7 +2017,8 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		rx:                         make(map[session.ID]*sessionRx),
-		closeRequested:             make(map[session.ID]struct{}),
+		closing:                    make(map[session.ID]struct{}),
+		unanswered:                 make(map[session.ID]session.Identity),
 		conns:                      make(map[*wsConn]struct{}),
 		outboundBudget:             outbound.NewBudget(outboundBudgetBytes),
 		tunnels:                    make(map[string]*tunnel.Tunnel),
@@ -2492,8 +2509,7 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// transfer ledger and the filesystem registry.
 	var filesCleanup sync.WaitGroup
 	for _, sess := range s.registry.List() {
-		s.closeLane(sess.ID())
-		_ = s.registry.Close(sess.ID())
+		s.stopSession(sess)
 		// Files (fm-w8): Stop closes every session, which closes its
 		// bindings (spec §5.1); the watcher goroutines stop with them.
 		filesCleanup.Add(1)
@@ -2585,23 +2601,30 @@ func (s *WSServer) getRx(id session.ID) *sessionRx {
 	return s.rx[id]
 }
 
-func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
-	return s.getOrCreateRxAt(id, 0)
+func (s *WSServer) getOrCreateRx(sess session.Session) *sessionRx {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	if s.stopped || !s.canClaimCloseLocked(sess) {
+		return nil
+	}
+	return s.createRxLocked(sess.ID(), 0)
 }
 
-// getOrCreateRxAt is getOrCreateRx for a session whose stream does not start
-// at zero — one taken back from a helper that outlived the previous
-// coordinator (nocx-k6p18.30). `base` is ignored for a receiver that already
-// exists: the ring is the session's, not the caller's, and a second caller
-// naming a different origin for one stream is a bug rather than a rebase.
+// getOrCreateRxAt reserves the receiver before a readoption has registered
+// its session. Unlike an ordinary open, it has no incarnation to check yet.
 func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
-
 	if s.stopped {
 		return nil
 	}
+	if _, closing := s.closing[id]; closing {
+		return nil
+	}
+	return s.createRxLocked(id, base)
+}
 
+func (s *WSServer) createRxLocked(id session.ID, base uint64) *sessionRx {
 	if rx, ok := s.rx[id]; ok {
 		return rx
 	}
@@ -2710,27 +2733,120 @@ func (s *WSServer) NoteCloseRequested(id session.ID) {
 	s.markCloseRequested(id)
 }
 
-// markCloseRequested records that the user asked for this session's end.
-// Called by the "close" handler BEFORE the registry close, because the
-// registry close is what wakes monitorExit and the marker has to be there
-// when it looks.
+// Expected-exit intent needs no per-ID tombstone. It goes on the receiver
+// when close is requested and is consumed by the monitor, which holds the
+// receiver even after removal. Without a monitor it dies with the receiver.
 func (s *WSServer) markCloseRequested(id session.ID) {
-	s.ringsMu.Lock()
-	defer s.ringsMu.Unlock()
-	s.closeRequested[id] = struct{}{}
+	if rx := s.getRx(id); rx != nil {
+		rx.closeRequested.Store(true)
+	}
 }
 
-// takeCloseRequested reports whether this session's end was asked for, and
-// clears the marker. Read-and-clear: the marker describes one teardown, and
-// the exit it describes happens once.
-func (s *WSServer) takeCloseRequested(id session.ID) bool {
+func (s *WSServer) canClaimCloseLocked(sess session.Session) bool {
+	id := sess.ID()
+	if _, closing := s.closing[id]; closing {
+		return false
+	}
+	current, err := s.registry.Get(id)
+	return err == nil && sess.Identity().SameIncarnation(id, current)
+}
+
+// claimClose reserves the end from admission until the closer returns. The
+// caller must release it even if retirement is refused and the session lives.
+func (s *WSServer) claimClose(sess session.Session) bool {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
-	_, ok := s.closeRequested[id]
-	if ok {
-		delete(s.closeRequested, id)
+	return s.claimCloseLocked(sess)
+}
+
+func (s *WSServer) claimCloseLocked(sess session.Session) bool {
+	if !s.canClaimCloseLocked(sess) {
+		return false
 	}
-	return ok
+	s.closing[sess.ID()] = struct{}{}
+	return true
+}
+
+func (s *WSServer) releaseClose(id session.ID) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	delete(s.closing, id)
+	if pending, ok := s.unanswered[id]; ok {
+		current, err := s.registry.Get(id)
+		if err != nil || !pending.SameIncarnation(id, current) {
+			delete(s.unanswered, id)
+		}
+	}
+}
+
+// trackUnanswered starts when the dial returns an adopted session, before
+// the binding write or any renderer setup can hold up the open.
+func (s *WSServer) trackUnanswered(sess session.Session) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	id := sess.ID()
+	current, err := s.registry.Get(id)
+	if err == nil && sess.Identity().SameIncarnation(id, current) {
+		s.unanswered[id] = sess.Identity()
+	}
+}
+
+// enqueueOpenAnswer shares the admission fence with Stop. A successful
+// enqueue and release of the open's ownership are one step, for both replies.
+func (s *WSServer) enqueueOpenAnswer(sess session.Session, enqueue func() error) error {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	if s.stopped {
+		return errOpenShuttingDown
+	}
+	if !s.canClaimCloseLocked(sess) {
+		return context.Canceled
+	}
+	if s.openStep != nil {
+		s.openStep("before-answer-enqueue")
+	}
+	if err := enqueue(); err != nil {
+		return err
+	}
+	delete(s.unanswered, sess.ID())
+	return nil
+}
+
+func (s *WSServer) stopSession(sess session.Session) {
+	id := sess.ID()
+	s.ringsMu.Lock()
+	claimed := s.claimCloseLocked(sess)
+	identity, pending := s.unanswered[id]
+	s.ringsMu.Unlock()
+	if !claimed {
+		return
+	}
+	defer s.releaseClose(id)
+	s.closeLane(id)
+	if pending && identity.SameIncarnation(id, sess) {
+		if err := s.registry.EndSession(id); err != nil {
+			s.log.Warn("ending unanswered session at shutdown", "session_id", id, "error", err)
+		}
+		// Stop already closes rings and releases files and git below. No
+		// monitor was started for an unanswered open.
+		s.removeRx(id)
+		s.discardLateOpenRegistrations(id, sess)
+		s.unwatchPane(id)
+		return
+	}
+	_ = s.registry.Close(id)
+}
+
+// retireExitedSession takes the natural end only if neither another closer
+// nor shutdown has claimed it. Retire under the fence, but finish outside it.
+func (s *WSServer) retireExitedSession(rx *sessionRx, sess session.Session) func() error {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	if s.stopped || rx.closeRequested.Load() || !s.canClaimCloseLocked(sess) {
+		return nil
+	}
+	_, finish, _ := s.registry.PrepareEndSession(sess.ID())
+	return finish
 }
 
 // Responder is the outbound capability handed to control-plane handlers:
@@ -2946,6 +3062,40 @@ type connState struct {
 	mu                 sync.Mutex
 	sessions           map[session.ID]session.Session
 	generation         uint64
+	// gone is set by this connection's own teardown before it cancels or
+	// scans anything. From that moment no open may install it as a
+	// subscriber: the scan that empties the slots and the install that fills
+	// one take THIS lock, so a socket that went can never be left holding a
+	// session it opened (nocx-oalo1.6.16).
+	gone bool
+}
+
+// markGone records that this connection's teardown has begun. Read-and-held:
+// nothing ever clears it, because a connection is one incarnation.
+func (c *connState) markGone() {
+	c.mu.Lock()
+	c.gone = true
+	c.mu.Unlock()
+}
+
+// installSubscriber installs wconn as rx's one subscriber unless this
+// connection can no longer carry it, and reports whether it did.
+//
+// THE CHECK AND THE INSTALL ARE ONE STEP, and the step is the connection's own
+// lock — the same one its teardown holds while it empties every slot this
+// socket still held. Either the install happens first (and that scan then
+// clears it, reporting the foreground interval's close), or the teardown
+// happened first and this refuses. A check before the lock would leave the
+// window the review of cruelty measured: the teardown walks the sessions,
+// finds the slot empty, and the dead socket fills it afterwards.
+func (c *connState) installSubscriber(rx *sessionRx, wconn *wsConn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gone {
+		return false
+	}
+	rx.setSubscriber(wconn, c)
+	return true
 }
 
 func newConnState() *connState {
@@ -3533,6 +3683,12 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	go s.readLoop(ctx, wconn, state, readErr)
 
 	<-readErr
+	// THE TEARDOWN IS DECLARED BEFORE IT ACTS (nocx-oalo1.6.16): an open that
+	// is still running may not install this socket as its session's subscriber
+	// once its teardown has begun, and this flag under the state lock is what
+	// the install reads. Set first, so the scan below and any install cannot
+	// disagree about which came first.
+	state.markGone()
 	// A disconnected renderer cannot cancel through the socket, so wake every
 	// cancellable read before the connection's handler state is discarded.
 	wconn.requestCancels.cancelAll()
@@ -3569,7 +3725,14 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// this session any more (session.NoClient). The session stays alive and
 	// keeps producing into its ring — this is AD-9, not a close.
 	for _, sess := range orphaned {
-		s.takeSize(sess.ID(), sess, session.NoClient())
+		// Only while the slot is still empty: a newer attach that took the
+		// session between the scan above and this report owns the geometry
+		// (nocx-eidfb.2, nocx-oalo1.6.16).
+		rx := s.getRx(sess.ID())
+		if rx == nil {
+			continue
+		}
+		rx.ifNoSubscriber(func() { s.takeSize(sess.ID(), sess, session.NoClient()) })
 	}
 }
 
@@ -4511,32 +4674,10 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
 
-	// EndSession, not Close (nocx-isjh4, closer 2), and FIRST — moved ahead
-	// of unwatchPane by nocx-xn63t.6.4. This call only ever does anything
-	// for a session whose shell exited with nobody else having touched the
-	// registry yet — Stop() and an explicit close both remove the registry
-	// row themselves, before their own Close/EndSession call can wake this
-	// goroutine, so this line is a no-op for either of them (Reg.Close/
-	// EndSession refuse an id already gone). For the case it DOES act on,
-	// the exit status and the session's recorded output are already this
-	// coordinator's own, in memory, before Done() ever fires — recorded via
-	// the notify path (internal/helper/client.Client.sessionExited) and the
-	// session-output ring this goroutine closes below — so nothing the
-	// "persist, then close" ordering ITSELF requires depends on running
-	// this before unwatchPane.
+	// For a natural exit, end rather than detach (nocx-isjh4). The helper
+	// round trip must finish before unwatchPane: the admissions owner can
+	// close the shared carrier when the last pane stops using it.
 	//
-	// What DOES require it: EndSession's own round trip (internal/helper/
-	// client's AttachedSession.EndSession) is this coordinator's only
-	// chance to tell the far helper the session is over, and unwatchPane
-	// ends in helperRegistry.SessionEnded, which — since nocx-xn63t.6.3 —
-	// legitimately closes that same shared client once no git binding
-	// holds it open. Called after unwatchPane, EndSession's CloseSession
-	// could find that client already gone: the far helper never hears it,
-	// and keeps listing a session this coordinator has already given up on
-	// until its own unclaimed-session TTL sweeps it — measured against
-	// e2e/remote-coordinator-reclaim.spec.ts's 60s bound. So the message
-	// that tells the far helper goes out while the connection to send it on
-	// is still guaranteed open.
 	// THE END HOLD (nocx-zg3k3.5.11 Round 4, REVIEW-2's decision): a
 	// re-adopted session whose helper retained a lifecycle window replays it
 	// through its lane — start, rows, end, domain close — and the exit carry
@@ -4561,7 +4702,9 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		s.dropSessionEndHold(sess.ID())
 	}
 
-	_ = s.registry.EndSession(sess.ID())
+	if finish := s.retireExitedSession(rx, sess); finish != nil {
+		_ = finish()
+	}
 
 	// The pane's observation closes here, because everything below this line
 	// tears down the things a frame could still be about. A session that is
@@ -4655,7 +4798,7 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// teardown leaves no shell report, so the session layer classifies a
 	// closed tab exactly as it classifies a dropped connection, and it is
 	// right to — the difference is intent, which only the handler saw.
-	requested := s.takeCloseRequested(sess.ID())
+	requested := rx.closeRequested.Swap(false)
 
 	// Is this end the coordinator's OWN shutdown? ONE read and ONE verdict,
 	// because two things below speak for the same end — the notification
@@ -4897,6 +5040,21 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// about, and it must not outlive the registry entry that named it
 	// (nocx-zas0d, ws_signal.go's heldStops).
 	s.dropHeldStopsFor(sid)
+	s.unregisterIntegration(sid)
+	s.discoverySessionClosed(sess)
+}
+
+// discardLateOpenRegistrations removes what an unconfirmed open registered
+// after a closer had already taken the session's end apart (nocx-oalo1.6.16).
+//
+// The closer ended the registry entry and tore down what existed when it
+// looked. An open still running registers its lane, its discovery target and
+// its integration entry after that look, and no later owner ever looks at the
+// session again — so these three are the open's own to take back, and taking
+// them back twice costs nothing (each is a delete, and the discovery teardown
+// re-checks whether the profile still has a live session).
+func (s *WSServer) discardLateOpenRegistrations(sid session.ID, sess session.Session) {
+	s.unregisterLifecycleLanes(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
 }

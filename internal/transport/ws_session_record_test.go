@@ -678,7 +678,7 @@ func TestSessionRecording_StopDrainsFinalOutputAfterRxRemoval(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				rx := ws.getOrCreateRx(sess.ID())
+				rx := ws.getOrCreateRx(sess)
 				if rx == nil {
 					t.Fatal("failed to create the session ring")
 				}

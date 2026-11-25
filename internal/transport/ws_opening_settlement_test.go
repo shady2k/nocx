@@ -81,7 +81,7 @@ func TestAFailedOpenSettlesTheOpeningItPublished(t *testing.T) {
 			defer func() { _ = ws.Stop(ctx) }()
 			h := openHandlers{opener: ws.opener, sess: ws, log: logger}
 			params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
-			if _, err := h.openInto(ctx, &wsConn{}, newConnState(), params, func(openResult) {}); err == nil {
+			if _, err := h.openInto(ctx, &wsConn{}, newConnState(), params, func(openResult) error { return nil }); err == nil {
 				t.Fatal("expected the open to fail")
 			}
 			snaps := sink.all()
@@ -140,9 +140,12 @@ func TestOldOpenFailureCannotSettleConcurrentNewOpen(t *testing.T) {
 	wc := &wsConn{}
 	state := newConnState()
 	done := make(chan error, 1)
-	go func() { _, err := h.openInto(ctx, wc, state, params, func(openResult) {}); done <- err }()
+	go func() {
+		_, err := h.openInto(ctx, wc, state, params, func(openResult) error { return nil })
+		done <- err
+	}()
 	<-helper.entered
-	_, _ = h.openInto(ctx, wc, state, params, func(openResult) {})
+	_, _ = h.openInto(ctx, wc, state, params, func(openResult) error { return nil })
 	before := len(sink.all())
 	close(helper.release)
 	<-done

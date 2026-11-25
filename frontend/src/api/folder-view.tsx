@@ -222,8 +222,8 @@ export function FolderView(props: FolderViewProps) {
               { label: t('api.env.field.value', 'Value') },
             ]}
             rows={rows()}
-            addLabel="Add variable"
-            emptyLabel="No variables declared in this folder."
+            addLabel={t('api.table.addVariable', 'Add variable')}
+            emptyLabel={t('api.table.emptyFolderVariables', 'No variables declared in this folder.')}
             removeLabel={(i) => `Remove variable ${i + 1}`}
             renderRow={(row, i) => (
               <>

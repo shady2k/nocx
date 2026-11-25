@@ -3184,7 +3184,7 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={opening()}
           title={t('api.collection.open.title', 'Open a collection folder')}
-          submitLabel="Open"
+          submitLabel={t('api.dialog.open', 'Open')}
           fieldId="api-collection-path"
           fieldLabel="Collection folder"
           fieldDescription={commitNote('The folder you place.')}
@@ -3207,7 +3207,7 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={foldering()}
           title={folderAskTitle()}
-          submitLabel="Create folder"
+          submitLabel={t('api.dialog.createFolder', 'Create folder')}
           fieldId="api-new-folder-name"
           fieldLabel="Name"
           fieldDescription="One folder, one name — not a path. A folder inside this one is made by asking again from its own row."

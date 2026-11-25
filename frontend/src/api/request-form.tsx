@@ -554,8 +554,8 @@ export function RequestEditor(props: RequestEditorProps) {
                       { label: t('api.env.field.value', 'Value') },
                     ]}
                     rows={req().query}
-                    addLabel="Add parameter"
-                    emptyLabel="No query parameters."
+                    addLabel={t('api.table.addParameter', 'Add parameter')}
+                    emptyLabel={t('api.table.emptyQueryParameters', 'No query parameters.')}
                     removeLabel={(i) => `Remove parameter ${i + 1}`}
                     renderRow={(row, i) => (
                       <>
@@ -628,7 +628,7 @@ export function RequestEditor(props: RequestEditorProps) {
                         { label: t('api.env.field.value', 'Value') },
                       ]}
                       rows={req().variables}
-                      addLabel="Add variable"
+                      addLabel={t('api.table.addVariable', 'Add variable')}
                       emptyLabel={undefined}
                       removeLabel={(i) => `Remove variable ${i + 1}`}
                       renderRow={(row, i) => (
@@ -713,7 +713,7 @@ export function RequestEditor(props: RequestEditorProps) {
                         rows={scopeRows().filter(
                           (variable) => variable.scope !== 'request' && variable.refused === '',
                         )}
-                        emptyLabel="No variables in this request's effective scope."
+                        emptyLabel={t('api.table.emptyRequestVariables', "No variables in this request's effective scope.")}
                         renderRow={(row) => (
                           <>
                             <td>{row().scope}</td>
@@ -814,8 +814,8 @@ export function RequestEditor(props: RequestEditorProps) {
                       { label: t('api.env.field.value', 'Value') },
                     ]}
                     rows={req().headers}
-                    addLabel="Add header"
-                    emptyLabel="No headers."
+                    addLabel={t('api.table.addHeader', 'Add header')}
+                    emptyLabel={t('api.table.emptyHeaders', 'No headers.')}
                     removeLabel={(i) => `Remove header ${i + 1}`}
                     renderRow={(row, i) => (
                       <>

@@ -1411,7 +1411,7 @@ function buildOverflowMenu(
           id: 'copy-output',
           label: t('scrollback.chrome.copyOutput', 'Copy output'),
           icon: CopyIcon,
-          busyLabel: 'Copying…',
+          busyLabel: t('scrollback.chrome.copying', 'Copying…'),
           onSelect: async () => {
             const stored = await storedAnswer()
             if (stored === null) refuseCopy()
@@ -1422,7 +1422,7 @@ function buildOverflowMenu(
           id: 'copy-all',
           label: t('scrollback.chrome.copyAll', 'Copy all'),
           icon: CopyIcon,
-          busyLabel: 'Copying…',
+          busyLabel: t('scrollback.chrome.copying', 'Copying…'),
           // The same source as Copy output, deliberately: two items on one block
           // reading one thing from two places is how they start to disagree.
           onSelect: async () => {
@@ -3945,7 +3945,7 @@ export class BlockManager {
           // already on screen — this is the other half of the same rule.
           reasoningNote = createDisclosure({
             kind: 'reasoning',
-            summary: 'Thinking',
+            summary: t('scrollback.disclosure.reasoning', 'Thinking'),
             expanded: reasoningStartsExpanded(),
           })
           // INTO THE OPEN RUN OF PROSE when there is one, so the note lands

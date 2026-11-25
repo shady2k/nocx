@@ -16,6 +16,7 @@ import type { BlockReceiptLabels } from '../ui/block-receipt'
 import type { PersonMessageLabels } from '../ui/person-message'
 import type { FileReadoutLabels } from '../ui/file-readout'
 import type { FolderPickerLabels } from '../ui/folder-picker'
+import type { ConfirmLabels } from '../ui/dialog'
 
 export const collisionLabels = (): CollisionLabels => ({
   title: t('kit.collision.title', 'File already exists'),
@@ -26,6 +27,17 @@ export const collisionLabels = (): CollisionLabels => ({
   applyOne: t('ui.collision.applyOne', 'Apply to the 1 remaining file'),
   applyMany: (count: number) =>
     tPlural('ui.collision.applyMany', count, 'Apply to the {count} remaining files'),
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
+})
+
+/** The words of a confirm: its two buttons (the caller's own) and the close
+ *  control's, which every confirm shares. Built when the dialog opens. */
+export const confirmLabels = (ok: string, cancel: string): ConfirmLabels => ({
+  ok,
+  cancel,
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
 })
 
 export const fileReadoutLabels = (): FileReadoutLabels => ({
@@ -102,6 +114,8 @@ export const folderPickerLabels = (): FolderPickerLabels => ({
   contents: t('kit.folderPicker.contents', 'Folder contents'),
   empty: t('kit.folderPicker.empty', 'This folder is empty'),
   go: t('kit.folderPicker.goLabel', 'Go'),
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
   pathPlaceholder: t('kit.folderPicker.pathPlaceholder', '/path/to/folder'),
   cannotOpenPath: (path) => t('kit.folderPicker.cannotOpenPath', 'Cannot open {path}', { path }),
 })

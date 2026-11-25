@@ -1115,7 +1115,14 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   return (
-    <Dialog open={props.open} onClose={props.onClose} onEscape={onDialogEscape} size="lg">
+    <Dialog
+      open={props.open}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
+      onClose={props.onClose}
+      onEscape={onDialogEscape}
+      size="lg"
+    >
       <div class="quick-connect" data-variant={props.variant} ref={panelRef} onKeyDown={onKeyDown}>
         {/* Drill-in breadcrumbs: the command's path, walked back one step at
             a time with Backspace or Escape. */}

@@ -698,6 +698,8 @@ export function SecretsSection(props: SecretsSectionProps) {
       <Show when={addOpen()}>
         <Dialog
           open={addOpen()}
+          closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+          closeTitle={t('ui.dialog.closeTitle', 'Close')}
           onClose={closeAdd}
           title={t('secrets.add.title', 'Add secret')}
           onSubmit={() => void submitAdd()}
@@ -796,6 +798,8 @@ export function SecretsSection(props: SecretsSectionProps) {
         {(target) => (
           <Dialog
             open={true}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeReplace}
             title={`${t('secrets.replace.ariaHead', 'Replace value of')} "${target().name}"`}
             onSubmit={() => void submitReplace()}
@@ -862,6 +866,8 @@ export function SecretsSection(props: SecretsSectionProps) {
         {(target) => (
           <Dialog
             open={true}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeRename}
             title={t('secrets.rename.compositeTitle', 'Rename "{name}"', { name: target().name })}
             onSubmit={() => void submitRename()}
@@ -905,6 +911,8 @@ export function SecretsSection(props: SecretsSectionProps) {
         {(target) => (
           <Dialog
             open={true}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeDelete}
             title={t('secrets.delete.compositeTitle', 'Delete "{name}"?', { name: target().name })}
             footer={

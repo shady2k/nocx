@@ -27,6 +27,7 @@ import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { TrashIcon } from '../ui/icons'
 import { showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import { showToast } from '../ui/toast'
 import { log } from '../log'
 import { t } from '../i18n/locale-model'
@@ -75,7 +76,13 @@ export function NotesPanel(props: NotesPanelProps) {
   }
 
   const remove = async (row: NoteRow): Promise<void> => {
-    if (!(await showConfirm(`Delete "${nameOf(row)}"?`))) return
+    if (
+      !(await showConfirm(
+        `Delete "${nameOf(row)}"?`,
+        confirmLabels(t('ui.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
+      ))
+    )
+      return
     try {
       await props.store.remove(row.id)
     } catch (err) {

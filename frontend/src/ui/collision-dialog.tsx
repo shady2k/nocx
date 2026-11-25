@@ -89,6 +89,9 @@ export interface CollisionLabels {
   /** The count is the files an "apply to all" would reach; the label
    *  resolves it through the catalogue's plural forms at call time. */
   applyMany: (count: number) => string
+  /** The dialog's close control words. */
+  closeAria: string
+  closeTitle: string
 }
 
 export function CollisionDialog(props: CollisionDialogProps) {
@@ -113,6 +116,8 @@ export function CollisionDialog(props: CollisionDialogProps) {
       open
       title={label('title')}
       onClose={() => resolve('skip')}
+      closeAria={label('closeAria')}
+      closeTitle={label('closeTitle')}
       footer={
         <>
           <Button variant="danger" onClick={() => resolve('overwrite')}>

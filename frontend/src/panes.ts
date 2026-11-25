@@ -47,6 +47,7 @@ import { cardQuote } from './overview/overview-model'
 import { NotifyClient } from './notify-client'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
+import { confirmLabels } from './i18n/kit-labels'
 import {
   showTabEditDialog,
   showWorkspaceCreateDialog,
@@ -2551,7 +2552,10 @@ export class PaneManager {
       .filter(Boolean)
       .join(' ')
     if (message) {
-      const proceed = await showConfirm(message, 'Close tab', 'Cancel')
+      const proceed = await showConfirm(
+        message,
+        confirmLabels(t('tabs.close', 'Close tab'), t('ui.confirm.cancel', 'Cancel')),
+      )
       if (!proceed) return
       // The world moved while the modal was open: this pane may already be
       // gone, and closing it twice would take a tab that has since been
@@ -2788,8 +2792,7 @@ export class PaneManager {
         name,
         open.map((pane) => this.liveWorkOf(pane)),
       ),
-      'Close workspace',
-      'Cancel',
+      confirmLabels(t('panes.confirm.closeWorkspace', 'Close workspace'), t('ui.confirm.cancel', 'Cancel')),
     )
     if (!proceed) return false
     for (const pane of open) {

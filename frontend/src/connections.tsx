@@ -24,6 +24,7 @@ import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
 import { EditableRowList } from './ui/row-list'
 import { Dialog, showConfirm } from './ui/dialog'
+import { confirmLabels } from './i18n/kit-labels'
 import { Radio } from './ui/radio'
 import { Section } from './ui/section'
 import { Stack } from './ui/stack'
@@ -2596,8 +2597,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (
       !(await showConfirm(
         `${t('connections.editor.deleteConfirmHead', 'Delete')} "${profile.name}"?`,
-        t('connections.editor.deleteConfirmOk', 'Delete'),
-        t('connections.common.cancel', 'Cancel'),
+        confirmLabels(
+          t('connections.editor.deleteConfirmOk', 'Delete'),
+          t('connections.common.cancel', 'Cancel'),
+        ),
       ))
     )
       return
@@ -3381,6 +3384,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(profile) => (
           <Dialog
             open={dialogOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => {
               const owner = opening
               if (owner) closeEditor(owner)
@@ -3468,6 +3473,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       {/* Quick-connect Dialog — creation starts from one field */}
       <Dialog
         open={quickConnectOpen()}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={closeQuickConnect}
         title={t('connections.quick.title', 'New Connection')}
         size="lg"
@@ -3504,6 +3511,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       {/* Import Dialog — bringing connections in from elsewhere */}
       <Dialog
         open={importOpen()}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={closeImportDialog}
         title={t('connections.import.title', 'Import Connections')}
         size="lg"
@@ -3589,6 +3598,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(preview) => (
           <Dialog
             open={previewOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closePreview}
             title={t('connections.preview.title', 'Tabby Import Preview')}
             size="lg"
@@ -3711,6 +3722,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(group) => (
           <Dialog
             open={groupDialogOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeGroupEditor}
             // The live draft name, not the stored one: the title is where the
             // group's identity stays readable once the user is two sections
@@ -3753,6 +3766,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <Show when={deleteConfirmOpen()}>
         <Dialog
           open={deleteConfirmOpen()}
+          closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+          closeTitle={t('ui.dialog.closeTitle', 'Close')}
           onClose={cancelDeleteGroup}
           // Which group. A confirmation that does not name what it is about to
           // destroy is asking the user to remember which row they clicked.

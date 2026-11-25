@@ -6,6 +6,7 @@ import { TextField } from './ui/text-field'
 import { Stack } from './ui/stack'
 import { SwatchPicker, type SwatchOption } from './ui/swatch-picker'
 import { WORKSPACE_COLOURS, leastUsedWorkspaceColour } from './layout/workspace-colours'
+import { t } from './i18n/locale-model'
 
 /**
  * The name-and-colour dialog: one form, and every subject in the strip that
@@ -94,6 +95,8 @@ const NameColourDialog: Component<{
     <Dialog
       open
       title={props.title}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={() => props.onResolve(null)}
       onSubmit={submit}
       footer={

@@ -61,6 +61,8 @@
 
 import { createSignal, untrack } from 'solid-js'
 import { showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
+import { t } from '../i18n/locale-model'
 import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-client'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
 import type { ApiImportPostmanResult, Unsupported } from '../generated/api.import.postman'
@@ -1938,8 +1940,10 @@ export function createApiStore(
     if (open !== null && unsavedWork()) {
       const proceed = await showConfirm(
         unsavedQuestion(open, 'import'),
-        'Discard and import',
-        'Cancel',
+        confirmLabels(
+          t('api.confirm.discardAndImport', 'Discard and import'),
+          t('ui.confirm.cancel', 'Cancel'),
+        ),
       )
       // NOTHING MOVES ON A NO — not the draft, not the notes, not the error.
       // The import did not happen, so the form is exactly as it was found.

@@ -14,6 +14,7 @@ import { readBackupText, MAX_BACKUP_BYTES, downloadText } from './backup-file'
 import { Button, FileInput, Radio, MarkerList, PageSection } from './ui'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
+import { confirmLabels } from './i18n/kit-labels'
 import { isNotStartedAnswer } from './dispatcher'
 import { t } from './i18n/locale-model'
 
@@ -217,7 +218,13 @@ export function BackupRestoreSection(props: Props) {
     const msg = isReplace
       ? 'Replace will reset all connections and settings to match the backup exactly. Extra connections and settings overrides will be removed. Credential metadata and keychain entries are not affected. Continue?'
       : 'Merge will apply backup settings and connections on top of your current configuration. Existing items not in the backup are kept. Continue?'
-    const confirmed = await showConfirm(msg, isReplace ? 'Replace' : 'Merge', 'Cancel')
+    const confirmed = await showConfirm(
+      msg,
+      confirmLabels(
+        isReplace ? t('backup.confirm.replace', 'Replace') : t('backup.confirm.merge', 'Merge'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
+    )
     if (!confirmed) return
 
     setState('restoring', true)

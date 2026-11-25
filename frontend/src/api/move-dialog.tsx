@@ -108,6 +108,8 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
     <Dialog
       open={props.open}
       title={`Move ${props.requestName} to…`}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={

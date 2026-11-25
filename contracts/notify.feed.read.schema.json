@@ -36,6 +36,8 @@
         "at",
         "title",
         "body",
+        "titleSegments",
+        "bodySegments",
         "kind",
         "level",
         "count",
@@ -59,6 +61,16 @@
         "body": {
           "description": "Untrusted presentation data, same guarantees as title. Empty when the source had none.",
           "type": "string"
+        },
+        "titleSegments": {
+          "description": "The title as an ordered list of catalogue segments, for a sentence nocx composed. The renderer joins the translated segments in order; an empty list means the raw title is the whole sentence.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/segment" }
+        },
+        "bodySegments": {
+          "description": "The body as an ordered list of catalogue segments, same rules as titleSegments.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/segment" }
         },
         "kind": {
           "description": "The event kind, stamped by the source adapter from the method invoked — never carried on the wire inbound.",
@@ -133,6 +145,31 @@
           "type": "boolean"
         }
       }
+    },
+    "segment": {
+      "description": "One piece of a composed sentence. A keyed segment names a catalogue entry and its scalar params, which are data (a count, a channel id), never display text. A text segment is verbatim, untranslated text: a program's own words or backend error prose.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key"],
+          "properties": {
+            "key": { "type": "string" },
+            "params": {
+              "type": "object",
+              "additionalProperties": { "type": ["string", "number"] }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "text": { "type": "string" }
+          }
+        }
+      ]
     },
     "dropped": {
       "type": "object",

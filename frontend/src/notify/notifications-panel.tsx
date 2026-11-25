@@ -44,13 +44,11 @@ import { Select } from '../ui/select'
 import type { BadgeTone } from '../ui/badge'
 import type { FeedStore } from './feed-store'
 import type { Kind, NotifyCatalogue } from '../generated/notify.catalogue'
-import type { NotifyFeedRead } from '../generated/notify.feed.read'
+import type { NotifyFeedRead, Segment } from '../generated/notify.feed.read'
 import { t, tPlural } from '../i18n/locale-model'
 
 type Occurrence = NotifyFeedRead['occurrences'][number]
 type RunMember = Occurrence['run'][number]
-
-type Segment = NotifyFeedRead['occurrences'][number]['titleSegments'][number]
 
 /** A slot's text. The translated segments join in order; a slot with none is
  *  the raw string, so a locale without the keys still shows the event. Text

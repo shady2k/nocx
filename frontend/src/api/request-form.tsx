@@ -83,20 +83,28 @@ import type { ApiScopeVariable } from './api-store'
  *  is a picker that silently changes it. */
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
-const BODY_KINDS: Array<{ value: ApiRequest['body']['kind']; label: string }> = [
-  { value: 'none', label: 'None' },
-  { value: 'json', label: 'JSON' },
-  { value: 'raw', label: 'Raw' },
-  { value: 'form', label: 'Form' },
-  { value: 'file', label: 'From a file in the collection' },
+const BODY_KINDS: Array<{ value: ApiRequest['body']['kind']; labelKey: string; fallback: string }> = [
+  { value: 'none', labelKey: 'api.form.body.none', fallback: 'None' },
+  { value: 'json', labelKey: 'api.form.body.json', fallback: 'JSON' },
+  { value: 'raw', labelKey: 'api.form.body.raw', fallback: 'Raw' },
+  { value: 'form', labelKey: 'api.form.body.form', fallback: 'Form' },
+  { value: 'file', labelKey: 'api.form.body.file', fallback: 'From a file in the collection' },
 ]
 
-const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; label: string }> = [
-  { value: 'none', label: 'None' },
-  { value: 'bearer', label: 'Bearer' },
-  { value: 'basic', label: 'Basic' },
-  { value: 'apikey', label: 'API key' },
+const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; labelKey: string; fallback: string }> = [
+  { value: 'none', labelKey: 'api.form.auth.none', fallback: 'None' },
+  { value: 'bearer', labelKey: 'api.form.auth.bearer', fallback: 'Bearer' },
+  { value: 'basic', labelKey: 'api.form.auth.basic', fallback: 'Basic' },
+  { value: 'apikey', labelKey: 'api.form.auth.apikey', fallback: 'API key' },
 ]
+
+/** The picker options for a kind table, labelled at render so the
+ *  translation is read when the picker draws, not when the module loads. */
+function kindOptions<V extends string>(
+  table: Array<{ value: V; labelKey: string; fallback: string }>,
+): Array<{ value: V; label: string }> {
+  return table.map((k) => ({ value: k.value, label: t(k.labelKey, k.fallback) }))
+}
 
 /** How many rows a tab is holding, for the tab's own label. A count that is
  *  zero is not shown: "Headers 0" is a longer way to write "Headers", and the
@@ -523,9 +531,7 @@ export function RequestEditor(props: RequestEditorProps) {
       <Show
         when={request()}
         fallback={
-          <p class="api-request__idle">
-            Choose a request from a collection, or import a curl line, and it appears here.
-          </p>
+          <p class="api-request__idle">{t('api.form.idle', 'Choose a request from a collection, or import a curl line, and it appears here.')}</p>
         }
       >
         {(req) => (
@@ -543,13 +549,13 @@ export function RequestEditor(props: RequestEditorProps) {
                     variant="table"
                     ariaLabel={t('api.form.query.aria', 'Query parameters')}
                     columns={[
-                      { label: 'Send', labelHidden: true },
-                      { label: 'Name' },
-                      { label: 'Value' },
+                      { label: t('api.form.field.send', 'Send'), labelHidden: true },
+                      { label: t('api.env.field.name', 'Name') },
+                      { label: t('api.env.field.value', 'Value') },
                     ]}
                     rows={req().query}
-                    addLabel="Add parameter"
-                    emptyLabel="No query parameters."
+                    addLabel={t('api.table.addParameter', 'Add parameter')}
+                    emptyLabel={t('api.table.emptyQueryParameters', 'No query parameters.')}
                     removeLabel={(i) => `Remove parameter ${i + 1}`}
                     renderRow={(row, i) => (
                       <>
@@ -617,12 +623,12 @@ export function RequestEditor(props: RequestEditorProps) {
                       variant="table"
                       ariaLabel={t('api.form.vars.aria', 'Request variables')}
                       columns={[
-                        { label: 'Send', labelHidden: true },
-                        { label: 'Name' },
-                        { label: 'Value' },
+                        { label: t('api.form.field.send', 'Send'), labelHidden: true },
+                        { label: t('api.env.field.name', 'Name') },
+                        { label: t('api.env.field.value', 'Value') },
                       ]}
                       rows={req().variables}
-                      addLabel="Add variable"
+                      addLabel={t('api.table.addVariable', 'Add variable')}
                       emptyLabel={undefined}
                       removeLabel={(i) => `Remove variable ${i + 1}`}
                       renderRow={(row, i) => (
@@ -698,16 +704,16 @@ export function RequestEditor(props: RequestEditorProps) {
                         readOnly
                         ariaLabel={t('api.form.inheritedVars.aria', 'Inherited request variables')}
                         columns={[
-                          { label: 'Scope' },
-                          { label: 'Name' },
-                          { label: 'Value' },
-                          { label: 'From' },
-                          { label: 'Status' },
+                          { label: t('api.form.field.scope', 'Scope') },
+                          { label: t('api.env.field.name', 'Name') },
+                          { label: t('api.env.field.value', 'Value') },
+                          { label: t('api.form.field.from', 'From') },
+                          { label: t('api.form.field.status', 'Status') },
                         ]}
                         rows={scopeRows().filter(
                           (variable) => variable.scope !== 'request' && variable.refused === '',
                         )}
-                        emptyLabel="No variables in this request's effective scope."
+                        emptyLabel={t('api.table.emptyRequestVariables', "No variables in this request's effective scope.")}
                         renderRow={(row) => (
                           <>
                             <td>{row().scope}</td>
@@ -761,7 +767,7 @@ export function RequestEditor(props: RequestEditorProps) {
                               body: { ...req().body, kind: v as ApiRequest['body']['kind'] },
                             })
                           }
-                          options={BODY_KINDS}
+                          options={kindOptions(BODY_KINDS)}
                         />
                       </div>
                       <Show when={hasFormatter(req().body.kind)}>
@@ -777,7 +783,7 @@ export function RequestEditor(props: RequestEditorProps) {
                       <TextField
                         id="api-body-file"
                         label={t('api.form.fileInCollection', 'File in the collection')}
-                        description="A path WITHIN the collection, read on send under the handle's path rules."
+                        description={t('api.form.filePathHint', "A path WITHIN the collection, read on send under the handle's path rules.")}
                         value={req().body.fileRef}
                         onInput={(v) => patch({ body: { ...req().body, fileRef: v } })}
                       />
@@ -803,13 +809,13 @@ export function RequestEditor(props: RequestEditorProps) {
                     variant="table"
                     ariaLabel={t('api.form.headers.aria', 'Request headers')}
                     columns={[
-                      { label: 'Send', labelHidden: true },
-                      { label: 'Name' },
-                      { label: 'Value' },
+                      { label: t('api.form.field.send', 'Send'), labelHidden: true },
+                      { label: t('api.env.field.name', 'Name') },
+                      { label: t('api.env.field.value', 'Value') },
                     ]}
                     rows={req().headers}
-                    addLabel="Add header"
-                    emptyLabel="No headers."
+                    addLabel={t('api.table.addHeader', 'Add header')}
+                    emptyLabel={t('api.table.emptyHeaders', 'No headers.')}
                     removeLabel={(i) => `Remove header ${i + 1}`}
                     renderRow={(row, i) => (
                       <>
@@ -886,7 +892,7 @@ export function RequestEditor(props: RequestEditorProps) {
                               auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] },
                             })
                           }
-                          options={AUTH_KINDS}
+                          options={kindOptions(AUTH_KINDS)}
                         />
                       </div>
                     </div>

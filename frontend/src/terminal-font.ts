@@ -1,5 +1,6 @@
 import { log } from './log'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 
 export const TERMINAL_FONT_KEY = 'terminal.fontFamily'
 let revision = 0
@@ -84,7 +85,7 @@ export async function applyTerminalFont(
     log.warn('Nordwand Mono could not be loaded', { error: String(error) })
     showToast({
       level: 'danger',
-      message: 'Nordwand Mono could not be loaded. The current font is unchanged.',
+      message: t('terminal.font.loadFailed', 'Nordwand Mono could not be loaded. The current font is unchanged.'),
     })
   }
 }

@@ -254,7 +254,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
             {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
-            Import
+            {t('api.import.submit', 'Import')}
           </Button>
         </>
       }
@@ -308,7 +308,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
               )
             }
             options={props.connections.map((c) => ({ value: c.id, label: c.name }))}
-            placeholder="Direct"
+            placeholder={t('api.import.routeDirect', 'Direct')}
             placeholderValue=""
           />
         </Field>
@@ -583,7 +583,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
             {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
-            Convert to a request
+            {t('api.import.curl.convert', 'Convert to a request')}
           </Button>
         </>
       }
@@ -591,7 +591,10 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
       <TextField
         id="api-import-curl"
         label={t('api.import.curl.lineLabel', 'curl command line')}
-        description="Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking."
+        description={t(
+          'api.import.curl.desc',
+          "Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.",
+        )}
         multiline
         value={props.value}
         error={refusal()}

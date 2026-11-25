@@ -12,469 +12,145 @@
   "violations": [
     {
       "file": "src/about-section.tsx",
-      "line": 199,
+      "line": 205,
       "context": "jsx-text",
       "snippet": "nocx"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1086,
+      "line": 848,
       "context": "jsx-text",
       "snippet": "Allow once"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1095,
+      "line": 857,
       "context": "jsx-text",
       "snippet": "Deny once"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1152,
+      "line": 914,
       "context": "jsx-text",
       "snippet": "with these arguments:"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1154,
+      "line": 918,
       "context": "attr:ariaLabel",
       "snippet": "Arguments of"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1166,
+      "line": 928,
       "context": "jsx-text",
       "snippet": "The assistant is asking to call"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1172,
-      "context": "jsx-text",
-      "snippet": "The assistant read a skill at an address it resolved, and is"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1191,
-      "context": "attr:description",
-      "snippet": "This is what the assistant is offered on every ask once this"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1222,
+      "line": 955,
       "context": "jsx-text",
       "snippet": "With its variables as the shell reads them now. This is what"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1245,
+      "line": 978,
       "context": "attr:ariaLabel",
       "snippet": "What would do"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1261,
+      "line": 994,
       "context": "attr:ariaLabel",
       "snippet": "The argument of"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1283,
-      "context": "jsx-text",
-      "snippet": "Every file this would write, and what each holds. Installing"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1298,
-      "context": "attr:ariaLabel",
-      "snippet": ", which installing “” would write"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1324,
+      "line": 1013,
       "context": "jsx-text",
       "snippet": "And what those files hold right now. This is a reading, not"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1340,
+      "line": 1029,
       "context": "attr:ariaLabel",
       "snippet": "What holds right now"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1365,
-      "context": "attr:description",
-      "snippet": "Line of matched the static scan. It is evidence to read be"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1368,
-      "context": "attr:ariaLabel",
-      "snippet": "Line of , which the static scan matched"
-    },
-    {
-      "file": "src/agent-approval-prompt.tsx",
-      "line": 1401,
+      "line": 1038,
       "context": "jsx-text",
       "snippet": "What was found, and where — never the material itself:"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1418,
+      "line": 1055,
       "context": "jsx-text",
       "snippet": "Approving covers this call: it has not run, and no call afte"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1434,
+      "line": 1071,
       "context": "jsx-text",
       "snippet": "An answer in this session lasts until this terminal session"
     },
     {
       "file": "src/agent-approval-prompt.tsx",
-      "line": 1437,
+      "line": 1074,
       "context": "jsx-text",
       "snippet": ", in every session, from now on, which you can c"
     },
     {
       "file": "src/agent-ask.ts",
-      "line": 226,
+      "line": 377,
       "context": "prop:label",
       "snippet": "Manage permissions"
     },
     {
       "file": "src/agent-ask.ts",
-      "line": 256,
+      "line": 407,
       "context": "prop:label",
       "snippet": "Undo"
     },
     {
-      "file": "src/api/api-pane.tsx",
-      "line": 3173,
-      "context": "attr:placeholder",
-      "snippet": "orders-api"
-    },
-    {
-      "file": "src/api/api-pane.tsx",
-      "line": 3188,
-      "context": "attr:placeholder",
-      "snippet": "/work/acme-api"
-    },
-    {
-      "file": "src/api/api-pane.tsx",
-      "line": 3211,
-      "context": "attr:placeholder",
-      "snippet": "reports"
-    },
-    {
-      "file": "src/api/api-pane.tsx",
-      "line": 3672,
-      "context": "jsx-text",
-      "snippet": "No environment"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 193,
-      "context": "attr:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 194,
-      "context": "attr:description",
-      "snippet": "What the picker beside Send will call it — the name in the f"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 195,
-      "context": "attr:placeholder",
-      "snippet": "Production"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 315,
-      "context": "prop:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 315,
-      "context": "prop:label",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 326,
-      "context": "attr:placeholder",
-      "snippet": "baseUrl"
-    },
-    {
-      "file": "src/api/environment-view.tsx",
-      "line": 335,
-      "context": "attr:placeholder",
-      "snippet": "https://api.example.com"
-    },
-    {
-      "file": "src/api/folder-view.tsx",
-      "line": 216,
-      "context": "prop:label",
-      "snippet": "Send"
-    },
-    {
-      "file": "src/api/folder-view.tsx",
-      "line": 216,
-      "context": "prop:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/api/folder-view.tsx",
-      "line": 216,
-      "context": "prop:label",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/api/folder-view.tsx",
-      "line": 234,
-      "context": "attr:placeholder",
-      "snippet": "baseUrl"
-    },
-    {
-      "file": "src/api/folder-view.tsx",
-      "line": 243,
-      "context": "attr:placeholder",
-      "snippet": "https://api.example.com"
-    },
-    {
-      "file": "src/api/import-dialogs.tsx",
-      "line": 256,
-      "context": "jsx-text",
-      "snippet": "Import"
-    },
-    {
-      "file": "src/api/import-dialogs.tsx",
-      "line": 311,
-      "context": "attr:placeholder",
-      "snippet": "Direct"
-    },
-    {
-      "file": "src/api/import-dialogs.tsx",
-      "line": 582,
-      "context": "jsx-text",
-      "snippet": "Convert to a request"
-    },
-    {
-      "file": "src/api/import-dialogs.tsx",
-      "line": 591,
-      "context": "attr:description",
-      "snippet": "Parsed, never executed — there is no shell behind this field"
-    },
-    {
-      "file": "src/api/move-dialog.tsx",
-      "line": 110,
-      "context": "attr:title",
-      "snippet": "Move to…"
-    },
-    {
-      "file": "src/api/move-dialog.tsx",
-      "line": 135,
-      "context": "attr:label",
-      "snippet": "Root of"
-    },
-    {
-      "file": "src/api/move-dialog.tsx",
-      "line": 136,
-      "context": "attr:ariaLabel",
-      "snippet": "Root of"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 87,
-      "context": "prop:label",
-      "snippet": "None"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 88,
-      "context": "prop:label",
-      "snippet": "JSON"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 89,
-      "context": "prop:label",
-      "snippet": "Raw"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 90,
-      "context": "prop:label",
-      "snippet": "Form"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 91,
-      "context": "prop:label",
-      "snippet": "From a file in the collection"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 96,
-      "context": "prop:label",
-      "snippet": "Bearer"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 97,
-      "context": "prop:label",
-      "snippet": "Basic"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 98,
-      "context": "prop:label",
-      "snippet": "API key"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 522,
-      "context": "jsx-text",
-      "snippet": "Choose a request from a collection, or import a curl line, a"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 542,
-      "context": "prop:label",
-      "snippet": "Send"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 543,
-      "context": "prop:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 544,
-      "context": "prop:label",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 673,
-      "context": "prop:label",
-      "snippet": "Scope"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 676,
-      "context": "prop:label",
-      "snippet": "From"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 677,
-      "context": "prop:label",
-      "snippet": "Status"
-    },
-    {
-      "file": "src/api/request-form.tsx",
-      "line": 750,
-      "context": "attr:description",
-      "snippet": "A path WITHIN the collection, read on send under the handle'"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 171,
-      "context": "prop:label",
-      "snippet": "Body"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 214,
-      "context": "prop:label",
-      "snippet": "Raw"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 460,
-      "context": "jsx-text",
-      "snippet": "── request ──"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 464,
-      "context": "jsx-text",
-      "snippet": "── connection ──"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 477,
-      "context": "jsx-text",
-      "snippet": "── certificate chain ──"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 480,
-      "context": "attr:ariaLabel",
-      "snippet": "Certificate"
-    },
-    {
-      "file": "src/api/run-list.tsx",
-      "line": 490,
-      "context": "jsx-text",
-      "snippet": "── response ──"
-    },
-    {
-      "file": "src/api/timing-bar.tsx",
-      "line": 66,
-      "context": "prop:label",
-      "snippet": "waiting"
-    },
-    {
-      "file": "src/api/timing-bar.tsx",
-      "line": 67,
-      "context": "prop:label",
-      "snippet": "download"
-    },
-    {
       "file": "src/backup-restore-section.tsx",
-      "line": 138,
+      "line": 141,
       "context": "prop:message",
       "snippet": "Backup failed:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 162,
+      "line": 165,
       "context": "prop:message",
       "snippet": "Could not read the backup file:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 195,
+      "line": 198,
       "context": "prop:message",
       "snippet": "Could not preview the backup:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 255,
+      "line": 258,
       "context": "prop:message",
       "snippet": "Restore failed:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 447,
+      "line": 456,
       "context": "jsx-text",
       "snippet": "connection credential binding(s) rem"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 453,
+      "line": 462,
       "context": "jsx-text",
       "snippet": "group credential binding(s) removed"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 459,
+      "line": 468,
       "context": "jsx-text",
       "snippet": "group default key(s) omitted from ba"
     },
@@ -504,13 +180,13 @@
     },
     {
       "file": "src/capability.ts",
-      "line": 118,
+      "line": 119,
       "context": "prop:label",
       "snippet": "Enable command editor"
     },
     {
       "file": "src/capability.ts",
-      "line": 124,
+      "line": 125,
       "context": "prop:label",
       "snippet": "Restore command editor"
     },
@@ -522,31 +198,31 @@
     },
     {
       "file": "src/connections.tsx",
-      "line": 1338,
+      "line": 1385,
       "context": "attr:placeholder",
       "snippet": "— Not set (inherit) —"
     },
     {
       "file": "src/connections.tsx",
-      "line": 2431,
+      "line": 2779,
       "context": "jsx-text",
       "snippet": "No connections here yet — pick this group in a connection’s"
     },
     {
       "file": "src/connections.tsx",
-      "line": 2514,
+      "line": 2862,
       "context": "attr:placeholder",
       "snippet": "127.0.0.1"
     },
     {
       "file": "src/connections.tsx",
-      "line": 2533,
+      "line": 2881,
       "context": "attr:placeholder",
       "snippet": "host:port"
     },
     {
       "file": "src/editor.ts",
-      "line": 591,
+      "line": 612,
       "context": "prop:ariaLabel",
       "snippet": "Run command"
     },
@@ -594,13 +270,13 @@
     },
     {
       "file": "src/grant.ts",
-      "line": 182,
+      "line": 186,
       "context": "prop:label",
       "snippet": "Dismiss all"
     },
     {
       "file": "src/grant.ts",
-      "line": 204,
+      "line": 208,
       "context": "prop:ariaLabel",
       "snippet": "Dismiss this mark"
     },
@@ -618,127 +294,115 @@
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 35,
+      "line": 60,
       "context": "prop:label",
       "snippet": "Raw"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 36,
+      "line": 61,
       "context": "prop:title",
       "snippet": "No integration — a plain terminal, nothing written to the ho"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 40,
+      "line": 65,
       "context": "prop:label",
       "snippet": "Script"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 41,
+      "line": 66,
       "context": "prop:title",
       "snippet": "The shell scripts nocx ships — command blocks, completions,"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 45,
+      "line": 70,
       "context": "prop:label",
       "snippet": "Helper"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 46,
+      "line": 71,
       "context": "prop:title",
       "snippet": "Deploy the nocx helper — the Git panel and everything that n"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 128,
+      "line": 153,
       "context": "jsx-text",
       "snippet": "Cancel"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 141,
+      "line": 166,
       "context": "jsx-text",
       "snippet": "This is the first time nocx has met this host. If you trust"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 147,
+      "line": 172,
       "context": "jsx-text",
       "snippet": "The host key offered by this server differs from the one noc"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 159,
+      "line": 184,
       "context": "jsx-text",
       "snippet": "Offered fingerprint:"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 169,
-      "context": "jsx-text",
-      "snippet": "Choose how nocx integrates with this machine. The method is"
-    },
-    {
-      "file": "src/host-key-dialog.tsx",
-      "line": 175,
+      "line": 201,
       "context": "attr:ariaLabel",
       "snippet": "Integration method"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 181,
-      "context": "jsx-text",
-      "snippet": "Choosing Helper also allows nocx to deploy its helper binary"
-    },
-    {
-      "file": "src/host-key-dialog.tsx",
-      "line": 185,
+      "line": 214,
       "context": "jsx-text",
       "snippet": "Fingerprint:"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 249,
+      "line": 278,
       "context": "attr:title",
       "snippet": "Allow this agent to use nocx's tools?"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 260,
+      "line": 289,
       "context": "jsx-text",
       "snippet": "Deny"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 267,
+      "line": 296,
       "context": "jsx-text",
       "snippet": "If you allow it, this agent"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 268,
+      "line": 297,
       "context": "jsx-text",
       "snippet": "and commands it launches"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 268,
+      "line": 297,
       "context": "jsx-text",
       "snippet": "can start other agents in new tabs, watch what the"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 273,
+      "line": 302,
       "context": "attr:ariaLabel",
       "snippet": "What is being allowed"
     },
     {
       "file": "src/host-key-dialog.tsx",
-      "line": 306,
+      "line": 335,
       "context": "jsx-text",
       "snippet": "If you deny, the agent still runs — without nocx's tools, an"
     },
@@ -834,7 +498,7 @@
     },
     {
       "file": "src/ipc.ts",
-      "line": 1593,
+      "line": 1677,
       "context": "prop:message",
       "snippet": "Could not reattach this session. The shell has not been conf"
     },
@@ -894,43 +558,37 @@
     },
     {
       "file": "src/main.tsx",
-      "line": 248,
+      "line": 250,
       "context": "prop:message",
       "snippet": "nocx could not read the update state this launch — open Sett"
     },
     {
       "file": "src/main.tsx",
-      "line": 437,
+      "line": 414,
       "context": "prop:message",
       "snippet": "Could not record the decision:"
     },
     {
       "file": "src/main.tsx",
-      "line": 506,
+      "line": 474,
       "context": "prop:message",
       "snippet": "Could not trust the host key:"
     },
     {
       "file": "src/main.tsx",
-      "line": 563,
-      "context": "prop:message",
-      "snippet": "Could not save the connection method for :"
-    },
-    {
-      "file": "src/main.tsx",
-      "line": 1258,
+      "line": 1223,
       "context": "prop:message",
       "snippet": "Copied \"\" to the clipboard."
     },
     {
       "file": "src/main.tsx",
-      "line": 1669,
+      "line": 1641,
       "context": "prop:message",
       "snippet": "Forwarding on :"
     },
     {
       "file": "src/main.tsx",
-      "line": 1749,
+      "line": 1721,
       "context": "prop:label",
       "snippet": "Ports:"
     },
@@ -1008,55 +666,55 @@
     },
     {
       "file": "src/panes.ts",
-      "line": 1649,
+      "line": 1827,
       "context": "prop:message",
       "snippet": "Could not open a tab:"
     },
     {
       "file": "src/panes.ts",
-      "line": 1869,
+      "line": 2122,
       "context": "prop:message",
       "snippet": "Saved \"\" as a connection"
     },
     {
       "file": "src/panes.ts",
-      "line": 1874,
+      "line": 2127,
       "context": "prop:message",
       "snippet": "Could not save:"
     },
     {
       "file": "src/panes.ts",
-      "line": 1894,
+      "line": 2147,
       "context": "prop:message",
       "snippet": "Opened \"\" as a connection"
     },
     {
       "file": "src/panes.ts",
-      "line": 1899,
+      "line": 2152,
       "context": "prop:message",
       "snippet": "Could not connect to :"
     },
     {
       "file": "src/panes.ts",
-      "line": 2424,
+      "line": 2699,
       "context": "prop:message",
       "snippet": "Could not create the workspace:"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 202,
+      "line": 205,
       "context": "attr:label",
       "snippet": "A–Z"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 210,
+      "line": 213,
       "context": "attr:label",
       "snippet": "a–z"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 218,
+      "line": 221,
       "context": "attr:label",
       "snippet": "0–9"
     },
@@ -1098,31 +756,31 @@
     },
     {
       "file": "src/ports.tsx",
-      "line": 659,
+      "line": 663,
       "context": "attr:title",
       "snippet": "Cannot see the ports on"
     },
     {
       "file": "src/ports.tsx",
-      "line": 660,
+      "line": 664,
       "context": "attr:description",
       "snippet": "You reached this shell by hand, so nocx has no connection of"
     },
     {
       "file": "src/ports.tsx",
-      "line": 669,
+      "line": 673,
       "context": "jsx-text",
       "snippet": "Open as connection"
     },
     {
       "file": "src/ports.tsx",
-      "line": 694,
+      "line": 698,
       "context": "attr:description",
       "snippet": "Open an SSH session to this profile first — the ports it lis"
     },
     {
       "file": "src/publish-notice.tsx",
-      "line": 158,
+      "line": 157,
       "context": "attr:ariaLabel",
       "snippet": "Dismiss"
     },
@@ -1143,84 +801,6 @@
       "line": 923,
       "context": "prop:ariaLabel",
       "snippet": "search history"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 994,
-      "context": "prop:label",
-      "snippet": "Running"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1289,
-      "context": "prop:ariaLabel",
-      "snippet": "Block actions"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1336,
-      "context": "prop:message",
-      "snippet": "The stored answer is not available, so nothing was copied."
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1366,
-      "context": "prop:label",
-      "snippet": "Show dump"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1382,
-      "context": "prop:message",
-      "snippet": "Could not load the model dump"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1401,
-      "context": "prop:label",
-      "snippet": "Stop"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1410,
-      "context": "prop:label",
-      "snippet": "Copy command"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1448,
-      "context": "prop:label",
-      "snippet": "Copy output"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1454,
-      "context": "prop:label",
-      "snippet": "Copy all"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1847,
-      "context": "prop:ariaLabel",
-      "snippet": "Interrupt"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1848,
-      "context": "prop:title",
-      "snippet": "Interrupt (Ctrl+C) — focus controls: Alt+F10"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1863,
-      "context": "prop:ariaLabel",
-      "snippet": "Stop"
-    },
-    {
-      "file": "src/scrollback/blocks.ts",
-      "line": 1864,
-      "context": "prop:title",
-      "snippet": "Stop"
     },
     {
       "file": "src/session-signal-undelivered.ts",
@@ -1248,273 +828,141 @@
     },
     {
       "file": "src/settings.tsx",
-      "line": 1188,
+      "line": 1136,
       "context": "prop:message",
       "snippet": "Could not save \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1215,
+      "line": 1163,
       "context": "prop:message",
       "snippet": "Could not reset \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1247,
+      "line": 1195,
       "context": "prop:message",
       "snippet": "Could not clear \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1799,
+      "line": 1747,
       "context": "jsx-text",
       "snippet": "Replace"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1802,
+      "line": 1750,
       "context": "jsx-text",
       "snippet": "Clear"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 636,
+      "line": 663,
       "context": "prop:label",
       "snippet": "Rename…"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 648,
+      "line": 691,
       "context": "prop:label",
       "snippet": "Close"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 787,
+      "line": 830,
       "context": "attr:title",
       "snippet": "Workspace:"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 807,
+      "line": 850,
       "context": "attr:ariaLabel",
       "snippet": "Close workspace"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 808,
+      "line": 851,
       "context": "attr:title",
       "snippet": "Close workspace"
-    },
-    {
-      "file": "src/tab-strip.tsx",
-      "line": 886,
-      "context": "attr:ariaLabel",
-      "snippet": "Show all workspaces"
-    },
-    {
-      "file": "src/tab-strip.tsx",
-      "line": 887,
-      "context": "attr:title",
-      "snippet": "Show all workspaces"
-    },
-    {
-      "file": "src/tab-strip.tsx",
-      "line": 897,
-      "context": "attr:placeholder",
-      "snippet": "Filter tabs…"
-    },
-    {
-      "file": "src/tab-strip.tsx",
-      "line": 898,
-      "context": "attr:ariaLabel",
-      "snippet": "Filter tabs"
-    },
-    {
-      "file": "src/tab-strip.tsx",
-      "line": 925,
-      "context": "attr:ariaLabel",
-      "snippet": "New tab"
     },
     {
       "file": "src/tab-strip.tsx",
       "line": 929,
       "context": "attr:ariaLabel",
-      "snippet": "More"
+      "snippet": "Show all workspaces"
     },
     {
       "file": "src/tab-strip.tsx",
       "line": 930,
       "context": "attr:title",
+      "snippet": "Show all workspaces"
+    },
+    {
+      "file": "src/tab-strip.tsx",
+      "line": 940,
+      "context": "attr:placeholder",
+      "snippet": "Filter tabs…"
+    },
+    {
+      "file": "src/tab-strip.tsx",
+      "line": 941,
+      "context": "attr:ariaLabel",
+      "snippet": "Filter tabs"
+    },
+    {
+      "file": "src/tab-strip.tsx",
+      "line": 968,
+      "context": "attr:ariaLabel",
+      "snippet": "New tab"
+    },
+    {
+      "file": "src/tab-strip.tsx",
+      "line": 972,
+      "context": "attr:ariaLabel",
       "snippet": "More"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1042,
+      "line": 973,
+      "context": "attr:title",
+      "snippet": "More"
+    },
+    {
+      "file": "src/tab-strip.tsx",
+      "line": 1085,
       "context": "prop:label",
       "snippet": "Quick connect…"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1053,
+      "line": 1096,
       "context": "prop:label",
       "snippet": "Insert a secret…"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1059,
+      "line": 1102,
       "context": "prop:label",
       "snippet": "Snippets…"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1070,
+      "line": 1113,
       "context": "prop:label",
       "snippet": "New note"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1076,
+      "line": 1119,
       "context": "prop:label",
       "snippet": "New workspace…"
     },
     {
       "file": "src/tab-strip.tsx",
-      "line": 1146,
+      "line": 1194,
       "context": "attr:ariaLabel",
       "snippet": "Resize the tab strip"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 5648,
-      "context": "prop:message",
-      "snippet": "This connection has stopped accepting input — keystrokes are"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 7981,
-      "context": "prop:message",
-      "snippet": "Native input is active — enable command editor to ask the as"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 7990,
-      "context": "prop:message",
-      "snippet": "This pane has no assistant."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 8284,
-      "context": "prop:ariaLabel",
-      "snippet": "Close the assistant and return to the program"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 8285,
-      "context": "prop:title",
-      "snippet": "Close the assistant (Esc)"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 8395,
-      "context": "prop:ariaLabel",
-      "snippet": "Resize the assistant against the frozen screen"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 8800,
-      "context": "prop:message",
-      "snippet": "A command is running. You can ask the assistant about it, bu"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 8947,
-      "context": "prop:message",
-      "snippet": "The command could not be reached, so it may still be running"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10673,
-      "context": "prop:message",
-      "snippet": "\"\" saved, but the history rewrite is still owed — retry to f"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10681,
-      "context": "prop:message",
-      "snippet": "Stored \"\" in the vault."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10690,
-      "context": "prop:message",
-      "snippet": "This offer is no longer held — the command stays stored mask"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10697,
-      "context": "prop:message",
-      "snippet": "Could not save the secret — the command stays stored masked."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10720,
-      "context": "prop:message",
-      "snippet": "Unlock the vault to save this key."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10752,
-      "context": "prop:message",
-      "snippet": "Dismissed — this key will not be offered again in this sessi"
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10762,
-      "context": "prop:message",
-      "snippet": "Could not dismiss the offer — try again."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10800,
-      "context": "prop:message",
-      "snippet": "Unknown secret: . The command was not sent."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10807,
-      "context": "prop:message",
-      "snippet": "The vault is locked. Unlock it and run the command again."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10936,
-      "context": "prop:message",
-      "snippet": "Dismissed — will not be offered again as a connection."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10964,
-      "context": "prop:message",
-      "snippet": "Saved \"\" as a connection."
-    },
-    {
-      "file": "src/terminal-content.ts",
-      "line": 10969,
-      "context": "prop:message",
-      "snippet": "Could not save connection:"
-    },
-    {
-      "file": "src/terminal-font.ts",
-      "line": 50,
-      "context": "prop:message",
-      "snippet": "Nordwand Mono could not be loaded. The current font is uncha"
-    },
-    {
-      "file": "src/test-support/hello.tsx",
-      "line": 2,
-      "context": "jsx-text",
-      "snippet": "Hello,"
     },
     {
       "file": "src/tool-surface-notice.tsx",
@@ -1572,61 +1020,55 @@
     },
     {
       "file": "src/ui/file-readout.tsx",
-      "line": 163,
+      "line": 160,
       "context": "prop:description",
       "snippet": "Its bytes are not something that can be shown as lines, so t"
     },
     {
       "file": "src/ui/file-readout.tsx",
-      "line": 172,
+      "line": 169,
       "context": "prop:description",
       "snippet": "The budget is , and the read stops there. The file is on dis"
     },
     {
       "file": "src/ui/file-readout.tsx",
-      "line": 262,
+      "line": 259,
       "context": "attr:description",
       "snippet": ". The match is highlighted where it sits, in the bytes thems"
     },
     {
       "file": "src/ui/folder-picker.tsx",
-      "line": 232,
+      "line": 231,
       "context": "attr:placeholder",
       "snippet": "/path/to/folder"
     },
     {
       "file": "src/ui/folder-picker.tsx",
-      "line": 238,
+      "line": 237,
       "context": "jsx-text",
       "snippet": "Go"
     },
     {
       "file": "src/ui/folder-picker.tsx",
-      "line": 257,
+      "line": 256,
       "context": "attr:title",
       "snippet": "Cannot open"
     },
     {
       "file": "src/ui/operation-row.tsx",
-      "line": 229,
+      "line": 239,
       "context": "jsx-text",
       "snippet": "Queued"
     },
     {
       "file": "src/ui/operation-row.tsx",
-      "line": 235,
-      "context": "jsx-text",
-      "snippet": "Waiting for the server"
-    },
-    {
-      "file": "src/ui/operation-row.tsx",
-      "line": 262,
+      "line": 279,
       "context": "attr:ariaLabel",
       "snippet": "progress"
     },
     {
       "file": "src/ui/operation-row.tsx",
-      "line": 357,
+      "line": 377,
       "context": "attr:ariaLabel",
       "snippet": "Cancel"
     },
@@ -1644,13 +1086,13 @@
     },
     {
       "file": "src/ui/toast.tsx",
-      "line": 198,
+      "line": 240,
       "context": "prop:message",
       "snippet": "The browser could not be opened. Try again or open the relea"
     },
     {
       "file": "src/ui/toast.tsx",
-      "line": 259,
+      "line": 313,
       "context": "attr:ariaLabel",
       "snippet": "Dismiss notification"
     },

@@ -3173,7 +3173,7 @@ export function ApiPane(props: ApiPaneProps) {
           fieldDescription={commitNote(
             'A name, not a path — the folder is made where nocx keeps collections.',
           )}
-          placeholder="orders-api"
+          placeholder={t('api.pane.placeholder.collection', 'orders-api')}
           value={name()}
           onInput={setName}
           error={nameRefused()}
@@ -3184,11 +3184,11 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={opening()}
           title={t('api.collection.open.title', 'Open a collection folder')}
-          submitLabel="Open"
+          submitLabel={t('api.dialog.open', 'Open')}
           fieldId="api-collection-path"
           fieldLabel="Collection folder"
           fieldDescription={commitNote('The folder you place.')}
-          placeholder="/work/acme-api"
+          placeholder={t('api.pane.placeholder.folderPath', '/work/acme-api')}
           value={folderPath()}
           onInput={setFolderPath}
           error={pathRefused()}
@@ -3207,11 +3207,11 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={foldering()}
           title={folderAskTitle()}
-          submitLabel="Create folder"
+          submitLabel={t('api.dialog.createFolder', 'Create folder')}
           fieldId="api-new-folder-name"
           fieldLabel="Name"
           fieldDescription="One folder, one name — not a path. A folder inside this one is made by asking again from its own row."
-          placeholder="reports"
+          placeholder={t('api.pane.placeholder.folder', 'reports')}
           value={folderName()}
           onInput={setFolderName}
           error={folderRefused()}
@@ -3677,7 +3677,7 @@ export function ApiPane(props: ApiPaneProps) {
                   selected={store.activeEnvironment() === ''}
                   onClick={() => store.setEnvironment('')}
                 >
-                  No environment
+                  {t('api.pane.noEnvironment', 'No environment')}
                 </Button>
               </Show>
             </div>

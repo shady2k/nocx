@@ -32,6 +32,7 @@
 
 import { For, Show, createEffect } from 'solid-js'
 import { Caption } from '../ui/caption'
+import { t } from '../i18n/locale-model'
 import { formatElapsed } from './api-model'
 import type { ApiTimings } from './api-model'
 
@@ -40,7 +41,6 @@ import type { ApiTimings } from './api-model'
  *  caller, so the five phases have one owner. */
 interface Phase {
   id: string
-  label: string
   ms: number
 }
 
@@ -55,17 +55,23 @@ interface Phase {
  * did not happen". A clamp cannot lie about the total, which is drawn from
  * its own measurement.
  */
-export function phasesOf(t: ApiTimings): Phase[] {
-  const before = t.dnsMs + t.connectMs + t.tlsMs
-  const waiting = Math.max(0, t.ttfbMs - before)
-  const download = Math.max(0, t.totalMs - Math.max(t.ttfbMs, before))
+export function phasesOf(timings: ApiTimings): Phase[] {
+  const before = timings.dnsMs + timings.connectMs + timings.tlsMs
+  const waiting = Math.max(0, timings.ttfbMs - before)
+  const download = Math.max(0, timings.totalMs - Math.max(timings.ttfbMs, before))
   return [
-    { id: 'resolve', label: 'resolve', ms: t.dnsMs },
-    { id: 'connect', label: 'connect', ms: t.connectMs },
-    { id: 'tls', label: 'tls', ms: t.tlsMs },
-    { id: 'waiting', label: 'waiting', ms: waiting },
-    { id: 'download', label: 'download', ms: download },
+    { id: 'resolve', ms: timings.dnsMs },
+    { id: 'connect', ms: timings.connectMs },
+    { id: 'tls', ms: timings.tlsMs },
+    { id: 'waiting', ms: waiting },
+    { id: 'download', ms: download },
   ].filter((p) => p.ms > 0)
+}
+
+/** A phase's name, resolved at render: the three derived phases are
+ *  translatable, the three measured ones are protocol names kept in English. */
+function phaseLabel(id: string): string {
+  return id === 'waiting' || id === 'download' ? t(`api.timing.${id}`, id) : id
 }
 
 export interface TimingBarProps {
@@ -89,8 +95,8 @@ export function TimingBar(props: TimingBarProps) {
           class="api-timing__bar"
           role="img"
           aria-label={phases()
-            .map((p) => `${p.label} ${formatElapsed(p.ms)}`)
-            .concat(`total ${formatElapsed(props.timings.totalMs)}`)
+            .map((p) => `${phaseLabel(p.id)} ${formatElapsed(p.ms)}`)
+            .concat(`${t('api.timing.total', 'total')} ${formatElapsed(props.timings.totalMs)}`)
             .join(', ')}
         >
           <For each={phases()}>
@@ -108,7 +114,7 @@ export function TimingBar(props: TimingBarProps) {
                 ref={(el: HTMLElement) => {
                   createEffect(() => el.style.setProperty('--api-timing-share', share(p.ms)))
                 }}
-                title={`${p.label} ${formatElapsed(p.ms)}`}
+                title={`${phaseLabel(p.id)} ${formatElapsed(p.ms)}`}
               />
             )}
           </For>
@@ -121,12 +127,12 @@ export function TimingBar(props: TimingBarProps) {
             {(p) => (
               <span class="api-timing__key">
                 <span class="api-timing__swatch" data-phase={p.id} aria-hidden="true" />
-                <Caption>{`${p.label} ${formatElapsed(p.ms)}`}</Caption>
+                <Caption>{`${phaseLabel(p.id)} ${formatElapsed(p.ms)}`}</Caption>
               </span>
             )}
           </For>
           <span class="api-timing__key" data-total="true">
-            <Caption>{`total ${formatElapsed(props.timings.totalMs)}`}</Caption>
+            <Caption>{`${t('api.timing.total', 'total')} ${formatElapsed(props.timings.totalMs)}`}</Caption>
           </span>
         </div>
       </div>

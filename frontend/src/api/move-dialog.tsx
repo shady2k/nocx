@@ -107,7 +107,7 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
   return (
     <Dialog
       open={props.open}
-      title={`Move ${props.requestName} to…`}
+      title={t('api.move.title', 'Move {name} to…', { name: props.requestName })}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
@@ -136,8 +136,8 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
           value=""
           checked={chosen() === ''}
           onChange={setChosen}
-          label={`Root of ${props.collectionName}`}
-          ariaLabel={`Root of ${props.collectionName}`}
+          label={t('api.move.rootOf', 'Root of {collection}', { collection: props.collectionName })}
+          ariaLabel={t('api.move.rootOf', 'Root of {collection}', { collection: props.collectionName })}
         />
         <For each={props.folders}>
           {(folder) => (

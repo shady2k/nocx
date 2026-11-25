@@ -2119,7 +2119,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'hostKey.method.raw.title': 'Без интеграции — простой терминал, на хост ничего не записывается.',
   'hostKey.method.script.title': 'Скрипты оболочки, которые поставляет nocx: блоки команд, автодополнение, без скомпилированного файла.',
   // ── Integration reason sentences, first set ──
-  'hostKey.agent.powers': 'могут запускать других агентов в новых вкладках, наблюдать за их работой и останавливать их. Они не могут читать ваши секреты, обращаться к другой машине или менять что-либо ещё на этой машине.',
   'integration.bootstrap-interrupted.description': 'Подключение оборвалось, пока nocx ещё настраивал эту сессию.',
   'integration.bootstrap-out-of-order.description': 'Ответ пришёл не в свою очередь во время настройки nocx, поэтому nocx его отверг и остановился.',
   'integration.bootstrap-protocol.description': 'То, что ответило nocx при настройке, не было протоколом nocx, поэтому nocx остановился и не стал действовать по нему.',
@@ -2128,4 +2127,25 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'integration.capability-unlink-failed.description': 'Удалённый хост не смог сделать ключ nocx безымянным перед записью, поэтому nocx ничего не записал.',
   'integration.capability-write-failed.description': 'Удалённый хост не смог сохранить ключ nocx для этой сессии, поэтому у сессии нет собственного канала связи.',
   'integration.channel-unavailable.description': 'Это подключение не даёт nocx собственного канала к оболочке, поэтому эта вкладка — простой терминал.',
+  // ── Integration reason sentences, second set ──
+  'integration.exec-refused.description': 'Это подключение не стало запускать строку, которой nocx открывает оболочку, поэтому оно открыло вашу оболочку обычным способом.',
+  'integration.exec-substituted.description': 'Это подключение всегда выполняет одну фиксированную команду, о чём бы его ни просили, поэтому интегрировать здесь нечего.',
+  'integration.generation-unavailable.description': 'На этом хосте нет копии интеграции оболочки nocx для запуска. Следующее подключение установит её и повторит попытку.',
+  'integration.loader-termios-unavailable.description': 'nocx не смог перевести терминал в состояние, нужное для настройки, поэтому вернул терминал без изменений.',
+  'integration.publish-unavailable.description': 'nocx не смог скопировать свою интеграцию оболочки на этот хост, поэтому запускать там было нечего.',
+  'integration.receiver-unready.description': 'На удалённом хосте никто не ответил на настройку nocx, поэтому эта вкладка — простой терминал.',
+  'integration.secret-malformed.description': 'Удалённый хост не распознал ключ nocx для этой сессии, поэтому у сессии нет собственного канала связи.',
+  'integration.secret-not-for-this-session.description': 'Ключ, дошедший до удалённого хоста, был адресован другой сессии, поэтому удалённый хост его отверг.',
+  'integration.secret-too-large.description': 'Ключ nocx для этой сессии был больше, чем nocx позволяет себе отправить, поэтому он не был отправлен.',
+  // ── Integration stage sentences and notices ──
+  'integration.stage-digest-mismatch.description': 'Настройка nocx пришла на удалённый хост не в том виде, в каком была отправлена, поэтому nocx её не выполнил.',
+  'integration.stage-digest-unavailable.description': 'Удалённый хост не может проверить, что настройка nocx пришла целой, а nocx не запускает настройку, которую не может проверить.',
+  'integration.stage-fd-unavailable.description': 'Удалённый хост не смог передать проверенную настройку nocx оболочке, поэтому ничего из неё не выполнилось.',
+  'integration.stage-source-failed.description': 'Настройка nocx выполнилась на удалённом хосте и вернула управление вместо того, чтобы запустить вашу оболочку.',
+  'integration.stage-too-large.description': 'Настройка nocx была больше, чем nocx позволяет себе отправить, поэтому не отправлено ничего.',
+  'integration.unsupported-fish-startup.description': 'nocx не смог проверить эту схему запуска Fish по проверенному префиксу Fish 4.9.3, поэтому эта вкладка — простой терминал.',
+  'ipc.reattach.unavailable': 'Не удалось переподключиться к этой сессии. Завершение оболочки не подтверждено; повторите попытку с той же сессией.',
+  'ops.empty.description': 'Загрузки и другая фоновая работа появляются здесь, пока выполняются, и остаются ненадолго после завершения.',
+  'publish.dismiss.aria': 'Закрыть',
+  'unreconciled.dismiss.aria': 'Закрыть',
 }

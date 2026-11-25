@@ -5024,7 +5024,7 @@ export class TerminalContent extends BasePaneContent {
           }
           if (text.includes('\n') && this._bufferType === 'normal') {
             const confirmed = await showConfirm(
-              'Paste multi-line text?',
+              t('ui.confirm.pasteMultiline', 'Paste multi-line text?'),
               confirmLabels(t('ui.confirm.paste', 'Paste'), t('ui.confirm.cancel', 'Cancel')),
             )
             if (!confirmed) return

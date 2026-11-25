@@ -90,7 +90,7 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstall = async (d: FootprintDestination): Promise<void> => {
     if (!props.client || !d.removableProfileId) return
     const ok = await showConfirm(
-      `Remove nocx's shell integration from ${d.identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.`,
+      t('footprint.confirm.uninstallShell', "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.", { identity: d.identity }),
       confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
     )
     if (!ok) return
@@ -122,7 +122,7 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstallHelper = async (h: HelperInstall): Promise<void> => {
     if (!props.client || !h.removableProfileId) return
     const ok = await showConfirm(
-      `Remove the remote helper from ${h.identity}? The whole ${h.path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.`,
+      t('footprint.confirm.uninstallHelper', 'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.', { identity: h.identity, path: h.path }),
       confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
     )
     if (!ok) return

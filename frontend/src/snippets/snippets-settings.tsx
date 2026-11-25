@@ -236,7 +236,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
   async function remove(s: Snippet): Promise<void> {
     if (
       !(await showConfirm(
-        `Delete "${s.title}"?`,
+        t('snippets.delete.confirm', 'Delete "{title}"?', { title: s.title }),
         confirmLabels(t('ui.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
       ))
     )

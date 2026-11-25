@@ -78,7 +78,7 @@ export function NotesPanel(props: NotesPanelProps) {
   const remove = async (row: NoteRow): Promise<void> => {
     if (
       !(await showConfirm(
-        `Delete "${nameOf(row)}"?`,
+        t('notes.delete.confirm', 'Delete "{name}"?', { name: nameOf(row) }),
         confirmLabels(t('ui.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
       ))
     )

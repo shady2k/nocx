@@ -2376,4 +2376,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'workspaceColour.red': 'Red',
   'workspaceColour.pink': 'Pink',
   'workspaceColour.purple': 'Purple',
+  // ── File viewer reload action (file-viewer-content.tsx) ─────────────────
+  'fileViewer.reload.label': 'Reload',
+  'fileViewer.reload.reason': 'Re-read the file from disk',
+  'fileViewer.reload.retryReason': 'Try reading the file again',
+  'fileViewer.unavailable.gone': 'The terminal or connection that provided this file is gone',
+  'fileViewer.unavailable.back': 'The source is back — re-read the file',
 }

@@ -16,6 +16,7 @@ import type { GitPanelServices } from './git-client'
 import type { ActiveOrigin } from '../pane-content'
 import { setActiveLocale } from '../i18n/locale-model'
 import { ToastHost, clearToasts } from '../ui/toast'
+import { toastHostLabels } from '../i18n/kit-labels'
 
 const services: GitPanelServices = {
   open: vi.fn().mockResolvedValue({ state: 'ok', bindingId: 'b1', toplevel: '/r' }),
@@ -63,7 +64,7 @@ function mountGitView() {
       () => null,
     ),
   )
-  render(() => <ToastHost />)
+  render(() => <ToastHost labels={toastHostLabels()} />)
   return panel
 }
 

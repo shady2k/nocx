@@ -25,6 +25,7 @@ import { CompletionController } from './suggest/controller'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import { commandWord, type SuggestionProvider } from './suggest/providers'
 import type { Candidate } from './suggest/candidate'
+import { completionDropdownLabels } from './i18n/kit-labels'
 
 /**
  * The editor's internal CM6 view. CommandEditor keeps it private; tests
@@ -808,7 +809,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
     }
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [captureProvider],
       dropdown,
@@ -846,7 +847,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
   it('under ssh the completion dropdown gets the keys its footer advertises: Tab opens it, ArrowDown moves its selection, Enter accepts, Escape dismisses', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [sshHostProvider(['alpha', 'beta'])],
       dropdown,
@@ -903,7 +904,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
   it('at bare `ssh` with no space typed, Tab opens the completion dropdown with history rows and inserts nothing (nocx-v03i)', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     // The shipped history provider's applicability: any non-empty line, and
     // a row whose command starts with the line replaces the whole line.
     const historyProvider: SuggestionProvider = {

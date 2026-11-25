@@ -5,6 +5,7 @@ import { createUpdateController } from './update-controller'
 import { downloadProgressLabel } from './update-details'
 import { ToastHost } from './ui/toast'
 import { mountSidebar } from './sidebar'
+import { toastHostLabels } from './i18n/kit-labels'
 
 const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }))
 vi.mock('./log', () => ({ log: { warn: logWarn } }))
@@ -52,7 +53,7 @@ describe('shared update offer', () => {
       })
       .mockResolvedValue(undefined)
     const controller = createUpdateController({ finish })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showHeldByCoordinator('2.0.0')
     fireEvent.click(screen.getByRole('button', { name: 'Update available' }))
@@ -73,7 +74,7 @@ describe('shared update offer', () => {
     'reads held startup through the startup seam: %s',
     async (order) => {
       const controller = createUpdateController({ finish: vi.fn() })
-      render(() => <ToastHost />)
+      render(() => <ToastHost labels={toastHostLabels()} />)
       mountIndicator(controller)
       if (order === 'check-first') controller.showAvailable('2.0.1', NOTES)
       await controller.restore({
@@ -90,7 +91,7 @@ describe('shared update offer', () => {
 
   it('leaves ordinary pending startup quiet and logs a failed state read', async () => {
     const controller = createUpdateController()
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     await controller.restore({
       getState: () => Promise.resolve({ HeldByOlderCoordinator: false, Version: '2.0.0' }),
@@ -113,7 +114,7 @@ describe('shared update offer', () => {
     const apply = vi.fn()
     const restart = vi.fn()
     const controller = createUpdateController({ apply, restart, finish })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     const first = mountIndicator(controller)
     controller.showHeldByCoordinator('2.0.0')
     controller.showAvailable('2.0.1', NOTES)
@@ -138,7 +139,7 @@ describe('shared update offer', () => {
     const error = new Error('stop failed /private/state Errno 5')
     const finish = vi.fn().mockRejectedValueOnce(error).mockResolvedValue(undefined)
     const controller = createUpdateController({ finish })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('2.0.1', NOTES)
     controller.showHeldByCoordinator('2.0.0')
@@ -322,7 +323,7 @@ describe('shared update offer', () => {
       const error = new Error(raw)
       const apply = vi.fn().mockRejectedValueOnce(error).mockResolvedValue(undefined)
       const controller = createUpdateController({ apply })
-      render(() => <ToastHost />)
+      render(() => <ToastHost labels={toastHostLabels()} />)
       mountIndicator(controller)
       controller.showAvailable('2.0.0', NOTES)
       if (route === 'indicator')
@@ -348,7 +349,7 @@ describe('shared update offer', () => {
     async (route) => {
       const open = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined)
       const controller = createUpdateController({ apply: vi.fn() })
-      render(() => <ToastHost openUrl={open} />)
+      render(() => <ToastHost labels={toastHostLabels()} openUrl={open} />)
       mountIndicator(controller)
       controller.showAvailable('2.0.0', NOTES)
       if (route === 'indicator')
@@ -371,7 +372,7 @@ describe('shared update offer', () => {
 
   it('announces once per version even after Later or dismiss, while the indicator stays findable', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('2.0.0', NOTES)
     expect(screen.getAllByRole('button', { name: 'Install now' })).toHaveLength(1)
@@ -400,7 +401,7 @@ describe('shared update offer', () => {
     )
     const restart = vi.fn()
     const controller = createUpdateController({ apply, restart })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('2.0.0', NOTES)
     fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
@@ -430,7 +431,7 @@ describe('shared update offer', () => {
     render(() => (
       <>
         <div id="tabbar" />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
     controller.showAvailable('2.0.0', NOTES)
@@ -459,7 +460,7 @@ describe('shared update offer', () => {
 
   it('says a failed startup-state read out loud, not only in the log (review, .66.1.1)', async () => {
     const controller = createUpdateController()
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
 
     const onFailure = vi.fn()
@@ -496,7 +497,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
   it('names the offered build beside the version it shares with the installed one', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.8.1', COMPARE, NIGHTLY)
 
@@ -507,7 +508,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
   it('names the build on a nightly that also moves the version', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.8.2', COMPARE, NIGHTLY)
 
@@ -517,7 +518,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
   it('renders no link when the backend could not compose a range', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.8.1', '', NIGHTLY)
 
@@ -527,7 +528,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
   it('leaves the stable offer exactly as it was', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('2.0.1', NOTES, {
       channel: 'stable',
@@ -542,7 +543,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
   it('announces a second nightly of the same version as its own build', () => {
     const controller = createUpdateController({ apply: vi.fn() })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.8.1', COMPARE, NIGHTLY)
     fireEvent.click(screen.getByRole('button', { name: 'Later' }))
@@ -586,7 +587,7 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
     ]
     const getState = vi.fn(() => Promise.resolve(readings.shift() ?? { Downloading: false }))
     const controller = createUpdateController({ apply, getState })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.9.0', '')
 
@@ -634,7 +635,7 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
     )
     const getState = vi.fn(() => Promise.resolve({ Downloading: true, Downloaded: 0, Total: 0 }))
     const controller = createUpdateController({ apply, getState })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.9.0', '')
     void controller.apply()
@@ -649,7 +650,7 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
     const apply = vi.fn(() => Promise.reject(new Error('download sha256 mismatch')))
     const getState = vi.fn(() => Promise.resolve(progress(15_000_000, 150_000_000)))
     const controller = createUpdateController({ apply, getState })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountIndicator(controller)
     controller.showAvailable('0.9.0', '')
 
@@ -693,7 +694,7 @@ describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
       about: () => Promise.resolve(ABOUT),
       getState: () => Promise.resolve({ Pending: true, Downloaded: 0, Total: 0 }),
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     controller.showAvailable('0.8.1', NOTES, OFFER)
     fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
     return controller
@@ -707,7 +708,7 @@ describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
       getState: () => Promise.resolve({ Pending: true, Downloaded: 0, Total: 0 }),
       clipboard: { writeText },
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     controller.showAvailable('0.8.1', NOTES, OFFER)
     fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
     await vi.waitFor(() =>
@@ -747,7 +748,7 @@ describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
       about: () => Promise.resolve(ABOUT),
       clipboard: { writeText },
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     controller.showAvailable('0.8.1', NOTES, OFFER)
     fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
     await vi.waitFor(() =>
@@ -768,7 +769,7 @@ describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
       about: () => Promise.resolve(ABOUT),
       clipboard: { writeText: vi.fn() },
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     // An available update, and the held state that asks to be finished: both
     // are outcomes of an update, and neither is a failure to diagnose.
     controller.showAvailable('0.8.1', NOTES, OFFER)
@@ -787,7 +788,7 @@ describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
       getState: () => Promise.reject(new Error('GetUpdateState: no updater')),
       clipboard: { writeText },
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     controller.showAvailable('0.8.1', NOTES, OFFER)
     fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
     await vi.waitFor(() =>

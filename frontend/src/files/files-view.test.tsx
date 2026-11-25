@@ -40,6 +40,7 @@ import { createDownloadFlow } from './download-flow'
 import { createDownloadStore } from './download-store'
 import { downloadResultFixture, fakeDownloadServices, fakeSaver } from './download-fixtures'
 import type { DownloadSurface } from './download-surface'
+import { toastHostLabels } from '../i18n/kit-labels'
 
 /** A clipboard fake: the seam's contract is writeText rejects when the
  *  platform refused — tests that assert failure override it. */
@@ -241,7 +242,7 @@ async function mountApp(
   /* eslint-enable solid/reactivity */
   // A ToastHost so action outcomes (copies, refused reveals) are
   // ASSERTABLE as rendered toasts, the way a user sees them.
-  render(() => <ToastHost />)
+  render(() => <ToastHost labels={toastHostLabels()} />)
   liveHandles.push(handle)
   return { manager, bar, panel, handle, open, originFor, setActiveOrigin, filesStore: filesStore! }
 }

@@ -138,7 +138,9 @@ export function BackupRestoreSection(props: Props) {
       }
     } catch (err) {
       showToast({
-        message: `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('backup.failed', 'Backup failed: {message}', {
+          message: err instanceof Error ? err.message : String(err),
+        }),
         level: 'danger',
       })
     } finally {
@@ -162,7 +164,9 @@ export function BackupRestoreSection(props: Props) {
       if (gen !== fileGen) return
       setState({ preview: null, fileInputResetKey: state.fileInputResetKey + 1, previewing: false })
       showToast({
-        message: `Could not read the backup file: ${readBackupFileSentence(err)}`,
+        message: t('backup.readFailed', 'Could not read the backup file: {reason}', {
+          reason: readBackupFileSentence(err),
+        }),
         level: 'danger',
       })
     }
@@ -195,7 +199,9 @@ export function BackupRestoreSection(props: Props) {
           }
           setState({ preview: null })
           showToast({
-            message: `Could not preview the backup: ${restorePreviewSentence(err)}`,
+            message: t('backup.previewFailed', 'Could not preview the backup: {reason}', {
+              reason: restorePreviewSentence(err),
+            }),
             level: 'danger',
           })
         } finally {
@@ -255,7 +261,7 @@ export function BackupRestoreSection(props: Props) {
           if (saved) setState('contents', saved)
         })
       }
-      showToast({ message: `Restore failed: ${msg}`, level: 'danger' })
+      showToast({ message: t('backup.restoreFailed', 'Restore failed: {message}', { message: msg }), level: 'danger' })
     } finally {
       setState('restoring', false)
     }
@@ -453,20 +459,29 @@ export function BackupRestoreSection(props: Props) {
                   <ul>
                     <Show when={p().omissions.credentialBindingsRemoved > 0}>
                       <li>
-                        {p().omissions.credentialBindingsRemoved} connection credential binding(s)
-                        removed
+                        {t(
+                          'backup.omissions.credentialBindings',
+                          '{count} connection credential binding(s) removed',
+                          { count: p().omissions.credentialBindingsRemoved },
+                        )}
                       </li>
                     </Show>
                     <Show when={p().omissions.groupCredentialBindingsRemoved > 0}>
                       <li>
-                        {p().omissions.groupCredentialBindingsRemoved} group credential binding(s)
-                        removed
+                        {t(
+                          'backup.omissions.groupCredentialBindings',
+                          '{count} group credential binding(s) removed',
+                          { count: p().omissions.groupCredentialBindingsRemoved },
+                        )}
                       </li>
                     </Show>
                     <Show when={p().omissions.groupDefaultKeysOmitted > 0}>
                       <li>
-                        {p().omissions.groupDefaultKeysOmitted} group default key(s) omitted from
-                        backup
+                        {t(
+                          'backup.omissions.groupDefaultKeys',
+                          '{count} group default key(s) omitted from backup',
+                          { count: p().omissions.groupDefaultKeysOmitted },
+                        )}
                       </li>
                     </Show>
                   </ul>

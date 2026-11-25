@@ -3,6 +3,7 @@ import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
 import { readFileSync } from 'node:fs'
 import { ToastHost, showToast, updateToast, dismissToast, clearToasts, toasts } from './toast'
+import { toastHostLabels } from '../i18n/kit-labels'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -71,7 +72,7 @@ describe('showToast', () => {
 
 describe('ToastHost', () => {
   it('renders each toast with its level on the element', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({ level: 'warning', message: 'Passphrase is required.' })
     const toast = container.querySelector('.ui-toast')
     expect(toast?.getAttribute('data-level')).toBe('warning')
@@ -79,7 +80,7 @@ describe('ToastHost', () => {
   })
 
   it('removes a toast from the DOM when its close button is clicked', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({ level: 'danger', message: 'Export failed.' })
     const close = container.querySelector('.ui-toast button') as HTMLButtonElement
     close.click()
@@ -87,7 +88,7 @@ describe('ToastHost', () => {
   })
 
   it('announces politely rather than interrupting', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     const host = container.querySelector('.ui-toast-host')
     expect(host?.getAttribute('aria-live')).toBe('polite')
   })
@@ -143,7 +144,9 @@ describe('showToast with actions and a link', () => {
         return outcome === 'reject' ? Promise.reject(error) : Promise.resolve()
       })
       const reportError = vi.fn()
-      const { container } = render(() => <ToastHost openUrl={open} onOpenUrlError={reportError} />)
+      const { container } = render(() => (
+        <ToastHost labels={toastHostLabels()} openUrl={open} onOpenUrlError={reportError} />
+      ))
       showToast({
         message: 'Update available',
         link: { label: 'Release notes', href: 'https://example.com/notes' },
@@ -166,7 +169,7 @@ describe('showToast with actions and a link', () => {
   )
 
   it('renders the link as an anchor to where it points', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({
       message: 'nocx 0.7.0 is available',
       link: { label: 'Release notes', href: 'https://example.com/notes' },
@@ -180,7 +183,7 @@ describe('showToast with actions and a link', () => {
   })
 
   it('renders actions as kit buttons that reach the caller', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     const install = vi.fn()
     const later = vi.fn()
     showToast({
@@ -198,7 +201,7 @@ describe('showToast with actions and a link', () => {
   })
 
   it('marks the action a person is meant to press as the toast primary', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({
       message: 'nocx 0.7.0 is available',
       actions: [
@@ -211,7 +214,7 @@ describe('showToast with actions and a link', () => {
   })
 
   it('closes the toast when an action runs, so no action is its own dismiss button too', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({
       message: 'nocx 0.7.0 is available',
       actions: [{ label: 'Later', onClick: () => {} }],
@@ -234,7 +237,7 @@ describe('a toast that reports a measure', () => {
   })
 
   it('draws the kit bar with the caller’s figure beside it', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({ message: 'Downloading nocx 0.9.0…', progress: measure(0.42, '42% · 63 of 150 MB') })
     const bar = container.querySelector('.ui-progress-bar')
     expect(bar).not.toBeNull()
@@ -248,7 +251,7 @@ describe('a toast that reports a measure', () => {
   })
 
   it('moves the same bar when the report is updated in place', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     const id = showToast({ message: 'Downloading…', progress: measure(0.1, '10%') })
     const bar = container.querySelector('.ui-progress-bar')
     expect(updateToast(id, { message: 'Downloading…', progress: measure(0.75, '75%') })).toBe(true)
@@ -263,7 +266,7 @@ describe('a toast that reports a measure', () => {
   })
 
   it('reports false for a toast that is gone rather than raising a new one', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     const id = showToast({ message: 'Downloading…' })
     dismissToast(id)
     expect(updateToast(id, { message: 'Downloading…', progress: measure(0.5, '50%') })).toBe(false)
@@ -271,7 +274,7 @@ describe('a toast that reports a measure', () => {
   })
 
   it('renders no bar for a toast that is only a sentence', () => {
-    const { container } = render(() => <ToastHost />)
+    const { container } = render(() => <ToastHost labels={toastHostLabels()} />)
     showToast({ message: 'Can not reach the release server.' })
     expect(container.querySelector('.ui-progress-bar')).toBeNull()
   })

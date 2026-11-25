@@ -93,11 +93,13 @@ const SECTIONS = [
   'notifications',
 ] as const
 
-// The four sentinel-zero sentences, with their settings keys.
+// The four sentinel-zero sentences, with their settings keys. Go mints a zero
+// label only where a declaration carries ZeroLabel, so the diskCeilingMiB
+// setting has none and is not listed.
 const ZERO_LABEL_KEYS = [
   'settings.history.retentionDays.zeroLabel',
   'settings.worktrees.idleDays.zeroLabel',
-  'settings.history.diskCeilingMiB.zeroLabel',
+  'settings.sessions.idleDays.zeroLabel',
   'settings.terminal.scrollbackLines.zeroLabel',
 ] as const
 
@@ -105,20 +107,20 @@ describe('catalogue parity with the Go-minted dynamic families', () => {
   it('en and ru carry every routing pair, centre toggle and the debounce', () => {
     for (const kind of ROUTE_KINDS) {
       for (const channel of ROUTE_CHANNELS) {
-        expect(en[`notifications.route.${kind}.${channel}`]).toBeDefined()
-        expect(ru[`notifications.route.${kind}.${channel}`]).toBeDefined()
-        expect(en[`notifications.route.${kind}.${channel}.description`]).toBeDefined()
-        expect(ru[`notifications.route.${kind}.${channel}.description`]).toBeDefined()
+        expect(en[`settings.notifications.route.${kind}.${channel}.label`]).toBeDefined()
+        expect(ru[`settings.notifications.route.${kind}.${channel}.label`]).toBeDefined()
+        expect(en[`settings.notifications.route.${kind}.${channel}.description`]).toBeDefined()
+        expect(ru[`settings.notifications.route.${kind}.${channel}.description`]).toBeDefined()
       }
-      expect(en[`notifications.centre.${kind}`]).toBeDefined()
-      expect(ru[`notifications.centre.${kind}`]).toBeDefined()
-      expect(en[`notifications.centre.${kind}.description`]).toBeDefined()
-      expect(ru[`notifications.centre.${kind}.description`]).toBeDefined()
+      expect(en[`settings.notifications.centre.${kind}.label`]).toBeDefined()
+      expect(ru[`settings.notifications.centre.${kind}.label`]).toBeDefined()
+      expect(en[`settings.notifications.centre.${kind}.description`]).toBeDefined()
+      expect(ru[`settings.notifications.centre.${kind}.description`]).toBeDefined()
     }
-    expect(en['notifications.debounceSeconds.label']).toBeDefined()
-    expect(ru['notifications.debounceSeconds.label']).toBeDefined()
-    expect(en['notifications.debounceSeconds.description']).toBeDefined()
-    expect(ru['notifications.debounceSeconds.description']).toBeDefined()
+    expect(en['settings.notifications.debounceSeconds.label']).toBeDefined()
+    expect(ru['settings.notifications.debounceSeconds.label']).toBeDefined()
+    expect(en['settings.notifications.debounceSeconds.description']).toBeDefined()
+    expect(ru['settings.notifications.debounceSeconds.description']).toBeDefined()
   })
 
   it('ru carries every section title and zero sentence, en too', () => {
@@ -153,9 +155,9 @@ describe('catalogue parity with the Go-minted dynamic families', () => {
 
   it('t() resolves the routing label and section under ru', () => {
     setActiveLocale('ru')
-    expect(t('notifications.route.blockFinished.toast', 'Command finished → In-app toast')).toBe(
-      'Команда завершена → Тост в приложении',
-    )
+    expect(
+      t('settings.notifications.route.blockFinished.toast.label', 'Command finished → In-app toast'),
+    ).toBe('Команда завершена → Тост в приложении')
     expect(t('settings.section.history', 'History')).toBe('История')
     expect(t('settings.history.retentionDays.zeroLabel', 'Never switched off automatically')).toBe(
       'Не отключать автоматически',

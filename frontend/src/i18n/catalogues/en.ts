@@ -40,6 +40,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.worktrees.idleDays.label': 'Remove unused worker checkouts after',
   'settings.worktrees.idleDays.description':
     'A worker checkout nocx created that nothing has used for this long is removed by the daily sweep. Only the checkout goes — its branch and every commit on it stay — and one holding uncommitted work is never removed.',
+  'settings.sessions.idleDays.label': 'End unattended sessions after',
+  'settings.sessions.idleDays.description':
+    'Ends a session after no nocx window has been attached for this long, even if a program is running. A day is 24 hours. Applies only to newly opened sessions.',
   'settings.history.retentionDays.label': 'Keep history for',
   'settings.history.retentionDays.description':
     "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space.",
@@ -1046,88 +1049,89 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'pw.cancel': 'Cancel',
 
   // ── Go-minted, no call site: sections, sentinel-zero sentences and the notifications routing family (internal/settings, internal/notify, internal/app) ──
-  'notifications.route.blockFinished.banner': 'Command finished → OS banner',
-  'notifications.route.blockFinished.banner.description':
-    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.blockFinished.toast': 'Command finished → In-app toast',
-  'notifications.route.blockFinished.toast.description':
-    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.blockFinished': 'Command finished → Центр уведомлений',
-  'notifications.centre.blockFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.sessionEnded.banner': 'Session ended → OS banner',
-  'notifications.route.sessionEnded.banner.description':
-    "nocx's own session registry recorded that a session ended. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.sessionEnded.toast': 'Session ended → In-app toast',
-  'notifications.route.sessionEnded.toast.description':
-    "nocx's own session registry recorded that a session ended. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.sessionEnded': 'Session ended → Центр уведомлений',
-  'notifications.centre.sessionEnded.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.transferFinished.banner': 'File transfer finished → OS banner',
-  'notifications.route.transferFinished.banner.description':
-    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.transferFinished.toast': 'File transfer finished → In-app toast',
-  'notifications.route.transferFinished.toast.description':
-    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.transferFinished': 'File transfer finished → Центр уведомлений',
-  'notifications.centre.transferFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.programNotify.banner': 'Program notification request → OS banner',
-  'notifications.route.programNotify.banner.description':
-    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.programNotify.toast': 'Program notification request → In-app toast',
-  'notifications.route.programNotify.toast.description':
-    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.programNotify': 'Program notification request → Центр уведомлений',
-  'notifications.centre.programNotify.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.bell.banner': 'Terminal bell → OS banner',
-  'notifications.route.bell.banner.description':
-    'A program printed BEL. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.bell.toast': 'Terminal bell → In-app toast',
-  'notifications.route.bell.toast.description':
-    'A program printed BEL. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.bell': 'Terminal bell → Центр уведомлений',
-  'notifications.centre.bell.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.coordinatorStalled.banner':
+  'settings.notifications.route.blockFinished.banner.label': 'Command finished → OS banner',
+  'settings.notifications.route.blockFinished.banner.description':
+    "nocx's own block ledger recorded that a command finished. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.blockFinished.toast.label': 'Command finished → In-app toast',
+  'settings.notifications.route.blockFinished.toast.description':
+    "nocx's own block ledger recorded that a command finished. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.sessionEnded.banner.label': 'Session ended → OS banner',
+  'settings.notifications.route.sessionEnded.banner.description':
+    "nocx's own session registry recorded that a session ended. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.sessionEnded.toast.label': 'Session ended → In-app toast',
+  'settings.notifications.route.sessionEnded.toast.description':
+    "nocx's own session registry recorded that a session ended. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.transferFinished.banner.label': 'File transfer finished → OS banner',
+  'settings.notifications.route.transferFinished.banner.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.transferFinished.toast.label': 'File transfer finished → In-app toast',
+  'settings.notifications.route.transferFinished.toast.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.programNotify.banner.label': 'Program notification request → OS banner',
+  'settings.notifications.route.programNotify.banner.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.programNotify.toast.label': 'Program notification request → In-app toast',
+  'settings.notifications.route.programNotify.toast.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.bell.banner.label': 'Terminal bell → OS banner',
+  'settings.notifications.route.bell.banner.description':
+    'A program printed BEL. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.bell.toast.label': 'Terminal bell → In-app toast',
+  'settings.notifications.route.bell.toast.description':
+    'A program printed BEL. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.coordinatorStalled.banner.label':
     'A coordinator is not reading its workers → OS banner',
-  'notifications.route.coordinatorStalled.banner.description':
-    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.coordinatorStalled.toast':
+  'settings.notifications.route.coordinatorStalled.banner.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.coordinatorStalled.toast.label':
     'A coordinator is not reading its workers → In-app toast',
-  'notifications.route.coordinatorStalled.toast.description':
-    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.coordinatorStalled':
-    'A coordinator is not reading its workers → Центр уведомлений',
-  'notifications.centre.coordinatorStalled.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.paneWorkFinished.banner': 'Work seems to have finished → OS banner',
-  'notifications.route.paneWorkFinished.banner.description':
-    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.paneWorkFinished.toast': 'Work seems to have finished → In-app toast',
-  'notifications.route.paneWorkFinished.toast.description':
-    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.paneWorkFinished': 'Work seems to have finished → Центр уведомлений',
-  'notifications.centre.paneWorkFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.debounceSeconds.label': 'Collapse repeats for',
-  'notifications.debounceSeconds.description':
+  'settings.notifications.route.coordinatorStalled.toast.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.paneWorkFinished.banner.label': 'Work seems to have finished → OS banner',
+  'settings.notifications.route.paneWorkFinished.banner.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.paneWorkFinished.toast.label': 'Work seems to have finished → In-app toast',
+  'settings.notifications.route.paneWorkFinished.toast.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.centre.blockFinished.label': 'Command finished → Notification centre',
+  'settings.notifications.centre.blockFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.sessionEnded.label': 'Session ended → Notification centre',
+  'settings.notifications.centre.sessionEnded.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.transferFinished.label': 'File transfer finished → Notification centre',
+  'settings.notifications.centre.transferFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.programNotify.label': 'Program notification request → Notification centre',
+  'settings.notifications.centre.programNotify.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.bell.label': 'Terminal bell → Notification centre',
+  'settings.notifications.centre.bell.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.coordinatorStalled.label':
+    'A coordinator is not reading its workers → Notification centre',
+  'settings.notifications.centre.coordinatorStalled.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.paneWorkFinished.label': 'Work seems to have finished → Notification centre',
+  'settings.notifications.centre.paneWorkFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.debounceSeconds.label': 'Collapse repeats for',
+  'settings.notifications.debounceSeconds.description':
     'After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.',
   'settings.section.answers': 'Answers',
   'settings.section.clipboard': 'Clipboard',
   'settings.section.history': 'History',
   'settings.section.instructions': 'Instructions',
   'settings.section.interface': 'Interface',
+  'settings.section.notifications': 'Notifications',
   'settings.section.pets': 'Pets',
+  'settings.section.sessions': 'Sessions',
   'settings.section.terminal': 'Terminal',
   'settings.section.updates': 'Updates',
   'settings.section.worktrees': 'Worktrees',
-  'settings.section.notifications': 'Notifications',
   'settings.history.retentionDays.zeroLabel': 'Never switched off automatically',
   'settings.worktrees.idleDays.zeroLabel': 'Never removed automatically',
-  'settings.history.diskCeilingMiB.zeroLabel': 'Kept until the size limit is reached',
+  'settings.sessions.idleDays.zeroLabel': 'Never end unattended sessions',
   'settings.terminal.scrollbackLines.zeroLabel': 'No scrollback — only the current screen',
 
   // ── API workbench (frontend/src/api/*) ──

@@ -2169,4 +2169,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
   'terminal.font.loadFailed': 'Nordwand Mono could not be loaded. The current font is unchanged.',
   'testSupport.hello.greeting': 'Hello, {name}!',
+  'api.timing.waiting': 'waiting',
+  'api.timing.download': 'download',
+  'api.timing.total': 'total',
 }

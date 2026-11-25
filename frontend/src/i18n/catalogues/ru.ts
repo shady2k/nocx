@@ -1963,4 +1963,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
   'terminal.font.loadFailed': 'Не удалось загрузить Nordwand Mono. Текущий шрифт не изменён.',
   'testSupport.hello.greeting': 'Привет, {name}!',
+  'api.timing.waiting': 'ожидание',
+  'api.timing.download': 'загрузка',
+  'api.timing.total': 'всего',
 }

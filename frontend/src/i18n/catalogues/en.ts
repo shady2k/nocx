@@ -2213,4 +2213,21 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'checkouts.unavailable.recordWrites':
     'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.',
   'checkouts.unavailable.unknown': 'The sweep cannot run, and this build does not know why.',
+  // ── Tab strip chrome (tab-strip.tsx) ────────────────────────────────────
+  'tabs.menu.rename': 'Rename…',
+  'tabs.menu.close': 'Close',
+  'tabs.menu.quickConnect': 'Quick connect…',
+  'tabs.menu.insertSecret': 'Insert a secret…',
+  'tabs.menu.snippets': 'Snippets…',
+  'tabs.menu.newNote': 'New note',
+  'tabs.menu.newWorkspace': 'New workspace…',
+  'tabs.newTab.aria': 'New tab',
+  'tabs.more.aria': 'More',
+  'tabs.showAll.aria': 'Show all workspaces',
+  'tabs.filter.placeholder': 'Filter tabs…',
+  'tabs.filter.aria': 'Filter tabs',
+  'tabs.closeWorkspace.aria': 'Close workspace',
+  'tabs.closeWorkspace.named': 'Close workspace {name}',
+  'tabs.workspace.title': 'Workspace: {name}',
+  'tabs.resizeStrip.aria': 'Resize the tab strip',
 }

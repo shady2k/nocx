@@ -2230,4 +2230,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'tabs.closeWorkspace.named': 'Close workspace {name}',
   'tabs.workspace.title': 'Workspace: {name}',
   'tabs.resizeStrip.aria': 'Resize the tab strip',
+  // ── Grant panel chrome (grant.ts) ───────────────────────────────────────
+  'grant.panel.aria': 'marked for the question',
+  'grant.dismissAll': 'Dismiss all',
+  'grant.dismissMark.aria': 'Dismiss this mark',
 }

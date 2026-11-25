@@ -3,10 +3,50 @@
 // behaviours the design names as its own criteria: the fallback order
 // (active → en → call-site → key), the reactivity of the locale signal, and
 // Russian plural resolution through Intl.PluralRules.
-import { describe, it, expect, afterEach } from 'vitest'
+//
+// The catalogues are replaced by fixtures this file defines, so the mechanism
+// is tested on keys it owns. The real catalogues carry no test keys: a key
+// absent from ru is a fallback case, and a fixture key keeps that case stable
+// whatever the product catalogues later hold.
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { createRenderEffect, createRoot } from 'solid-js'
 import { t, tPlural, formatDateTime, locale, setActiveLocale, pluralCategory } from './locale-model'
 import { bootstrapLocale, reconcileLocaleFromGo, STORAGE_KEY } from './bootstrap'
+
+vi.mock('./catalogues/en', () => ({
+  en: {
+    // A plain string in both catalogues.
+    'fixture.greeting': 'Welcome back',
+    // Identical in both: an English wording approved as-is still resolves.
+    'fixture.sameInBoth': 'Session',
+    // A plural object in both catalogues.
+    'fixture.commandCount': {
+      one: '{count} command',
+      other: '{count} commands',
+    },
+    // Present only in en: the active locale must fall back to it.
+    'fixture.untranslated': 'This key has no Russian translation yet',
+    // Present only in en and a plural: the fallback path must still fill {count}.
+    'fixture.onlyEnglishPlural': {
+      one: '{count} English-only thing',
+      other: '{count} English-only things',
+    },
+  },
+}))
+
+vi.mock('./catalogues/ru', () => ({
+  ru: {
+    'fixture.greeting': 'С возвращением',
+    // Identical to en: the Russian entry is the English wording, unchanged.
+    'fixture.sameInBoth': 'Session',
+    'fixture.commandCount': {
+      one: '{count} команда',
+      few: '{count} команды',
+      many: '{count} команд',
+      other: '{count} команды',
+    },
+  },
+}))
 
 afterEach(() => {
   // The locale signal is module state; leave it English so one test's switch
@@ -20,22 +60,25 @@ afterEach(() => {
 describe('t resolution order', () => {
   it('returns the active catalogue value', () => {
     setActiveLocale('ru')
-    expect(t('i18n.sample.greeting')).toBe('С возвращением')
+    expect(t('fixture.greeting')).toBe('С возвращением')
+  })
+
+  it('returns an entry whose Russian value is the English wording unchanged', () => {
+    setActiveLocale('ru')
+    expect(t('fixture.sameInBoth')).toBe('Session')
   })
 
   it('falls back to the English catalogue when the active locale misses the key', () => {
-    // The key's ru value IS the English sentence: its wording was never
-    // approved as Russian, so the data carries the visible fallback.
     setActiveLocale('ru')
-    expect(t('i18n.sample.untranslated')).toBe('This key has no Russian translation yet')
+    expect(t('fixture.untranslated')).toBe('This key has no Russian translation yet')
   })
 
   it('falls back to the call-site literal when neither catalogue knows the key', () => {
-    expect(t('i18n.sample.nowhere', 'Visible English fallback')).toBe('Visible English fallback')
+    expect(t('fixture.nowhere', 'Visible English fallback')).toBe('Visible English fallback')
   })
 
   it('returns the key itself as the last resort — never blank', () => {
-    expect(t('i18n.sample.nowhere')).toBe('i18n.sample.nowhere')
+    expect(t('fixture.nowhere')).toBe('fixture.nowhere')
   })
 })
 
@@ -46,7 +89,7 @@ describe('locale signal reactivity', () => {
     const resolved: string[] = []
     const dispose = createRoot((dispose) => {
       createRenderEffect(() => {
-        resolved.push(t('i18n.sample.greeting'))
+        resolved.push(t('fixture.greeting'))
       })
       return dispose
     })
@@ -68,16 +111,16 @@ describe('locale signal reactivity', () => {
 describe('plural resolution', () => {
   it('picks one/few/many for ru counts 1/2/5', () => {
     setActiveLocale('ru')
-    expect(tPlural('i18n.sample.commandCount', 1)).toBe('1 команда')
-    expect(tPlural('i18n.sample.commandCount', 2)).toBe('2 команды')
-    expect(tPlural('i18n.sample.commandCount', 5)).toBe('5 команд')
+    expect(tPlural('fixture.commandCount', 1)).toBe('1 команда')
+    expect(tPlural('fixture.commandCount', 2)).toBe('2 команды')
+    expect(tPlural('fixture.commandCount', 5)).toBe('5 команд')
   })
 
   it('uses the same entry for English counts through one/other', () => {
     setActiveLocale('en')
-    expect(tPlural('i18n.sample.commandCount', 1)).toBe('1 command')
-    expect(tPlural('i18n.sample.commandCount', 2)).toBe('2 commands')
-    expect(tPlural('i18n.sample.commandCount', 5)).toBe('5 commands')
+    expect(tPlural('fixture.commandCount', 1)).toBe('1 command')
+    expect(tPlural('fixture.commandCount', 2)).toBe('2 commands')
+    expect(tPlural('fixture.commandCount', 5)).toBe('5 commands')
   })
 
   it('exposes the category the rules give a count', () => {
@@ -89,7 +132,7 @@ describe('plural resolution', () => {
 
   it('falls back to the call-site literal when the key is nowhere', () => {
     setActiveLocale('ru')
-    expect(tPlural('i18n.sample.nowhere', 3, '3 items')).toBe('3 items')
+    expect(tPlural('fixture.nowhere', 3, '3 items')).toBe('3 items')
   })
 
   // The fallback is still a sentence with a number in it, and `{count}` is
@@ -98,14 +141,14 @@ describe('plural resolution', () => {
   // placeholder at a person: "{count} уведомлений".
   it('interpolates {count} on the fallback path too', () => {
     setActiveLocale('ru')
-    expect(tPlural('i18n.sample.nowhere', 3, '{count} items')).toBe('3 items')
+    expect(tPlural('fixture.nowhere', 3, '{count} items')).toBe('3 items')
   })
 
   it('interpolates {count} from the English catalogue when the active locale misses the key', () => {
     // A key minted in en and not yet translated arrives through the English
     // entry, whose own {count} must be filled as well.
     setActiveLocale('ru')
-    expect(tPlural('i18n.sample.onlyEnglishPlural', 4, 'irrelevant')).toBe('4 English-only things')
+    expect(tPlural('fixture.onlyEnglishPlural', 4, 'irrelevant')).toBe('4 English-only things')
   })
 })
 

@@ -65,7 +65,6 @@ import {
   type OutputRecording,
   type OutputRecordingSource,
 } from './status'
-import { t } from '../i18n/locale-model'
 
 export interface IntegrationNoticeProps {
   /** The degraded fact. */

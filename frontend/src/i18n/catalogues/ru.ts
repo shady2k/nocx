@@ -2100,12 +2100,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'git.refusal.nothingToAmend': 'В этой ветке пока нет коммита для исправления.',
   'git.refusal.reason': 'Изменение не выполнено ({reason}).',
   'git.refusal.repositoryGone': 'Изменение не выполнено — репозиторий этого представления больше недоступен.',
-  'i18n.sample.onlyEnglishPlural': {
-    one: '{count} текст только на английском',
-    few: '{count} текста только на английском',
-    many: '{count} текстов только на английском',
-    other: '{count} текста только на английском',
-  },
   'kit.blockReceipt.aria': 'сохранить обнаруженный секрет',
   'kit.blockReceipt.dismiss': 'Отклонить',
   'kit.blockReceipt.dismissAria': 'не сохранять этот {kind}',

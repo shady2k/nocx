@@ -441,16 +441,27 @@ Decided in ADR-727g63tr, which holds the decision in full; this section adds wha
 
 **Packages and imports**, extending §5.1.1:
 
-| Where                                         | What                                                             | May import                                                                | May never import                                 |
-| --------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------ |
-| `internal/hostmode/`                          | The host record: mode by host-key fingerprint, beside consent    | `log`, the settings store                                                 | `internal/ssh`, `transport`, `app`               |
-| `internal/farhelper/`                         | Per `connectionId`: decide, dial, keep, redial, publish the axis | `hostconn`, `helper/client`, `helper/proto`, `hostmode`, `consent`, `log` | `transport`, `app`, `panedriver`, `internal/ssh` |
-| `internal/portsprobe/`                        | Ladder, parser and result types, execution injected              | `log`                                                                     | `internal/ssh`, `x/crypto`, `helper/*`           |
-| `internal/filesystem/helperfs/`               | `filesystem.Provider` over the far helper's `fs`                 | `filesystem`, `helper/client`, `helper/proto`                             | `internal/ssh`, `transport`                      |
-| `internal/git/helper/`                        | Git consumes the far helper lease; never owns reachability       | `git`, `git/hostsvc`, `farhelper`, `helper/client`                        | `internal/ssh`, `transport`, `app`               |
-| `internal/helper/host` services `fs`, `ports` | Host-local file and ports services in the far helper             | `portsprobe`, `os`                                                        | `internal/ssh`, `x/crypto`                       |
+| Where                                  | What                                                                       | May import                                                                | May never import                                                                      |
+| -------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `internal/hostmode/`                   | The host record: mode by host-key fingerprint, beside consent              | `log`, the settings store                                                 | `internal/ssh`, `transport`, `app`                                                    |
+| `internal/farhelper/`                  | Per `connectionId`: decide, dial, keep, redial, publish the axis           | `hostconn`, `helper/client`, `helper/proto`, `hostmode`, `consent`, `log` | `transport`, `app`, `panedriver`, `internal/ssh`                                      |
+| `internal/portsprobe/`                 | Ladder, parser and result types, execution injected                        | `log`                                                                     | `internal/ssh`, `x/crypto`, `helper/*`                                                |
+| `internal/filesystem/helperfs/`        | `filesystem.Provider` over the far helper's `fs`                           | `filesystem`, `helper/client`, `helper/proto`                             | `internal/ssh`, `transport`                                                           |
+| `internal/git/helper/`                 | Git consumes the far helper lease; never owns reachability                 | `git`, `git/hostsvc`, `farhelper`, `helper/client`                        | `internal/ssh`, `transport`, `app`                                                    |
+| `internal/filesystem/hostsvc/`         | The far helper's `fs` service: `root`, `stat`, `list`, `canonical`, `read` | `filesystem`, `filesystem/local`, `helper/proto`, `helper/host`, `os`     | `farhelper`, `internal/ssh`, `x/crypto`, `hostconn`, `helper/client`, `helper/deploy` |
+| `internal/helper/host` service `ports` | Host-local ports service in the far helper                                 | `portsprobe`, `os`                                                        | `internal/ssh`, `x/crypto`                                                            |
 
 `panedriver` reads the axis through an interface it declares; `internal/app` only wires.
+
+**The plan's reversible clarifications (ALX-1756 §0), and where the read half stands (`nocx-oalo1.12.2`).** These were taken while the `nocx-oalo1.12` plan was written, and none of them changes ADR-727g63tr's decision; each is reversible without a new record while no generation ships them.
+
+- The helper-side `fs` service lives in `internal/filesystem/hostsvc/`, beside the provider it maps, and holds a `*local.Provider` injected by the composition root — the same division `git/hostsvc.New(factory)` keeps. It imports neither `farhelper` nor the connection stack; C30's dependency walk is the fence.
+- `fs` has `root` and `inventory` besides the file ops. `root` answers the navigation root: an optional caller-verified path is re-checked at call time, and an unusable one falls back to the account's home, inferred and labelled. `inventory` reports the temporary write sessions the helper still holds — a file it could not delete included — so a restarted helper's leftovers are visible rather than silently left.
+- A write session's `commit` takes an optional `expect`, and one member is `absent: true`, "the target must not exist", beside the `{size, mtimeNs, sha256}` form. Upload is the same primitive without `expect`.
+- `identity` (dev:ino) and `version` (`{size, mtimeNs, sha256}`) are different claims: a range read answers the first, a whole-file read the second, and a write's expectation speaks the second. A caller tells an append from a replacement by the first and a change from a quiet file by the second.
+- The coordinator-side helper axis is a neutral type declared in `internal/filesystem` (`HelperAxis`) and reported by the panels' providers. `internal/filesystem` imports no `farhelper`: the axis is a VALUE about a connection, and the package that decides a connection stays the only one that dials it.
+
+The read half — `root`, `stat`, `list`, `canonical` and read with a version or an identity — lands with `nocx-oalo1.12.2`; the write session, `inventory` and `watch` land with their own leaves.
 
 **The checks, and where the hosted shell's carrier stands** (`nocx-oalo1.6.4`). C23 and C24 are
 the connection-owner ratchet's `helper-decider` and `panel-host-path` rules

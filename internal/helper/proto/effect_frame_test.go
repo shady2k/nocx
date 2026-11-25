@@ -161,12 +161,12 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the connection table (nocx-oalo1.6.2): the `connections` op, and the
-// `generation` field on every connection observation, which is a field a frozen
-// shape cannot gain without a fence.
+// moved — the `fs` service (nocx-oalo1.12.2), whose five read ops a 30-helper
+// answers `unknown_op` to, which a coordinator must read as "older helper"
+// rather than as a host that refuses files.
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "30" {
-		t.Fatalf("helper protocol version = %q, want 30", Version)
+	if Version != "31" {
+		t.Fatalf("helper protocol version = %q, want 31", Version)
 	}
 }
 

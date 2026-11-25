@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.root.params.schema.json",
+  "title": "HelperFSRootParams",
+  "description": "Params of the helper fs service's root op. The navigation root is the provider's warm start: a path the caller verified (an OSC 7 working directory) is re-checked at call time and falls back to the account's home directory, labelled inferred, when it is gone. The path is optional because a caller with nothing verified has nothing to state; a path that is present but unusable is not an error, it is the inferred case with its reason.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "description": "The caller's verified working directory, if it has one. Absolute and clean, as the provider's path syntax requires; a path this host cannot use yields the labelled home root rather than a refusal.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

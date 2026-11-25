@@ -1,6 +1,7 @@
 package filesystem_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,35 +45,50 @@ var filesystemPackages = []string{"./internal/filesystem", "./internal/filesyste
 // constraint that does not hold and a dependency of a dependency are one
 // question to the compiler and three different ones to a grep.
 //
-// Both builds are checked. The untagged one is what `make helpers` produces
-// and what is deployed to somebody else's host; the nocx_local_ssh one is the
-// local helper, where the client stack exists — and still must not be reached
-// from a filesystem provider, because the provider is the half the far helper
-// links too.
+// Four builds are checked, and the GOOS axis is the half this test was missing
+// (review of nocx-oalo1.12.1, ALX-1761). The two TAG variants are the deployed
+// helper and the local one; the two PLATFORMS are the two this product ships
+// on, because a provider is per-platform: mounts_darwin.go and its imports are
+// invisible to a Linux run, so a Darwin-only reach into the connection stack
+// passed the gate while being the artifact that reaches somebody else's host.
+// CGO_ENABLED=0 pins the analysis to what the shipped helper can be built
+// with — the release cross-compile has no macOS SDK on Linux — and keeps the
+// answer the same on either host, which is what makes the axis meaningful on
+// CI rather than a statement about the runner.
 func TestFilesystemDependencyGraphReachesNoConnectionStack(t *testing.T) {
-	for _, tc := range []struct {
+	platforms := []struct{ name, goos string }{
+		{name: "linux", goos: "linux"},
+		{name: "darwin", goos: "darwin"},
+	}
+	tagsets := []struct {
 		name string
 		tags []string
 	}{
 		{name: "untagged"},
 		{name: "nocx_local_ssh", tags: []string{"nocx_local_ssh"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, pkg := range filesystemPackages {
-				deps := packageDependencies(t, pkg, tc.tags...)
-				for _, forbidden := range forbiddenPackages {
-					if deps[forbidden] {
-						t.Errorf("%s reaches %s: a filesystem provider is reused by the far helper and must link no connection stack", pkg, forbidden)
+	}
+	for _, platform := range platforms {
+		for _, tc := range tagsets {
+			t.Run(platform.name+"/"+tc.name, func(t *testing.T) {
+				for _, pkg := range filesystemPackages {
+					deps := packageDependencies(t, pkg, platform.goos, tc.tags...)
+					for _, forbidden := range forbiddenPackages {
+						if deps[forbidden] {
+							t.Errorf("%s on %s reaches %s: a filesystem provider is reused by the far helper and must link no connection stack", pkg, platform.goos, forbidden)
+						}
 					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
 // packageDependencies lists the packages `go list -deps <pkg>` reaches under
-// the given build tags.
-func packageDependencies(t *testing.T, pkg string, tags ...string) map[string]bool {
+// the given GOOS and build tags. GOOS is stated on every call rather than
+// inherited, so "which platform did this run measure" is visible in the test
+// name that failed; CGO_ENABLED=0 matches the release build and keeps the
+// cross-platform answer independent of the host's toolchain.
+func packageDependencies(t *testing.T, pkg, goos string, tags ...string) map[string]bool {
 	t.Helper()
 	args := []string{"list", "-deps"}
 	if len(tags) > 0 {
@@ -81,9 +97,10 @@ func packageDependencies(t *testing.T, pkg string, tags ...string) map[string]bo
 	args = append(args, pkg)
 	cmd := exec.Command("go", args...) // #nosec G204 — "go" and every argument are literals assembled here
 	cmd.Dir = moduleRoot(t)
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list -deps %s: %v\n%s", pkg, err, output)
+		t.Fatalf("go list -deps %s (GOOS=%s): %v\n%s", pkg, goos, err, output)
 	}
 	deps := make(map[string]bool)
 	for _, dep := range strings.Fields(string(output)) {

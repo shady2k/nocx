@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.stat.params.schema.json",
+  "title": "HelperFSStatParams",
+  "description": "Params of the helper fs service's stat op: one path to classify. Path syntax belongs to the provider; a relative or unclean path is refused with `invalid-path` rather than silently rewritten.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "description": "The absolute, clean path to classify. Symlinks are followed, so the answer describes the object the link would open or expand.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

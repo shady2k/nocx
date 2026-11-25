@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.list.schema.json",
+  "title": "HelperFSListResult",
+  "description": "Result of the helper fs service's list op: one page of one directory, with the facts a client needs to paginate and to poll. Entries is never null — an empty directory is [] — because a decoder must not have to tell 'no rows' from 'no answer'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "canonical", "entries", "offset", "total", "hasMore", "rev"],
+  "properties": {
+    "path": {
+      "description": "The lexical path the caller asked about, echoed.",
+      "type": "string"
+    },
+    "canonical": {
+      "description": "The provider-canonical identity of the directory actually listed. Returned for every successful list, not only for symlinks, so the root and every ordinary ancestor speak one identity vocabulary.",
+      "type": "string"
+    },
+    "entries": {
+      "description": "The page's rows, in the provider's order. Never null.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    },
+    "offset": {
+      "description": "The offset this page answered, echoing the request.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "total": {
+      "description": "How many entries the complete directory holds, not how many this page carries.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "hasMore": {
+      "description": "Whether the complete listing holds entries after this page.",
+      "type": "boolean"
+    },
+    "rev": {
+      "description": "The digest of the WHOLE, ordered directory (filesystem.ComputeRev): every entry's name, size, mtime, mode, kind, link target and link kind, plus the canonical identity of the directory itself. Two polls compare digests instead of re-reading every row, and a changed digest means the client re-lists once and replaces the page atomically.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "entry": {
+      "description": "One row. Path is LEXICAL — the absolute spelling joined onto the directory the caller asked about, symlinks unresolved — so the tree a client draws keeps the shape it requested; Canonical describes the directory actually read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "kind", "size", "mtimeNs", "mode"],
+      "properties": {
+        "name": {
+          "description": "The entry's name, never a path.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The entry's lexical absolute path: the caller's directory spelling plus this name.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The kind of object, in internal/filesystem.Kind's own closed vocabulary: `regular`, `dir`, `symlink`, `other` (a FIFO, socket or device) or `unreadable` (the entry exists but its metadata could not be read).",
+          "type": "string",
+          "enum": ["regular", "dir", "symlink", "other", "unreadable"]
+        },
+        "linkTarget": {
+          "description": "Present exactly for a symlink: the target as the link states it, which may be relative to the link's directory.",
+          "type": "string"
+        },
+        "linkKind": {
+          "description": "Present exactly for a symlink: what the target IS. `other` means the link is genuinely broken, `unreadable` means the target exists but could not be classified — different facts a person acts on differently.",
+          "type": "string",
+          "enum": ["regular", "dir", "symlink", "other", "unreadable"]
+        },
+        "size": {
+          "description": "The object's size in bytes. Zero is a real size.",
+          "type": "integer"
+        },
+        "mtimeNs": {
+          "description": "Modification time in Unix nanoseconds.",
+          "type": "integer"
+        },
+        "mode": {
+          "description": "The object's os.FileMode bits.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

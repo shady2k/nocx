@@ -408,4 +408,20 @@ package proto
 // not derivable on the receiving side (a `reconnecting` overtaken by
 // `connected` reads as one `connected`), which is why the field has to exist at
 // all.
-const Version = "30"
+//
+// This is 31 rather than 30 because the wire grew a SERVICE (nocx-oalo1.12.2):
+// `fs`, whose five read ops — `root`, `stat`, `list`, `canonical` and `read` —
+// are how a coordinator reads a host's filesystem through this helper instead
+// of opening SFTP on the connection itself (ADR-727g63tr, design §5.10). Every
+// op is one a 30-helper answers `unknown_op` to, and that is the half that
+// must not be misread: the refusal means "this machine's helper is older than
+// this app" — the same sentence every generation boundary states — and not
+// "this host refuses files", which is what a person would be told by a panel
+// that read the empty answer as a permission problem. The service is also the
+// closed set of ops a reader switches on, and two peers that disagree refuse
+// each other at hello in both directions, which is what makes the number the
+// whole of the compatibility story. The write half of the same service lands
+// with its own leaves; nothing has shipped at 31, so that round WIDENS this
+// number in place rather than bumping again — the same way 15 grew for as long
+// as no generation was published.
+const Version = "31"

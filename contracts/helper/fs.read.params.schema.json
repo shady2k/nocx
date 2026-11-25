@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.read.params.schema.json",
+  "title": "HelperFSReadParams",
+  "description": "Params of the helper fs service's read op. A whole-file read asks for the entire file and its version, and therefore starts at 0; a range read asks for a window and is answered with the object's identity instead. Length is bounded by the files.read ceiling plus one: the extra byte is the truncation probe's room, and a longer request is a page that cannot exist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "offset", "length", "whole"],
+  "properties": {
+    "path": {
+      "description": "The absolute, clean path to read. Symlinks are followed once by the provider, and the object actually opened is what the answer describes.",
+      "type": "string",
+      "minLength": 1
+    },
+    "offset": {
+      "description": "The first byte to return. A whole-file read requires 0.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "length": {
+      "description": "The maximum number of bytes to return. Positive; at most 2 MiB + 1 (the files.read ceiling plus the truncation probe's byte).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097153
+    },
+    "whole": {
+      "description": "Read the entire file and answer its version. A file larger than `length` is refused `too-large` rather than truncated, because a prefix is not the file and the version would describe bytes the caller never saw.",
+      "type": "boolean"
+    }
+  }
+}

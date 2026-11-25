@@ -1,0 +1,362 @@
+// Package hostsvc is the far helper's `fs` service: the read half of the
+// filesystem surface a coordinator reaches over a connection this helper holds
+// (ADR-727g63tr, design §5.10).
+//
+// # It maps, it does not re-derive
+//
+// Root, stat, list and canonical are internal/filesystem/local's own answers,
+// mapped onto the wire. The provider owns path syntax, the entry caps, the
+// deterministic order and the whole-directory digest; this package holds a
+// *local.Provider and asks it, because a second implementation of any of those
+// would agree everywhere anybody looked and disagree somewhere nobody did.
+//
+// # read is the one op with work of its own
+//
+// The plan's whole-file read is not local.Provider.Read: it samples the open
+// descriptor before and after the bytes, retries while the file moves, and
+// answers a version over exactly the bytes it returns. The range read answers
+// the object's identity instead. Both open with O_NONBLOCK and fstat the SAME
+// descriptor, so a FIFO swapped in for a regular file is answered rather than
+// blocked on — the interval local.Read closed for the panel, kept here because
+// this is a second open and would otherwise be a second window.
+//
+// # The artifact it runs inside
+//
+// This package is compiled into the helper written to hosts we do not own, so
+// it names no ssh client, no sftp, no hostconn and no deploy: the dependency
+// tests in internal/filesystem and internal/helper/deploy are the fence, and
+// they walk `go list -deps` rather than reading imports by eye.
+package hostsvc
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"syscall"
+
+	filesystem "github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/filesystem/local"
+	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
+)
+
+// maxReadLength is the bound fs.read accepts: the files.read ceiling plus one,
+// so a caller can ask for "the ceiling and a bit" without a second bound. The
+// extra byte is what a truncation probe needs; the op's shape has no truncation
+// flag because a whole-file read refuses a file it cannot return in one piece
+// (too-large) rather than returning a labelled prefix.
+const maxReadLength = local.MaxReadBytes + 1
+
+// wholeReadAttempts is the retry budget of a whole-file read. Three attempts
+// is the plan's number: one to detect movement, two to let a writer finish,
+// and a refusal rather than a wrong version after that. A quiet file costs one.
+const wholeReadAttempts = 3
+
+// Service is the helper's `fs` service.
+type Service struct {
+	provider *local.Provider
+
+	// afterRead is the test seam for the interval a whole-file read guards:
+	// it runs after the bytes were read and BEFORE the after-stat that decides
+	// whether the file moved. A test rewrites the file there, which models
+	// "somebody wrote during the read" without a sleeping writer goroutine.
+	afterRead func(attempt int)
+}
+
+// New builds the fs service over a local provider. The provider is the
+// caller's — the composition root constructs it, and a test injects one with
+// local.WithRoot, WithEntryCap or WithListTimeout — the same division
+// git/hostsvc.New(factory) keeps.
+func New(provider *local.Provider) *Service {
+	return &Service{provider: provider}
+}
+
+// Name is the reserved service name the host registers it under.
+func (s *Service) Name() string { return proto.ServiceFS }
+
+// Ops is the closed set of operations this service serves. The write half is
+// deliberately absent: an op this generation does not have is one a
+// coordinator learns about at hello, not one it learns about by writing.
+func (s *Service) Ops() []string {
+	return []string{proto.OpRoot, proto.OpStat, proto.OpList, proto.OpCanonical, proto.OpRead}
+}
+
+// ParamsSchema declares each op's params type; the host decodes a request's
+// params through it and audits it for argv at registration (D3). None of the
+// five takes a command, a script or a bare string list.
+func (s *Service) ParamsSchema(op string) *host.Schema {
+	switch op {
+	case proto.OpRoot:
+		return host.SchemaFor(proto.FSRootParams{})
+	case proto.OpStat, proto.OpCanonical:
+		return host.SchemaFor(proto.FSPathParams{})
+	case proto.OpList:
+		return host.SchemaFor(proto.FSListParams{})
+	case proto.OpRead:
+		return host.SchemaFor(proto.FSReadParams{})
+	}
+	return nil
+}
+
+// Call dispatches one named operation. Every op runs under the request
+// context; a cancelled request is answered `timed-out` rather than left to
+// finish work nobody is waiting for.
+func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch op {
+	case proto.OpRoot:
+		return s.root(ctx, params)
+	case proto.OpStat:
+		return s.stat(ctx, params)
+	case proto.OpList:
+		return s.list(ctx, params)
+	case proto.OpCanonical:
+		return s.canonical(ctx, params)
+	case proto.OpRead:
+		return s.read(ctx, params)
+	}
+	return nil, fmt.Errorf("hostsvc: no op %q", op)
+}
+
+// root answers the navigation root (spec D2). With no path it is the provider
+// this service holds; with one it is a provider over that path, which is the
+// same verified-override re-check local.Provider.Root performs — absolute and
+// still a directory, or the home directory inferred and labelled with why.
+// There is no new inference and no new fallback here.
+func (s *Service) root(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.FSRootParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	provider := s.provider
+	if p.Path != "" {
+		provider = local.New(local.WithRoot(p.Path))
+	}
+	r, err := provider.Root(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return proto.FSRootResult{
+		Path:           r.Path,
+		Display:        r.Display,
+		Inferred:       r.Inferred,
+		InferredReason: r.InferredReason,
+	}, nil
+}
+
+// stat classifies one path and reports the metadata a row shows. The path is
+// resolved through the provider first, which is where the provider's path
+// syntax and its typed refusals live; the stat itself is the same call local's
+// Stat makes, taking the fields local.Stat deliberately does not carry.
+func (s *Service) stat(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.FSPathParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	canonical, err := s.provider.Canonical(ctx, p.Path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return nil, err
+	}
+	return proto.FSStatResult{
+		Kind:    filesystem.KindOf(info.Mode()),
+		Size:    info.Size(),
+		MtimeNs: info.ModTime().UnixNano(),
+		Mode:    uint32(info.Mode()), //nolint:gosec // os.FileMode is 32 bits of defined flags; this is its wire form
+	}, nil
+}
+
+// list answers one page of the provider's complete, deterministically ordered
+// listing. A page past the directory's total is refused rather than answered
+// empty: the caller asked for a page that cannot exist, and an empty answer
+// would read as "this directory ended here".
+func (s *Service) list(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.FSListParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	listing, err := s.provider.List(ctx, p.Path, filesystem.Page{Offset: p.Offset, Limit: p.Limit})
+	if err != nil {
+		return nil, err
+	}
+	if p.Offset > listing.Total {
+		return nil, &invalidPage{reason: fmt.Sprintf("offset %d is past the directory's %d entries", p.Offset, listing.Total)}
+	}
+	entries := make([]proto.FSListEntry, 0, len(listing.Entries))
+	for _, e := range listing.Entries {
+		entries = append(entries, proto.FSListEntry{
+			Name:       e.Name,
+			Path:       e.Path,
+			Kind:       e.Kind,
+			LinkTarget: e.LinkTarget,
+			LinkKind:   e.LinkKind,
+			Size:       e.Size,
+			MtimeNs:    e.ModTime.UnixNano(),
+			Mode:       e.Mode,
+		})
+	}
+	return proto.FSListResult{
+		Path:      listing.Path,
+		Canonical: listing.Canonical,
+		Entries:   entries,
+		Offset:    listing.Offset,
+		Total:     listing.Total,
+		HasMore:   listing.HasMore,
+		Rev:       listing.Rev,
+	}, nil
+}
+
+// canonical answers the provider-canonical identity of a path.
+func (s *Service) canonical(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.FSPathParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	c, err := s.provider.Canonical(ctx, p.Path)
+	if err != nil {
+		return nil, err
+	}
+	return proto.FSCanonicalResult{Canonical: c}, nil
+}
+
+// read opens the object ONCE, classifies the descriptor, and then answers
+// either the whole file with a version or a range with an identity.
+//
+// O_NONBLOCK is not a flag for regular files; it is what makes the open of a
+// FIFO somebody swapped in return instead of block. The type check happens on
+// the descriptor, so the object classified and the object read are the same
+// one — statting the path first would leave the window this closes.
+func (s *Service) read(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p proto.FSReadParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	if p.Offset < 0 || p.Length <= 0 {
+		return nil, &invalidPage{reason: fmt.Sprintf("offset %d and length %d are not a readable page", p.Offset, p.Length)}
+	}
+	if p.Length > maxReadLength {
+		return nil, &invalidPage{reason: fmt.Sprintf("length %d exceeds the %d-byte read ceiling", p.Length, maxReadLength)}
+	}
+	if p.Whole && p.Offset != 0 {
+		return nil, &invalidPage{reason: fmt.Sprintf("a whole-file read starts at 0, not %d", p.Offset)}
+	}
+	canonical, err := s.provider.Canonical(ctx, p.Path)
+	if err != nil {
+		return nil, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	// #nosec G304 — a caller-supplied path is the feature of this service. It
+	// reached here through the provider's own Canonical, which is where the
+	// path syntax and the typed refusals live, and it names an object on THIS
+	// machine — the one the helper exists to read.
+	f, err := os.OpenFile(canonical, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &notRegular{path: p.Path, kind: kindName(info.Mode())}
+	}
+	identity := fileIdentity(info)
+	if !p.Whole {
+		return readRange(f, p, canonical, identity, info)
+	}
+	return s.readWhole(ctx, f, p, canonical, identity)
+}
+
+// readWhole reads the entire file and returns the version of exactly the bytes
+// returned. A file bigger than the caller's bound is `too-large` — the whole
+// file was asked for, and a prefix is not it. Stability is decided on the open
+// descriptor: size and mtime sampled before and after must agree, or somebody
+// wrote during the read and the bytes are a mixture nobody can name. Three
+// attempts, then `changed-during-read`.
+func (s *Service) readWhole(ctx context.Context, f *os.File, p proto.FSReadParams, canonical, identity string) (any, error) {
+	for attempt := 0; attempt < wholeReadAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		before, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if before.Size() > p.Length {
+			return nil, &tooLarge{observed: before.Size(), limit: p.Length}
+		}
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+			return nil, seekErr
+		}
+		data, err := io.ReadAll(io.LimitReader(f, p.Length))
+		if err != nil {
+			return nil, err
+		}
+		if s.afterRead != nil {
+			s.afterRead(attempt)
+		}
+		after, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if after.Size() != before.Size() || after.ModTime().UnixNano() != before.ModTime().UnixNano() {
+			continue
+		}
+		if data == nil {
+			data = []byte{}
+		}
+		sum := sha256.Sum256(data)
+		return proto.FSReadResult{
+			Canonical: canonical,
+			Identity:  identity,
+			Data:      data,
+			Size:      int64(len(data)),
+			MtimeNs:   after.ModTime().UnixNano(),
+			Changed:   attempt > 0,
+			Version: &proto.FSVersion{
+				Size:    int64(len(data)),
+				MtimeNs: after.ModTime().UnixNano(),
+				SHA256:  hex.EncodeToString(sum[:]),
+			},
+		}, nil
+	}
+	return nil, &changedDuringRead{path: p.Path, attempts: wholeReadAttempts}
+}
+
+// readRange returns at most Length bytes from Offset, with the object's
+// identity and no version. An append keeps the inode and therefore the
+// identity; a replacement changes it, which is the only way a caller can tell
+// "the file grew" from "this is a different file now". An offset past the end
+// answers no bytes rather than an error: the range exists, it is empty.
+func readRange(f *os.File, p proto.FSReadParams, canonical, identity string, info os.FileInfo) (any, error) {
+	if _, err := f.Seek(p.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, p.Length))
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	return proto.FSReadResult{
+		Canonical: canonical,
+		Identity:  identity,
+		Data:      data,
+		Size:      int64(len(data)),
+		MtimeNs:   info.ModTime().UnixNano(),
+		Changed:   false,
+	}, nil
+}

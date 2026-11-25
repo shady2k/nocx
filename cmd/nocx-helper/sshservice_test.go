@@ -52,7 +52,7 @@ func standUpHelper(t *testing.T, seam sshSeam) *client.Client {
 	t.Helper()
 	helperEnd, coordEnd := net.Pipe()
 	h := host.New(helperEnd, helperEnd, helperHash, "instance-1", discardLog())
-	registerHelperServices(h, stubService{"git-stub"}, stubService{"session-stub"}, seam)
+	registerHelperServices(h, stubService{"git-stub"}, stubService{"session-stub"}, stubService{"fs-stub"}, seam)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

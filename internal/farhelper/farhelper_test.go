@@ -658,7 +658,7 @@ func TestAHealthyConnectionProbesInstallsAndServes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	if lease.Client == nil || lease.Ctx == nil {
+	if lease.Client() == nil || lease.Ctx == nil {
 		t.Fatalf("Acquire answered %+v", lease)
 	}
 	// A pause cancels the lease's context: nothing may use a client whose

@@ -34,6 +34,22 @@ export const fileReadoutLabels = (): FileReadoutLabels => ({
   tooLarge: t('kit.fileReadout.tooLarge', 'This file is larger than the read budget'),
   readFailed: t('kit.fileReadout.readFailed', 'This file could not be read'),
   scanNotice: t('kit.fileReadout.scanNotice', 'Highlighted lines below matched a static scan'),
+  notTextDesc: t(
+    'kit.fileReadout.notTextDesc',
+    'Its bytes are not something that can be shown as lines, so there is nothing here to read. The file is on disk exactly as it was — this is a fact about the file, not a refusal of the request.',
+  ),
+  tooLargeDesc: (size) =>
+    t(
+      'kit.fileReadout.tooLargeDesc',
+      'The budget is {size}, and the read stops there. The file is on disk exactly as it was; what is bounded is the reading, not the file.',
+      { size },
+    ),
+  scanDesc: (words) =>
+    t(
+      'kit.fileReadout.scanDesc',
+      '{words}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.',
+      { words },
+    ),
 })
 
 /** The WORDS one copy control says — CodeBlock's header button

@@ -2171,4 +2171,23 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'banner.clipboard.allow': 'Allow clipboard writes',
   'banner.clipboard.suppress': "Don't show again",
   'banner.clipboard.dismiss': 'Dismiss',
+  // ── Approval prompt literals (agent-approval-prompt.tsx) ────────────────
+  'approval.allowOnce': 'Allow once',
+  'approval.denyOnce': 'Deny once',
+  'approval.askingTool.withArgs': 'The assistant is asking to call',
+  'approval.askingTool.argsTail': 'with these arguments:',
+  'approval.askingTool.plain': 'The assistant is asking to call',
+  'approval.arguments.aria': 'Arguments of {tool}',
+  'approval.expanded.lead':
+    'With its variables as the shell reads them now. This is what the command means, not what is sent — the line above is what runs, exactly as written:',
+  'approval.facts.aria': 'What {tool} would do',
+  'approval.blockArg.aria': 'The {name} argument of {tool}',
+  'approval.scripts.lead':
+    'And what those files hold right now. This is a reading, not what is sent — the command above is what runs, exactly as written, and a file can change between this question and the moment it runs.',
+  'approval.script.aria': 'What {path} holds right now',
+  'approval.findings.lead': 'What was found, and where — never the material itself:',
+  'approval.covers.body':
+    'Approving covers this call: it has not run, and no call after it in this response will. It does not promise the terminal is untouched — a permitted call earlier in this batch may already have run.',
+  'approval.standing.lead':
+    'An answer in this session lasts until this terminal session ends; restarting the shell starts a new one and the question comes back. An answer of always is a standing answer for {rule}, in every session, from now on, which you can change on the Assistant permissions page.',
 }

@@ -55,7 +55,10 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
   return (
     <div class="clipboard-banner">
       <span class="clipboard-banner-message">
-        {t('banner.clipboard.message', 'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.')}
+        {t(
+          'banner.clipboard.message',
+          'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.',
+        )}
       </span>
       <div class="clipboard-banner-actions">
         <Button variant="primary" onClick={() => props.onChoice('allow')}>
@@ -64,7 +67,11 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
         <Button variant="default" onClick={() => props.onChoice('suppress')}>
           {t('banner.clipboard.suppress', "Don't show again")}
         </Button>
-        <IconButton ariaLabel={t('banner.clipboard.dismiss', 'Dismiss')} size="sm" onClick={() => props.onChoice('dismiss')}>
+        <IconButton
+          ariaLabel={t('banner.clipboard.dismiss', 'Dismiss')}
+          size="sm"
+          onClick={() => props.onChoice('dismiss')}
+        >
           <CloseIcon />
         </IconButton>
       </div>

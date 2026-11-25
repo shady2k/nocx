@@ -8548,7 +8548,11 @@ export class TerminalContent extends BasePaneContent {
     // SEVERED (ADR-0024 §4): the integrate/retry actions are deleted with
     // the in-band tier; the surviving editor-presentation actions both
     // restore the editor presentation.
-    this.editor.setRecoveryAction(action.label, () => this._restoreEditor())
+    const label =
+      action.kind === 'enable-editor'
+        ? t('recovery.enableEditor', 'Enable command editor')
+        : t('recovery.restoreEditor', 'Restore command editor')
+    this.editor.setRecoveryAction(label, () => this._restoreEditor())
   }
   private _restoreEditor(): void {
     this.nativeMode = false

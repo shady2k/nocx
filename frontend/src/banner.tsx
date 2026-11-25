@@ -24,6 +24,7 @@ import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
 import { Button } from './ui/button'
 import { CloseIcon } from './ui/icons'
+import { t } from './i18n/locale-model'
 
 /** The three banner outcomes the caller acts on. */
 export type BannerChoice = 'allow' | 'suppress' | 'dismiss'
@@ -54,17 +55,23 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
   return (
     <div class="clipboard-banner">
       <span class="clipboard-banner-message">
-        A terminal program tried to write to your clipboard. This is disabled by default for
-        security reasons, to protect against malicious software.
+        {t(
+          'banner.clipboard.message',
+          'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.',
+        )}
       </span>
       <div class="clipboard-banner-actions">
         <Button variant="primary" onClick={() => props.onChoice('allow')}>
-          Allow clipboard writes
+          {t('banner.clipboard.allow', 'Allow clipboard writes')}
         </Button>
         <Button variant="default" onClick={() => props.onChoice('suppress')}>
-          Don't show again
+          {t('banner.clipboard.suppress', "Don't show again")}
         </Button>
-        <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onChoice('dismiss')}>
+        <IconButton
+          ariaLabel={t('banner.clipboard.dismiss', 'Dismiss')}
+          size="sm"
+          onClick={() => props.onChoice('dismiss')}
+        >
           <CloseIcon />
         </IconButton>
       </div>

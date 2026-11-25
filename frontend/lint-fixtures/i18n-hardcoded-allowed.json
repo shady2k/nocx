@@ -41,12 +41,6 @@
       "reason": "the trailing question mark of a composed question title; the words come from t(), the punctuation is the template literal static (same shape as the secrets name-composites)"
     },
     {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "su",
-      "reason": "technical term — the shell command's own name"
-    },
-    {
       "file": "src/scrollback/blocks.ts",
       "context": "dom:title",
       "snippet": "ms",
@@ -92,6 +86,36 @@
       "context": "prop:message",
       "snippet": "\"\"",
       "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
+    },
+    {
+      "file": "src/connections.tsx",
+      "context": "attr:placeholder",
+      "snippet": "127.0.0.1",
+      "reason": "example value — the bind address a person replaces with their own host"
+    },
+    {
+      "file": "src/connections.tsx",
+      "context": "attr:placeholder",
+      "snippet": "host:port",
+      "reason": "example value — the destination shape a person replaces with their own host and port"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "A–Z",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "a–z",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "0–9",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
     }
   ]
 }

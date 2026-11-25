@@ -6,6 +6,7 @@ import { TextField } from './ui/text-field'
 import { Stack } from './ui/stack'
 import { SwatchPicker, type SwatchOption } from './ui/swatch-picker'
 import { WORKSPACE_COLOURS, leastUsedWorkspaceColour } from './layout/workspace-colours'
+import { t } from './i18n/locale-model'
 
 /**
  * The name-and-colour dialog: one form, and every subject in the strip that
@@ -57,12 +58,15 @@ export interface NameColourDraft {
   readonly colour: string | null
 }
 
-const SWATCHES: readonly SwatchOption[] = WORKSPACE_COLOURS.map((c) => ({
-  value: c.key,
-  label: c.label,
-  // The token NAME, never a literal — see swatch-picker.tsx and ADR-0013.
-  token: `--ws-${c.key}`,
-}))
+/** Built when the dialog renders, not when this module loads: the labels are
+ *  catalogue text, and a table made here would keep the starting language. */
+const swatches = (): readonly SwatchOption[] =>
+  WORKSPACE_COLOURS.map((c) => ({
+    value: c.key,
+    label: t(c.labelKey, c.key.charAt(0).toUpperCase() + c.key.slice(1)),
+    // The token NAME, never a literal — see swatch-picker.tsx and ADR-0013.
+    token: `--ws-${c.key}`,
+  }))
 
 const NameColourDialog: Component<{
   title: string
@@ -99,7 +103,7 @@ const NameColourDialog: Component<{
       footer={
         <>
           <Button variant="default" onClick={() => props.onResolve(null)}>
-            Cancel
+            {t('nameColour.cancel', 'Cancel')}
           </Button>
           <Button
             variant="primary"
@@ -112,9 +116,9 @@ const NameColourDialog: Component<{
       }
     >
       <Stack>
-        <TextField label="Name" value={name()} onInput={setName} autoFocus selectOnFocus />
+        <TextField label={t('nameColour.name', 'Name')} value={name()} onInput={setName} autoFocus selectOnFocus />
         <SwatchPicker
-          options={SWATCHES}
+          options={swatches()}
           value={colour()}
           onChange={setColour}
           ariaLabel={props.colourLabel}
@@ -174,7 +178,7 @@ export function showWorkspaceCreateDialog(
   taken: readonly (string | null | undefined)[],
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'New workspace',
+    title: t('nameColour.newWorkspace', 'New workspace'),
     submitLabel: 'Create',
     colourLabel: 'Workspace colour',
     // A workspace's colour is its identity in the strip (§5.5): every one of
@@ -201,7 +205,7 @@ export function showWorkspaceEditDialog(
   colour: string | null,
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'Rename workspace',
+    title: t('nameColour.renameWorkspace', 'Rename workspace'),
     submitLabel: 'Save',
     colourLabel: 'Workspace colour',
     allowNone: false,
@@ -224,7 +228,7 @@ export function showTabEditDialog(
   colour: string | null,
 ): Promise<NameColourDraft | null> {
   return ask({
-    title: 'Rename tab',
+    title: t('nameColour.renameTab', 'Rename tab'),
     submitLabel: 'Save',
     colourLabel: 'Tab colour',
     allowNone: true,

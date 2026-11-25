@@ -150,7 +150,7 @@ function UnreconciledNotice(props: { account: UnreconciledAccount; onDismiss: ()
       title={unreconciledTitle(props.account)}
       description={unreconciledDescription(props.account)}
       action={
-        <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
+        <IconButton ariaLabel={t('unreconciled.dismiss.aria', 'Dismiss')} size="sm" onClick={() => props.onDismiss()}>
           <CloseIcon />
         </IconButton>
       }

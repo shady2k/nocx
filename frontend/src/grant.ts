@@ -49,7 +49,7 @@ export class GrantController {
     this.panel = new FloatingPanel({
       variant: 'grant',
       role: 'listbox',
-      ariaLabel: 'marked for the question',
+      ariaLabel: '',
       dismissBoundary: this.chip,
       callbacks: {
         onPick: (index) => this.reveal(index),
@@ -183,7 +183,7 @@ export class GrantController {
     const footer = document.createElement('div')
     footer.className = 'ui-floating-panel__footer'
     const dismissAll = createButton({
-      label: 'Dismiss all',
+      label: t('grant.dismissAll', 'Dismiss all'),
       variant: 'ghost',
       size: 'sm',
       onClick: (event) => {
@@ -197,6 +197,7 @@ export class GrantController {
     })
     dismissAll.dataset.action = 'dismiss-all-grants'
     footer.appendChild(dismissAll)
+    this.panel.root.setAttribute('aria-label', t('grant.panel.aria', 'marked for the question'))
     this.panel.show({ rows, selectedIndex: -1, after: [footer] })
   }
 
@@ -205,7 +206,7 @@ export class GrantController {
     // the row's identity belongs to ContextMenu, and a glyph is not an icon.
     const button = createIconButton({
       size: 'xs',
-      ariaLabel: 'Dismiss this mark',
+      ariaLabel: t('grant.dismissMark.aria', 'Dismiss this mark'),
       icon: () => iconElement(CloseIcon),
       attrs: { 'data-action': 'dismiss-grant', 'data-item-id': itemId },
       onClick: (event) => {

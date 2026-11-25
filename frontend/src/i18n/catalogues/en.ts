@@ -2247,4 +2247,221 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.table.emptyHeaders': 'No headers.',
   'scrollback.disclosure.reasoning': 'Thinking',
   'scrollback.disclosure.toolResult': 'Sent and returned',
+  // ── Clipboard banner (banner.tsx) ───────────────────────────────────────
+  'banner.clipboard.message':
+    'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.',
+  'banner.clipboard.allow': 'Allow clipboard writes',
+  'banner.clipboard.suppress': "Don't show again",
+  'banner.clipboard.dismiss': 'Dismiss',
+  // ── Approval prompt literals (agent-approval-prompt.tsx) ────────────────
+  'approval.allowOnce': 'Allow once',
+  'approval.denyOnce': 'Deny once',
+  'approval.askingTool.withArgs': 'The assistant is asking to call',
+  'approval.askingTool.argsTail': 'with these arguments:',
+  'approval.askingTool.plain': 'The assistant is asking to call',
+  'approval.arguments.aria': 'Arguments of {tool}',
+  'approval.expanded.lead':
+    'With its variables as the shell reads them now. This is what the command means, not what is sent — the line above is what runs, exactly as written:',
+  'approval.facts.aria': 'What {tool} would do',
+  'approval.blockArg.aria': 'The {name} argument of {tool}',
+  'approval.scripts.lead':
+    'And what those files hold right now. This is a reading, not what is sent — the command above is what runs, exactly as written, and a file can change between this question and the moment it runs.',
+  'approval.script.aria': 'What {path} holds right now',
+  'approval.findings.lead': 'What was found, and where — never the material itself:',
+  'approval.covers.body':
+    'Approving covers this call: it has not run, and no call after it in this response will. It does not promise the terminal is untouched — a permitted call earlier in this batch may already have run.',
+  'approval.standing.lead':
+    'An answer in this session lasts until this terminal session ends; restarting the shell starts a new one and the question comes back. An answer of always is a standing answer for {rule}, in every session, from now on, which you can change on the Assistant permissions page.',
+  // ── History-status sentences (history-status.ts) ────────────────────────
+  'history.unavailable.title': 'Commands are not being kept',
+  'history.unavailable.noKey':
+    'The key that encrypts the history database could not be read, so nothing is being stored.',
+  'history.unavailable.invalidBudget':
+    'The size limits below could not be applied, so the store was not opened and nothing is being stored.',
+  'history.unavailable.openFailed':
+    'The history database could not be opened, so nothing is being stored.',
+  'history.unavailable.writeFailed':
+    'The history database is refusing writes, so commands are running but not being kept.',
+  'history.unavailable.unknown': 'Nothing is being stored.',
+  'history.detached.title': 'Sessions keep running only while a window is open',
+  'history.detached.causeOutputOff': 'Command output is not being kept',
+  'history.detached.causeHistoryOff': 'History is turned off',
+  'history.detached.body':
+    '{cause}, so there is nowhere to write what a session prints while its window is closed. Such a session pauses once its output buffer fills and continues when a window is opened on it again. Nothing it printed is lost.',
+  // ── Checkout-sweep sentences (checkouts-status.ts) ──────────────────────
+  'checkouts.unavailable.title': 'Unused worker checkouts are not being cleaned up',
+  'checkouts.unavailable.noRecord':
+    'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.',
+  'checkouts.unavailable.recordWrites':
+    'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.',
+  'checkouts.unavailable.unknown': 'The sweep cannot run, and this build does not know why.',
+  // ── Tab strip chrome (tab-strip.tsx) ────────────────────────────────────
+  'tabs.menu.rename': 'Rename…',
+  'tabs.menu.close': 'Close',
+  'tabs.menu.quickConnect': 'Quick connect…',
+  'tabs.menu.insertSecret': 'Insert a secret…',
+  'tabs.menu.snippets': 'Snippets…',
+  'tabs.menu.newNote': 'New note',
+  'tabs.menu.newWorkspace': 'New workspace…',
+  'tabs.newTab.aria': 'New tab',
+  'tabs.more.aria': 'More',
+  'tabs.showAll.aria': 'Show all workspaces',
+  'tabs.filter.placeholder': 'Filter tabs…',
+  'tabs.filter.aria': 'Filter tabs',
+  'tabs.closeWorkspace.aria': 'Close workspace',
+  'tabs.closeWorkspace.named': 'Close workspace {name}',
+  'tabs.workspace.title': 'Workspace: {name}',
+  'tabs.resizeStrip.aria': 'Resize the tab strip',
+  // ── Grant panel chrome (grant.ts) ───────────────────────────────────────
+  'grant.panel.aria': 'marked for the question',
+  'grant.dismissAll': 'Dismiss all',
+  'grant.dismissMark.aria': 'Dismiss this mark',
+  // ── Host-key and agent-approval dialogs (host-key-dialog.tsx) ───────────
+  'hostKey.firstTime.body':
+    'This is the first time nocx has met this host. If you trust this machine, accept its key — it will be saved to ~/.ssh/known_hosts.',
+  'hostKey.changed.body':
+    'The host key offered by this server differs from the one nocx has seen before. That can mean the host’s key was regenerated — or that someone is intercepting this connection. Do not continue unless you are sure this is the same machine. Accepting replaces the old key: it stops being trusted.',
+  'hostKey.fingerprint.offered': 'Offered fingerprint',
+  'hostKey.fingerprint.label': 'Fingerprint',
+  'hostKey.method.aria': 'Integration method',
+  'hostKey.method.raw.label': 'Raw',
+  'hostKey.method.raw.title': 'No integration — a plain terminal, nothing written to the host.',
+  'hostKey.method.script.label': 'Script',
+  'hostKey.method.script.title':
+    'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
+  'hostKey.method.helper.label': 'Helper',
+  'hostKey.method.helper.title':
+    'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
+  'hostKey.cancel': 'Cancel',
+  'hostKey.agent.title': "Allow this agent to use nocx's tools?",
+  'hostKey.agent.lead': 'If you allow it, this agent',
+  'hostKey.agent.launches': 'and commands it launches',
+  'hostKey.agent.powers':
+    'can start other agents in new tabs, watch what they are doing, and stop them. They cannot read your secrets, reach another machine, or change anything else on this one.',
+  'hostKey.agent.allowed.aria': 'What is being allowed',
+  'hostKey.agent.denyBody':
+    "If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer is remembered for this agent alone.",
+  'hostKey.agent.deny': 'Deny',
+  // ── Shell-integration notice (integration/notice.tsx) ───────────────────
+  'integration.copy.copied': 'Copied',
+  'integration.copy.failed': 'Could not copy to the clipboard',
+  'integration.toolbar.aria': 'Shell integration',
+  'integration.notice.dontShowShell': "Don't show again for this shell",
+  'integration.notice.dismiss.aria': 'Dismiss',
+  'integration.notice.copy': 'Copy',
+  'integration.notice.learnMore': 'Learn more',
+  'integration.notice.close': 'Close',
+  'integration.commands.aria': 'Commands to run',
+  'integration.about.title': 'About shell integration',
+  // ── Connections list and editor (connections.tsx) ───────────────────────
+  'connections.group.empty':
+    'No connections here yet — pick this group in a connection’s editor to move it in.',
+  'connections.inherit.placeholder': '— Not set (inherit) —',
+  // ── Recovery labels (capability.ts) ─────────────────────────────────────
+  'recovery.enableEditor': 'Enable command editor',
+  'recovery.restoreEditor': 'Restore command editor',
+  // ── Worker tool surface notice (tool-surface-notice.tsx) ────────────────
+  'toolSurface.unavailable.title': 'Worker tools unavailable',
+  'toolSurface.unavailable.body': 'The nocx worker tool surface is unavailable: {reason}.',
+  'toolSurface.unavailable.noAnswer': 'the endpoint did not answer',
+  'toolSurface.dismiss.aria': 'Dismiss',
+  // ── Name-and-colour dialog (name-colour-dialog.tsx) ─────────────────────
+  'nameColour.cancel': 'Cancel',
+  'nameColour.name': 'Name',
+  'nameColour.newWorkspace': 'New workspace',
+  'nameColour.renameWorkspace': 'Rename workspace',
+  'nameColour.renameTab': 'Rename tab',
+  // ── Notices' dismiss labels (publish-notice.tsx, unreconciled-notice.tsx)
+  'publish.dismiss.aria': 'Dismiss',
+  'unreconciled.dismiss.aria': 'Dismiss',
+  // ── Shell-integration degrade sentences (integration/status.ts) ─────────
+  'integration.notIntegrated.title': 'Not integrated',
+  'integration.channel-lost.title': 'Integration lost',
+  'integration.channel-lost.description': 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
+  'integration.remote-command.description': 'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
+  'integration.command-too-long.description': 'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+  'integration.fish.detected': 'Detected Fish {version}.',
+  'integration.fish.unavailable': 'Fish version is unavailable.',
+  'integration.handshake-timeout.description': 'Your shell did not answer nocx in time, so this tab is a plain terminal.',
+  'integration.startup-did-not-return.description': 'nocx’s shell integration never answered from inside your shell, so this tab is a plain terminal.',
+  'integration.unsupported-shell.description': 'nocx has no integration for this shell, so this tab is a plain terminal.',
+  'integration.unsupported-fish-startup.description': 'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
+  'integration.no-secure-temp.description': 'nocx could not create a private temporary file for this session, so integration was not installed.',
+  'integration.session-unavailable.description': 'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
+  'integration.pty-unavailable.description': 'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
+  'integration.exec-refused.description': 'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
+  'integration.exec-substituted.description': 'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
+  'integration.host-key-unconfirmed.description': 'The host key was not confirmed, so shell integration was not delivered.',
+  'integration.publish-unavailable.description': 'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
+  'integration.loader-termios-unavailable.description': 'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
+  'integration.bootstrap-interrupted.description': 'The connection ended while nocx was still setting this session up.',
+  'integration.bootstrap-protocol.description': 'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
+  'integration.bootstrap-timeout.description': 'The far host answered nocx once and then did not finish the setup in time.',
+  'integration.bootstrap-out-of-order.description': 'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
+  'integration.receiver-unready.description': 'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
+  'integration.stage-too-large.description': 'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
+  'integration.stage-digest-unavailable.description': 'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
+  'integration.stage-digest-mismatch.description': 'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
+  'integration.stage-fd-unavailable.description': 'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
+  'integration.stage-source-failed.description': 'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
+  'integration.secret-too-large.description': 'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
+  'integration.secret-malformed.description': 'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
+  'integration.secret-not-for-this-session.description': 'The key that reached the far host was addressed to a different session, so the far host refused it.',
+  'integration.capability-fd-unavailable.description': 'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
+  'integration.capability-unlink-failed.description': 'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
+  'integration.capability-write-failed.description': 'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
+  'integration.generation-unavailable.description': 'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
+  'integration.channel-unavailable.description': 'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
+  'integration.unknown.description': 'nocx could not set up shell integration for this session, and cannot say why.',
+  // ── Agent ask, editor submit and mark affordance (agent-ask.ts, editor.ts, mark-affordance.tsx) ──
+  'agentAsk.undo': 'Undo',
+  'agentAsk.managePermissions': 'Manage permissions',
+  'editor.runCommand.aria': 'Run command',
+  'markAffordance.forQuestion.aria': '{label} for the question',
+  // ── Desktop endpoint failure (endpoint-desktop.ts) ─────────────────────
+  'endpoint.noServer.message': 'The desktop backend could not be reached.',
+  'endpoint.noServer.remedy': 'Retry when the backend is available.',
+  // ── Workspace chip and command-history recall (workspace-chip.tsx, recall.ts) ──
+  'workspaceChip.title': 'Workspace: {name}',
+  'recall.panel.aria': 'command history',
+  'recall.search.placeholder': 'search history',
+  'recall.search.aria': 'search history',
+  // ── Undelivered stop notice (session-signal-undelivered.ts) ────────────
+  'sessionSignal.attemptClosed': 'The command had ended before the stop could reach it.',
+  'sessionSignal.unsupported': 'This command is running on a host nocx cannot signal from here.',
+  'sessionSignal.undelivered': 'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
+  'sessionSignal.unknown': 'nocx could not stop the command ({reason})',
+  // ── Session reattach and operations empty state (ipc.ts, operations-view.tsx) ──
+  'ipc.reattach.unavailable': 'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+  'ops.empty.description': 'Uploads and other background work appear here while they run, and stay for a while after they finish.',
+  // ── Pane and connection toasts (panes.ts) ──────────────────────────────
+  'panes.openTab.failed': 'Could not open a tab: {message}',
+  'panes.connection.saved': 'Saved "{host}" as a connection',
+  'panes.save.failed': 'Could not save: {message}',
+  'panes.connection.opened': 'Opened "{host}" as a connection',
+  'panes.connect.failed': 'Could not connect to {host}: {message}',
+  'panes.createWorkspace.failed': 'Could not create the workspace: {message}',
+  // ── App-level toasts and the ports row (main.tsx) ──────────────────────
+  'main.ports.label': 'Ports: {state}',
+  'main.forward.started': 'Forwarding {destination} on {host}:{port}',
+  'main.copied': 'Copied "{title}" to the clipboard.',
+  'main.hostKey.untrusted': 'Could not trust the host key: {message}',
+  'main.decision.failed': 'Could not record the decision: {message}',
+  'main.updateState.unreadable': 'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
+  // ── Workspace colour names (layout/workspace-colours.ts) ──────────────
+  'workspaceColour.grey': 'Grey',
+  'workspaceColour.blue': 'Blue',
+  'workspaceColour.cyan': 'Cyan',
+  'workspaceColour.green': 'Green',
+  'workspaceColour.yellow': 'Yellow',
+  'workspaceColour.orange': 'Orange',
+  'workspaceColour.red': 'Red',
+  'workspaceColour.pink': 'Pink',
+  'workspaceColour.purple': 'Purple',
+  // ── File viewer reload action (file-viewer-content.tsx) ─────────────────
+  'fileViewer.reload.label': 'Reload',
+  'fileViewer.reload.reason': 'Re-read the file from disk',
+  'fileViewer.reload.retryReason': 'Try reading the file again',
+  'fileViewer.unavailable.gone': 'The terminal or connection that provided this file is gone',
+  'fileViewer.unavailable.back': 'The source is back — re-read the file',
 }

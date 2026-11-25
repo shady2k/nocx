@@ -660,7 +660,7 @@ abstract class TabStripBase implements TabStrip {
         return [
           {
             id: 'rename',
-            label: 'Rename…',
+            label: t('tabs.menu.rename', 'Rename…'),
             icon: PencilIcon,
             onSelect: () => this.onRename?.(paneId),
           },
@@ -688,7 +688,7 @@ abstract class TabStripBase implements TabStrip {
             : []),
           {
             id: 'close',
-            label: 'Close',
+            label: t('tabs.menu.close', 'Close'),
             icon: CloseIcon,
             onSelect: () => this.onClose?.(paneId),
           },
@@ -827,7 +827,7 @@ abstract class TabStripBase implements TabStrip {
               <Button
                 variant="ghost"
                 size="sm"
-                title={`Workspace: ${item.heading}`}
+                title={t('tabs.workspace.title', 'Workspace: {name}', { name: item.heading })}
                 onClick={(e: MouseEvent) => {
                   const anchor = e.currentTarget
                   if (!(anchor instanceof HTMLElement)) return
@@ -847,8 +847,8 @@ abstract class TabStripBase implements TabStrip {
                   heading only places it. */}
               <IconButton
                 size="sm"
-                ariaLabel={`Close workspace ${item.heading}`}
-                title="Close workspace"
+                ariaLabel={t('tabs.closeWorkspace.named', 'Close workspace {name}', { name: item.heading })}
+                title={t('tabs.closeWorkspace.aria', 'Close workspace')}
                 onClick={(e: MouseEvent) => {
                   e.stopPropagation()
                   this.onCloseWorkspace?.(item.key)
@@ -926,8 +926,8 @@ abstract class TabStripBase implements TabStrip {
                   them rather than among the actions at the far end. */}
               <div class="tabstrip-lead">
                 <IconButton
-                  ariaLabel="Show all workspaces"
-                  title="Show all workspaces"
+                  ariaLabel={t('tabs.showAll.aria', 'Show all workspaces')}
+                  title={t('tabs.showAll.aria', 'Show all workspaces')}
                   onClick={() => this.onOpenOverview?.()}
                 >
                   <LayersIcon />
@@ -937,8 +937,8 @@ abstract class TabStripBase implements TabStrip {
                 <SearchField
                   value={searchQuery()}
                   onInput={(v) => setSearchQuery(v)}
-                  placeholder="Filter tabs…"
-                  ariaLabel="Filter tabs"
+                  placeholder={t('tabs.filter.placeholder', 'Filter tabs…')}
+                  ariaLabel={t('tabs.filter.aria', 'Filter tabs')}
                   onKeyDown={(e) => {
                     if (e.key === 'Escape' && searchQuery() !== '') {
                       e.stopPropagation()
@@ -965,12 +965,12 @@ abstract class TabStripBase implements TabStrip {
                   offered only there would be unreachable for exactly the
                   person who has never made a workspace — nocx-isoph.7). */}
               <div class="tabstrip-actions">
-                <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
+                <IconButton ariaLabel={t('tabs.newTab.aria', 'New tab')} square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
                 <IconButton
-                  ariaLabel="More"
-                  title="More"
+                  ariaLabel={t('tabs.more.aria', 'More')}
+                  title={t('tabs.more.aria', 'More')}
                   onClick={(e: MouseEvent) => {
                     const anchor = e.currentTarget
                     if (!(anchor instanceof HTMLElement)) return
@@ -998,8 +998,8 @@ abstract class TabStripBase implements TabStrip {
           <Show when={this.orientation === 'horizontal'}>
             <div class="tabstrip-lead">
               <IconButton
-                ariaLabel="Show all workspaces"
-                title="Show all workspaces"
+                ariaLabel={t('tabs.showAll.aria', 'Show all workspaces')}
+                title={t('tabs.showAll.aria', 'Show all workspaces')}
                 onClick={() => this.onOpenOverview?.()}
               >
                 <LayersIcon />
@@ -1082,7 +1082,7 @@ abstract class TabStripBase implements TabStrip {
                 items={[
                   {
                     id: 'quick-connect',
-                    label: 'Quick connect…',
+                    label: t('tabs.menu.quickConnect', 'Quick connect…'),
                     // The marks are the ones each action already wears
                     // elsewhere in the product — the key that opens the
                     // secret picker, the layers that stand for a workspace —
@@ -1093,13 +1093,13 @@ abstract class TabStripBase implements TabStrip {
                   },
                   {
                     id: 'insert-secret',
-                    label: 'Insert a secret…',
+                    label: t('tabs.menu.insertSecret', 'Insert a secret…'),
                     icon: KeyIcon,
                     onSelect: () => this.onInsertSecret?.(),
                   },
                   {
                     id: 'snippets',
-                    label: 'Snippets…',
+                    label: t('tabs.menu.snippets', 'Snippets…'),
                     icon: TextQuoteIcon,
                     onSelect: () => this.onSnippets?.(),
                   },
@@ -1110,13 +1110,13 @@ abstract class TabStripBase implements TabStrip {
                     // action as ⌥⌘N (notes/chord.ts), reachable by someone
                     // who has never met the chord.
                     id: 'new-note',
-                    label: 'New note',
+                    label: t('tabs.menu.newNote', 'New note'),
                     icon: StickyNoteIcon,
                     onSelect: () => this.onNewNote?.(),
                   },
                   {
                     id: 'new-workspace',
-                    label: 'New workspace…',
+                    label: t('tabs.menu.newWorkspace', 'New workspace…'),
                     icon: LayersIcon,
                     onSelect: () => this.onNewWorkspace?.(),
                   },
@@ -1166,12 +1166,12 @@ abstract class TabStripBase implements TabStrip {
               onPointerLeave={() => this.releaseTabWidths()}
               onPointerDown={() => this.freezeTabWidths()}
             >
-              <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
+              <IconButton ariaLabel={t('tabs.newTab.aria', 'New tab')} onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
               <IconButton
-                ariaLabel="More"
-                title="More"
+                ariaLabel={t('tabs.more.aria', 'More')}
+                title={t('tabs.more.aria', 'More')}
                 onClick={(e: MouseEvent) => {
                   const anchor = e.currentTarget
                   if (!(anchor instanceof HTMLElement)) return
@@ -1191,7 +1191,7 @@ abstract class TabStripBase implements TabStrip {
               its keyboard and its bounds are the kit's. */}
           <Show when={this.orientation === 'vertical'}>
             <ResizeHandle
-              ariaLabel="Resize the tab strip"
+              ariaLabel={t('tabs.resizeStrip.aria', 'Resize the tab strip')}
               value={stripWidth()}
               min={TABSTRIP_WIDTH_MIN}
               max={TABSTRIP_WIDTH_MAX}

@@ -609,7 +609,7 @@ export class CommandEditor {
     // resolution, submission guards, multiline handling and target dispatch
     // in submit()/commit() below are the ONLY path a click can reach.
     this.submitButton = createIconButton({
-      ariaLabel: 'Run command',
+      ariaLabel: t('editor.runCommand.aria', 'Run command'),
       icon: () => iconElement(ArrowRightIcon),
       size: 'sm',
       onClick: () => this.submit(),

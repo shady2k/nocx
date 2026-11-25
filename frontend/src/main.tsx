@@ -246,8 +246,7 @@ function main(): void {
       if (!shouldAnnounceUpdateStateFailure(reason, currentPlatform())) return
       showToast({
         level: 'warning',
-        message:
-          'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
+        message: t('main.updateState.unreadable', 'nocx could not read the update state this launch — open Settings and check there if you expect a new release.'),
       })
     },
   })
@@ -411,7 +410,7 @@ function main(): void {
         onError: (message) =>
           showToast({
             level: 'danger',
-            message: `Could not record the decision: ${message}`,
+            message: t('main.decision.failed', 'Could not record the decision: {message}', { message }),
             duration: 0,
           }),
       }),
@@ -471,7 +470,7 @@ function main(): void {
     } catch (err) {
       showToast({
         level: 'danger',
-        message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('main.hostKey.untrusted', 'Could not trust the host key: {message}', { message: err instanceof Error ? err.message : String(err) }),
         duration: 0,
       })
     } finally {
@@ -496,7 +495,7 @@ function main(): void {
     } catch (err) {
       showToast({
         level: 'danger',
-        message: `Could not trust the host key: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('main.hostKey.untrusted', 'Could not trust the host key: {message}', { message: err instanceof Error ? err.message : String(err) }),
         duration: 0,
       })
     } finally {
@@ -1220,7 +1219,7 @@ function main(): void {
     // to be anchored to, and Toast is the kit's one notification affordance
     // (ui/README.md).
     onRefused: (message) => showToast({ message, level: 'danger' }),
-    onCopied: (title) => showToast({ message: `Copied "${title}" to the clipboard.` }),
+    onCopied: (title) => showToast({ message: t('main.copied', 'Copied "{title}" to the clipboard.', { title }) }),
     onManage: () => openSettingsPane().openPage('snippets'),
     // A body with parameter fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
@@ -1638,7 +1637,7 @@ function main(): void {
     const announce = (rec: TunnelOpenResult): void => {
       showToast({
         level: 'success',
-        message: `Forwarding ${rec.destination} on ${rec.actualBind.host}:${rec.actualBind.port}`,
+        message: t('main.forward.started', 'Forwarding {destination} on {host}:{port}', { destination: rec.destination, host: rec.actualBind.host, port: rec.actualBind.port }),
       })
     }
     const open = (bindPort: number): Promise<TunnelOpenResult> =>
@@ -1718,7 +1717,7 @@ function main(): void {
           return [
             {
               id: `__ports_${st.discovery.state}__`,
-              label: `Ports: ${st.discovery.state}`,
+              label: t('main.ports.label', 'Ports: {state}', { state: st.discovery.state }),
               detail:
                 st.discovery.classification ||
                 st.discovery.stderr ||

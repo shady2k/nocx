@@ -1673,8 +1673,10 @@ export class WSClient {
     })
     this._setAttachment(state, {
       kind: 'unavailable',
-      message:
+      message: t(
+        'ipc.reattach.unavailable',
         'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+      ),
     })
     return 'unavailable'
   }

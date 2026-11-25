@@ -19,6 +19,7 @@
 import type { Dispatcher } from './dispatcher'
 import type { SessionSignalUndelivered } from './generated/session.signalUndelivered'
 import type { ToastLevel } from './ui/toast'
+import { t } from './i18n/locale-model'
 
 /** One undelivered-Stop fact, delivered with its session id intact. */
 export type SignalUndeliveredHandler = (fact: SessionSignalUndelivered) => void
@@ -63,26 +64,31 @@ export function undeliveredNotice(
     case 'attempt-closed':
       return {
         level: 'info',
-        message: 'The command had ended before the stop could reach it.',
+        message: t('sessionSignal.attemptClosed', 'The command had ended before the stop could reach it.'),
       }
     case 'unsupported':
       return {
         level: 'warning',
-        message: 'This command is running on a host nocx cannot signal from here.',
+        message: t(
+          'sessionSignal.unsupported',
+          'This command is running on a host nocx cannot signal from here.',
+        ),
       }
     case 'write-refused':
     case 'write-failed':
     case 'lane-refused':
       return {
         level: 'warning',
-        message:
+        message: t(
+          'sessionSignal.undelivered',
           'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
+        ),
       }
     default: {
       const unreachable: never = fact.reason
       return {
         level: 'warning',
-        message: `nocx could not stop the command (${String(unreachable)})`,
+        message: t('sessionSignal.unknown', 'nocx could not stop the command ({reason})', { reason: String(unreachable) }),
       }
     }
   }

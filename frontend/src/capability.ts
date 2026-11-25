@@ -80,7 +80,8 @@ export type InputPresentation = 'editor' | 'terminal'
  *  authorisation and technical eligibility are resolved — never disabled
  *  and never rejected at click time. */
 export type RecoveryAction =
-  { kind: 'enable-editor'; label: string } | { kind: 'restore-editor'; label: string }
+  | { kind: 'enable-editor'; labelKey: string }
+  | { kind: 'restore-editor'; labelKey: string }
 
 /** The facts the action set is derived from. Authorisation and technical
  *  eligibility are separate gates, resolved BEFORE the action set is
@@ -116,13 +117,13 @@ export function deriveActions(f: ActionFacts): RecoveryAction[] {
 
   // Integrated but the user is in terminal input: offer to switch back.
   if (f.shellState === 'integrated' && f.presentation === 'terminal') {
-    actions.push({ kind: 'enable-editor', label: 'Enable command editor' })
+    actions.push({ kind: 'enable-editor', labelKey: 'recovery.enableEditor' })
     return actions
   }
 
   // Markers stopped unexpectedly: offer restoration.
   if (f.shellState === 'lost') {
-    actions.push({ kind: 'restore-editor', label: 'Restore command editor' })
+    actions.push({ kind: 'restore-editor', labelKey: 'recovery.restoreEditor' })
     return actions
   }
 

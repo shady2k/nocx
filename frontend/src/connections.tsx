@@ -1382,7 +1382,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={gv(key) as string}
                 onChange={(v) => setG(key, v || '')}
                 options={jumpOptions()}
-                placeholder="&mdash; Not set (inherit) &mdash;"
+                placeholder={t('connections.inherit.placeholder', '— Not set (inherit) —')}
               />
             </div>
           </Field>
@@ -2777,8 +2777,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         <Show when={!collapsed()}>
           <Show when={gp.length === 0 && node.children.length === 0}>
             <p class="cm-group-empty">
-              No connections here yet — pick this group in a connection&rsquo;s editor to move it
-              in.
+              {t(
+                'connections.group.empty',
+                'No connections here yet — pick this group in a connection’s editor to move it in.',
+              )}
             </p>
           </Show>
           <For each={gp}>{(p) => renderRow(p)}</For>

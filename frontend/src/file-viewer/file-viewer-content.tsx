@@ -22,6 +22,7 @@ import type { FilesReadResult } from '../generated/files.read'
 import { BasePaneContent, type ActiveOrigin, type PaneHost } from '../pane-content'
 import { languageForPath, viewerHighlighting } from '../ui/document-language'
 import { highlightActiveLine } from '@codemirror/view'
+import { t } from '../i18n/locale-model'
 
 // ── The seam (injected at registration; never imported) ────────────────────
 
@@ -345,7 +346,11 @@ export class FileViewerContent extends BasePaneContent {
         if (this.state.result.changed) {
           return {
             lines,
-            reload: { disabled: this.dead, label: 'Reload', reason: 'Re-read the file from disk' },
+            reload: {
+              disabled: this.dead,
+              label: t('fileViewer.reload.label', 'Reload'),
+              reason: t('fileViewer.reload.reason', 'Re-read the file from disk'),
+            },
           }
         }
         return { lines, reload: null }
@@ -355,17 +360,21 @@ export class FileViewerContent extends BasePaneContent {
           lines: [
             { state: 'error', text: `Could not read file: ${this.state.message}`, tone: 'danger' },
           ],
-          reload: { disabled: this.dead, label: 'Reload', reason: 'Try reading the file again' },
+          reload: {
+            disabled: this.dead,
+            label: t('fileViewer.reload.label', 'Reload'),
+            reason: t('fileViewer.reload.retryReason', 'Try reading the file again'),
+          },
         }
       case 'unavailable':
         return {
           lines: [{ state: 'unavailable', text: UNAVAILABLE_LINE }],
           reload: {
             disabled: this.dead,
-            label: 'Reload',
+            label: t('fileViewer.reload.label', 'Reload'),
             reason: this.dead
-              ? 'The terminal or connection that provided this file is gone'
-              : 'The source is back — re-read the file',
+              ? t('fileViewer.unavailable.gone', 'The terminal or connection that provided this file is gone')
+              : t('fileViewer.unavailable.back', 'The source is back — re-read the file'),
           },
         }
     }

@@ -1,5 +1,6 @@
 import { ResolveBackend } from '../bindings/github.com/shady2k/nocx/wailsapp'
-import type { EndpointFailureKind, EndpointProvider, EndpointResult } from './endpoint'
+import type { EndpointFailure, EndpointFailureKind, EndpointProvider, EndpointResult } from './endpoint'
+import { t } from './i18n/locale-model'
 
 type BackendResolution = {
   ok: boolean
@@ -14,10 +15,12 @@ type BackendResolution = {
   traceparent?: string
 }
 
-const NO_SERVER_FAILURE = {
-  kind: 'no-server' as const,
-  message: 'The desktop backend could not be reached.',
-  remedy: 'Retry when the backend is available.',
+function noServerFailure(): EndpointFailure {
+  return {
+    kind: 'no-server',
+    message: t('endpoint.noServer.message', 'The desktop backend could not be reached.'),
+    remedy: t('endpoint.noServer.remedy', 'Retry when the backend is available.'),
+  }
 }
 
 function failureKind(kind: string): EndpointFailureKind {
@@ -63,7 +66,7 @@ export function createDesktopEndpointProvider(): EndpointProvider {
       try {
         return mapResolution(await ResolveBackend())
       } catch {
-        return { ok: false, failure: NO_SERVER_FAILURE }
+        return { ok: false, failure: noServerFailure() }
       }
     },
   }

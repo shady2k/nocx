@@ -50,6 +50,25 @@ import { t, tPlural } from '../i18n/locale-model'
 type Occurrence = NotifyFeedRead['occurrences'][number]
 type RunMember = Occurrence['run'][number]
 
+type Segment = NotifyFeedRead['occurrences'][number]['titleSegments'][number]
+
+/** A slot's text. The translated segments join in order; a slot with none is
+ *  the raw string, so a locale without the keys still shows the event. Text
+ *  segments are a program's or the backend's own words and pass through
+ *  verbatim, never through the catalogue. Keyed segments resolve at render, so
+ *  the language is the one the window has now, not the one it started in. */
+function segmentText(segments: readonly Segment[], raw: string): string {
+  if (segments.length === 0) return raw
+  return segments
+    .map((s) => {
+      if ('text' in s) return s.text
+      const params = s.params ?? {}
+      if ('count' in params) return tPlural(s.key, Number(params.count), s.key)
+      return t(s.key, s.key, params)
+    })
+    .join('')
+}
+
 /** Level maps onto the kit's tone vocabulary. info is neutral, not "info":
  *  an ordinary completion is not an advisory, and toning every row blue is
  *  how a feed stops distinguishing anything. */
@@ -377,14 +396,18 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
                   return (
                     <RecordRow
                       density="dense"
-                      title={o.count > 1 ? `${o.title} ×${o.count}` : o.title}
+                      title={
+                        o.count > 1
+                          ? `${segmentText(o.titleSegments, o.title)} ×${o.count}`
+                          : segmentText(o.titleSegments, o.title)
+                      }
                       kind={{
                         label: kindLabel(o.kind, catalogue()),
                         description: kindDescription(o.kind, catalogue()),
                         tone: toneOf(o.level),
                       }}
                       meta={metaLine(o.host, live() ? formatWhen(o.at) : 'session closed')}
-                      detail={o.body === '' ? undefined : o.body}
+                      detail={o.body === '' && o.bodySegments.length === 0 ? undefined : segmentText(o.bodySegments, o.body)}
                       selected={!o.read}
                       // A ROW WITH NO LIVE SESSION OFFERS NOTHING, and that is
                       // decided rather than unfinished (nocx-4ii6g). The two

@@ -96,6 +96,14 @@
     {
       "test": "job:ci-linux (with-secret-service)#843",
       "bead": "nocx-y3kfq"
+    },
+    {
+      "test": "go:TestStalledConsumerCancellation",
+      "bead": "nocx-oalo1.6.18"
+    },
+    {
+      "test": "go:TestBashAgentInterruptDoesNotExitInteractiveShell",
+      "bead": "nocx-oalo1.6.19"
     }
   ]
 }

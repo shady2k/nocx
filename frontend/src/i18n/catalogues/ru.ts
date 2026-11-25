@@ -2118,4 +2118,14 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'hostKey.method.helper.title': 'Развернуть помощник nocx — панель Git и всё, что требует больше, чем оболочка.',
   'hostKey.method.raw.title': 'Без интеграции — простой терминал, на хост ничего не записывается.',
   'hostKey.method.script.title': 'Скрипты оболочки, которые поставляет nocx: блоки команд, автодополнение, без скомпилированного файла.',
+  // ── Integration reason sentences, first set ──
+  'hostKey.agent.powers': 'могут запускать других агентов в новых вкладках, наблюдать за их работой и останавливать их. Они не могут читать ваши секреты, обращаться к другой машине или менять что-либо ещё на этой машине.',
+  'integration.bootstrap-interrupted.description': 'Подключение оборвалось, пока nocx ещё настраивал эту сессию.',
+  'integration.bootstrap-out-of-order.description': 'Ответ пришёл не в свою очередь во время настройки nocx, поэтому nocx его отверг и остановился.',
+  'integration.bootstrap-protocol.description': 'То, что ответило nocx при настройке, не было протоколом nocx, поэтому nocx остановился и не стал действовать по нему.',
+  'integration.bootstrap-timeout.description': 'Удалённый хост ответил nocx один раз, а затем не завершил настройку вовремя.',
+  'integration.capability-fd-unavailable.description': 'Удалённый хост не смог открыть закрытое место для ключа nocx этой сессии, поэтому nocx никакого ключа не передал.',
+  'integration.capability-unlink-failed.description': 'Удалённый хост не смог сделать ключ nocx безымянным перед записью, поэтому nocx ничего не записал.',
+  'integration.capability-write-failed.description': 'Удалённый хост не смог сохранить ключ nocx для этой сессии, поэтому у сессии нет собственного канала связи.',
+  'integration.channel-unavailable.description': 'Это подключение не даёт nocx собственного канала к оболочке, поэтому эта вкладка — простой терминал.',
 }

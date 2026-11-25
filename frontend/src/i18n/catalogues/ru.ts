@@ -195,6 +195,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   },
   'ui.toast.dismiss': 'Закрыть уведомление',
   'ui.connection.status': 'Состояние подключения',
+  'ui.watch.polling': 'Опрос',
   'ui.fileReadout.factsAria': 'Что это за файл',
   'ui.fileReadout.legendTitle': 'Подсвеченные ниже строки совпали со статическим сканом',
   'ui.fileReadout.legendTail':

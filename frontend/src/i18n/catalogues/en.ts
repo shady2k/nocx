@@ -423,6 +423,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ui.collision.applyMany': 'Apply to the {count} remaining files',
   'ui.toast.dismiss': 'Dismiss notification',
   'ui.connection.status': 'Connection status',
+  'ui.watch.polling': 'Polling',
   'ui.fileReadout.factsAria': 'What this file is',
   'ui.fileReadout.legendTitle': 'Highlighted lines below matched a static scan',
   'ui.fileReadout.legendTail':

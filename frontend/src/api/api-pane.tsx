@@ -3364,6 +3364,7 @@ export function ApiPane(props: ApiPaneProps) {
                 mode={store.watchMode()}
                 reason={store.watchDegradedReason()}
                 local
+                pollingLabel={t('ui.watch.polling', 'Polling')}
               />
               <IconButton
                 id="api-new-collection"

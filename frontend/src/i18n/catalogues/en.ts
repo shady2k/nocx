@@ -2165,4 +2165,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Check agent settings',
   'editor.chip.agent': 'Answers with {agent}. Open agent settings.',
   'editor.chip.agentModel': 'Answers with the model {model}. Open agent settings.',
+
+  // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
+  'terminal.font.loadFailed': 'Nordwand Mono could not be loaded. The current font is unchanged.',
+  'testSupport.hello.greeting': 'Hello, {name}!',
 }

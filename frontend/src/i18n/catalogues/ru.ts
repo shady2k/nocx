@@ -1959,4 +1959,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Проверить настройки агента',
   'editor.chip.agent': 'Отвечает агент {agent}. Открыть настройки агента.',
   'editor.chip.agentModel': 'Отвечает модель {model}. Открыть настройки агента.',
+
+  // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
+  'terminal.font.loadFailed': 'Не удалось загрузить Nordwand Mono. Текущий шрифт не изменён.',
+  'testSupport.hello.greeting': 'Привет, {name}!',
 }

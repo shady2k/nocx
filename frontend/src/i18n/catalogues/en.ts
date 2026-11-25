@@ -2174,4 +2174,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.timing.total': 'total',
   'api.move.rootOf': 'Root of {collection}',
   'api.move.title': 'Move {name} to…',
+  'api.pane.placeholder.collection': 'orders-api',
+  'api.pane.placeholder.folderPath': '/work/acme-api',
+  'api.pane.placeholder.folder': 'reports',
+  'api.pane.noEnvironment': 'No environment',
 }

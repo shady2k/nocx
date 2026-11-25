@@ -1968,4 +1968,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.timing.total': 'всего',
   'api.move.rootOf': 'Корень: {collection}',
   'api.move.title': 'Переместить {name}…',
+  'api.pane.placeholder.collection': 'orders-api',
+  'api.pane.placeholder.folderPath': '/work/acme-api',
+  'api.pane.placeholder.folder': 'отчёты',
+  'api.pane.noEnvironment': 'Нет окружения',
 }

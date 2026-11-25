@@ -2234,4 +2234,30 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'grant.panel.aria': 'marked for the question',
   'grant.dismissAll': 'Dismiss all',
   'grant.dismissMark.aria': 'Dismiss this mark',
+  // ── Host-key and agent-approval dialogs (host-key-dialog.tsx) ───────────
+  'hostKey.firstTime.body':
+    'This is the first time nocx has met this host. If you trust this machine, accept its key — it will be saved to ~/.ssh/known_hosts.',
+  'hostKey.changed.body':
+    'The host key offered by this server differs from the one nocx has seen before. That can mean the host’s key was regenerated — or that someone is intercepting this connection. Do not continue unless you are sure this is the same machine. Accepting replaces the old key: it stops being trusted.',
+  'hostKey.fingerprint.offered': 'Offered fingerprint',
+  'hostKey.fingerprint.label': 'Fingerprint',
+  'hostKey.method.aria': 'Integration method',
+  'hostKey.method.raw.label': 'Raw',
+  'hostKey.method.raw.title': 'No integration — a plain terminal, nothing written to the host.',
+  'hostKey.method.script.label': 'Script',
+  'hostKey.method.script.title':
+    'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
+  'hostKey.method.helper.label': 'Helper',
+  'hostKey.method.helper.title':
+    'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
+  'hostKey.cancel': 'Cancel',
+  'hostKey.agent.title': "Allow this agent to use nocx's tools?",
+  'hostKey.agent.lead': 'If you allow it, this agent',
+  'hostKey.agent.launches': 'and commands it launches',
+  'hostKey.agent.powers':
+    'can start other agents in new tabs, watch what they are doing, and stop them. They cannot read your secrets, reach another machine, or change anything else on this one.',
+  'hostKey.agent.allowed.aria': 'What is being allowed',
+  'hostKey.agent.denyBody':
+    "If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer is remembered for this agent alone.",
+  'hostKey.agent.deny': 'Deny',
 }

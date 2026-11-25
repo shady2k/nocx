@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -328,11 +329,29 @@ func TestReadRefusesASpecialFileWithoutBlocking(t *testing.T) {
 // because `internal` tells a person the helper broke rather than that they
 // clicked a socket.
 func TestReadRefusesASocket(t *testing.T) {
-	dir := tempDir(t)
+	// A SHORT directory, not t.TempDir(): a unix socket's path lives in
+	// sockaddr_un's 104-byte sun_path, and on macOS $TMPDIR is long enough
+	// that t.TempDir() plus the test's own name overflows it. The test then
+	// read "cannot create a socket here" and skipped — in ci-mac, the one
+	// platform whose open(2) errno this test exists to name.
+	dir, err := os.MkdirTemp("", "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// EvalSymlinks: on macOS $TMPDIR lives under /var, a symlink to
+	// /private/var, and the provider answers the resolved spelling.
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	socket := filepath.Join(dir, "s.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
-		t.Skipf("unix sockets are unavailable here: %v", err)
+		if runtime.GOOS == "windows" {
+			t.Skip("Go's net package creates no unix sockets on Windows")
+		}
+		t.Fatalf("listen unix %s: %v", socket, err)
 	}
 	defer func() { _ = listener.Close() }()
 	svc := New(local.New(local.WithRoot(dir)))

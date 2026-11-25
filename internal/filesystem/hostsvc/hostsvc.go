@@ -177,9 +177,11 @@ func (s *Service) stat(ctx context.Context, raw json.RawMessage) (any, error) {
 }
 
 // list answers one page of the provider's complete, deterministically ordered
-// listing. A page past the directory's total is refused rather than answered
-// empty: the caller asked for a page that cannot exist, and an empty answer
-// would read as "this directory ended here".
+// listing. A page past the directory's total is answered empty with the real
+// total and rev, exactly as local.List answers it: deleting an entry between
+// two pages produces that page, and the total the caller already holds is what
+// resolves the race. A refusal here would make this op disagree with the
+// provider on the same tree for a page the provider can express.
 func (s *Service) list(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p proto.FSListParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -188,9 +190,6 @@ func (s *Service) list(ctx context.Context, raw json.RawMessage) (any, error) {
 	listing, err := s.provider.List(ctx, p.Path, filesystem.Page{Offset: p.Offset, Limit: p.Limit})
 	if err != nil {
 		return nil, err
-	}
-	if p.Offset > listing.Total {
-		return nil, &invalidPage{reason: fmt.Sprintf("offset %d is past the directory's %d entries", p.Offset, listing.Total)}
 	}
 	entries := make([]proto.FSListEntry, 0, len(listing.Entries))
 	for _, e := range listing.Entries {
@@ -263,14 +262,18 @@ func (s *Service) read(ctx context.Context, raw json.RawMessage) (any, error) {
 	// machine — the one the helper exists to read.
 	f, err := os.OpenFile(canonical, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		// A unix socket cannot be opened at all: open(2) answers ENXIO before
-		// any descriptor exists, so the fstat that names every other special
-		// object never runs. lstat is the ONLY way to name this one, and it is
+		// A unix socket cannot be opened at all: open(2) answers ENXIO on
+		// Linux and EOPNOTSUPP on Darwin, in both cases before any descriptor
+		// exists, so the fstat that names every other special object never
+		// runs. The two errnos are one condition spelled twice and neither is
+		// portable to the other platform, so both are accepted — a branch that
+		// knew only Linux's spelling answered a macOS read as an unclassified
+		// `internal`. lstat is the ONLY way to name this object, and it is
 		// used for nothing else — the descriptor-is-the-object rule below
-		// stands for every open that succeeds, and an ENXIO on anything that
-		// is not a socket is returned unchanged rather than turned into a
+		// stands for every open that succeeds, and either errno on anything
+		// that is not a socket is returned unchanged rather than turned into a
 		// refusal this op did not observe.
-		if errors.Is(err, syscall.ENXIO) {
+		if errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.EOPNOTSUPP) {
 			if info, lerr := os.Lstat(canonical); lerr == nil && info.Mode()&os.ModeSocket != 0 {
 				return nil, &notRegular{path: p.Path, kind: kindName(info.Mode())}
 			}

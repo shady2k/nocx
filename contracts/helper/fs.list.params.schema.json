@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/fs.list.params.schema.json",
   "title": "HelperFSListParams",
-  "description": "Params of the helper fs service's list op: one directory and one page. The provider enumerates the whole directory — its deterministic order and its digest are properties of the complete listing — and answers the page the caller asked for. A page past the directory's total is refused with `invalid-page`, not answered empty: 'there is more' and 'you asked past the end' are different facts.",
+  "description": "Params of the helper fs service's list op: one directory and one page. The provider enumerates the whole directory — its deterministic order and its digest are properties of the complete listing — and answers the page the caller asked for. An offset past the directory's total answers an empty `entries` with the real `total` and `rev`, the same answer `local.List` gives: deleting an entry between two pages produces that page, and the `total` the caller already holds is what resolves the race.",
   "type": "object",
   "additionalProperties": false,
   "required": ["path", "offset", "limit"],

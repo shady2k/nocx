@@ -760,10 +760,13 @@ reader:
   finer vocabulary a refusal needs, beside the file row's own coarse `kind`.
 - **The refusal codes are the plan's closed list**, not the wire's generic
   ones: `not-found`, `permission-denied`, `not-dir`, `not-regular`,
-  `invalid-path`, `invalid-page`, `too-large`, `timed-out` and
-  `changed-during-read`. A refused op is one request's answer; the host keeps
-  serving, which is what lets one unreadable directory leave the rest of the
-  panel working.
+  `invalid-path`, `invalid-page`, `too-large`, `too-large-size`, `timed-out`
+  and `changed-during-read`. `too-large` is the entry cap (or a whole-file read
+  past the caller's bound) and `too-large-size` is the listing's byte cap: two
+  limits on two different things, and a caller that recovers the error type
+  behind the refusal needs the word to tell them apart. A refused op is one
+  request's answer; the host keeps serving, which is what lets one unreadable
+  directory leave the rest of the panel working.
 
 The number moved because the wire grew a SERVICE whose every op a 30-helper
 answers `unknown_op` to. That refusal is the half that must be read correctly:

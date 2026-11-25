@@ -28,13 +28,20 @@ const (
 	// ErrCodeInvalidPath: the path violates the provider's syntax. Details
 	// carries the reason.
 	ErrCodeInvalidPath = "invalid-path"
-	// ErrCodeInvalidPage: the page cannot exist — a non-positive length, a
-	// negative offset, a whole-file read not at 0, or an offset past the end.
+	// ErrCodeInvalidPage: the page cannot be asked for at all — a negative
+	// offset, a non-positive length, a whole-file read not at 0, or a length
+	// over the read ceiling. An offset past a directory's end is NOT this: it
+	// names a page the provider answers empty, with the real total and rev.
 	ErrCodeInvalidPage = "invalid-page"
-	// ErrCodeTooLarge: the entry cap, the listing size cap, or a whole-file
-	// read of a file larger than the caller's bound. Details carries `observed`
-	// and `limit`.
+	// ErrCodeTooLarge: the entry cap, or a whole-file read of a file larger
+	// than the caller's bound. Details carries `observed` and `limit`.
 	ErrCodeTooLarge = "too-large"
+	// ErrCodeTooLargeSize: the listing's byte cap — the wire cost of the whole
+	// listing summed over its entries. It is not `too-large` because the two
+	// caps count different things against different limits, and a caller that
+	// must name the cap it hit, or recover the error type behind the refusal,
+	// cannot get either from one word.
+	ErrCodeTooLargeSize = "too-large-size"
 	// ErrCodeTimedOut: the operation's elapsed-time cap, or the request's own
 	// context being cancelled.
 	ErrCodeTimedOut = "timed-out"
@@ -108,7 +115,7 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 	}
 	var sized *filesystem.ErrTooLargeSize
 	if errors.As(err, &sized) {
-		return ErrCodeTooLarge, mustJSON(sizeDetails{Observed: sized.ObservedBytes, Limit: sized.Limit}), true
+		return ErrCodeTooLargeSize, mustJSON(sizeDetails{Observed: sized.ObservedBytes, Limit: sized.Limit}), true
 	}
 	var timedOut *filesystem.ErrTimedOut
 	if errors.As(err, &timedOut) {
@@ -130,10 +137,12 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 	return "", nil, false
 }
 
-// invalidPage is a page this op refuses: one that cannot exist (a non-positive
-// length, a negative offset) or one past what the directory holds. It is the
-// service's own type because filesystem.ErrInvalidPage carries ints and a read
-// page is 64-bit; the CODE is still the plan's single invalid-page spelling.
+// invalidPage is a page this op cannot express: a non-positive length, a
+// negative offset, a whole-file read not at 0, or a length over the ceiling. It
+// is the service's own type because filesystem.ErrInvalidPage carries ints and
+// a read page is 64-bit; the CODE is still the plan's single invalid-page
+// spelling. An offset past a directory's end never reaches it — that page is
+// answered empty, the way local.List answers it.
 type invalidPage struct{ reason string }
 
 func (e *invalidPage) Error() string { return "hostsvc: invalid page: " + e.reason }

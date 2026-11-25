@@ -111,9 +111,10 @@ type FSStatResult struct {
 }
 
 // FSListParams addresses one page of one directory. Offset and Limit are the
-// caller's page; a page beyond the directory's total is refused rather than
-// answered empty, because "there is more" and "you asked past the end" are
-// different facts and an empty page cannot tell them apart.
+// caller's page; an offset past the directory's total is answered empty with
+// the real Total and Rev, the same answer local.List gives for that page —
+// deleting an entry between two pages produces it, and the Total the caller
+// already holds is what resolves the race.
 type FSListParams struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset"`

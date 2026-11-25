@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	filesystem "github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/hostsvc"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -241,15 +242,39 @@ func TestListKeepsLexicalEntryPathsUnderASymlinkedParent(t *testing.T) {
 	}
 }
 
-// TestListRefusesAPagePastTheEnd: offset == total is the empty page; offset >
-// total is a page that cannot exist.
-func TestListRefusesAPagePastTheEnd(t *testing.T) {
+// TestListPastTheEndIsAnEmptyPage: an offset past the directory's total is
+// answered the way local.List answers it — an empty, non-nil page carrying the
+// real total and rev — because deleting an entry between two pages produces
+// exactly that page, and the total a caller already holds is what resolves the
+// race. A refusal here would make this service disagree with the provider on
+// the same tree.
+func TestListPastTheEndIsAnEmptyPage(t *testing.T) {
 	dir := tempDir(t)
-	mustWrite(t, filepath.Join(dir, "only.txt"), nil)
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
-	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 2, Limit: 10})
-	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodeInvalidPage {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeInvalidPage)
+	mustMkdir(t, filepath.Join(dir, "adir"))
+	mustWrite(t, filepath.Join(dir, "b.txt"), nil)
+
+	provider := local.New(local.WithRoot(dir))
+	want, err := provider.List(context.Background(), dir, filesystem.Page{Offset: 5, Limit: 10})
+	if err != nil {
+		t.Fatalf("local.List: %v", err)
+	}
+	got := listThrough(t, hostsvc.New(provider), dir, 5, 10)
+	if got.Entries == nil || len(got.Entries) != 0 {
+		t.Fatalf("entries = %#v, want an empty non-nil slice", got.Entries)
+	}
+	if got.HasMore {
+		t.Fatal("a page past the end reported more")
+	}
+	if got.Total != want.Total || got.Offset != want.Offset || got.Rev != want.Rev {
+		t.Fatalf("total %d offset %d rev %q; local.List answers total %d offset %d rev %q",
+			got.Total, got.Offset, got.Rev, want.Total, want.Offset, want.Rev)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"entries":[]`) {
+		t.Fatalf("an empty page marshals as %s", raw)
 	}
 }
 
@@ -345,6 +370,34 @@ func TestEntryCapIsTooLargeWithTheObservedCount(t *testing.T) {
 	}
 	if d.Observed != 3 || d.Limit != 2 {
 		t.Fatalf("details = %+v, want observed 3 and limit 2", d)
+	}
+}
+
+// TestSizeCapIsTooLargeSizeWithTheObservedBytes: the listing's BYTE cap is a
+// different limit from the entry cap and keeps a different code, because
+// whoever recovers the error type behind the refusal — the helperfs leaf does
+// it with errors.As — cannot tell the two apart under one word. observed is not
+// asserted exactly: the provider measures the wire cost of the whole listing
+// and this test does not re-derive it, which would be a second implementation
+// of the cap.
+func TestSizeCapIsTooLargeSizeWithTheObservedBytes(t *testing.T) {
+	dir := tempDir(t)
+	mustWrite(t, filepath.Join(dir, "a.txt"), nil)
+	svc := hostsvc.New(local.New(local.WithRoot(dir), local.WithSizeCap(1)))
+	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
+	code, details := refusal(t, svc, err)
+	if code != hostsvc.ErrCodeTooLargeSize {
+		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeTooLargeSize)
+	}
+	var d struct {
+		Observed int64 `json:"observed"`
+		Limit    int64 `json:"limit"`
+	}
+	if err := json.Unmarshal(details, &d); err != nil {
+		t.Fatalf("details: %v", err)
+	}
+	if d.Limit != 1 || d.Observed <= 1 {
+		t.Fatalf("details = %+v, want an observed above the 1-byte limit", d)
 	}
 }
 

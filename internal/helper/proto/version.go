@@ -421,7 +421,8 @@ package proto
 // closed set of ops a reader switches on, and two peers that disagree refuse
 // each other at hello in both directions, which is what makes the number the
 // whole of the compatibility story. The write half of the same service lands
-// with its own leaves; nothing has shipped at 31, so that round WIDENS this
-// number in place rather than bumping again — the same way 15 grew for as long
-// as no generation was published.
+// with its own leaves and each round moves this number: the write half is 32
+// and watch is 33, because a generation is published with the next nightly and
+// the argument that let 15 widen in place — nothing was published to gain it
+// against — is spent by the time the next round lands.
 const Version = "31"

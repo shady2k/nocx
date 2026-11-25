@@ -13,6 +13,7 @@ import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceC
 import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
 import { StatusCard } from './ui/status-card'
+import { t } from './i18n/locale-model'
 
 export interface ToolSurfaceNoticeProps {
   fact: SessionToolSurfaceChanged
@@ -30,10 +31,10 @@ export function mountToolSurfaceNotice(
     () => (
       <StatusCard
         tone="danger"
-        title="Worker tools unavailable"
-        description={`The nocx worker tool surface is unavailable: ${props.fact.reason ?? 'the endpoint did not answer'}.`}
+        title={t('toolSurface.unavailable.title', 'Worker tools unavailable')}
+        description={t('toolSurface.unavailable.body', 'The nocx worker tool surface is unavailable: {reason}.', { reason: props.fact.reason ?? t('toolSurface.unavailable.noAnswer', 'the endpoint did not answer') })}
         action={
-          <IconButton ariaLabel="Dismiss" size="sm" onClick={props.onDismiss}>
+          <IconButton ariaLabel={t('toolSurface.dismiss.aria', 'Dismiss')} size="sm" onClick={props.onDismiss}>
             <CloseIcon />
           </IconButton>
         }

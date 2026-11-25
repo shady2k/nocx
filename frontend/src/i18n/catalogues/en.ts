@@ -2275,4 +2275,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.group.empty':
     'No connections here yet — pick this group in a connection’s editor to move it in.',
   'connections.inherit.placeholder': '— Not set (inherit) —',
+  // ── Recovery labels (capability.ts) ─────────────────────────────────────
+  'recovery.enableEditor': 'Enable command editor',
+  'recovery.restoreEditor': 'Restore command editor',
+  // ── Worker tool surface notice (tool-surface-notice.tsx) ────────────────
+  'toolSurface.unavailable.title': 'Worker tools unavailable',
+  'toolSurface.unavailable.body': 'The nocx worker tool surface is unavailable: {reason}.',
+  'toolSurface.unavailable.noAnswer': 'the endpoint did not answer',
+  'toolSurface.dismiss.aria': 'Dismiss',
 }

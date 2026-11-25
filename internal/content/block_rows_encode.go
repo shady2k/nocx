@@ -249,6 +249,7 @@ func blockRowPlainText(text string, marks [][3]int64) (string, error) {
 		return cmp.Compare(a[0], b[0])
 	})
 	remainingCodepoints := int64(utf8.RuneCountInString(text))
+	needsRewrite := false
 	for i, m := range marks {
 		if i > 0 && marks[i-1][0] == m[0] {
 			return "", fmt.Errorf("content: block rows: two marks name position %d", m[0])
@@ -262,12 +263,17 @@ func blockRowPlainText(text string, marks [][3]int64) (string, error) {
 			return "", fmt.Errorf("content: block rows: marks claim more codepoints than the row's text has")
 		}
 		remainingCodepoints -= m[1]
+		needsRewrite = needsRewrite || m[1] == 0 || m[2] == int64(emulator.WidthSpacerTail)
 	}
 	positions := remainingCodepoints + int64(len(marks))
 	for _, m := range marks {
 		if m[0] >= positions {
 			return "", fmt.Errorf("content: block rows: mark position %d is outside the row's %d positions", m[0], positions)
 		}
+	}
+	// Width and nonempty cluster spans alone do not change the row's bytes.
+	if !needsRewrite {
+		return strings.TrimRight(text, " "), nil
 	}
 
 	var out strings.Builder

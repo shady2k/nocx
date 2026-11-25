@@ -50,6 +50,25 @@ func BenchmarkBlockRowsText(b *testing.B) {
 	}
 }
 
+func BenchmarkBlockRowsTextMarkedUnicode(b *testing.B) {
+	const rows = 4096
+	text := "日é" + strings.Repeat("x", 74)
+	var body bytes.Buffer
+	for i := range rows {
+		fmt.Fprintf(&body, "{\"from\":%d,\"row\":{\"text\":%q,\"marks\":[[0,1,2],[1,2,1]],\"continuation\":%t}}\n",
+			i, text, i > 0)
+	}
+	chunks := splitBlockRowsChunks(body.Bytes(), 64<<10)
+	b.ReportAllocs()
+	b.SetBytes(rows * int64(len(text)))
+	for b.Loop() {
+		got, err := content.BlockRowsTextAfter(chunks, 0)
+		if err != nil || len(got) != rows*len(text) {
+			b.Fatalf("BlockRowsTextAfter length = %d, err = %v; want %d", len(got), err, rows*len(text))
+		}
+	}
+}
+
 func TestBlockRowsTextAfter_ContinuationAcrossChunks(t *testing.T) {
 	// A retained continuation, empty logical lines, and byte-sized chunks
 	// exercise separators independently of text length and JSON boundaries.
@@ -128,6 +147,11 @@ func TestBlockRowsTextAfter_CompactRowText(t *testing.T) {
 			"unmarked Unicode and non-space whitespace",
 			`{"text":" \t中é👩‍💻   "}`,
 			" \t中é👩‍💻\u00a0",
+		},
+		{
+			"width and cluster marks do not change text",
+			`{"text":"日é  ","marks":[[1,2,1],[0,1,2]]}`,
+			"日é",
 		},
 		{
 			"unordered marks preserve clusters and blank positions",

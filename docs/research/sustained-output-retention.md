@@ -248,3 +248,17 @@ parent suite's files or signal handling.
 
 No full integration gate, native macOS/WebKit check, raw-session-recording
 repair, or claim of constant-time capped appends is included.
+
+## PR #826 review follow-up
+
+A prepend can assign sequence zero to a chunk between the protected head and
+tail. Sequence IDs order chunks; only the byte boundaries decide which chunks
+are protected. The public store regression retains exactly 32 KiB, reports one
+evicted middle row, and reports no stream loss.
+
+Validated width and nonempty grapheme spans no longer cause a copy of row
+text. On Linux amd64 (Ryzen 7 5700X, Go 1.26.5), `BenchmarkBlockRowsTextMarkedUnicode`
+used 4,096 wrapped rows with wide and combining cells and no text-changing
+marks. At `-benchtime=200x -count=3`, median allocation fell from 2,755,394 to
+2,427,738 B/op and from 20,531 to 16,435 allocations/op. This isolates marked
+rows; it does not measure end-user latency.

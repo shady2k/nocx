@@ -820,7 +820,7 @@ func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, cap
 		// The head reservation is fixed; the tail protects the newest
 		// whole chunks totalling at least half the current cap. Once a
 		// chunk reaches that tail, every later chunk is protected too.
-		if held-victimBytes <= capBytes || held-scanned < capBytes/2 || seq == 0 {
+		if held-victimBytes <= capBytes || held-scanned < capBytes/2 {
 			break
 		}
 		if !haveVictim {

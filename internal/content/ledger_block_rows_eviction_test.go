@@ -62,8 +62,10 @@ func newBlockRowsEvictionStore(t testing.TB) (*sqliteContent, string) {
 func TestBlockRowsEvictionRetainsExactChunks(t *testing.T) {
 	// Sizes are deliberately unequal. Expected survivors are hand-selected
 	// from the protected ends and the byte shortfall, not another eviction
-	// implementation. SQL setup expresses sparse/zero/negative sequence IDs
-	// and an absent reservation, which the normal append API cannot request.
+	// implementation. SQL setup expresses exact sequence gaps and an absent
+	// head reservation, which the normal append API cannot request.
+	// Close measures the span from the first surviving row; for headless
+	// fixtures the retained chunks, not DroppedRows, expose prefix eviction.
 	for _, tc := range []struct {
 		name    string
 		seq     []int
@@ -85,11 +87,11 @@ func TestBlockRowsEvictionRetainsExactChunks(t *testing.T) {
 		{"exact head boundary", []int{1, 3, 7, 9, 13, 21}, []int{2, 2, 1, 2, 3, 3}, new(int64(4)), 10, []int{0, 1, 4, 5}, 10, 2, 2},
 		{"negative head boundary", []int{-9, -5, -2, 4, 10}, []int{2, 2, 2, 2, 4}, new(int64(3)), 8, []int{0, 1, 4}, 8, 2, 2},
 		{"zero seq inside protected head", []int{-3, 0, 5, 9, 13}, []int{2, 2, 2, 2, 4}, new(int64(3)), 8, []int{0, 1, 4}, 8, 2, 2},
-		{"zero seq stops after headed negative victim", []int{-4, -2, 0, 5, 9}, []int{2, 2, 2, 2, 4}, new(int64(2)), 8, []int{0, 2, 3, 4}, 10, 2, 1},
+		{"zero seq among unprotected middle chunks", []int{-4, -2, 0, 5, 9}, []int{2, 2, 2, 2, 4}, new(int64(2)), 8, []int{0, 3, 4}, 8, 2, 2},
 		{"no head sparse prefix", []int{1, 3, 7, 9, 13}, []int{1, 3, 2, 2, 4}, nil, 8, []int{2, 3, 4}, 8, 0, 0},
 		{"zero head sparse prefix", []int{1, 3, 7, 9, 13}, []int{1, 3, 2, 2, 4}, new(int64(0)), 8, []int{2, 3, 4}, 8, 0, 0},
-		{"zero victim stops after negative seq", []int{-3, 0, 5, 9}, []int{2, 2, 2, 6}, nil, 8, []int{1, 2, 3}, 10, 0, 0},
-		{"zero first victim", []int{0, 5, 9}, []int{2, 2, 6}, nil, 8, []int{0, 1, 2}, 10, 0, 0},
+		{"zero victim after negative seq", []int{-3, 0, 5, 9}, []int{2, 2, 2, 6}, nil, 8, []int{2, 3}, 8, 0, 0},
+		{"zero first victim", []int{0, 5, 9}, []int{2, 2, 6}, nil, 8, []int{1, 2}, 8, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, entry := newBlockRowsEvictionStore(t)
@@ -227,6 +229,51 @@ func TestBlockRowsEvictionKeepsFixedHeadAcrossCapChanges(t *testing.T) {
 	}
 	if summary.DroppedRows != 5 || summary.LostRows != 0 || summary.UnavailableRows != 0 {
 		t.Fatalf("summary = %+v, want five cap drops and no loss", summary)
+	}
+}
+
+func TestBlockRowsEvictionDropsMiddleOfPrependedRows(t *testing.T) {
+	s, entry := newBlockRowsEvictionStore(t)
+	ctx := context.Background()
+	const capBytes = 32 << 10
+	s.policy.SetOutputCapBytes(capBytes)
+
+	// At four-digit indices, 96 ordinary cells encode to a 128-byte line.
+	// The append fits one chunk; the prepend fills one more and leaves a
+	// single middle row outside the protected head and tail.
+	cells := make([]emulator.Cell, 96)
+	for i := range cells {
+		cells[i] = emulator.Cell{Grapheme: "x", Width: emulator.WidthNarrow, HasText: true}
+	}
+	for _, delivery := range []struct{ from, to uint64 }{{1129, 1257}, {1000, 1129}} {
+		rows := make([]emulator.Row, delivery.to-delivery.from)
+		for i := range rows {
+			rows[i].Cells = cells
+		}
+		if err := s.AppendBlockRows(ctx, AppendBlockRows{
+			EntryID: entry, ArtifactID: evictionArtifact, FromRow: delivery.from, Rows: rows,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	art, err := s.Artifact(ctx, evictionArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if art.ByteLen != capBytes {
+		t.Fatalf("retained %d bytes, want %d", art.ByteLen, capBytes)
+	}
+	assertByteLenIsChunkTotal(t, art)
+	want := []RowRange{{From: 1000, To: 1128}, {From: 1129, To: 1257}}
+	if !reflect.DeepEqual(art.RetainedRanges, want) {
+		t.Fatalf("retained ranges = %+v, want %+v", art.RetainedRanges, want)
+	}
+	summary, err := s.CloseBlockRows(ctx, CloseBlockRows{EntryID: entry, ArtifactID: evictionArtifact})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DroppedRows != 1 || summary.LostRows != 0 || summary.UnavailableRows != 0 {
+		t.Fatalf("summary = %+v, want one cap drop and no loss", summary)
 	}
 }
 

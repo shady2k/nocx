@@ -165,21 +165,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.description':
     'nocx сделал вывод из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину.',
 
-  // ── Mechanism samples ───────────────────────────────────────────────────
-  // A plain string.
-  'i18n.sample.greeting': 'С возвращением',
-  // The former deliberate gap, minted when the catalogue turned complete at
-  // stage 3's close: the English-fallback order is proven by the
-  // call-site-literal test in locale-model.test.ts, not by a catalogue hole.
-  'i18n.sample.untranslated': 'This key has no Russian translation yet',
-  // A plural object: Russian needs one/few/many (1 команда / 2 команды /
-  // 5 команд), resolved with Intl.PluralRules('ru').
-  'i18n.sample.commandCount': {
-    one: '{count} команда',
-    few: '{count} команды',
-    many: '{count} команд',
-    other: '{count} команды',
-  },
   // ── Kit chrome, passed as props from the surfaces (kit never imports i18n)
   'ui.collision.title': 'Файл уже существует',
   'ui.collision.overwrite': 'Перезаписать',

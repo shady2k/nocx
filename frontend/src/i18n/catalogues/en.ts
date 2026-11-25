@@ -30,7 +30,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.ui.language.description':
     'The language nocx speaks in its own screens — settings, prompts and notices. Terminal output is never translated.',
   'settings.ui.language.option.en': 'English',
-  'settings.ui.language.option.ru': 'Русский',
+  'settings.ui.language.option.ru': 'Russian',
 
   // ── Settings declarations (Go: internal/settings/settings.go) ───────────
   // Order follows the declaration sites in settings.go.
@@ -164,26 +164,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.label': 'Work seems to have finished',
   'notify.kind.paneWorkFinished.description':
     "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine.",
-
-  // ── Mechanism samples ───────────────────────────────────────────────────
-  // A plain string: the base case every translated surface will use.
-  'i18n.sample.greeting': 'Welcome back',
-  // A plural object: `Intl.PluralRules` picks the form for the count. The
-  // label names the mechanism itself, so the sample is self-describing in
-  // whichever locale is active.
-  'i18n.sample.commandCount': {
-    one: '{count} command',
-    other: '{count} commands',
-  },
-  // Deliberately absent from ru: proves the visible-English fallback at
-  // runtime (design story 2) and emits the parity fixture's warning shape.
-  'i18n.sample.untranslated': 'This key has no Russian translation yet',
-  // Deliberately absent from ru too, and a plural: the fallback path must
-  // still fill {count}, whichever catalogue the entry came out of.
-  'i18n.sample.onlyEnglishPlural': {
-    one: '{count} English-only thing',
-    other: '{count} English-only things',
-  },
 
   // ── Operations → the catalogue's waiting sentences ──────────────────────
   // Go: internal/operation/catalog, one `waiting` sentence per method, and the

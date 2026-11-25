@@ -19,6 +19,7 @@
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
 import type { SessionToolSurfaceChanged } from '../generated/session.toolSurfaceChanged'
+import { t } from '../i18n/locale-model'
 
 export type IntegrationReason = NonNullable<SessionIntegrationChanged['reason']>
 
@@ -272,7 +273,18 @@ export interface IntegrationMessage {
  *  did not answer, and the backend does NOT know that anything intercepted it.
  *  Giving the second the first's sentence would state a finding nocx does not
  *  have, which is how a zsh user was handed advice about bash. */
-interface MessageTemplate extends Omit<IntegrationMessage, 'fix'> {
+/** A sentence the catalogue owns: its key, and the English it falls back to.
+ *  Resolved with t() when the message is built, so a locale switch reaches
+ *  the card on its next render (ADR-nswp57x0 point 1). */
+interface MessageText {
+  readonly key: string
+  readonly fallback: string
+}
+
+
+interface MessageTemplate extends Omit<IntegrationMessage, 'fix' | 'title' | 'description'> {
+  readonly title: MessageText
+  readonly description: MessageText
   /** Resolved against the shell that actually ran, which is the whole point:
    *  a fix written once, for a shell nobody named, is the defect. */
   readonly fix?: (shell: ShellFacts) => IntegrationFix
@@ -329,15 +341,23 @@ const PLAIN_TERMINAL =
  *  description and the last good step are what differ, and they are what the
  *  user reads to know which of thirty things happened. */
 function notIntegrated(
+  reason: string,
   description: string,
   lastGoodStep: string,
   fix?: (shell: ShellFacts) => IntegrationFix,
 ): MessageTemplate {
-  return { title: 'Not integrated', description, happening: PLAIN_TERMINAL, lastGoodStep, fix }
+  return {
+    title: { key: 'integration.notIntegrated.title', fallback: 'Not integrated' },
+    description: { key: `integration.${reason}.description`, fallback: description },
+    happening: PLAIN_TERMINAL,
+    lastGoodStep,
+    fix,
+  }
 }
 
 const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   'handshake-timeout': notIntegrated(
+    'handshake-timeout',
     'Your shell did not answer nocx in time, so this tab is a plain terminal.',
     'nocx started the shell and opened its channel. The shell never answered on it.',
     standAsideFix,
@@ -359,12 +379,16 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   // stand-aside advice tells a person their startup took the shell over,
   // which is exactly the claim this reason can no longer make.
   'startup-did-not-return': notIntegrated(
+    'startup-did-not-return',
     'nocx’s shell integration never answered from inside your shell, so this tab is a plain terminal.',
     'nocx started the shell and handed it the integration. Nothing ever answered on it.',
   ),
   'channel-lost': {
-    title: 'Integration lost',
-    description: 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
+    title: { key: 'integration.channel-lost.title', fallback: 'Integration lost' },
+    description: {
+      key: 'integration.channel-lost.description',
+      fallback: 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
+    },
     // It used to end "they are no longer recorded", which was true until the
     // backend became its own consumer of the replay ring (nocx-22k1c.1) and
     // is false now — and it is the one message a person reads at the exact
@@ -375,21 +399,27 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
     lastGoodStep: 'The shell was integrated and answering. Its channel then ended.',
   },
   'unsupported-shell': notIntegrated(
+    'unsupported-shell',
     'nocx has no integration for this shell, so this tab is a plain terminal.',
     'The connection opened. Integration was declined before the shell started.',
   ),
   'unsupported-fish-startup': notIntegrated(
+    'unsupported-fish-startup',
     'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
     'Fish started normally without integration credentials. Compatibility depends on the startup prelude, not the version number alone.',
   ),
   'no-secure-temp': notIntegrated(
+    'no-secure-temp',
     'nocx could not create a private temporary file for this session, so integration was not installed.',
     'The connection opened. Installing the integration stopped before the shell started.',
   ),
   'remote-command': {
-    title: 'Not integrated',
-    description:
-      'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
+    title: { key: 'integration.notIntegrated.title', fallback: 'Not integrated' },
+    description: {
+      key: 'integration.remote-command.description',
+      fallback:
+        'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
+    },
     happening: 'This tab runs the configured command. Command blocks do not apply to it.',
     lastGoodStep: 'The connection opened and ran what it was configured to run.',
   },
@@ -401,9 +431,12 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   // cannot fix it, so there is no remedy offered — it is a defect in nocx,
   // and the sentence says so rather than implying the host did something.
   'command-too-long': {
-    title: 'Not integrated',
-    description:
-      'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+    title: { key: 'integration.notIntegrated.title', fallback: 'Not integrated' },
+    description: {
+      key: 'integration.command-too-long.description',
+      fallback:
+        'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+    },
     happening: PLAIN_TERMINAL,
     lastGoodStep: 'The connection opened and authenticated. nocx stopped before sending anything.',
   },
@@ -414,26 +447,32 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   // each row is a different thing the user's administrator can change. Before
   // these, all five arrived as "cannot say why".
   'session-unavailable': notIntegrated(
+    'session-unavailable',
     'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
     'The connection opened and authenticated once. Opening another session on it was refused.',
   ),
   'pty-unavailable': notIntegrated(
+    'pty-unavailable',
     'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
     'The connection opened and nocx asked for a terminal. The request was refused.',
   ),
   'exec-refused': notIntegrated(
+    'exec-refused',
     'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
     'The connection opened and gave nocx a terminal. Running nocx’s own line on it was refused.',
   ),
   'exec-substituted': notIntegrated(
+    'exec-substituted',
     'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
     'The connection opened and ran what it is configured to run, in place of what nocx asked for.',
   ),
   'host-key-unconfirmed': notIntegrated(
+    'host-key-unconfirmed',
     'The host key was not confirmed, so shell integration was not delivered.',
     'The terminal opened without integration; nocx could not confirm which host record authorises delivery.',
   ),
   'publish-unavailable': notIntegrated(
+    'publish-unavailable',
     'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
     'The connection opened and authenticated. Copying the integration across was refused.',
   ),
@@ -445,18 +484,22 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   // empty "How to fix" that says "try again" teaches the user that the button
   // never helps.
   'loader-termios-unavailable': notIntegrated(
+    'loader-termios-unavailable',
     'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
     'The connection opened and nocx’s line started. Preparing the terminal stopped there.',
   ),
   'bootstrap-interrupted': notIntegrated(
+    'bootstrap-interrupted',
     'The connection ended while nocx was still setting this session up.',
     'nocx’s line started on the far host. The channel ended before the setup finished.',
   ),
   'bootstrap-protocol': notIntegrated(
+    'bootstrap-protocol',
     'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
     'nocx’s line started on the far host. What came back where nocx’s own frame belongs was something else.',
   ),
   'bootstrap-timeout': notIntegrated(
+    'bootstrap-timeout',
     'The far host answered nocx once and then did not finish the setup in time.',
     'nocx’s line started and announced itself. It never reached an outcome.',
   ),
@@ -465,67 +508,83 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   // written by something that is not nocx’s own setup. The sentence says
   // what happened and claims nothing about who did it.
   'bootstrap-out-of-order': notIntegrated(
+    'bootstrap-out-of-order',
     'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
     'nocx’s line started on the far host. A step was answered that was not the next one.',
   ),
   'receiver-unready': notIntegrated(
+    'receiver-unready',
     'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
     'The connection opened and nocx’s line was sent. Nothing announced itself on it.',
   ),
   'stage-too-large': notIntegrated(
+    'stage-too-large',
     'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
     'The connection opened. nocx refused its own oversized setup before writing a byte of it.',
   ),
   'stage-digest-unavailable': notIntegrated(
+    'stage-digest-unavailable',
     'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
     'The connection opened and nocx’s line started. Nothing on the host could compute a checksum.',
   ),
   'stage-digest-mismatch': notIntegrated(
+    'stage-digest-mismatch',
     'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
     'The connection opened and nocx’s setup was sent. Checking it on the far host did not match.',
   ),
   'stage-fd-unavailable': notIntegrated(
+    'stage-fd-unavailable',
     'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
     'The connection opened, and nocx’s setup arrived and verified. Passing it to the shell failed.',
   ),
   'stage-source-failed': notIntegrated(
+    'stage-source-failed',
     'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
     'The connection opened, and nocx’s setup arrived, verified and ran. It did not take the session over.',
   ),
   'secret-too-large': notIntegrated(
+    'secret-too-large',
     'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
     'The connection opened and nocx’s setup ran. nocx refused its own oversized frame.',
   ),
   'secret-malformed': notIntegrated(
+    'secret-malformed',
     'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
     'The connection opened and nocx’s setup ran and read the key. It was not the shape a key must be.',
   ),
   'secret-not-for-this-session': notIntegrated(
+    'secret-not-for-this-session',
     'The key that reached the far host was addressed to a different session, so the far host refused it.',
     'The connection opened and nocx’s setup ran and read a key. It named another session.',
   ),
   'capability-fd-unavailable': notIntegrated(
+    'capability-fd-unavailable',
     'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
     'The connection opened and nocx’s setup ran. Opening private storage for the key failed.',
   ),
   'capability-unlink-failed': notIntegrated(
+    'capability-unlink-failed',
     'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
     'The connection opened and nocx’s setup ran. Removing the name failed, so no key was written.',
   ),
   'capability-write-failed': notIntegrated(
+    'capability-write-failed',
     'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
     'The connection opened and nocx’s setup ran. Writing the key failed.',
   ),
   'generation-unavailable': notIntegrated(
+    'generation-unavailable',
     'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
     'The connection opened and nocx’s setup ran. It found nothing installed to hand the shell to.',
   ),
   'channel-unavailable': notIntegrated(
+    'channel-unavailable',
     'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
     'The connection opened and authenticated. Opening nocx’s own channel on it was refused.',
   ),
 
   unknown: notIntegrated(
+    'unknown',
     'nocx could not set up shell integration for this session, and cannot say why.',
     'The session opened. Integration stopped somewhere nocx cannot name.',
   ),
@@ -594,16 +653,29 @@ export function integrationMessage(
   recording: OutputRecording,
 ): IntegrationMessage | null {
   if (!isDegraded(fact) || !fact) return null
-  const { fix, ...words } = MESSAGES[fact.reason as IntegrationReason] ?? MESSAGES.unknown
+  const { fix, title, description, ...words } =
+    MESSAGES[fact.reason as IntegrationReason] ?? MESSAGES.unknown
+  let text = resolveText(description)
   if (fact.reason === 'unsupported-fish-startup') {
     const version = fact.shellVersion
-      ? `Detected Fish ${fact.shellVersion}.`
-      : 'Fish version is unavailable.'
-    words.description = `${version} ${words.description}`
+      ? t('integration.fish.detected', 'Detected Fish {version}.', { version: fact.shellVersion })
+      : t('integration.fish.unavailable', 'Fish version is unavailable.')
+    text = `${version} ${text}`
   }
   const output = recordingSentence(recording)
-  const said = output ? { ...words, description: `${words.description} ${output}` } : words
+  const said = {
+    ...words,
+    title: resolveText(title),
+    description: output ? `${text} ${output}` : text,
+  }
   return fix ? { ...said, fix: fix(shellFacts(fact.shell)) } : said
+}
+
+/** A template's sentence, resolved now: this runs when the message is built,
+ *  which is when the card reads it, so the active language is the one that
+ *  answers (ADR-nswp57x0 point 1). */
+function resolveText(text: MessageText): string {
+  return t(text.key, text.fallback)
 }
 
 /** How much of an executable name the process table keeps, in bytes.

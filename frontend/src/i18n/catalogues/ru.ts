@@ -1966,4 +1966,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.timing.waiting': 'ожидание',
   'api.timing.download': 'загрузка',
   'api.timing.total': 'всего',
+  'api.move.rootOf': 'Корень: {collection}',
+  'api.move.title': 'Переместить {name}…',
 }

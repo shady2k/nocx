@@ -2172,4 +2172,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.timing.waiting': 'waiting',
   'api.timing.download': 'download',
   'api.timing.total': 'total',
+  'api.move.rootOf': 'Root of {collection}',
+  'api.move.title': 'Move {name} to…',
 }

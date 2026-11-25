@@ -30,6 +30,7 @@ import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showConfirm } from './ui/dialog'
+import { confirmLabels } from './i18n/kit-labels'
 import { showToast } from './ui/toast'
 import { RefreshIcon, TrashIcon } from './ui/icons'
 import type { FootprintClient } from './footprint-client'
@@ -89,9 +90,8 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstall = async (d: FootprintDestination): Promise<void> => {
     if (!props.client || !d.removableProfileId) return
     const ok = await showConfirm(
-      `Remove nocx's shell integration from ${d.identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.`,
-      'Uninstall',
-      'Cancel',
+      t('footprint.confirm.uninstallShell', "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.", { identity: d.identity }),
+      confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
     )
     if (!ok) return
     setBusy(d.identity)
@@ -122,9 +122,8 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstallHelper = async (h: HelperInstall): Promise<void> => {
     if (!props.client || !h.removableProfileId) return
     const ok = await showConfirm(
-      `Remove the remote helper from ${h.identity}? The whole ${h.path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.`,
-      'Uninstall',
-      'Cancel',
+      t('footprint.confirm.uninstallHelper', 'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.', { identity: h.identity, path: h.path }),
+      confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
     )
     if (!ok) return
     setBusy(h.identity)

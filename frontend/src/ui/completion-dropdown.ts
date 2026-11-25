@@ -37,20 +37,20 @@ export interface CompletionRow {
   readonly kind?: 'directory' | 'file'
 }
 
+export interface CompletionDropdownLabels {
+  /** The listbox's accessible name. */
+  listbox: string
+  /** The word a row's source badge says, by source id. */
+  source: (source: string) => string | undefined
+}
+
 export interface CompletionDropdownCallbacks {
   /** A row was hovered (mouse) — the controller moves the selection. */
   onHover(index: number): void
   /** A row was clicked — the controller accepts it. */
   onPick(index: number): void
-}
-
-const SOURCE_LABEL: Record<string, string> = {
-  command: 'command',
-  history: 'history',
-  path: 'path',
-  host: 'host',
-  snippet: 'snippet',
-  function: 'function',
+  /** The dropdown's words, built by the caller (kit-labels.ts). */
+  labels: CompletionDropdownLabels
 }
 
 /** The type word for a path row — `Directory` / `File` (the owner's ask:
@@ -82,12 +82,14 @@ const FOOTER_HINTS = [
 export class CompletionDropdown {
   readonly root: HTMLElement
   private readonly panel: FloatingPanel
+  private readonly labels: CompletionDropdownLabels
 
   constructor(callbacks: CompletionDropdownCallbacks) {
+    this.labels = callbacks.labels
     this.panel = new FloatingPanel({
       variant: 'completion',
       role: 'listbox',
-      ariaLabel: 'completions',
+      ariaLabel: callbacks.labels.listbox,
       callbacks,
     })
     this.root = this.panel.root
@@ -158,7 +160,7 @@ export class CompletionDropdown {
     const badge = document.createElement('span')
     badge.className = 'ui-badge ui-floating-panel__source'
     badge.dataset.tone = 'neutral'
-    badge.textContent = SOURCE_LABEL[r.source] ?? r.source
+    badge.textContent = this.labels.source(r.source) ?? r.source
     actions.push(badge)
     return {
       id: r.id,

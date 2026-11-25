@@ -47,6 +47,10 @@ export interface DialogProps {
   open: boolean
   /** Called when the dialog should close (Escape, cancel event, close button). */
   onClose: () => void
+  /** The close control's accessible name. */
+  closeAria: string
+  /** The close control's tooltip word. */
+  closeTitle: string
   /** Dialog title (optional). Rendered in `.nocx-dialog__title`. */
   title?: string
   /** Dialog body content. */
@@ -320,8 +324,8 @@ export const Dialog: Component<DialogProps> = (props) => {
           <Show when={props.dismissible !== false}>
             <span class="nocx-dialog__close">
               <IconButton
-                ariaLabel="Close dialog"
-                title="Close"
+                ariaLabel={props.closeAria}
+                title={props.closeTitle}
                 size="sm"
                 onClick={() => props.onClose()}
               >
@@ -347,23 +351,33 @@ export const Dialog: Component<DialogProps> = (props) => {
   )
 }
 
+/** The words a confirm says: its two buttons and the close control's own. The
+ *  caller builds them (kit-labels.ts); the kit holds no English of its own. */
+export interface ConfirmLabels {
+  ok: string
+  cancel: string
+  closeAria: string
+  closeTitle: string
+}
+
 /** The confirm body, so the imperative helper below owns no markup of its own. */
 const ConfirmDialog: Component<{
   message: string
-  okLabel: string
-  cancelLabel: string
+  labels: ConfirmLabels
   onResolve: (result: boolean) => void
 }> = (props) => (
   <Dialog
     open
+    closeAria={props.labels.closeAria}
+    closeTitle={props.labels.closeTitle}
     onClose={() => props.onResolve(false)}
     footer={
       <>
         <Button variant="default" onClick={() => props.onResolve(false)}>
-          {props.cancelLabel}
+          {props.labels.cancel}
         </Button>
         <Button variant="primary" onClick={() => props.onResolve(true)}>
-          {props.okLabel}
+          {props.labels.ok}
         </Button>
       </>
     }
@@ -390,15 +404,10 @@ const ConfirmDialog: Component<{
  * matter where its node sits — so the constraint never applied here.
  *
  * @param message — The text to show (supports newlines, shown as pre-wrap).
- * @param okLabel — Label for the confirm button (default "OK").
- * @param cancelLabel — Label for the cancel button (default "Cancel").
+ * @param labels — The confirm button, the cancel button and the close control.
  * @returns Promise<boolean> — true if the user confirmed, false if cancelled.
  */
-export function showConfirm(
-  message: string,
-  okLabel = 'OK',
-  cancelLabel = 'Cancel',
-): Promise<boolean> {
+export function showConfirm(message: string, labels: ConfirmLabels): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const host = document.createElement('div')
     document.body.appendChild(host)
@@ -422,12 +431,7 @@ export function showConfirm(
 
     dispose = render(
       () => (
-        <ConfirmDialog
-          message={message}
-          okLabel={okLabel}
-          cancelLabel={cancelLabel}
-          onResolve={finish}
-        />
+        <ConfirmDialog message={message} labels={labels} onResolve={finish} />
       ),
       host,
     )

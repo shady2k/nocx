@@ -942,6 +942,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
           mode={store.watchMode()}
           reason={store.watchDegradedReason()}
           local={store.origin()?.kind === 'local'}
+          pollingLabel={t('ui.watch.polling', 'Polling')}
         />
         {/* The overflow. It draws nothing when it would open empty — a
             menu button that opens on nothing is worse than no button. */}

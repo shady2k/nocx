@@ -22,6 +22,7 @@ import { CompletionDropdown } from '../ui/completion-dropdown'
 import type { Candidate } from './candidate'
 import type { SuggestionProvider, SuggestContext, EmptyReason } from './providers'
 import { setDecisionTracing } from '../log'
+import { completionDropdownLabels } from '../i18n/kit-labels'
 
 /** The editor's internal CM6 view — reached only to seed selections and to
  *  read rendered decorations (the ghost span), the way editor.test.ts does. */
@@ -147,7 +148,7 @@ const rig = (opts: {
   const editor = new FakeEditor(opts.editorDoc ?? 'git sta')
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+  const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
   const controller = new CompletionController({
     providers: opts.providers,
     dropdown,
@@ -1102,7 +1103,7 @@ describe('ghost text', () => {
     const editor = ghostEditor('git sta')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [
@@ -1136,7 +1137,7 @@ describe('ghost text', () => {
     const editor = ghostEditor('cd Down')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('p', () => [
@@ -1173,7 +1174,7 @@ describe('ghost text', () => {
       const editor = ghostEditor('cd Down')
       const container = document.createElement('div')
       document.body.appendChild(container)
-      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
       const controller = new CompletionController({
         providers: [
           instantProvider('p', () => [
@@ -1212,7 +1213,7 @@ describe('ghost text', () => {
       const editor = ghostEditor('cd Down')
       const container = document.createElement('div')
       document.body.appendChild(container)
-      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
       const controller = new CompletionController({
         providers: [
           // Two rows, so the list is up and Enter has something to accept —
@@ -1265,7 +1266,7 @@ describe('ghost text', () => {
     const editor = ghostEditor('git sta')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [
@@ -1300,7 +1301,7 @@ describe('ghost text', () => {
     const editor = ghostEditor('git')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [slow.provider],
       dropdown,
@@ -1328,7 +1329,7 @@ describe('ghost text', () => {
     editor.caret = 7
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [
@@ -1355,7 +1356,7 @@ describe('ghost text', () => {
     const editor = ghostEditor('git sta')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [
@@ -1455,7 +1456,7 @@ describe('ghost draw and accept are one rule (nocx-mlm7)', () => {
   const rigView = () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [
@@ -1516,7 +1517,7 @@ describe('ghost refusal tracing (nocx-mlm7)', () => {
     const editor = new FakeEditor('git sta')
     const container = document.createElement('div')
     document.body.appendChild(container)
-    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {}, labels: completionDropdownLabels() })
     const controller = new CompletionController({
       providers: [
         instantProvider('h', () => [

@@ -59,6 +59,7 @@ import { TreeEmpty } from '../ui/tree-empty'
 import { TreeRow } from '../ui/tree-row'
 import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
 import { t } from '../i18n/locale-model'
@@ -2786,7 +2787,7 @@ export function ApiPane(props: ApiPaneProps) {
     // tree they may not have committed. The question NAMES what goes.
     void showConfirm(
       `Delete ${target.name}? The file is removed from the collection folder.`,
-      'Delete',
+      confirmLabels(t('api.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
     ).then((yes) => {
       if (yes) void store.deleteRequest(target.handle, target.relPath)
     })
@@ -2873,7 +2874,13 @@ export function ApiPane(props: ApiPaneProps) {
       void store.closeRequest().then(() => setView('folder'))
       return
     }
-    void showConfirm(question, 'Discard and close', 'Cancel').then((yes) => {
+    void showConfirm(
+      question,
+      confirmLabels(
+        t('api.confirm.discardAndClose', 'Discard and close'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
+    ).then((yes) => {
       if (!yes) return
       void store.closeRequest().then(() => setView('folder'))
     })
@@ -2927,7 +2934,7 @@ export function ApiPane(props: ApiPaneProps) {
         // sure" is a question about nothing.
         void showConfirm(
           `Delete ${target.name}? The file is removed from the collection folder.`,
-          'Delete',
+          confirmLabels(t('api.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
         ).then((yes) => {
           if (yes) void store.deleteRequest(target.handle, target.relPath)
         })
@@ -3364,6 +3371,7 @@ export function ApiPane(props: ApiPaneProps) {
                 mode={store.watchMode()}
                 reason={store.watchDegradedReason()}
                 local
+                pollingLabel={t('ui.watch.polling', 'Polling')}
               />
               <IconButton
                 id="api-new-collection"

@@ -98,6 +98,8 @@ const NameColourDialog: Component<{
     <Dialog
       open
       title={props.title}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={() => props.onResolve(null)}
       onSubmit={submit}
       footer={

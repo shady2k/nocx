@@ -246,6 +246,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
     <Dialog
       open={props.open}
       title={t('api.import.collection.title', 'Import collection')}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
@@ -575,6 +577,8 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
     <Dialog
       open={props.open}
       title={t('api.import.curl.title', 'Import a curl command')}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={

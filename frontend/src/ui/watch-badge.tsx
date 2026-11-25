@@ -49,6 +49,8 @@ export interface WatchBadgeProps {
   /** Whether this binding's polling CAN be a degrade: true for a local
    *  binding, false for a remote one whose designed mode is polling. */
   local: boolean
+  /** The badge's word while a degraded local watch is polling. */
+  pollingLabel: string
 }
 
 export function WatchBadge(props: WatchBadgeProps) {
@@ -60,7 +62,7 @@ export function WatchBadge(props: WatchBadgeProps) {
     >
       <Show when={props.mode === 'polling' && props.reason !== null && props.local}>
         <Badge tone="warning" data-testid={props.testId} title={props.reason ?? undefined}>
-          Polling
+          {props.pollingLabel}
         </Badge>
       </Show>
     </span>

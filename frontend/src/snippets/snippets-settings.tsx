@@ -28,6 +28,7 @@ import { Button } from '../ui/button'
 import { CollectionView } from '../ui/collection-view'
 import { RecordRow } from '../ui/record-row'
 import { Dialog, showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import { EmptyState } from '../ui/empty-state'
 import { Field } from '../ui/field'
 import { StatusCard } from '../ui/status-card'
@@ -233,7 +234,13 @@ export function SnippetsSection(props: SnippetsSectionProps) {
   }
 
   async function remove(s: Snippet): Promise<void> {
-    if (!(await showConfirm(`Delete "${s.title}"?`))) return
+    if (
+      !(await showConfirm(
+        t('snippets.delete.confirm', 'Delete "{title}"?', { title: s.title }),
+        confirmLabels(t('ui.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
+      ))
+    )
+      return
     try {
       await props.store.remove(s.id)
       showToast({
@@ -431,6 +438,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     <div class="sn-root">
       <CollectionView
         searchValue={searchQuery()}
+        actionsLabel={t('ui.collection.actions', 'Collection actions')}
         onSearch={setSearchQuery}
         searchPlaceholder="Filter snippets"
         searchLabel="Filter snippets"
@@ -457,6 +465,8 @@ export function SnippetsSection(props: SnippetsSectionProps) {
 
       <Dialog
         open={dialogOpen()}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={closeDialog}
         onSubmit={() => void save()}
         title={

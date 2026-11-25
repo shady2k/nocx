@@ -18,6 +18,7 @@ function subject(over: Partial<WatchBadgeProps> = {}) {
     mode: 'polling',
     reason: 'inotify watch limit reached',
     local: true,
+    pollingLabel: 'Polling',
     ...over,
   }
   const { container } = render(() => <WatchBadge {...props} />)
@@ -74,7 +75,13 @@ describe('WatchBadge — the warning', () => {
 
   it('takes the testId prefix from its caller, so two surfaces are addressable apart', () => {
     const { container } = render(() => (
-      <WatchBadge testId="api-polling-badge" mode="polling" reason="watcher refused" local />
+      <WatchBadge
+        testId="api-polling-badge"
+        mode="polling"
+        reason="watcher refused"
+        local
+        pollingLabel="Polling"
+      />
     ))
     expect(container.querySelector('[data-testid="api-polling-badge-slot"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="api-polling-badge"]')).not.toBeNull()

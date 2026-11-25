@@ -1651,6 +1651,8 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         {(mode) => (
           <Dialog
             open
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeWriter}
             title={
               mode === 'allow'
@@ -1675,6 +1677,8 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         {(p) => (
           <Dialog
             open
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closePanel}
             title={panelTitle(p)}
             footer={

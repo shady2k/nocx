@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Dialog } from './dialog'
 import { Prompt, overflowEdges, type ScrollBox } from './prompt'
 import { ToastHost, clearToasts, showToast } from './toast'
+import { toastHostLabels } from '../i18n/kit-labels'
 import { stackDepth } from './overlay/stack'
 
 afterEach(() => {
@@ -223,7 +224,7 @@ describe('Prompt', () => {
         <Prompt open ariaLabel="Password" onClose={() => undefined} actions={null}>
           Secret
         </Prompt>
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
 

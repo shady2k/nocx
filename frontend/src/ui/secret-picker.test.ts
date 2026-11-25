@@ -14,6 +14,7 @@ import {
   type SecretPickerCallbacks,
 } from './secret-picker'
 import type { VaultStatus, InventoryEntry } from '../vault-client'
+import { secretPickerLabels } from '../i18n/kit-labels'
 
 function entry(name: string, id = name): InventoryEntry {
   return {
@@ -60,7 +61,7 @@ function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): 
   const onInsert = vi.fn<SecretPickerCallbacks['onInsert']>()
   const onError = vi.fn()
   const callbacks: SecretPickerCallbacks = { onInsert, onError }
-  const picker = new SecretPicker(source, callbacks)
+  const picker = new SecretPicker(source, callbacks, secretPickerLabels())
   const container = document.createElement('div')
   document.body.appendChild(container)
   picker.mount(container)
@@ -206,7 +207,7 @@ describe('SecretPicker: document dismissal', () => {
       states.push(picker.isOpen)
     })
     const callbacks = { onInsert: h.onInsert, onError: h.onError, onDismiss }
-    const picker = new SecretPicker(h.source, callbacks)
+    const picker = new SecretPicker(h.source, callbacks, secretPickerLabels())
     pickerRef.current = picker
     picker.mount(h.container)
 

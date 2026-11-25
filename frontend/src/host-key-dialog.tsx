@@ -97,6 +97,8 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
   return (
     <Dialog
       open
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onClose}
       title={title()}
       footer={
@@ -283,6 +285,8 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
   return (
     <Dialog
       open
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={() => props.onDecide(false)}
       title={t('hostKey.agent.title', "Allow this agent to use nocx's tools?")}
       footer={

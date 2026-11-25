@@ -44,6 +44,7 @@ import { ArrowDownUpIcon } from '../ui/icons'
 import { OperationRow } from '../ui/operation-row'
 import { isTerminalPhase, isWaitingPhase } from '../ui/operation'
 import { t } from '../i18n/locale-model'
+import { operationRowLabels } from '../i18n/kit-labels'
 import type { Operation, OperationsModel } from './operations'
 import { createThrottledOperations, type RenderThrottleDeps } from './render-throttle'
 
@@ -183,6 +184,7 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
         <Show when={ops().find((o) => o.id === id)}>
           {(op) => (
             <OperationRow
+              labels={operationRowLabels()}
               kind={op().kind}
               title={op().title}
               destination={op().destination}

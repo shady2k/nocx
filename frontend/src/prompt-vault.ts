@@ -34,6 +34,7 @@
 import { kindIsQuiet, type SecretKind } from './secret-kind'
 import { findReferences } from './secret-reference'
 import { SecretPicker } from './ui/secret-picker'
+import { secretPickerLabels } from './i18n/kit-labels'
 import type { SecretsDetect, VaultClient } from './vault-client'
 import type { UnresolvedSpan } from './unresolved-redactions'
 
@@ -143,6 +144,7 @@ export class PromptVaultController {
         },
       },
       { onInsert: (name) => this.insertReference(name) },
+      secretPickerLabels(),
     )
   }
 

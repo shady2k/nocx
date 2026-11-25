@@ -133,6 +133,12 @@ export interface FileReadoutLabels {
   tooLarge: string
   readFailed: string
   scanNotice: string
+  /** The not-text refusal's sentence: the file is on disk, and the read is what stopped. */
+  notTextDesc: string
+  /** The too-large refusal's sentence, naming the read budget in the units a person reads. */
+  tooLargeDesc: (size: string) => string
+  /** The scan legend's sentence: the words the matched patterns carry, then the note. */
+  scanDesc: (words: string) => string
 }
 
 interface Refusal {
@@ -156,8 +162,7 @@ function refusalFor(outcome: FileReadoutOutcome, labels: FileReadoutLabels): Ref
       return {
         tone: 'warning',
         title: labels.notText,
-        description:
-          'Its bytes are not something that can be shown as lines, so there is nothing here to read. The file is on disk exactly as it was — this is a fact about the file, not a refusal of the request.',
+        description: labels.notTextDesc,
       }
     case 'too-large':
       return {
@@ -166,7 +171,7 @@ function refusalFor(outcome: FileReadoutOutcome, labels: FileReadoutLabels): Ref
         // The budget is NAMED, in the units a person reads sizes in, because
         // it travelled on the wire for exactly that purpose. A second copy of
         // the number here would one day quote a limit nothing enforces.
-        description: `The budget is ${formatBytes(outcome.maxBytes)}, and the read stops there. The file is on disk exactly as it was; what is bounded is the reading, not the file.`,
+        description: labels.tooLargeDesc(formatBytes(outcome.maxBytes)),
       }
     case 'unreadable':
       return {
@@ -256,7 +261,7 @@ export function FileReadout(props: FileReadoutProps) {
           <StatusCard
             tone="warning"
             title={labels().scanNotice}
-            description={`${words()}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.`}
+            description={labels().scanDesc(words())}
           />
         )}
       </Show>

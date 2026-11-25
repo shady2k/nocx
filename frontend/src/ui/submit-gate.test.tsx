@@ -5,6 +5,7 @@ import { createFormValidation, required } from './validation'
 import { createSignal } from 'solid-js'
 import { createSubmitGate } from './submit-gate'
 import { ToastHost, clearToasts, toasts } from './toast'
+import { toastHostLabels } from '../i18n/kit-labels'
 
 afterEach(() => {
   cleanup()
@@ -32,7 +33,7 @@ function mountForm(hideHostPanel = false) {
         <input id="host" />
       </div>
       <input id="port" />
-      <ToastHost />
+      <ToastHost labels={toastHostLabels()} />
     </>
   ))
 }
@@ -43,7 +44,7 @@ describe('createSubmitGate', () => {
     render(() => (
       <>
         <input id="host" />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
     const gate = createSubmitGate(v)
@@ -212,7 +213,7 @@ describe('createSubmitGate', () => {
     const v = createFormValidation({
       forwards: () => 'Forward 1: destination is required for local',
     })
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     const gate = createSubmitGate(v)
     await gate()
     expect(toasts()[0].message).toBe(

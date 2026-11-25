@@ -150,6 +150,15 @@ export interface OperationRowProps {
   now?: number
   /** Stop it. Absent means stopping would mean nothing any more. */
   onCancel?: () => void
+  /** The row's words: its waiting badge, and the two names a row's controls
+   *  carry, built from its title. The caller builds them (kit-labels.ts). */
+  labels: OperationRowLabels
+}
+
+export interface OperationRowLabels {
+  queued: string
+  progressOf: (title: string) => string
+  cancelOf: (title: string) => string
 }
 
 export function OperationRow(props: OperationRowProps) {
@@ -236,7 +245,7 @@ export function OperationRow(props: OperationRowProps) {
                   nothing about itself at all — see the module doc for why
                   this badge stays where `written`'s was removed. */}
               <Show when={waiting()}>
-                <Badge tone="neutral">Queued</Badge>
+                <Badge tone="neutral">{props.labels.queued}</Badge>
               </Show>
               <Show when={props.phase === 'unsettled'}>
                 {/* The reason is the badge's hover detail: the person was
@@ -276,7 +285,11 @@ export function OperationRow(props: OperationRowProps) {
                     for it. Its live rows are a wait and then "checking what
                     happened"; a bar at zero would say it is stalled. */}
                 <Show when={props.kind !== 'call'}>
-                  <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
+                  <ProgressBar
+                    value={fraction()}
+                    ariaLabel={props.labels.progressOf(props.title)}
+                    size="md"
+                  />
                 </Show>
                 {/* Its OWN class, not `__detail`. The two shared one, and they
                     want opposite things: a failure reason is a sentence and
@@ -374,7 +387,7 @@ export function OperationRow(props: OperationRowProps) {
         <Show when={props.onCancel}>
           <IconButton
             size="sm"
-            ariaLabel={`Cancel ${props.title}`}
+            ariaLabel={props.labels.cancelOf(props.title)}
             onClick={() => props.onCancel?.()}
           >
             <CloseIcon />

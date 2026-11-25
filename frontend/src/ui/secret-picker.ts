@@ -194,6 +194,11 @@ type PickerState =
       readonly selected: number
     }
 
+/** The words the secret picker draws: the listbox's accessible name. */
+export interface SecretPickerLabels {
+  listbox: string
+}
+
 export class SecretPicker {
   private state: PickerState = { name: 'closed' }
   private purpose: SecretPickerPurpose = 'insert'
@@ -215,6 +220,8 @@ export class SecretPicker {
   constructor(
     private readonly source: SecretPickerSource,
     private readonly callbacks: SecretPickerCallbacks,
+    /** The picker's words (the listbox's name), built by the caller. */
+    labels: SecretPickerLabels,
     /** The field this picker opens against, for a host that mounts the panel
      *  outside it (the plain-input adapter mounts on the body). Absent is the
      *  terminal: the prompt mounts the panel INTO the editor root, whose
@@ -226,7 +233,7 @@ export class SecretPicker {
     this.panel = new FloatingPanel({
       variant: 'secret',
       role: 'listbox',
-      ariaLabel: 'vault secrets',
+      ariaLabel: labels.listbox,
       callbacks: {
         onHover: (index) => this.hover(index),
         onPick: (index) => this.pick(index),

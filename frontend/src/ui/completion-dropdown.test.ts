@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { CompletionDropdown } from './completion-dropdown'
 import { MAX_PANEL_WIDTH_PX, MIN_PANEL_WIDTH_PX } from './floating-panel'
 import type { Candidate } from '../suggest/candidate'
+import { completionDropdownLabels } from '../i18n/kit-labels'
 
 const cand = (over: Partial<Candidate>): Candidate => ({
   id: 'c1',
@@ -28,7 +29,7 @@ const mount = () => {
   document.body.appendChild(container)
   const onHover = vi.fn()
   const onPick = vi.fn()
-  const dd = new CompletionDropdown({ onHover, onPick })
+  const dd = new CompletionDropdown({ onHover, onPick, labels: completionDropdownLabels() })
   dd.mount(container)
   return { dd, container, onHover, onPick }
 }

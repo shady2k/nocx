@@ -2,6 +2,7 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { render, fireEvent, cleanup } from '@solidjs/testing-library'
 import { Dialog, showConfirm, type DialogProps } from './dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import {
   pushOverlay,
   popOverlay,
@@ -206,10 +207,13 @@ describe('isWailsDragTarget', () => {
 
 /* ── Dialog component ──────────────────────────────────────────────── */
 
+const closeLabels = { closeAria: 'Close dialog', closeTitle: 'Close' }
+
 describe('Dialog', () => {
   function subject(overrides?: Partial<DialogProps>) {
     const props: DialogProps = {
       open: false,
+      ...closeLabels,
       onClose: vi.fn(),
       title: 'Test Dialog',
       children: 'Dialog body content',
@@ -416,7 +420,7 @@ describe('Dialog cancel', () => {
   it('closes on its own cancel', () => {
     const onClose = vi.fn()
     const { container } = render(() => (
-      <Dialog open={true} onClose={onClose} title="T">
+      <Dialog open={true} onClose={onClose} title="T" {...closeLabels}>
         body
       </Dialog>
     ))
@@ -428,7 +432,7 @@ describe('Dialog cancel', () => {
   it('ignores a cancel bubbling up from a descendant, such as a file picker', () => {
     const onClose = vi.fn()
     const { container } = render(() => (
-      <Dialog open={true} onClose={onClose} title="T">
+      <Dialog open={true} onClose={onClose} title="T" {...closeLabels}>
         <input type="file" data-testid="picker" />
       </Dialog>
     ))
@@ -597,7 +601,7 @@ describe('showConfirm', () => {
   })
 
   it('renders a dialog with message and buttons', async () => {
-    void showConfirm('Are you sure?')
+    void showConfirm('Are you sure?', confirmLabels('OK', 'Cancel'))
     // Wait for the microtask that showModal schedules.
     await vi.waitFor(() => {
       const dialog = document.querySelector('dialog.nocx-dialog')
@@ -617,7 +621,7 @@ describe('showConfirm', () => {
   })
 
   it('focuses the first contextual action instead of the universal close control', async () => {
-    const promise = showConfirm('Test', 'Yes', 'Cancel')
+    const promise = showConfirm('Test', confirmLabels('Yes', 'Cancel'))
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')).toBeTruthy()
     })
@@ -640,7 +644,7 @@ describe('showConfirm', () => {
   })
 
   it('resolves to false on cancel click', async () => {
-    const promise = showConfirm('Test')
+    const promise = showConfirm('Test', confirmLabels('OK', 'Cancel'))
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
@@ -655,7 +659,7 @@ describe('showConfirm', () => {
   })
 
   it('resolves to true on confirm click', async () => {
-    const promise = showConfirm('Test', 'Yes', 'No')
+    const promise = showConfirm('Test', confirmLabels('Yes', 'No'))
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
@@ -671,7 +675,7 @@ describe('showConfirm', () => {
   })
 
   it('removes the dialog from the DOM after resolution', async () => {
-    const promise = showConfirm('Test')
+    const promise = showConfirm('Test', confirmLabels('OK', 'Cancel'))
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
@@ -692,7 +696,7 @@ describe('showConfirm', () => {
     document.body.appendChild(btn)
     btn.focus()
 
-    const promise = showConfirm('Test')
+    const promise = showConfirm('Test', confirmLabels('OK', 'Cancel'))
 
     // Click cancel
     const cancelBtn = document.querySelector<HTMLButtonElement>(

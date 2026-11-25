@@ -336,6 +336,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
               addLabel={t('api.table.addVariable', 'Add variable')}
               emptyLabel={t('api.table.emptyEnvVariables', 'No variables yet. A URL written in {{baseUrl}} resolves against one of these.')}
               removeLabel={(i) => `Remove variable ${i + 1}`}
+              removeTitle={t('ui.rowList.remove', 'Remove')}
               renderRow={(row, i) => (
                 <>
                   <td>

@@ -37,6 +37,7 @@ import { ToastHost } from './ui/toast'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { LOCAL_TARGET_ID } from './ports-client'
+import { toastHostLabels } from './i18n/kit-labels'
 
 afterEach(() => {
   cleanup()
@@ -136,7 +137,7 @@ function mountPanel(
   const filter = createPortsFilterControl()
   render(() => (
     <>
-      <ToastHost />
+      <ToastHost labels={toastHostLabels()} />
       <PortsPanel
         profileId={pid}
         unavailableIn={() => 'pi@192.0.2.93'}

@@ -104,6 +104,8 @@ function SecretCreateForm(
   return (
     <Dialog
       open={true}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onClose}
       title={t('secrets.add.dialogTitle', 'Create secret')}
       onSubmit={() => submitAction()?.invoke()}

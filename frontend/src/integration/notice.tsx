@@ -65,6 +65,7 @@ import {
   type OutputRecording,
   type OutputRecordingSource,
 } from './status'
+import { t } from '../i18n/locale-model'
 
 export interface IntegrationNoticeProps {
   /** The degraded fact. */
@@ -180,6 +181,8 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
               the same fact look like two. */}
           <Dialog
             open={open()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => setOpen(false)}
             title={openLabel(m)}
             footer={
@@ -208,6 +211,8 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
           </Dialog>
           <Dialog
             open={aboutOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => setAboutOpen(false)}
             title={t('integration.about.title', 'About shell integration')}
             footer={

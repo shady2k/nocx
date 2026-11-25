@@ -27,6 +27,7 @@ import type { UrlOpener } from '../open-url'
 import { RpcError, TransportUnavailableError } from '../dispatcher'
 import { ToastHost, clearToasts } from '../ui/toast'
 import { setDocumentHidden } from '../test-support/document-visibility'
+import { toastHostLabels } from '../i18n/kit-labels'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -208,7 +209,7 @@ function mountApp(
   // A ToastHost so action outcomes (copied branch, refused browser open) are
   // ASSERTABLE as rendered toasts, the way a user sees them — the files
   // pattern.
-  render(() => <ToastHost />)
+  render(() => <ToastHost labels={toastHostLabels()} />)
   liveHandles.push(handle)
   return { panel, open, setActiveOrigin, services, store, handle }
 }

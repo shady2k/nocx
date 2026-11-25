@@ -96,6 +96,8 @@ export function CollectionDialog(props: CollectionDialogProps) {
     <Dialog
       open={props.open}
       title={props.title}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={

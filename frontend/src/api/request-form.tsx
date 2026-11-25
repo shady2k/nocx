@@ -557,6 +557,7 @@ export function RequestEditor(props: RequestEditorProps) {
                     addLabel={t('api.table.addParameter', 'Add parameter')}
                     emptyLabel={t('api.table.emptyQueryParameters', 'No query parameters.')}
                     removeLabel={(i) => `Remove parameter ${i + 1}`}
+                    removeTitle={t('ui.rowList.remove', 'Remove')}
                     renderRow={(row, i) => (
                       <>
                         {/* The tick is FIRST, which is where a person looks
@@ -631,6 +632,7 @@ export function RequestEditor(props: RequestEditorProps) {
                       addLabel={t('api.table.addVariable', 'Add variable')}
                       emptyLabel={undefined}
                       removeLabel={(i) => `Remove variable ${i + 1}`}
+                      removeTitle={t('ui.rowList.remove', 'Remove')}
                       renderRow={(row, i) => (
                         <>
                           <td>
@@ -703,6 +705,7 @@ export function RequestEditor(props: RequestEditorProps) {
                         variant="table"
                         readOnly
                         ariaLabel={t('api.form.inheritedVars.aria', 'Inherited request variables')}
+                        removeTitle={t('ui.rowList.remove', 'Remove')}
                         columns={[
                           { label: t('api.form.field.scope', 'Scope') },
                           { label: t('api.env.field.name', 'Name') },
@@ -817,6 +820,7 @@ export function RequestEditor(props: RequestEditorProps) {
                     addLabel={t('api.table.addHeader', 'Add header')}
                     emptyLabel={t('api.table.emptyHeaders', 'No headers.')}
                     removeLabel={(i) => `Remove header ${i + 1}`}
+                    removeTitle={t('ui.rowList.remove', 'Remove')}
                     renderRow={(row, i) => (
                       <>
                         <td>

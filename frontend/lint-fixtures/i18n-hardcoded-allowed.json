@@ -93,5 +93,11 @@
       "snippet": "\"\"",
       "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
     }
+    ,{
+      "file": "src/about-section.tsx",
+      "context": "jsx-text",
+      "snippet": "nocx",
+      "reason": "the product's brand name — a proper noun, identical in every language, never translated"
+    }
   ]
 }

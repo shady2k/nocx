@@ -17,6 +17,7 @@ import { markdownLanguage, viewerHighlighting } from '../ui/document-language'
 import { BasePaneContent, type PaneHost } from '../pane-content'
 import { log } from '../log'
 import { showToast } from '../ui/toast'
+import { t } from '../i18n/locale-model'
 import type { Note, NotesStore } from './notes-store'
 
 /** How long after the last keystroke a save runs. Long enough that a
@@ -119,7 +120,10 @@ export class NoteContent extends BasePaneContent {
         log.error('nocx: a note could not be saved on close', { message: message(err) })
         showToast({
           level: 'danger',
-          message: `"${this.title || 'Note'}" could not be saved: ${message(err)}`,
+          message: t('notes.saveFailed', '"{title}" could not be saved: {message}', {
+            title: this.title || 'Note',
+            message: message(err),
+          }),
         })
       })
     }

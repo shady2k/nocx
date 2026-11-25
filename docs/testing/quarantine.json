@@ -108,6 +108,14 @@
     {
       "test": "e2e:e2e/renderer-memory-soak.spec.ts › renderer memory soak: retained artifacts return to the live set after churn (nocx-1ebrs.71, nocx-3an1s.1.6, nocx-atpw5.1.35)",
       "bead": "nocx-oalo1.6.17"
+    },
+    {
+      "test": "go:TestTurnSettlementAnswersBlockedCallBeforeClosingEndpoint",
+      "bead": "nocx-oalo1.6.20"
+    },
+    {
+      "test": "e2e:e2e/ask-about-full-screen-program.spec.ts › asking about a full-screen program without leaving it (nocx-7l4ex) › freezes, answers twice with one composer, thaws, and quits normally",
+      "bead": "nocx-oalo1.6.21"
     }
   ]
 }

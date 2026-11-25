@@ -92,6 +92,18 @@
       "context": "prop:message",
       "snippet": "\"\"",
       "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
+    },
+    {
+      "file": "src/connections.tsx",
+      "context": "attr:placeholder",
+      "snippet": "127.0.0.1",
+      "reason": "example value — the bind address a person replaces with their own host"
+    },
+    {
+      "file": "src/connections.tsx",
+      "context": "attr:placeholder",
+      "snippet": "host:port",
+      "reason": "example value — the destination shape a person replaces with their own host and port"
     }
   ]
 }

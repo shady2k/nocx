@@ -2271,4 +2271,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'integration.notice.close': 'Close',
   'integration.commands.aria': 'Commands to run',
   'integration.about.title': 'About shell integration',
+  // ── Connections list and editor (connections.tsx) ───────────────────────
+  'connections.group.empty':
+    'No connections here yet — pick this group in a connection’s editor to move it in.',
+  'connections.inherit.placeholder': '— Not set (inherit) —',
 }

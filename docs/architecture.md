@@ -11,6 +11,39 @@ updated: 2026-07-20
 
 nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from a TypeScript frontend that paints the session runtime's screen frames with its own cell model and painter ([ADR-0072](decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md); xterm.js, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md), remains only as the invisible input layer until `nocx-zg3k3.8`), hosted by a **Wails v3** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
 
+## Solution strategy
+
+- **Two WebSocket planes.** Separate terminal data from typed control.
+  In practice: The binary plane carries only terminal frames and structured input. Raw PTY bytes and JSON stay outside it. JSON-RPC carries only typed control operations and facts. Bulk file uploads use a separate `POST /upload/{ticket}` route and require no new WebSocket `msg-type`.
+  Carried by: [AD-1](#architectural-decisions), [ADR-0036](decisions/0036-an-http-upload-route-beside-the-websocket.md), [ADR-0066](decisions/0066-one-emulator-and-it-is-the-backends.md)
+- **One Go core.** Share the same Go core across targets.
+  In practice: Build the desktop backend, web server and remote helper from one Go codebase. Hosts embed or serve the core without reimplementing product logic.
+  Carried by: [AD-2](#architectural-decisions)
+- **Thin, replaceable Wails v3 shell.** Keep the desktop shell replaceable.
+  In practice: Wails handles windows, the WebView and OS integration only. Keep product logic portable and outside the shell.
+  Carried by: [AD-3](#architectural-decisions)
+- **One owner for SSH connection facts.** The backend owns connection facts and actions.
+  In practice: Build SSH on `golang.org/x/crypto/ssh` with a reference-counted connection pool. The backend connection manager behind `Carrier` alone owns connection actions and facts, including dialing, liveness, closing, exit cause and the panes that share a connection. Use `x/crypto/ssh` only inside the transport, except to read key formats. The client displays the backend's answers.
+  Carried by: [AD-4](#architectural-decisions), [ADR-ba6xet1b](decisions/ba6xet1b-a-connection-fact-has-one-owner.md)
+- **Two tiers of shell integration.** Keep baseline shell integration available without remote installation.
+  In practice: Tier A provides baseline OSC 7/133 integration wherever no helper is installed, with no remote installation. Tier B uses a cross-compiled Go helper installed with user consent. The helper owns the PTY and replaces Tier A delivery on that host, while baseline capabilities remain available without installation.
+  Carried by: [AD-5](#architectural-decisions)
+- **One owner for terminal state.** The session runtime owns terminal state.
+  In practice: The VT emulator in `sessionruntime` owns screen state, modes, live scrollback and typed observations. The renderer owns layout, painting, selection, accessibility and IME, with no second VT parser. Only the authenticated channel and process exit have authority over lifecycle and waves. Terminal bytes and the grid never have that authority.
+  Carried by: [AD-6](#architectural-decisions), [ADR-0024](decisions/0024-authenticated-shell-integration-channel.md), [ADR-0066](decisions/0066-one-emulator-and-it-is-the-backends.md)
+- **Authoritative server session ID.** The server owns the authoritative session identity.
+  In practice: Each tab has its own PTY or SSH channel. The server assigns the authoritative `sessionId` or adopts the ID assigned by the helper. Control operations run FIFO per session. Every operation has a catalog declaration with a finite lifetime. Closing revokes the ID before waiting for the process to exit.
+  Carried by: [AD-7](#architectural-decisions), [ADR-8eej3e66](decisions/8eej3e66-every-operation-is-catalogued-with-its-lifetime-and-busy-is-not-an-answer.md)
+- **Interfaces at boundaries and manual dependency injection.** Wire modules through interfaces in one composition root.
+  In practice: Modules depend only on interfaces and are wired by hand in one composition root. Express variation through an interface method or a caller-supplied policy, with no mode flags or `switch` branches inside implementations.
+  Carried by: [AD-8](#architectural-decisions)
+- **Recovery from one revision.** Recover from a consistent snapshot at one revision.
+  In practice: On attach or reconnect, the client receives consistent cards and a live frame at the same revision `R`, then changes after `R`. Recovery needs no raw-byte replay or screen reset.
+  Carried by: [AD-9](#architectural-decisions), [ADR-0066](decisions/0066-one-emulator-and-it-is-the-backends.md)
+- **Bounded, fair delivery in three classes.** Bound delivery fairly per session and distinguish three delivery classes.
+  In practice: Apply limits and fairness per session. Ingest and ledger delivery are lossless and ordered, screen frames can coalesce, and effects are delivered at most once per `EffectID`. Only the helper's output window can discard old bytes, and the product explicitly reports the gap. An overflowing row stream ends the current block as `incomplete`.
+  Carried by: [AD-10](#architectural-decisions), [ADR-0066](decisions/0066-one-emulator-and-it-is-the-backends.md), [ADR-0075](decisions/0075-an-overflowing-row-stream-ends-the-block-in-flight-incomplete.md)
+
 ## Component Diagram
 
 ```mermaid

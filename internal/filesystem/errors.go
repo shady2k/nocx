@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionid"
 )
 
 // Domain error markers for the filesystem package. Transport switches on
@@ -146,7 +146,7 @@ func (e *ErrUnknownBinding) Error() string {
 // that lives inside Acquire so no handler can forget it.
 type ErrNotOwned struct {
 	ID        string
-	SessionID session.ID
+	SessionID sessionid.ID
 }
 
 func (e *ErrNotOwned) Error() string {

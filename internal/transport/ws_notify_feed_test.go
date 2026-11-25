@@ -91,6 +91,74 @@ func TestNotifyFeedRead_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "notify.feed.read result")
 }
 
+// A delivery failure's sentences travel as keyed segments, and the real
+// result off the socket must carry them. The raw title and body are still
+// present: a locale without the keys shows them. A test that builds the
+// payload itself would prove nothing, so this asserts on what the server
+// sent.
+func TestNotifyFeedRead_OverTheWireCarriesDeliverySegments(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.read.schema.json")
+	feed := newTestFeed(t)
+	ev := notify.Event{
+		SessionID: "s1", Title: "build finished", Body: "exit 0",
+		Kind: notify.KindSessionEnded, Trust: notify.TrustAttested, Level: notify.LevelInfo,
+		At:          time.Now(),
+		Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+	}
+	feed.RecordDeliveryFailure(ev, notify.ChannelBanner, errors.New("permission denied"))
+
+	_, conn := newNotifyFeedWS(t, feed)
+	resp := jsonrpcCall(t, conn, "notify.feed.read", map[string]any{})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("notify.feed.read: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "notify.feed.read result")
+
+	var result struct {
+		Occurrences []struct {
+			Title         string `json:"title"`
+			Body          string `json:"body"`
+			TitleSegments []struct {
+				Key    string            `json:"key"`
+				Params map[string]string `json:"params"`
+				Text   *string           `json:"text"`
+			} `json:"titleSegments"`
+			BodySegments []struct {
+				Key    string            `json:"key"`
+				Params map[string]string `json:"params"`
+				Text   *string           `json:"text"`
+			} `json:"bodySegments"`
+		} `json:"occurrences"`
+	}
+	if err := json.Unmarshal(envelope.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Occurrences) == 0 {
+		t.Fatal("feed read returned no occurrences")
+	}
+	// The failure row is the newest occurrence.
+	row := result.Occurrences[0]
+	if row.Title == "" || row.Body == "" {
+		t.Errorf("raw title/body must stay present as the fallback: title=%q body=%q", row.Title, row.Body)
+	}
+	if len(row.TitleSegments) == 0 || row.TitleSegments[0].Key != "notify.delivery.failed.title" {
+		t.Errorf("title segments = %+v, want a keyed notify.delivery.failed.title first", row.TitleSegments)
+	}
+	if len(row.BodySegments) == 0 || row.BodySegments[0].Key != "notify.delivery.failed.body" {
+		t.Errorf("body segments = %+v, want a keyed notify.delivery.failed.body first", row.BodySegments)
+	}
+	if row.BodySegments[0].Params["channel"] != notify.ChannelBanner {
+		t.Errorf("body channel param = %q, want the catalogue id %q", row.BodySegments[0].Params["channel"], notify.ChannelBanner)
+	}
+}
+
 // The mark is authoritative: the result carries the revision the renderer
 // applies directly, and the feed the NEXT read returns has no unread rows
 // left. A schema-shaped answer that marked nothing would satisfy the
@@ -164,6 +232,7 @@ func TestNotifyFeedRead_CarriesTheFeedsOwnValues(t *testing.T) {
 	}
 	want := feedOccurrenceDTO{
 		ID: string(id), At: o.At, Title: "deploy failed", Body: "exit status 1",
+		TitleSegments: []feedSegmentDTO{}, BodySegments: []feedSegmentDTO{},
 		Kind: "session.ended", Level: "warning", Count: 2, Read: false,
 		BackendID: "local", SessionID: "s1", Host: "prod-1",
 		Run: []feedRunMemberDTO{

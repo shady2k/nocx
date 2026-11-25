@@ -103,6 +103,16 @@ type Attribution struct {
 	Session string
 }
 
+// Segment is one piece of a composed sentence. Exactly one of two forms is
+// set: Key with its scalar Params, which the renderer translates, or Text,
+// which it shows verbatim. Params are data (a count, a channel catalogue id),
+// never display text; text that a person wrote travels as its own Text segment.
+type Segment struct {
+	Key    string
+	Params map[string]string
+	Text   string
+}
+
 // Event is the closed record of the pipeline. Provenance is structural:
 // the protected fields (Kind, Trust, Level, Attribution, At) are not on the
 // wire and are stamped by whoever the field comment names; only SessionID,
@@ -119,6 +129,16 @@ type Event struct {
 	// control data, never an opaque blob to concatenate (ADR-0047 §2.3).
 	Title string
 	Body  string
+
+	// TitleSegments and BodySegments are the same two slots as an ordered
+	// list of catalogue segments, set only for a sentence nocx composed. The
+	// renderer joins the translated segments in order and falls back to Title
+	// and Body when a slot has none. A segment is either a keyed sentence
+	// (Key with scalar Params) or raw text the renderer shows verbatim (Text):
+	// a program's own words and backend error prose are never translated, and
+	// never carried as a param (ADR-nswp57x0).
+	TitleSegments []Segment
+	BodySegments  []Segment
 
 	// Kind and Trust are stamped by the source adapter.
 	Kind  Kind

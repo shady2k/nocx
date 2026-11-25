@@ -23,6 +23,8 @@ function occurrence(over: Partial<Occurrence> = {}): Occurrence {
     at: '2026-08-22T10:00:00Z',
     title: 'build finished',
     body: '',
+    titleSegments: [],
+    bodySegments: [],
     kind: 'block.finished',
     level: 'success',
     count: 1,
@@ -87,5 +89,33 @@ describe('the notifications panel speaks the active language', () => {
     })
     const dropped = container.querySelector('[data-testid="notifications-dropped"]')
     expect(dropped?.textContent).toContain('1 уведомление выброшено')
+  })
+})
+
+describe('a delivery sentence is translated per segment, and falls back to the raw text', () => {
+  it('composes a keyed title in the active language, keeping the event title verbatim', () => {
+    setActiveLocale('ru')
+    const container = mount({
+      occurrences: [
+        occurrence({
+          title: 'Not delivered: build finished',
+          titleSegments: [
+            { key: 'notify.delivery.failed.title' },
+            { key: 'notify.delivery.failed.titleSeparator' },
+            { text: 'build finished' },
+          ],
+        }),
+      ],
+    })
+    expect(container.textContent).toContain('Не доставлено: build finished')
+    expect(container.textContent).not.toContain('Not delivered')
+  })
+
+  it('shows the raw title when a slot has no segments', () => {
+    setActiveLocale('ru')
+    const container = mount({
+      occurrences: [occurrence({ title: 'build finished' })],
+    })
+    expect(container.textContent).toContain('build finished')
   })
 })

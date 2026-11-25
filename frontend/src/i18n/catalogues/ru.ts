@@ -166,6 +166,20 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.label': 'Работа, кажется, завершена',
   'notify.kind.paneWorkFinished.description':
     'nocx сделал вывод из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину.',
+  // Доставка, которую центр уведомлений не смог выполнить. Предложения собраны
+  // из сегментов с ключами; причина после «could not deliver it» — текст
+  // бэкенда и остаётся английским (ADR-nswp57x0).
+  'notify.delivery.failed.title': 'Не доставлено',
+  'notify.delivery.failed.titleSeparator': ': ',
+  'notify.delivery.failed.body': '{channel} не смог доставить уведомление',
+  'notify.delivery.failed.causeSeparator': ': ',
+  'notify.delivery.more': {
+    one: 'ещё {count} уведомление',
+    few: 'ещё {count} уведомления',
+    many: 'ещё {count} уведомлений',
+    other: 'ещё {count} уведомления',
+  },
+  'notify.delivery.more.separator': ' — ',
 
   // ── Mechanism samples ───────────────────────────────────────────────────
   // A plain string.

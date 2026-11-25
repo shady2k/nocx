@@ -41,20 +41,32 @@ type feedRunMemberDTO struct {
 	Read  bool   `json:"read"`
 }
 
+// feedSegmentDTO is one piece of a composed sentence. Exactly one of the two
+// forms is set on the wire: a keyed segment (key, optional params) or verbatim
+// text. The omitempty tags keep the forms disjoint, because the schema closes
+// each form with additionalProperties false.
+type feedSegmentDTO struct {
+	Key    string            `json:"key,omitempty"`
+	Params map[string]string `json:"params,omitempty"`
+	Text   *string           `json:"text,omitempty"`
+}
+
 type feedOccurrenceDTO struct {
-	ID         string             `json:"id"`
-	At         string             `json:"at"`
-	Title      string             `json:"title"`
-	Body       string             `json:"body"`
-	Kind       string             `json:"kind"`
-	Level      string             `json:"level"`
-	Count      int                `json:"count"`
-	Read       bool               `json:"read"`
-	BackendID  string             `json:"backendId"`
-	SessionID  string             `json:"sessionId"`
-	Host       string             `json:"host"`
-	Run        []feedRunMemberDTO `json:"run"`
-	RunDropped int                `json:"runDropped"`
+	ID            string             `json:"id"`
+	At            string             `json:"at"`
+	Title         string             `json:"title"`
+	Body          string             `json:"body"`
+	TitleSegments []feedSegmentDTO   `json:"titleSegments"`
+	BodySegments  []feedSegmentDTO   `json:"bodySegments"`
+	Kind          string             `json:"kind"`
+	Level         string             `json:"level"`
+	Count         int                `json:"count"`
+	Read          bool               `json:"read"`
+	BackendID     string             `json:"backendId"`
+	SessionID     string             `json:"sessionId"`
+	Host          string             `json:"host"`
+	Run           []feedRunMemberDTO `json:"run"`
+	RunDropped    int                `json:"runDropped"`
 }
 
 type feedDroppedDTO struct {
@@ -98,19 +110,21 @@ func snapshotToResult(snap notify.FeedSnapshot) feedReadResult {
 	occ := make([]feedOccurrenceDTO, 0, len(snap.Occurrences))
 	for _, o := range snap.Occurrences {
 		occ = append(occ, feedOccurrenceDTO{
-			ID:         string(o.ID),
-			At:         stampOrEmpty(o.Event.At),
-			Title:      o.Event.Title,
-			Body:       o.Event.Body,
-			Kind:       string(o.Event.Kind),
-			Level:      string(o.Event.Level),
-			Count:      o.Count,
-			Read:       o.ReadAt != nil,
-			BackendID:  o.Event.Attribution.Backend,
-			SessionID:  o.Event.SessionID,
-			Host:       o.Event.Attribution.Host,
-			Run:        runToDTO(o.Run),
-			RunDropped: o.RunDropped,
+			ID:            string(o.ID),
+			At:            stampOrEmpty(o.Event.At),
+			Title:         o.Event.Title,
+			Body:          o.Event.Body,
+			TitleSegments: segmentsToDTO(o.Event.TitleSegments),
+			BodySegments:  segmentsToDTO(o.Event.BodySegments),
+			Kind:          string(o.Event.Kind),
+			Level:         string(o.Event.Level),
+			Count:         o.Count,
+			Read:          o.ReadAt != nil,
+			BackendID:     o.Event.Attribution.Backend,
+			SessionID:     o.Event.SessionID,
+			Host:          o.Event.Attribution.Host,
+			Run:           runToDTO(o.Run),
+			RunDropped:    o.RunDropped,
 		})
 	}
 	return feedReadResult{
@@ -123,6 +137,24 @@ func snapshotToResult(snap notify.FeedSnapshot) feedReadResult {
 			Newest: stampOrEmpty(snap.Dropped.Newest),
 		},
 	}
+}
+
+// segmentsToDTO carries a slot's ordered segments. make, never nil, for the
+// same reason occurrences is: the schema says `type: array` and a nil slice
+// marshals to null. A text segment keeps its text behind a pointer, so an
+// empty string is still a text segment on the wire rather than vanishing
+// under omitempty.
+func segmentsToDTO(segs []notify.Segment) []feedSegmentDTO {
+	out := make([]feedSegmentDTO, 0, len(segs))
+	for _, s := range segs {
+		if s.Key != "" {
+			out = append(out, feedSegmentDTO{Key: s.Key, Params: s.Params})
+			continue
+		}
+		text := s.Text
+		out = append(out, feedSegmentDTO{Text: &text})
+	}
+	return out
 }
 
 // runToDTO reverses the feed's tail onto the wire: the feed holds members

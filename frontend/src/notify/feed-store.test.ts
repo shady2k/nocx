@@ -9,6 +9,8 @@ const OCC: Occurrence = {
   at: '2026-08-22T10:00:00Z',
   title: 'build finished',
   body: 'exit 0',
+  titleSegments: [],
+  bodySegments: [],
   kind: 'block.finished',
   level: 'success',
   count: 1,

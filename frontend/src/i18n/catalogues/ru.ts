@@ -1986,4 +1986,11 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.import.curl.convert': 'Преобразовать в запрос',
   'api.import.curl.desc':
     'Разбирается, но не выполняется — за этим полем нет оболочки. Оно заполняет форму, заменяя то, что там открыто; ничего не записывается, пока запрос не сохранён. Запрос с несохранёнными изменениями не заменяется без вопроса.',
+  'api.runs.tab.body': 'Тело',
+  'api.runs.tab.raw': 'Исходно',
+  'api.runs.wire.request': '── запрос ──',
+  'api.runs.wire.connection': '── соединение ──',
+  'api.runs.wire.certificateChain': '── цепочка сертификатов ──',
+  'api.runs.wire.response': '── ответ ──',
+  'api.runs.certificate': 'Сертификат {count}',
 }

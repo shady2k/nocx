@@ -2192,4 +2192,11 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.import.curl.convert': 'Convert to a request',
   'api.import.curl.desc':
     "Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.",
+  'api.runs.tab.body': 'Body',
+  'api.runs.tab.raw': 'Raw',
+  'api.runs.wire.request': '── request ──',
+  'api.runs.wire.connection': '── connection ──',
+  'api.runs.wire.certificateChain': '── certificate chain ──',
+  'api.runs.wire.response': '── response ──',
+  'api.runs.certificate': 'Certificate {count}',
 }

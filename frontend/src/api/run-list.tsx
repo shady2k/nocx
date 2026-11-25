@@ -171,7 +171,7 @@ function Run(props: {
     if (res) {
       items.push({
         id: 'body',
-        label: 'Body',
+        label: t('api.runs.tab.body', 'Body'),
         content: () => (
           <Show when={readableBody()} fallback={<Caption>{bodySummary(res)}</Caption>}>
             {(view) => (
@@ -214,7 +214,7 @@ function Run(props: {
     if (request) {
       items.push({
         id: 'raw',
-        label: 'Raw',
+        label: t('api.runs.tab.raw', 'Raw'),
         content: () => (
           <RawExchange
             request={request}
@@ -464,11 +464,11 @@ function RawExchange(props: {
           wrapping — they are text this renderer composed out of facts, not
           bytes off the wire, and a fingerprint is a thing people copy out of
           a block that shows it whole. */}
-      <Caption>── request ──</Caption>
+      <Caption>{t('api.runs.wire.request', '── request ──')}</Caption>
       <CodeBlock ariaLabel={t('api.runs.rawRequest.aria', 'Raw request')} wrap={false}>
         <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg, props.secretName)}</For>
       </CodeBlock>
-      <Caption>── connection ──</Caption>
+      <Caption>{t('api.runs.wire.connection', '── connection ──')}</Caption>
       <Show when={props.connection !== ''}>
         <CodeBlock ariaLabel={t('api.runs.connection.aria', 'Connection')}>
           {props.connection}
@@ -483,10 +483,10 @@ function RawExchange(props: {
           fingerprint is a thing people COPY out of a pane and into a
           terminal. */}
       <Show when={props.certificates.length > 0}>
-        <Caption>── certificate chain ──</Caption>
+        <Caption>{t('api.runs.wire.certificateChain', '── certificate chain ──')}</Caption>
         <For each={props.certificates}>
           {(cert, i) => (
-            <CodeBlock ariaLabel={`Certificate ${i() + 1}`}>{certificateText(cert, i())}</CodeBlock>
+            <CodeBlock ariaLabel={t('api.runs.certificate', 'Certificate {count}', { count: i() + 1 })}>{certificateText(cert, i())}</CodeBlock>
           )}
         </For>
       </Show>
@@ -496,7 +496,7 @@ function RawExchange(props: {
       <Show when={props.response}>
         {(raw) => (
           <>
-            <Caption>── response ──</Caption>
+            <Caption>{t('api.runs.wire.response', '── response ──')}</Caption>
             <CodeBlock ariaLabel={t('api.runs.rawResponse.aria', 'Raw response')} wrap={false}>
               <For each={rawSegments(raw())}>{(seg) => rawSegment(seg, props.secretName)}</For>
             </CodeBlock>

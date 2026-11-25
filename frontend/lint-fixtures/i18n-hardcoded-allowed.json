@@ -92,8 +92,38 @@
       "context": "prop:message",
       "snippet": "\"\"",
       "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
-    }
-    ,{
+    },
+    {
+      "file": "src/pets/preview.tsx",
+      "context": "jsx-text",
+      "snippet": "~/nocx",
+      "reason": "mock terminal output — the working directory the pet preview's stand-in scrollback prints; terminal content is never localised (ADR-nswp57x0 §5)"
+    },
+    {
+      "file": "src/pets/preview.tsx",
+      "context": "jsx-text",
+      "snippet": "go build ./...",
+      "reason": "mock terminal output — the command the stand-in scrollback shows; terminal content is never localised (ADR-nswp57x0 §5)"
+    },
+    {
+      "file": "src/pets/preview.tsx",
+      "context": "jsx-text",
+      "snippet": "ok",
+      "reason": "mock terminal output — the exit status the stand-in scrollback prints; terminal content is never localised (ADR-nswp57x0 §5)"
+    },
+    {
+      "file": "src/pets/preview.tsx",
+      "context": "jsx-text",
+      "snippet": "go test ./internal/...",
+      "reason": "mock terminal output — the command the stand-in scrollback shows; terminal content is never localised (ADR-nswp57x0 §5)"
+    },
+    {
+      "file": "src/pets/preview.tsx",
+      "context": "jsx-text",
+      "snippet": "exit 1",
+      "reason": "mock terminal output — the exit status the stand-in scrollback prints; terminal content is never localised (ADR-nswp57x0 §5)"
+    },
+    {
       "file": "src/about-section.tsx",
       "context": "jsx-text",
       "snippet": "nocx",

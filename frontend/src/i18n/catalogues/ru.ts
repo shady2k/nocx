@@ -1959,4 +1959,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Проверить настройки агента',
   'editor.chip.agent': 'Отвечает агент {agent}. Открыть настройки агента.',
   'editor.chip.agentModel': 'Отвечает модель {model}. Открыть настройки агента.',
+  // ── Clipboard banner (banner.tsx) ───────────────────────────────────────
+  'banner.clipboard.message':
+    'Терминальная программа попыталась записать что-то в буфер обмена. Это отключено по умолчанию из соображений безопасности, чтобы защититься от вредоносного ПО.',
+  'banner.clipboard.allow': 'Разрешить запись в буфер обмена',
+  'banner.clipboard.suppress': 'Больше не показывать',
+  'banner.clipboard.dismiss': 'Закрыть',
 }

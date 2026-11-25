@@ -2165,4 +2165,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Check agent settings',
   'editor.chip.agent': 'Answers with {agent}. Open agent settings.',
   'editor.chip.agentModel': 'Answers with the model {model}. Open agent settings.',
+  // ── Clipboard banner (banner.tsx) ───────────────────────────────────────
+  'banner.clipboard.message':
+    'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.',
+  'banner.clipboard.allow': 'Allow clipboard writes',
+  'banner.clipboard.suppress': "Don't show again",
+  'banner.clipboard.dismiss': 'Dismiss',
 }

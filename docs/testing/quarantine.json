@@ -104,6 +104,10 @@
     {
       "test": "go:TestBashAgentInterruptDoesNotExitInteractiveShell",
       "bead": "nocx-oalo1.6.19"
+    },
+    {
+      "test": "e2e:e2e/renderer-memory-soak.spec.ts › renderer memory soak: retained artifacts return to the live set after churn (nocx-1ebrs.71, nocx-3an1s.1.6, nocx-atpw5.1.35)",
+      "bead": "nocx-oalo1.6.17"
     }
   ]
 }

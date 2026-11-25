@@ -149,7 +149,7 @@ test.beforeAll(async () => {
       `while [ ! -e '${armPath}' ]; do sleep 0.1; done`,
       `printf '\\033]9;%s\\007' '${ARMED}'`,
       `while [ ! -e '${geometryRequestPath}' ]; do sleep 0.1; done`,
-      `while [ ! -e '${geometryAcceptedPath}' ]; do printf '%s\n' "$(stty size)" > '${geometrySamplePath}'; sleep 0.1; done`,
+      `while [ ! -e '${geometryAcceptedPath}' ]; do printf '%s\n' "$(stty size)" > '${geometrySamplePath}.tmp' && mv '${geometrySamplePath}.tmp' '${geometrySamplePath}'; sleep 0.1; done`,
       `while [ ! -e '${summonRequestPath}' ]; do sleep 0.1; done`,
       `printf '%s\n' "$(stty size)" > '${baselineSizePath}'`,
       `cp '${resizePath}' '${baselinePath}'`,
@@ -533,6 +533,12 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     // class this gate exists to catch.
     writeFileSync(geometryRequestPath, 'geometry-request\n')
     let winchObserved = -1
+    // The settled PTY sample is captured in the observation that matched it to
+    // the rendered frame, not read again afterwards. The fixture keeps
+    // refreshing the sample until geometryAcceptedPath exists, so a later read
+    // can see a newer write than the geometry this gate compared with the
+    // frame (nocx-oalo1.6.21).
+    let sampledGeometry = ''
     await expect
       .poll(
         async () => {
@@ -543,7 +549,9 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
           const rendered = await renderedGridSize(page)
           const sampled = fileText(geometrySamplePath).trim()
           if (rendered === '' || sampled === '') return 'geometry not readable yet'
-          return rendered === sampled ? 'settled' : `rendered ${rendered} vs pty ${sampled}`
+          if (rendered !== sampled) return `rendered ${rendered} vs pty ${sampled}`
+          sampledGeometry = sampled
+          return 'settled'
         },
         {
           timeout: 15_000,
@@ -551,7 +559,7 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
         },
       )
       .toBe('settled')
-    const sampledGeometry = fileText(geometrySamplePath).trim()
+    expect(sampledGeometry).not.toBe('')
     writeFileSync(geometryAcceptedPath, 'geometry-accepted\n')
 
     // Request the geometry snapshot immediately before the summon action.

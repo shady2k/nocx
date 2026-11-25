@@ -214,7 +214,7 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
           <EmptyState
             icon={<ArrowDownUpIcon />}
             title={t('ops.empty.title', 'Nothing is running')}
-            description="Uploads and other background work appear here while they run, and stay for a while after they finish."
+            description={t('ops.empty.description', 'Uploads and other background work appear here while they run, and stay for a while after they finish.')}
           />
         }
       >

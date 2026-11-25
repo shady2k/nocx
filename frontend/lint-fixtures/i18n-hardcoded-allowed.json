@@ -104,6 +104,24 @@
       "context": "attr:placeholder",
       "snippet": "host:port",
       "reason": "example value — the destination shape a person replaces with their own host and port"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "A–Z",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "a–z",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
+    },
+    {
+      "file": "src/password-editor.tsx",
+      "context": "attr:label",
+      "snippet": "0–9",
+      "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
     }
   ]
 }

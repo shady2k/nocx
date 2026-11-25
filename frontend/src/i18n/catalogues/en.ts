@@ -2344,4 +2344,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'recall.panel.aria': 'command history',
   'recall.search.placeholder': 'search history',
   'recall.search.aria': 'search history',
+  // ── Undelivered stop notice (session-signal-undelivered.ts) ────────────
+  'sessionSignal.attemptClosed': 'The command had ended before the stop could reach it.',
+  'sessionSignal.unsupported': 'This command is running on a host nocx cannot signal from here.',
+  'sessionSignal.undelivered': 'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
+  'sessionSignal.unknown': 'nocx could not stop the command ({reason})',
+  // ── Session reattach and operations empty state (ipc.ts, operations-view.tsx) ──
+  'ipc.reattach.unavailable': 'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+  'ops.empty.description': 'Uploads and other background work appear here while they run, and stay for a while after they finish.',
 }

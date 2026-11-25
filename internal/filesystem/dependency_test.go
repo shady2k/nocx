@@ -36,9 +36,17 @@ var forbiddenPackages = []string{
 	"github.com/pkg/sftp",
 }
 
-// filesystemPackages are the packages the rule covers: the provider contract
-// and the local provider, which is the one the helper reuses.
-var filesystemPackages = []string{"./internal/filesystem", "./internal/filesystem/local"}
+// filesystemPackages are the packages the rule covers: the provider contract,
+// the local provider the helper reuses, and the helper's own `fs` service
+// (§5.10's filesystem row). The service is the package the deployed artifact
+// gains with nocx-oalo1.12.2, so it is the one a future import of the
+// connection stack would land in — and the C30 row asks for the C17 test to
+// carry §5.10's rows, not only the providers they map.
+var filesystemPackages = []string{
+	"./internal/filesystem",
+	"./internal/filesystem/local",
+	"./internal/filesystem/hostsvc",
+}
 
 // TestFilesystemDependencyGraphReachesNoConnectionStack asserts the rule with
 // `go list -deps` rather than by reading sources: a blank import, a build

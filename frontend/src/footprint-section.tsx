@@ -194,7 +194,7 @@ export function FootprintSection(props: FootprintSectionProps) {
                 <RecordRow
                   title={d.identity}
                   kind={{ label: d.generation, tone: 'info' }}
-                  meta={`${d.path} · protocol ${d.protocolVersion} · scripts ${d.scriptVersion} · last seen ${formatLastSeen(d.lastObservedAt)}`}
+                  meta={t('footprint.row.meta.agent', '{path} · protocol {protocol} · scripts {scripts} · last seen {seen}', { path: d.path, protocol: d.protocolVersion, scripts: d.scriptVersion, seen: formatLastSeen(d.lastObservedAt) })}
                   actions={
                     d.removableProfileId !== null ? (
                       <Button
@@ -226,7 +226,7 @@ export function FootprintSection(props: FootprintSectionProps) {
                 <RecordRow
                   title={h.identity}
                   kind={{ label: t('footprint.helper.word', 'helper'), tone: 'info' }}
-                  meta={`${h.path} · hash ${h.hash.slice(0, 12)}… · installed ${formatLastSeen(h.installedAt)}`}
+                  meta={t('footprint.row.meta.helper', '{path} · hash {hash}… · installed {installed}', { path: h.path, hash: h.hash.slice(0, 12), installed: formatLastSeen(h.installedAt) })}
                   actions={
                     h.removableProfileId !== null ? (
                       <Button

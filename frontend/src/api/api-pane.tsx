@@ -62,7 +62,7 @@ import { showConfirm } from '../ui/dialog'
 import { confirmLabels } from '../i18n/kit-labels'
 import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
-import { t } from '../i18n/locale-model'
+import { t, tPlural } from '../i18n/locale-model'
 import {
   contentsOf,
   directoryOf,
@@ -1428,7 +1428,7 @@ export function ApiPane(props: ApiPaneProps) {
         // A folder's line says whether going in is worth it. "Empty" rather
         // than "0 items", because that is the word the tree uses for the
         // same state one column to the left.
-        meta: count === 0 ? 'Empty' : count === 1 ? '1 item' : `${count} items`,
+        meta: count === 0 ? t('api.folder.meta.empty', 'Empty') : tPlural('api.folder.meta.items', count, '{count} items'),
         folder: true,
       }
     })

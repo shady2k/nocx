@@ -1122,7 +1122,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     if (answer.kind !== 'row') return undefined
     const scopes = matrix()?.[answer.effect].scopes ?? []
     if (scopes.length === 0) return undefined
-    return `Only in ${scopes.map(placeName).join(', ')}.`
+    return t('assistant.placesOnly', 'Only in {places}.', { places: scopes.map(placeName).join(', ') })
   }
 
   // The panels ---------------------------------------------------------

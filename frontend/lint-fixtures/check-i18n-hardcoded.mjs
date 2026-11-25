@@ -94,6 +94,7 @@ const TEXT_PROPS = new Set([
   'searchLabel',
   'fieldLabel',
   'fieldDescription',
+  'meta',
   'name',
   'buttonLabel',
   'pathPlaceholder',

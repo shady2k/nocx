@@ -2555,4 +2555,15 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'hostKey.fact.lasts': 'Действует',
   'hostKey.fact.noMachine': 'машина, которую nocx не смог назвать',
   'api.tree.emptyRow': 'Пусто',
+  'api.folder.meta.empty': 'Пусто',
+  'api.folder.meta.items': {
+    one: '{count} элемент',
+    few: '{count} элемента',
+    many: '{count} элементов',
+    other: '{count} элемента',
+  },
+  'agentAccess.row.meta': 'На {machine} · Каждая вкладка в рабочем пространстве {workspace} · {digest}',
+  'assistant.placesOnly': 'Только в {places}.',
+  'footprint.row.meta.agent': '{path} · протокол {protocol} · скрипты {scripts} · последний раз виден {seen}',
+  'footprint.row.meta.helper': '{path} · хеш {hash}… · установлен {installed}',
 }

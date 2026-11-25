@@ -2581,4 +2581,15 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'hostKey.fact.lasts': 'Lasts',
   'hostKey.fact.noMachine': 'a machine nocx could not name',
   'api.tree.emptyRow': 'Empty',
+  'api.folder.meta.empty': 'Empty',
+  'api.folder.meta.items': {
+    one: '{count} item',
+    few: '{count} items',
+    many: '{count} items',
+    other: '{count} items',
+  },
+  'agentAccess.row.meta': 'On {machine} · Every tab in the {workspace} workspace · {digest}',
+  'assistant.placesOnly': 'Only in {places}.',
+  'footprint.row.meta.agent': '{path} · protocol {protocol} · scripts {scripts} · last seen {seen}',
+  'footprint.row.meta.helper': '{path} · hash {hash}… · installed {installed}',
 }

@@ -1662,7 +1662,10 @@ describe('the composer follows the language (nocx-dej6.3.17)', () => {
   it('repaints its hint words and submit name when the locale flips', () => {
     setActiveLocale('en')
     const { ed, container } = setup()
-    const hints = () => Array.from(container.querySelectorAll('.ui-composer-frame__hint-label')).map((n) => n.textContent)
+    const hints = () =>
+      Array.from(container.querySelectorAll('.ui-composer-frame__hint-label')).map(
+        (n) => n.textContent,
+      )
     const submit = () => container.querySelector('button[aria-label]')?.getAttribute('aria-label')
     expect(hints()).toEqual(['run', 'ask', 'newline'])
     expect(submit()).toBe('Run command')

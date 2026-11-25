@@ -669,7 +669,9 @@ export class CommandEditor {
    *  so no second "which target is active" channel is introduced. */
   private updateSubmitLabel(): void {
     const toShell = this.actions.handoffToShell?.() ?? true
-    const label = toShell ? t('editor.runCommand.aria', 'Run command') : t('editor.sendQuestion.aria', 'Send question')
+    const label = toShell
+      ? t('editor.runCommand.aria', 'Run command')
+      : t('editor.sendQuestion.aria', 'Send question')
     this.submitButton.setAttribute('aria-label', label)
     this.submitButton.title = label
     this.frame.setSubmitHint(toShell ? t('editor.hint.run', 'run') : t('editor.hint.ask', 'ask'))
@@ -677,7 +679,10 @@ export class CommandEditor {
     // names what it does from here. The mark follows the host the person is
     // typing on: ⌘ on macOS, Ctrl elsewhere.
     const mod = currentPlatform() === 'darwin' ? '⌘' : 'Ctrl'
-    this.frame.setSwitchHint([mod, '↵'], toShell ? t('editor.hint.ask', 'ask') : t('editor.hint.run', 'run'))
+    this.frame.setSwitchHint(
+      [mod, '↵'],
+      toShell ? t('editor.hint.ask', 'ask') : t('editor.hint.run', 'run'),
+    )
   }
 
   /** Install the extensions of the target Enter currently goes to. Called

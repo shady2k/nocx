@@ -60,7 +60,7 @@ func TestQueuedReplacementCannotCloseNewIndependentShell(t *testing.T) {
 	state := newConnState()
 	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
 	h := openHandlers{opener: ws.opener, sess: ws, log: logger}
-	if _, err := h.openInto(ctx, wc, state, params, func(openResult) {}); err != nil {
+	if _, err := h.openInto(ctx, wc, state, params, func(openResult) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
@@ -86,7 +86,7 @@ func TestQueuedReplacementCannotCloseNewIndependentShell(t *testing.T) {
 			return false
 		}
 	})
-	opened, err := h.openInto(ctx, wc, state, params, func(openResult) {})
+	opened, err := h.openInto(ctx, wc, state, params, func(openResult) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

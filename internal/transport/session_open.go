@@ -243,7 +243,7 @@ func (o *sessionOpener) workspaceForOpen(ctx context.Context, paneID string) (st
 // returned, so reconciliation can never observe a live helper session without
 // the generation that qualifies its id space; a failed write closes the
 // session rather than exposing one no inventory may safely judge.
-func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSession, err error) {
+func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(session.Session), endFailedOpen func(session.Session)) (_ OpenedSession, err error) {
 	// THE OPEN'S RECORD (nocx-3an1s.1.8). Begin is a no-op for a caller with
 	// no dispatcher record (a backend open, a test), so this costs one nil
 	// check there. The connection label is minted per destination and is the
@@ -383,12 +383,16 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSessio
 		return OpenedSession{}, dialErr
 	}
 	endDial(nil)
+	if onDial != nil {
+		onDial(sess)
+	}
 	if hosted != nil {
 		diagnostics.NotePublish(ctx, publishNote(hosted))
 		diagnostics.NoteIntegration(ctx, hosted.IntegrationStatus)
 	}
 
 	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID, claim); err != nil {
+		endFailedOpen(sess)
 		return OpenedSession{}, err
 	}
 	// Both renderer and backend opens leave here with handover armed,
@@ -631,13 +635,8 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 	if hosted.AbortLifecycle != nil {
 		hosted.AbortLifecycle()
 	}
-	// EndSession, not Close: this open has already failed as a whole, so
-	// nobody will ever hold sess — leaving it merely detached would strand
-	// a helper-hosted session's window budget with no coordinator ever
-	// coming back for it (nocx-isjh4).
-	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
-		return svc.EndSession(sess.ID())
-	})
+	// The caller claims and ends this failed open; detaching it instead
+	// would strand the helper's session budget (nocx-isjh4).
 	return fmt.Errorf("recording the helper binding: %w", err)
 }
 
@@ -717,18 +716,27 @@ func (o *sessionOpener) releaseClaim(ctx context.Context, claim string) {
 	}
 }
 
-// close ends a session the opener produced, through the same operation the
-// open ran under. It exists so a caller that could not finish its own half —
-// a ring that could not be created because the server is shutting down — ends
-// the session rather than leaking it, without holding the capability seam
-// itself.
+// close ends a session the opener produced, through the open's own operation.
+// It exists so a caller that could not finish its own half — a ring that could
+// not be created because the server is shutting down — ends the session rather
+// than leaking it, without holding the capability seam itself.
 //
 // EndSession, not Close (nocx-isjh4): the caller here always failed to
 // finish adopting the session it just produced, so nobody will ever attach
 // to it — a helper-hosted session left merely detached here would hold its
 // window budget for no coordinator that is ever coming back.
+//
+// THE OPEN'S UNGATED PHASE, and not its gated one (nocx-oalo1.6.16). This runs
+// as the rollback of an open whose answer never reached the wire, so the
+// request that ordered it may already be withdrawn or cancelled: a gated phase
+// takes that request's context, and its admission would then refuse the very
+// close it exists to run — leaving a helper-hosted session nobody can ever
+// adopt. Holding no [config, session] gate is right for the second reason too:
+// the registry's end may wait on a helper's teardown, and a rollback must not
+// exclude unrelated session work while it does — the same reason
+// sessionEndOperation releases the session gate before its own teardown.
 func (o *sessionOpener) close(ctx context.Context, id session.ID) {
-	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
+	_ = o.op.Dial(ctx, func(_ context.Context, svc capability.OpenService) error {
 		return svc.EndSession(id)
 	})
 }
@@ -753,7 +761,12 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	if s.opener == nil {
 		return OpenedSession{}, errors.New("transport: the session opener is not running")
 	}
-	opened, err := s.opener.Open(ctx, spec)
+	opened, err := s.opener.Open(ctx, spec, nil, func(sess session.Session) {
+		if s.claimClose(sess) {
+			defer s.releaseClose(sess.ID())
+			s.opener.close(ctx, sess.ID())
+		}
+	})
 	if err != nil {
 		return OpenedSession{}, err
 	}
@@ -850,7 +863,7 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// (AD-9) every WebSocket that ever attaches to them. Closing event:
 	// session teardown — monitorExit below, started once per session, waits
 	// on the session's own Done and ends the read pump StartOutput starts.
-	if rx := s.getOrCreateRx(opened.Session.ID()); rx != nil {
+	if rx := s.getOrCreateRx(opened.Session); rx != nil {
 		if opened.Hosted != nil && opened.Hosted.ObserveOutputHoles != nil {
 			opened.Hosted.ObserveOutputHoles(func(lost uint64, reason string) {
 				rx.recordOutputHole(lost, sessionOutputHoleReason(reason))

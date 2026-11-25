@@ -63,7 +63,7 @@ func newScreenPublishFixture(t *testing.T) (*WSServer, session.ID, [16]byte, *ws
 		t.Fatalf("id to bytes: %v", err)
 	}
 	sock := newCaptureSocket()
-	rx := ws.getOrCreateRx(sid)
+	rx := ws.getOrCreateRxAt(sid, 0)
 	if rx == nil {
 		t.Fatal("the server would not make a ring")
 	}

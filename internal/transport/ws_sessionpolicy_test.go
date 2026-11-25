@@ -112,7 +112,7 @@ func serverWithLiveSession(t *testing.T) (*WSServer, session.Session, *exitFakeP
 	}
 	// The receiver is what removeRx claims; both of the two teardown owners
 	// go through it, so a session without one is not the production shape.
-	s.getOrCreateRx(sess.ID())
+	s.getOrCreateRx(sess)
 	return s, sess, fake
 }
 

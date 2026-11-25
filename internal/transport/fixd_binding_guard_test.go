@@ -29,7 +29,7 @@ func TestOldOpenCannotBindReplacementPaneRecord(t *testing.T) {
 	wc := &wsConn{}
 	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
 	h := openHandlers{opener: ws.opener, sess: ws, log: logger}
-	if _, err := h.openInto(ctx, wc, newConnState(), params, func(openResult) {}); err == nil {
+	if _, err := h.openInto(ctx, wc, newConnState(), params, func(openResult) error { return nil }); err == nil {
 		t.Fatal("expected open refusal")
 	}
 	if helper.ctx == nil {

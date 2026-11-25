@@ -158,8 +158,47 @@ func (c *requestCancels) cancelAll() {
 		// so a disconnect reaches retained work without an explicit
 		// withdrawal. Retained cancels stay for rpc.cancel, which is a
 		// withdrawal of the request while the connection lives on.
-		entry.cancel()
+		//
+		// IT IS A WITHDRAWAL, NOT A BARE CANCEL (nocx-oalo1.6.16): a socket's
+		// teardown is one of the parties an open's answer has to be ordered
+		// against, and the ordering is the entry's own lock. A raw cancel
+		// would end the context without taking it, and an open could then
+		// accept its answer after the socket had gone — see settleRequest.
+		entry.withdraw()
 	}
+}
+
+// errRequestWithdrawn is what an open returns for itself when the request it
+// would answer was withdrawn first. Nothing is on the wire, so no failure
+// answer is written either: the caller stopped waiting for one.
+var errRequestWithdrawn = errors.New("transport: the request was withdrawn before its answer")
+
+// settleRequest runs write inside the request's own start/withdraw interval and
+// reports whether it ran.
+//
+// IT IS THE ONE PLACE A WITHDRAWAL IS ORDERED WITH AN ANSWER (nocx-oalo1.6.16).
+// A command's answer commits when the socket's outbound queue accepts it, so the
+// question "withdrawn before the answer, or after it?" cannot be answered by
+// sampling the context: the sample and the enqueue would be two steps, and
+// cancel between them leaves the very defect this closes — a session created
+// for a caller that had already given up. withdraw() takes this same lock before
+// it cancels, so exactly one of the two wins: a withdrawal observed here refuses
+// the write, and a write that got here first is already the wire's.
+func settleRequest(ctx context.Context, write func()) bool {
+	entry, ok := ctx.Value(requestCancelContextKey{}).(*requestCancel)
+	if !ok {
+		// A caller with no request of its own — a backend open, a pane's
+		// reconnect — has no withdrawal to order against.
+		write()
+		return true
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.withdrawn {
+		return false
+	}
+	write()
+	return true
 }
 
 type rpcCancelParams struct {

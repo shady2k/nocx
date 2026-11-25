@@ -38,8 +38,8 @@ import (
 // it (migration map, close finding).
 type sessionMachine interface {
 	getRx(sid session.ID) *sessionRx
-	getOrCreateRx(sid session.ID) *sessionRx
-	removeRx(sid session.ID) *sessionRx
+	claimClose(sess session.Session) bool
+	releaseClose(id session.ID)
 	laneFor(sid session.ID, sess session.Session) *sessionLane
 	// takeSize hands a session the geometry of the client that now owns it
 	// (nocx-eidfb.2). One narrow method rather than the lane itself: the
@@ -109,8 +109,8 @@ type sessionMachine interface {
 // the discovery hooks. Same narrow-surface rule as sessionMachine.
 type openMachine interface {
 	closeSession(sid session.ID, sess session.Session)
-	getOrCreateRx(sid session.ID) *sessionRx
-	removeRx(sid session.ID) *sessionRx
+	getRx(sid session.ID) *sessionRx
+	getOrCreateRx(sess session.Session) *sessionRx
 	pumpToRing(ctx context.Context, sess session.Session, ring *outputRing)
 	monitorExit(rx *sessionRx, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
@@ -138,12 +138,29 @@ type openMachine interface {
 	recordPublishFailure(sid session.ID, reason shellintegration.PublishFailureReason)
 	// resendScreen is sessionMachine's, for the same install on this path.
 	resendScreen(ctx context.Context, sid session.ID)
+	// takeSize is sessionMachine's too: the open reports NoClient through it
+	// when the socket that measured the session went after the answer but
+	// before the subscriber slot ever took it (nocx-oalo1.6.16).
+	takeSize(sid session.ID, sess session.Session, reported session.Size)
+	// unregisterLifecycleLanes drops the lane the opener binds at Open. An
+	// open refused before its ring exists never reaches closeSession, and the
+	// lane it already bound would outlive the session it names.
+	unregisterLifecycleLanes(sid session.ID)
 	// bindPane points a pane's connection notifications at the renderer that
 	// opened it (ws_pane_connection.go). Called BEFORE the open's own work:
 	// the first observation can arrive while the dial is still opening, and a
 	// binding installed after the ack would miss the stage the pane exists
 	// for.
 	bindPane(paneID string, wconn *wsConn, state *connState, params openParams)
+	trackUnanswered(sess session.Session)
+	enqueueOpenAnswer(sess session.Session, enqueue func() error) error
+	claimClose(sess session.Session) bool
+	releaseClose(id session.ID)
+	// discardLateOpenRegistrations removes what an unconfirmed open registered
+	// after a closer had already taken the session's end apart. The closer tore
+	// down what existed when it looked; a lane, an integration entry or a
+	// discovery target added after that look has no other owner left.
+	discardLateOpenRegistrations(sid session.ID, sess session.Session)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -464,13 +481,49 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		defer reporter.End()
 	}
 
-	_, err := h.openInto(ctx, wconn, state, params, func(result openResult) {
+	// THE REQUEST IS ANSWERED ONCE (nocx-oalo1.6.16). Once the result is in
+	// the outbound queue the client has it, and an open that loses its pane
+	// afterwards ends the session without a second response for the same id:
+	// the failure answer belongs to the attempt that never reached the wire.
+	answered := false
+	_, err := h.openInto(ctx, wconn, state, params, func(result openResult) error {
 		resultJSON, _ := json.Marshal(result)
-		_ = respond(r, newJSONRPCResult(req.ID, resultJSON))
+		if respondErr := respond(r, newJSONRPCResult(req.ID, resultJSON)); respondErr != nil {
+			return respondErr
+		}
+		answered = true
+		return nil
 	})
-	if err != nil {
+	// A WITHDRAWN REQUEST GETS NO FAILURE ANSWER EITHER: the caller stopped
+	// waiting for one, and the open has already left nothing behind
+	// (nocx-oalo1.6.16).
+	if err != nil && !answered && !errors.Is(err, errRequestWithdrawn) {
 		h.answerOpenFailure(ctx, r, req, err)
 	}
+}
+
+// commitAnswer holds paneMu from binding validation through enqueue so the
+// pane cannot retire between them. As in PublishPaneConnection, the lock
+// spans only a bounded, non-blocking enqueue: TryResult's critical send and
+// TryNotify's queue send both select with a default, not socket I/O.
+// Lock order: paneMu -> requestCancel.mu -> ringsMu.
+func (h openHandlers) commitAnswer(ctx context.Context, paneRecord *paneRecord, paneID string, generation uint64, sess session.Session, result openResult, ack func(openResult) error) error {
+	machine, _ := h.sess.(*WSServer)
+	if machine != nil && paneRecord != nil {
+		machine.paneMu.Lock()
+		defer machine.paneMu.Unlock()
+		if lost, socketGone := machine.paneBindingLostLocked(paneID, paneRecord, generation); lost || socketGone {
+			return context.Canceled
+		}
+	}
+	var writeErr error
+	ran := settleRequest(ctx, func() {
+		writeErr = h.sess.enqueueOpenAnswer(sess, func() error { return ack(result) })
+	})
+	if !ran {
+		return errRequestWithdrawn
+	}
+	return writeErr
 }
 
 // openInto is THE ONE OPEN PATH: a session is created for a pane and every fact
@@ -479,8 +532,24 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 // its ack through ack; `pane.reconnect` does the same work for a pane whose
 // shell died, which is why this is one function and not a second beside it.
 //
+// ack reports the outbound queue's answer — nil when the answer was accepted —
+// because THE COMMIT POINT is that acceptance (nocx-oalo1.6.16). Until it the
+// open is the only owner of what it made and tears all of it down; after it the
+// session is the server's (AD-9) and a lost request or socket may take only
+// this connection's part.
+//
 // The supervisor has already restored the connection when a return callback opens a new shell.
-func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, ack func(openResult)) (openResult, error) {
+func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connState, params openParams, ack func(openResult) error) (openResult, error) {
+	// step is the test's hold on this open (ws.go's openStep): nil in
+	// production, so it is a nil check wherever it is called. "done" fires on
+	// every path — after the deferred cleanup — and is the test's only way to
+	// know the open finished, since the handler runs off the read loop.
+	step := func(name string) {
+		if machine, ok := h.sess.(*WSServer); ok && machine.openStep != nil {
+			machine.openStep(name)
+		}
+	}
+	defer func() { step("done") }()
 	spec := OpenSpec{
 		PaneID: params.PaneID,
 		Kind:   params.Kind,
@@ -547,7 +616,17 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			}
 		})
 	}
-	opened, err := h.opener.Open(ctx, spec)
+	endUnanswered := func(sess session.Session) {
+		if !h.sess.claimClose(sess) {
+			h.sess.discardLateOpenRegistrations(sess.ID(), sess)
+			return
+		}
+		defer h.sess.releaseClose(sess.ID())
+		h.sess.unregisterLifecycleLanes(sess.ID())
+		h.opener.close(ctx, sess.ID())
+		h.sess.closeSession(sess.ID(), sess)
+	}
+	opened, err := h.opener.Open(ctx, spec, h.sess.trackUnanswered, endUnanswered)
 	if err != nil {
 		// THE PROVISIONAL OPENING IS SETTLED BY WHOEVER PUBLISHED IT. A real
 		// bind replaces it before the spawn; every failure before that leaves
@@ -560,12 +639,37 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		return openResult{}, err
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
-	cleanupCtx := ctx
-	if machine, ok := h.sess.(*WSServer); ok {
-		cleanupCtx = machine.lifetimeCtx
-	}
+
+	// EVERY FAILURE FROM HERE ON OWNS THE SAME TEARDOWN. It is installed
+	// before the first check because the opener has already bound what it
+	// made — the registry entry, the lifecycle lane, the armed lifecycle
+	// delivery — and an open refused before its ring exists has none of the
+	// later owners a ring would bring.
+	monitored := false
+	var rx *sessionRx
+	defer func() {
+		if monitored {
+			return
+		}
+		step("teardown")
+		if hosted != nil && hosted.AbortLifecycle != nil {
+			hosted.AbortLifecycle()
+		}
+		state.remove(sess.ID())
+		// ONE OWNER OF THIS SESSION'S END (nocx-oalo1.6.16). A closer that has
+		// claimed it — a pane that left, a reconnect replacing its shell, the
+		// shutdown — ends the registry entry and tears the transport state
+		// down; what this open registered after that closer looked is this
+		// open's to take back, and nothing else here is.
+		//
+		// The claim is taken before the end, not inferred from the receiver
+		// afterwards: a closer standing inside EndSession has not removed the
+		// receiver yet, and one that finished has removed rather more than a
+		// registration of ours.
+		endUnanswered(sess)
+	}()
+
 	if err := ctx.Err(); err != nil {
-		h.opener.close(cleanupCtx, sess.ID())
 		return openResult{}, err
 	}
 
@@ -573,7 +677,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		machine.paneMu.Lock()
 		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || ctx.Err() != nil {
 			machine.paneMu.Unlock()
-			h.opener.close(cleanupCtx, sess.ID())
 			return openResult{}, context.Canceled
 		}
 		state.add(sess)
@@ -581,15 +684,12 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	} else {
 		state.add(sess)
 	}
-	rx := h.sess.getOrCreateRx(sess.ID())
+	step("before-receiver")
+	rx = h.sess.getOrCreateRx(sess)
 	if rx == nil {
-		if hosted != nil && hosted.AbortLifecycle != nil {
-			hosted.AbortLifecycle()
-		}
-		state.remove(sess.ID())
-		h.opener.close(ctx, sess.ID())
 		return openResult{}, errOpenShuttingDown
 	}
+	step("before-register")
 
 	if hosted != nil && hosted.LifecycleLane != "" {
 		if registrar, ok := h.sess.(interface {
@@ -598,21 +698,6 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			registrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
 		}
 	}
-
-	// Until the exit monitor takes ownership, every failed open must tear
-	// down the transport state it registered, even if delivery cancels ctx.
-	monitored := false
-	defer func() {
-		if monitored {
-			return
-		}
-		if hosted != nil && hosted.AbortLifecycle != nil {
-			hosted.AbortLifecycle()
-		}
-		state.remove(sess.ID())
-		h.opener.close(cleanupCtx, sess.ID())
-		h.sess.closeSession(sess.ID(), sess)
-	}()
 
 	// Port discovery (nocx-wzc4.2): only now, once the session's ring
 	// exists, is the target "up" — a session that failed its ring setup
@@ -683,19 +768,32 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		AwaitsIntegration: awaitsIntegration,
 		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
 	}
-	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil && ctx.Value(paneReconnectOpenKey{}) == nil {
-		machine.paneMu.Lock()
-		if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
-			machine.paneMu.Unlock()
-			return openResult{}, context.Canceled
-		}
-		ack(result)
-		machine.paneMu.Unlock()
-	} else {
-		ack(result)
+	// THE COMMIT POINT IS THE ANSWER IN THE OUTBOUND QUEUE (nocx-oalo1.6.16).
+	// The ack reports that acceptance. Before it, and when the call below
+	// refuses the answer, the deferred cleanup above tears the open down
+	// entire.
+	if ackErr := h.commitAnswer(ctx, paneRecord, params.PaneID, bindingGeneration, sess, result, ack); ackErr != nil {
+		return openResult{}, ackErr
 	}
-	if err := ctx.Err(); err != nil {
-		return openResult{}, err
+	step("committed")
+
+	// WHAT REMAINS AFTER THE ANSWER IS THIS CONNECTION'S PART. A socket that
+	// went while the answer was being enqueued has no client behind it:
+	// nothing is installed on it, its replays and screen resend go nowhere,
+	// and its measurement stops governing the session (nocx-eidfb.2). What it
+	// does NOT take is the session — the pump, the ring and the exit monitor
+	// below are still installed, so the output produced meanwhile is there for
+	// the next attach and the shell's exit is still observed (AD-9).
+	step("before-socket-check")
+	lost, socketGone := false, ctx.Err() != nil
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		lost, socketGone = machine.paneBindingLost(params.PaneID, paneRecord, bindingGeneration)
+		socketGone = socketGone || ctx.Err() != nil
+	}
+	if lost {
+		// Not a lost socket: the pane left or a newer open took its binding,
+		// and that ends the session as it always did.
+		return openResult{}, context.Canceled
 	}
 	// Every session-scoped notification must follow the open result (AD-7).
 	// Install the subscriber only now: lifecycle can authenticate during the
@@ -707,21 +805,33 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// ago, so the displaced pair is discarded here rather than announced: the
 	// slot is empty by construction on this path, and a displacement that
 	// cannot happen must not be dressed up as one that did.
-	if wconn != nil {
+	installed := false
+	if wconn != nil && !socketGone {
+		step("before-subscribe")
+		// Lock order: paneMu -> requestCancel.mu -> connState.mu. Socket
+		// teardown drops the state lock before withdrawing requests or
+		// unbinding panes; agent conversation teardown holds only state.mu.
+		install := func() {
+			settleRequest(ctx, func() { installed = state.installSubscriber(rx, wconn) })
+		}
 		if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
 			machine.paneMu.Lock()
-			if machine.paneRecords[params.PaneID] != paneRecord || paneRecord.bindingGeneration != bindingGeneration || paneRecord.ctx.Err() != nil || ctx.Err() != nil {
-				machine.paneMu.Unlock()
+			paneLost, _ := machine.paneBindingLostLocked(params.PaneID, paneRecord, bindingGeneration)
+			if !paneLost {
+				install()
+			}
+			machine.paneMu.Unlock()
+			if paneLost {
 				return openResult{}, context.Canceled
 			}
-			_, _ = rx.setSubscriber(wconn, state)
-			machine.paneMu.Unlock()
 		} else {
-			_, _ = rx.setSubscriber(wconn, state)
+			install()
 		}
-		if hosted != nil && hosted.StartLifecycle != nil {
-			hosted.StartLifecycle()
-		}
+		// The answer already belongs to the wire. Withdrawal or teardown
+		// wins only the subscriber slot, not the session (AD-9).
+		socketGone = !installed
+	}
+	if installed {
 		h.sess.replayLifecycleFacts(sess.ID())
 		// The axis was already entered above, before the ack — only the
 		// NOTIFICATION waits for AD-7. This is the first fact this session's
@@ -737,8 +847,21 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		// -race.
 		h.sess.replayToolSurface(sess.ID())
 	}
-	if wconn == nil && hosted != nil && hosted.StartLifecycle != nil {
+	if hosted != nil && hosted.StartLifecycle != nil {
 		hosted.StartLifecycle()
+	}
+	if socketGone {
+		// THE DEPARTED CLIENT'S MEASUREMENT GOES WITH IT — while nobody else
+		// holds the session. This is the report a session takes when its
+		// subscriber slot empties (nocx-eidfb.2), reached here because the slot
+		// never filled: the answer was accepted and then the socket went, so
+		// nothing ever took this client's geometry and nothing may go on
+		// running at it. A window that attached meanwhile owns the geometry,
+		// and the guard is the slot's, not a second sample of it.
+		rx.ifNoSubscriber(func() {
+			step("no-client-reported")
+			h.sess.takeSize(sess.ID(), sess, session.NoClient())
+		})
 	}
 	// The publish's own outcome, from the opener that attempted it
 	// (nocx-1kejz.4). After the ack and after the subscriber above, like every
@@ -797,7 +920,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	if conn, ok := connectionContext(ctx); ok {
 		pumpCtx = conn
 	}
-	if wconn != nil {
+	if wconn != nil && !socketGone {
 		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
 	}
 
@@ -809,7 +932,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// replay — the runtime holds the latest one — so the frame this
 	// subscriber is owed is asked for. Last, so its round trip delays no
 	// PTY byte.
-	if wconn != nil {
+	if wconn != nil && !socketGone {
 		h.sess.resendScreen(ctx, sess.ID())
 	}
 	return result, nil
@@ -928,16 +1051,16 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 	}
 
 	sid := session.ID(params.SessionID)
-	if !state.has(sid) {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(h.r, resp)
+	owned, ok := state.get(sid)
+	if !ok || !h.machine.claimClose(owned) {
+		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 		return
 	}
+	defer h.machine.releaseClose(sid)
 
 	op, err := h.ops.ForSessionEnd(sid)
 	if err != nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(h.r, resp)
+		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 		return
 	}
 	sess, err := op.Run(ctx, func(session.Session) {
@@ -1427,7 +1550,12 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 	// session and no one of them.
 	liveOp := capability.NewSessionOperation(sessionGate, s.registry, s.profileUsage)
 	immediate := control.ImmediateSubmission{}
-	openSub := s.work
+	// AN OPEN IS SHUTDOWN WORK (nocx-oalo1.6.16). It can run for as long as a
+	// dial takes, and Stop must not close the session an in-flight open is
+	// about to answer for: registering it here makes Stop cancel it and wait
+	// for it before the sessions are torn down, so the answer either precedes
+	// the shutdown or is never written.
+	openSub := &inflightSubmission{inflight: &s.inflight, inner: s.work}
 	sessionSub := s.work
 	// Completion ordering belongs to a session, not the whole server. All
 	// sockets share this scheduler: a blocked intent holds only its own

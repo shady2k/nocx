@@ -2187,4 +2187,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.folder.field.send': 'Send',
   'api.folder.field.varPlaceholder': 'baseUrl',
   'api.folder.field.valuePlaceholder': 'https://api.example.com',
+  'api.import.submit': 'Import',
+  'api.import.routeDirect': 'Direct',
+  'api.import.curl.convert': 'Convert to a request',
+  'api.import.curl.desc':
+    "Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.",
 }

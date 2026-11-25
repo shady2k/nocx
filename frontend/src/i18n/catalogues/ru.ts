@@ -1981,4 +1981,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.folder.field.send': 'Отправка',
   'api.folder.field.varPlaceholder': 'baseUrl',
   'api.folder.field.valuePlaceholder': 'https://api.example.com',
+  'api.import.submit': 'Импортировать',
+  'api.import.routeDirect': 'Напрямую',
+  'api.import.curl.convert': 'Преобразовать в запрос',
+  'api.import.curl.desc':
+    'Разбирается, но не выполняется — за этим полем нет оболочки. Оно заполняет форму, заменяя то, что там открыто; ничего не записывается, пока запрос не сохранён. Запрос с несохранёнными изменениями не заменяется без вопроса.',
 }

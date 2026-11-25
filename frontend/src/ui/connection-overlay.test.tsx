@@ -10,6 +10,7 @@ import {
   type ConnectionOverlayState,
 } from './connection-overlay'
 import { Prompt } from './prompt'
+import { connectionOverlayLabels } from '../i18n/kit-labels'
 
 const EXIT_MS = CONNECTION_OVERLAY_EXIT_MS
 
@@ -33,6 +34,7 @@ function subject(
   const mounted = mountConnectionOverlay(host, {
     state,
     onRetry: retry,
+    labels: connectionOverlayLabels(),
     ...options,
   })
   const destroy = () => mounted.destroy()

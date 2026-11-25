@@ -41,12 +41,6 @@
       "reason": "the trailing question mark of a composed question title; the words come from t(), the punctuation is the template literal static (same shape as the secrets name-composites)"
     },
     {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "su",
-      "reason": "technical term — the shell command's own name"
-    },
-    {
       "file": "src/scrollback/blocks.ts",
       "context": "dom:title",
       "snippet": "ms",
@@ -122,30 +116,6 @@
       "context": "attr:label",
       "snippet": "0–9",
       "reason": "charset symbol — a character-class name the ADR (point 6) keeps English; the checkbox names the class, not a sentence"
-    },
-    {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "tmux",
-      "reason": "program name — the command the user types, never displayed prose; environmentEntry has no screen consumer (only its test reads the label)"
-    },
-    {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "screen",
-      "reason": "program name — the command the user types, never displayed prose; environmentEntry has no screen consumer (only its test reads the label)"
-    },
-    {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "nix-shell",
-      "reason": "program name — nix-shell, the command the user types; environmentEntry has no screen consumer (only its test reads the label)"
-    },
-    {
-      "file": "src/environment-commands.ts",
-      "context": "prop:label",
-      "snippet": "root",
-      "reason": "identifier — the sudo target name the detector asserts in its test; environmentEntry has no screen consumer"
     }
   ]
 }

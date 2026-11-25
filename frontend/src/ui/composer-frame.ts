@@ -23,6 +23,8 @@ export interface ComposerFrameHandle {
   /** The target-switch chord's hint: its keys, one keycap each, and what it
    *  does from the target currently active — e.g. `['⌘', '↵'], 'ask'`. */
   setSwitchHint(keys: readonly string[], label: string): void
+  /** Repaint the newline hint's word (the language changed). */
+  setNewlineHint(label: string): void
   /** Remove the frame from its parent. CommandEditor's own `dispose()`
    *  still owns the CM6 view, the chrome row and every listener it
    *  installed; this is only the frame's own DOM teardown. */
@@ -33,7 +35,10 @@ export interface ComposerFrameHandle {
  *  `.nocx-editor-chrome`) — placed inside the card, above the field, never
  *  repainted or reparented beyond that one move. See the file header for
  *  why this module does not build it itself. */
-export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
+export function createComposerFrame(
+  chrome: HTMLElement,
+  hints: { submit: string; newline: string },
+): ComposerFrameHandle {
   const root = document.createElement('div')
   root.className = 'ui-composer-frame'
 
@@ -51,11 +56,11 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
   const hint = document.createElement('div')
   hint.className = 'ui-composer-frame__hint'
   const submitHint = document.createElement('span')
-  paintHint(submitHint, ['↵'], 'run')
+  paintHint(submitHint, ['↵'], hints.submit)
   const switchHint = document.createElement('span')
   switchHint.dataset.hint = 'switch'
   const newlineHint = document.createElement('span')
-  paintHint(newlineHint, ['⇧', '↵'], 'newline')
+  paintHint(newlineHint, ['⇧', '↵'], hints.newline)
   hint.append(submitHint, switchHint, newlineHint)
   root.append(chrome, field, hint)
 
@@ -66,6 +71,9 @@ export function createComposerFrame(chrome: HTMLElement): ComposerFrameHandle {
     submit,
     setFocused(focused: boolean): void {
       field.dataset.focused = focused ? 'true' : 'false'
+    },
+    setNewlineHint(label: string): void {
+      paintHint(newlineHint, ['⇧', '↵'], label)
     },
     setSubmitHint(label: string): void {
       paintHint(submitHint, ['↵'], label)

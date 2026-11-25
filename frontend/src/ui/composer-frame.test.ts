@@ -9,11 +9,13 @@
 import { describe, expect, it } from 'vitest'
 import { createComposerFrame } from './composer-frame'
 
+const HINTS = { submit: 'run', newline: 'newline' }
+
 describe('createComposerFrame', () => {
   it('places the given chrome inside the card, above the field', () => {
     const chrome = document.createElement('div')
     chrome.className = 'nocx-editor-chrome'
-    const frame = createComposerFrame(chrome)
+    const frame = createComposerFrame(chrome, HINTS)
 
     expect(frame.root.classList.contains('ui-composer-frame')).toBe(true)
     expect([...frame.root.children].slice(0, 2)).toEqual([chrome, frame.field])
@@ -29,7 +31,7 @@ describe('createComposerFrame', () => {
     chrome.className = 'nocx-editor-chrome'
     const marker = document.createElement('span')
     chrome.appendChild(marker)
-    const frame = createComposerFrame(chrome)
+    const frame = createComposerFrame(chrome, HINTS)
 
     expect(chrome.className).toBe('nocx-editor-chrome')
     expect(chrome.contains(marker)).toBe(true)
@@ -37,14 +39,14 @@ describe('createComposerFrame', () => {
   })
 
   it('the field holds exactly the editor and submit slots, in that order — the target switch is inserted ahead of them by a caller, not built here', () => {
-    const frame = createComposerFrame(document.createElement('div'))
+    const frame = createComposerFrame(document.createElement('div'), HINTS)
     expect([...frame.field.children]).toEqual([frame.editor, frame.submit])
     expect(frame.editor.classList.contains('ui-composer-frame__editor')).toBe(true)
     expect(frame.submit.classList.contains('ui-composer-frame__submit')).toBe(true)
   })
 
   it('starts unfocused, and setFocused projects a typed attribute on the field — never a class', () => {
-    const frame = createComposerFrame(document.createElement('div'))
+    const frame = createComposerFrame(document.createElement('div'), HINTS)
     expect(frame.field.dataset.focused).toBe('false')
     frame.setFocused(true)
     expect(frame.field.dataset.focused).toBe('true')
@@ -55,7 +57,7 @@ describe('createComposerFrame', () => {
 
   it('dispose removes the card from its parent, taking the caller’s chrome with it', () => {
     const chrome = document.createElement('div')
-    const frame = createComposerFrame(chrome)
+    const frame = createComposerFrame(chrome, HINTS)
     const parent = document.createElement('div')
     parent.appendChild(frame.root)
     expect(parent.contains(frame.root)).toBe(true)

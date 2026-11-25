@@ -2556,6 +2556,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agentAsk.undo': 'Undo',
   'agentAsk.managePermissions': 'Manage permissions',
   'editor.runCommand.aria': 'Run command',
+  'editor.sendQuestion.aria': 'Send question',
+  'editor.hint.run': 'run',
+  'editor.hint.ask': 'ask',
+  'editor.hint.newline': 'newline',
+  'editor.switch.shell': 'Run',
+  'editor.switch.agent': 'Ask',
   'markAffordance.forQuestion.aria': '{label} for the question',
   // ── Desktop endpoint failure (endpoint-desktop.ts) ─────────────────────
   'endpoint.noServer.message': 'The desktop backend could not be reached.',

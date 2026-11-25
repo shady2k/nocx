@@ -5,7 +5,7 @@ import { EditorView } from '@codemirror/view'
 import {
   grantBlockFromElement,
   grantBlockFromSelection,
-  TARGET_MENU_ITEMS,
+  targetMenuItems,
   TargetIndicator,
 } from './ask-entry'
 import { createAnswerBody } from './scrollback/answer-body'
@@ -261,11 +261,11 @@ describe('marks inside the frozen screen (nocx-hp8p2.7)', () => {
 
 describe('the target menu (spec 2026-09-15 §6)', () => {
   it('lists one row per entry this module already knows, by its presentation word', () => {
-    // TARGET_PRESENTATION is the indicator's own vocabulary — the module
+    // targetPresentation is the indicator's own vocabulary — the module
     // has no live handle on InputTargetRegistry, only the toggle it is
     // handed — so this is "the registry the gutter already knows" the spec
     // names, table-driven and exported so it is a plain unit under test.
-    expect(TARGET_MENU_ITEMS).toEqual([
+    expect(targetMenuItems()).toEqual([
       { targetId: 'shell', word: 'Run' },
       { targetId: 'agent', word: 'Ask' },
     ])

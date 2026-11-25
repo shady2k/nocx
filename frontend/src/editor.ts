@@ -47,7 +47,8 @@ import {
   type PromptContextFacts,
 } from './ui/prompt-context'
 import { SETTLE_EASING, SETTLE_MS, motionAllowed } from './motion'
-import { t } from './i18n/locale-model'
+import { locale, t } from './i18n/locale-model'
+import { createEffect, createRoot } from 'solid-js'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -210,6 +211,9 @@ export class CommandEditor {
    *  (`Run command` / `Send question`), refreshed from setTargetExtensions,
    *  the same seam the host already calls on every switch. */
   private submitButton: HTMLButtonElement
+  /** Disposes the reactive scope that repaints the composer's words when the
+   *  language changes (see the constructor). */
+  private disposeLabels: (() => void) | undefined
 
   /** The permanent grant chip in the chrome row. */
   private grantChip: HTMLButtonElement
@@ -475,7 +479,10 @@ export class CommandEditor {
     // already-built chrome row is placed inside the card, above the field
     // (composer-frame.ts's file header says why it is a parameter here
     // rather than something the frame builds itself).
-    this.frame = createComposerFrame(this.chrome)
+    this.frame = createComposerFrame(this.chrome, {
+      submit: t('editor.hint.run', 'run'),
+      newline: t('editor.hint.newline', 'newline'),
+    })
     this.root.appendChild(this.frame.root)
 
     // Focus dims the context (spec §5.3). focusin/focusout on the root rather
@@ -627,7 +634,14 @@ export class CommandEditor {
     // non-default active target (or a future caller that defers the first
     // setTargetExtensions) would otherwise show "Run command" while Enter
     // actually asks a question, until the next switch repainted it.
-    this.updateSubmitLabel()
+    this.disposeLabels = createRoot((dispose) => {
+      createEffect(() => {
+        locale()
+        this.updateSubmitLabel()
+        this.frame.setNewlineHint(t('editor.hint.newline', 'newline'))
+      })
+      return dispose
+    })
 
     // Key handling: capture on the card, so our decisions run before CM6's
     // own contentDOM handlers no matter what keymap the caller installs
@@ -655,15 +669,15 @@ export class CommandEditor {
    *  so no second "which target is active" channel is introduced. */
   private updateSubmitLabel(): void {
     const toShell = this.actions.handoffToShell?.() ?? true
-    const label = toShell ? 'Run command' : 'Send question'
+    const label = toShell ? t('editor.runCommand.aria', 'Run command') : t('editor.sendQuestion.aria', 'Send question')
     this.submitButton.setAttribute('aria-label', label)
     this.submitButton.title = label
-    this.frame.setSubmitHint(toShell ? 'run' : 'ask')
+    this.frame.setSubmitHint(toShell ? t('editor.hint.run', 'run') : t('editor.hint.ask', 'ask'))
     // The ⌘/Ctrl+Enter chord flips where Enter goes (ADR-0004 §3); the hint
     // names what it does from here. The mark follows the host the person is
     // typing on: ⌘ on macOS, Ctrl elsewhere.
     const mod = currentPlatform() === 'darwin' ? '⌘' : 'Ctrl'
-    this.frame.setSwitchHint([mod, '↵'], toShell ? 'ask' : 'run')
+    this.frame.setSwitchHint([mod, '↵'], toShell ? t('editor.hint.ask', 'ask') : t('editor.hint.run', 'run'))
   }
 
   /** Install the extensions of the target Enter currently goes to. Called
@@ -1611,6 +1625,7 @@ export class CommandEditor {
     this._cancelReturnAnim()
     if (this._ghost !== null) this._removeGhost(this._ghost)
     this._onGrantChipClick = null
+    this.disposeLabels?.()
     this.root.removeEventListener('keydown', this.onKeydown, true)
     this.root.removeEventListener('focusin', this.onFocusIn)
     this.root.removeEventListener('focusout', this.onFocusOut)

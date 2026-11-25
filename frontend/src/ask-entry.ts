@@ -132,13 +132,12 @@ export function grantBlockFromSelection(
  *  running block already uses for the same author (agent = info). Unknown
  *  ids fall back to the label and the neutral tone (a future target still
  *  gets an honest chip). */
-const TARGET_PRESENTATION: Record<string, { word: string; tone: BadgeTone }> = {
-  shell: { word: 'Run', tone: 'neutral' },
-  agent: { word: 'Ask', tone: 'info' },
-}
-
 function targetPresentation(targetId: string, label: string): { word: string; tone: BadgeTone } {
-  return TARGET_PRESENTATION[targetId] ?? { word: label, tone: 'neutral' }
+  // Resolved at the call, never stored in a module table: a catalogue read at
+  // module scope answers in the language the window started in.
+  if (targetId === 'shell') return { word: t('editor.switch.shell', 'Run'), tone: 'neutral' }
+  if (targetId === 'agent') return { word: t('editor.switch.agent', 'Ask'), tone: 'info' }
+  return { word: label, tone: 'neutral' }
 }
 
 /** The menu's rows (spec 2026-09-15 §6): one per entry this module already
@@ -148,9 +147,12 @@ function targetPresentation(targetId: string, label: string): { word: string; to
  *  and this vocabulary is the one it does own. Exported so the derivation
  *  is a plain, table-driven unit under test rather than something only
  *  visible through a mounted CM6 gutter. */
-export const TARGET_MENU_ITEMS: ModeIndicatorMenuItem[] = Object.entries(TARGET_PRESENTATION).map(
-  ([targetId, presentation]) => ({ targetId, word: presentation.word }),
-)
+export function targetMenuItems(): ModeIndicatorMenuItem[] {
+  return ['shell', 'agent'].map((targetId) => ({
+    targetId,
+    word: targetPresentation(targetId, targetId).word,
+  }))
+}
 
 /**
  * The line-start indicator: the token rendering what the ACTIVE target does
@@ -254,7 +256,7 @@ export class TargetIndicator {
       }),
       tone: this.tone,
       targetId: this.targetId,
-      items: TARGET_MENU_ITEMS,
+      items: targetMenuItems(),
       variant: 'field',
       // The registry's switch is binary today (register() only ever sees
       // shell and agent), so "pick a target" and "toggle away from the

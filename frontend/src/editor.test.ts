@@ -14,6 +14,7 @@
 // visibility. The document is read back directly in exactly three places
 // where no public channel exists and the assertion is state integrity
 // (cleared after a throwing submit; untouched by a no-op Ctrl-C).
+import { setActiveLocale } from './i18n/locale-model'
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
@@ -1654,5 +1655,23 @@ describe('the box transition (nocx-1ebrs.40)', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('the composer follows the language (nocx-dej6.3.17)', () => {
+  it('repaints its hint words and submit name when the locale flips', () => {
+    setActiveLocale('en')
+    const { ed, container } = setup()
+    const hints = () => Array.from(container.querySelectorAll('.ui-composer-frame__hint-label')).map((n) => n.textContent)
+    const submit = () => container.querySelector('button[aria-label]')?.getAttribute('aria-label')
+    expect(hints()).toEqual(['run', 'ask', 'newline'])
+    expect(submit()).toBe('Run command')
+    setActiveLocale('ru')
+    expect(hints()).toEqual(['выполнить', 'спросить', 'новая строка'])
+    expect(submit()).toBe('Выполнить команду')
+    setActiveLocale('en')
+    expect(hints()).toEqual(['run', 'ask', 'newline'])
+    ed.dispose()
+    setActiveLocale('en')
   })
 })

@@ -2206,4 +2206,11 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'history.detached.causeHistoryOff': 'History is turned off',
   'history.detached.body':
     '{cause}, so there is nowhere to write what a session prints while its window is closed. Such a session pauses once its output buffer fills and continues when a window is opened on it again. Nothing it printed is lost.',
+  // ── Checkout-sweep sentences (checkouts-status.ts) ──────────────────────
+  'checkouts.unavailable.title': 'Unused worker checkouts are not being cleaned up',
+  'checkouts.unavailable.noRecord':
+    'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.',
+  'checkouts.unavailable.recordWrites':
+    'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.',
+  'checkouts.unavailable.unknown': 'The sweep cannot run, and this build does not know why.',
 }

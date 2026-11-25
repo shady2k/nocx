@@ -1,5 +1,10 @@
 import { ResolveBackend } from '../bindings/github.com/shady2k/nocx/wailsapp'
-import type { EndpointFailure, EndpointFailureKind, EndpointProvider, EndpointResult } from './endpoint'
+import type {
+  EndpointFailure,
+  EndpointFailureKind,
+  EndpointProvider,
+  EndpointResult,
+} from './endpoint'
 import { t } from './i18n/locale-model'
 
 type BackendResolution = {

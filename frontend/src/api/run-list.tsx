@@ -373,7 +373,9 @@ function Run(props: {
                   <>
                     <StatusDot
                       tone={statusTone(res().status)}
-                      accessibleName={t('api.runs.status.aria', 'HTTP status {status}', { status: res().status })}
+                      accessibleName={t('api.runs.status.aria', 'HTTP status {status}', {
+                        status: res().status,
+                      })}
                     >
                       <span>{String(res().status)}</span>
                     </StatusDot>
@@ -486,7 +488,11 @@ function RawExchange(props: {
         <Caption>{t('api.runs.wire.certificateChain', '── certificate chain ──')}</Caption>
         <For each={props.certificates}>
           {(cert, i) => (
-            <CodeBlock ariaLabel={t('api.runs.certificate', 'Certificate {count}', { count: i() + 1 })}>{certificateText(cert, i())}</CodeBlock>
+            <CodeBlock
+              ariaLabel={t('api.runs.certificate', 'Certificate {count}', { count: i() + 1 })}
+            >
+              {certificateText(cert, i())}
+            </CodeBlock>
           )}
         </For>
       </Show>

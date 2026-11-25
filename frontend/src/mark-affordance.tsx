@@ -82,7 +82,9 @@ export function createMarkAffordance(onMark: (grant: GrantBlock) => void): MarkA
       <Button
         variant="primary"
         size="sm"
-        ariaLabel={t('markAffordance.forQuestion.aria', '{label} for the question', { label: label() })}
+        ariaLabel={t('markAffordance.forQuestion.aria', '{label} for the question', {
+          label: label(),
+        })}
         onClick={() => {
           if (offered !== null) onMark(offered)
         }}

@@ -268,7 +268,10 @@ export function BackupRestoreSection(props: Props) {
           if (saved) setState('contents', saved)
         })
       }
-      showToast({ message: t('backup.restoreFailed', 'Restore failed: {message}', { message: msg }), level: 'danger' })
+      showToast({
+        message: t('backup.restoreFailed', 'Restore failed: {message}', { message: msg }),
+        level: 'danger',
+      })
     } finally {
       setState('restoring', false)
     }

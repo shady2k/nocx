@@ -405,7 +405,11 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
                         tone: toneOf(o.level),
                       }}
                       meta={metaLine(o.host, live() ? formatWhen(o.at) : 'session closed')}
-                      detail={o.body === '' && o.bodySegments.length === 0 ? undefined : segmentText(o.bodySegments, o.body)}
+                      detail={
+                        o.body === '' && o.bodySegments.length === 0
+                          ? undefined
+                          : segmentText(o.bodySegments, o.body)
+                      }
                       selected={!o.read}
                       // A ROW WITH NO LIVE SESSION OFFERS NOTHING, and that is
                       // decided rather than unfinished (nocx-4ii6g). The two

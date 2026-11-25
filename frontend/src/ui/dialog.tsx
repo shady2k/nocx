@@ -430,9 +430,7 @@ export function showConfirm(message: string, labels: ConfirmLabels): Promise<boo
     }
 
     dispose = render(
-      () => (
-        <ConfirmDialog message={message} labels={labels} onResolve={finish} />
-      ),
+      () => <ConfirmDialog message={message} labels={labels} onResolve={finish} />,
       host,
     )
   })

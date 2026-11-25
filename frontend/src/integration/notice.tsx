@@ -134,7 +134,11 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
   const copySnippet = (snippet: string) => {
     props.copy(snippet).then(
       () => showToast({ level: 'success', message: t('integration.copy.copied', 'Copied') }),
-      () => showToast({ level: 'danger', message: t('integration.copy.failed', 'Could not copy to the clipboard') }),
+      () =>
+        showToast({
+          level: 'danger',
+          message: t('integration.copy.failed', 'Could not copy to the clipboard'),
+        }),
     )
   }
 
@@ -165,7 +169,11 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
                   {t('integration.notice.dontShowShell', "Don't show again for this shell")}
                 </Button>
                 {/* And this one answers only the card in front of the user. */}
-                <IconButton ariaLabel={t('integration.notice.dismiss.aria', 'Dismiss')} size="sm" onClick={() => props.onDismiss()}>
+                <IconButton
+                  ariaLabel={t('integration.notice.dismiss.aria', 'Dismiss')}
+                  size="sm"
+                  onClick={() => props.onDismiss()}
+                >
                   <CloseIcon />
                 </IconButton>
               </Toolbar>
@@ -187,9 +195,15 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
             footer={
               <>
                 <Show when={m.fix} keyed>
-                  {(fix) => <Button onClick={() => copySnippet(fix.snippet)}>{t('integration.notice.copy', 'Copy')}</Button>}
+                  {(fix) => (
+                    <Button onClick={() => copySnippet(fix.snippet)}>
+                      {t('integration.notice.copy', 'Copy')}
+                    </Button>
+                  )}
                 </Show>
-                <Button onClick={() => setAboutOpen(true)}>{t('integration.notice.learnMore', 'Learn more')}</Button>
+                <Button onClick={() => setAboutOpen(true)}>
+                  {t('integration.notice.learnMore', 'Learn more')}
+                </Button>
                 <Button variant="primary" onClick={() => setOpen(false)}>
                   {t('integration.notice.close', 'Close')}
                 </Button>
@@ -201,7 +215,9 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
                 {(fix) => (
                   <>
                     <p>{fix.lead}</p>
-                    <CodeBlock ariaLabel={t('integration.commands.aria', 'Commands to run')}>{fix.snippet}</CodeBlock>
+                    <CodeBlock ariaLabel={t('integration.commands.aria', 'Commands to run')}>
+                      {fix.snippet}
+                    </CodeBlock>
                   </>
                 )}
               </Show>

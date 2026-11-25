@@ -434,7 +434,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ui.dialog.closeTitle': 'Close',
   'ui.confirm.ok': 'OK',
   'ui.confirm.cancel': 'Cancel',
-  'ui.toast.browserOpenFailed': 'The browser could not be opened. Try again or open the release notes in your browser.',
+  'ui.toast.browserOpenFailed':
+    'The browser could not be opened. Try again or open the release notes in your browser.',
   'ui.fileReadout.factsAria': 'What this file is',
   'ui.fileReadout.legendTitle': 'Highlighted lines below matched a static scan',
   'ui.fileReadout.legendTail':
@@ -1070,16 +1071,20 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.notifications.route.sessionEnded.toast.label': 'Session ended → In-app toast',
   'settings.notifications.route.sessionEnded.toast.description':
     "nocx's own session registry recorded that a session ended. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
-  'settings.notifications.route.transferFinished.banner.label': 'File transfer finished → OS banner',
+  'settings.notifications.route.transferFinished.banner.label':
+    'File transfer finished → OS banner',
   'settings.notifications.route.transferFinished.banner.description':
     "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
-  'settings.notifications.route.transferFinished.toast.label': 'File transfer finished → In-app toast',
+  'settings.notifications.route.transferFinished.toast.label':
+    'File transfer finished → In-app toast',
   'settings.notifications.route.transferFinished.toast.description':
     "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
-  'settings.notifications.route.programNotify.banner.label': 'Program notification request → OS banner',
+  'settings.notifications.route.programNotify.banner.label':
+    'Program notification request → OS banner',
   'settings.notifications.route.programNotify.banner.description':
     'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
-  'settings.notifications.route.programNotify.toast.label': 'Program notification request → In-app toast',
+  'settings.notifications.route.programNotify.toast.label':
+    'Program notification request → In-app toast',
   'settings.notifications.route.programNotify.toast.description':
     'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
   'settings.notifications.route.bell.banner.label': 'Terminal bell → OS banner',
@@ -1096,10 +1101,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'A coordinator is not reading its workers → In-app toast',
   'settings.notifications.route.coordinatorStalled.toast.description':
     "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
-  'settings.notifications.route.paneWorkFinished.banner.label': 'Work seems to have finished → OS banner',
+  'settings.notifications.route.paneWorkFinished.banner.label':
+    'Work seems to have finished → OS banner',
   'settings.notifications.route.paneWorkFinished.banner.description':
     "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
-  'settings.notifications.route.paneWorkFinished.toast.label': 'Work seems to have finished → In-app toast',
+  'settings.notifications.route.paneWorkFinished.toast.label':
+    'Work seems to have finished → In-app toast',
   'settings.notifications.route.paneWorkFinished.toast.description':
     "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
   'settings.notifications.centre.blockFinished.label': 'Command finished → Notification centre',
@@ -1108,10 +1115,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.notifications.centre.sessionEnded.label': 'Session ended → Notification centre',
   'settings.notifications.centre.sessionEnded.description':
     'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
-  'settings.notifications.centre.transferFinished.label': 'File transfer finished → Notification centre',
+  'settings.notifications.centre.transferFinished.label':
+    'File transfer finished → Notification centre',
   'settings.notifications.centre.transferFinished.description':
     'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
-  'settings.notifications.centre.programNotify.label': 'Program notification request → Notification centre',
+  'settings.notifications.centre.programNotify.label':
+    'Program notification request → Notification centre',
   'settings.notifications.centre.programNotify.description':
     'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
   'settings.notifications.centre.bell.label': 'Terminal bell → Notification centre',
@@ -1121,7 +1130,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'A coordinator is not reading its workers → Notification centre',
   'settings.notifications.centre.coordinatorStalled.description':
     'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
-  'settings.notifications.centre.paneWorkFinished.label': 'Work seems to have finished → Notification centre',
+  'settings.notifications.centre.paneWorkFinished.label':
+    'Work seems to have finished → Notification centre',
   'settings.notifications.centre.paneWorkFinished.description':
     'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
   'settings.notifications.debounceSeconds.label': 'Collapse repeats for',
@@ -1772,7 +1782,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ports.cannotSee.title': 'Cannot see the ports on {target}',
   'ports.cannotSee.desc':
     'You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports.',
-  'ports.noConnection.sshFirst': 'Open an SSH session to this profile first — the ports it listens on will appear here.',
+  'ports.noConnection.sshFirst':
+    'Open an SSH session to this profile first — the ports it listens on will appear here.',
   'ports.openAsConnection': 'Open as connection',
   'tabs.pinned': 'Pinned',
   'tabs.saveAsConnection': 'Save as connection',
@@ -1951,8 +1962,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'footprint.kept.head': 'modified file(s) kept:',
   'footprint.uninstall.failedHead': 'Uninstall failed:',
   'footprint.confirm.uninstall': 'Uninstall',
-  'footprint.confirm.uninstallShell': "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.",
-  'footprint.confirm.uninstallHelper': 'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.',
+  'footprint.confirm.uninstallShell':
+    "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.",
+  'footprint.confirm.uninstallHelper':
+    'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.',
   'panes.confirm.closeWorkspace': 'Close workspace',
   'footprint.title': 'Remote footprint',
   'footprint.desc':
@@ -2200,14 +2213,19 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'update.downloading.figure': '{percent}% · {done} of {total} MB',
   'update.link.releaseNotes': 'Release notes',
   'update.link.whatChanged': 'What changed',
-  'update.failure.download': 'The update could not be downloaded. Check your connection and try again.',
-  'update.failure.verify': 'The update could not be verified. Check for updates and download it again.',
+  'update.failure.download':
+    'The update could not be downloaded. Check your connection and try again.',
+  'update.failure.verify':
+    'The update could not be verified. Check for updates and download it again.',
   'update.failure.unpack': 'The update could not be unpacked. Check free space and try again.',
-  'update.failure.replace': 'The update could not replace the app. Allow writes to the app’s folder and try again.',
+  'update.failure.replace':
+    'The update could not replace the app. Allow writes to the app’s folder and try again.',
   'update.failure.notInstalled':
     'This copy of nocx cannot be updated here. Install the latest release in a folder you can write to, then try again.',
-  'update.failure.blocked': 'The update is blocked by {path}, which is not nocx’s own. Move or remove it, then try again.',
-  'update.failure.generic': 'The update could not finish. Try again, or install the latest release manually.',
+  'update.failure.blocked':
+    'The update is blocked by {path}, which is not nocx’s own. Move or remove it, then try again.',
+  'update.failure.generic':
+    'The update could not finish. Try again, or install the latest release manually.',
   'update.failure.devBuild':
     'this is a development build; self-update is not available — run a release build, or use the package manager that installed nocx',
   'update.failure.appImage':
@@ -2253,7 +2271,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.pane.noEnvironment': 'No environment',
   'api.env.field.name': 'Name',
   'api.env.field.value': 'Value',
-  'api.env.field.nameDesc': "What the picker beside Send will call it — the name in the file, not the file's name.",
+  'api.env.field.nameDesc':
+    "What the picker beside Send will call it — the name in the file, not the file's name.",
   'api.env.field.namePlaceholder': 'Production',
   'api.env.field.varPlaceholder': 'baseUrl',
   'api.env.field.valuePlaceholder': 'https://api.example.com',
@@ -2264,7 +2283,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.import.routeDirect': 'Direct',
   'api.import.curl.convert': 'Convert to a request',
   'api.import.curl.desc':
-    "Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.",
+    'Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.',
   'api.runs.tab.body': 'Body',
   'api.runs.tab.raw': 'Raw',
   'api.runs.wire.request': '── request ──',
@@ -2285,20 +2304,28 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.form.field.scope': 'Scope',
   'api.form.field.from': 'From',
   'api.form.field.status': 'Status',
-  'api.form.idle': 'Choose a request from a collection, or import a curl line, and it appears here.',
-  'api.form.filePathHint': "A path WITHIN the collection, read on send under the handle's path rules.",
-  'terminal.input.stopped': 'This connection has stopped accepting input — keystrokes are being dropped.',
-  'terminal.assistant.nativeInput': 'Native input is active — enable command editor to ask the assistant.',
-  'terminal.assistant.runningBlocked': 'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
-  'terminal.secrets.savedPartial': '{name} saved, but the history rewrite is still owed — retry to finish it.',
+  'api.form.idle':
+    'Choose a request from a collection, or import a curl line, and it appears here.',
+  'api.form.filePathHint':
+    "A path WITHIN the collection, read on send under the handle's path rules.",
+  'terminal.input.stopped':
+    'This connection has stopped accepting input — keystrokes are being dropped.',
+  'terminal.assistant.nativeInput':
+    'Native input is active — enable command editor to ask the assistant.',
+  'terminal.assistant.runningBlocked':
+    'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
+  'terminal.secrets.savedPartial':
+    '{name} saved, but the history rewrite is still owed — retry to finish it.',
   'terminal.secrets.storedName': 'Stored {name} in the vault.',
-  'terminal.secrets.dismissedSession': 'Dismissed — this key will not be offered again in this session.',
+  'terminal.secrets.dismissedSession':
+    'Dismissed — this key will not be offered again in this session.',
   'terminal.secrets.unknownNames': {
     one: 'Unknown secret: {names}. The command was not sent.',
     other: 'Unknown secrets: {names}. The command was not sent.',
   },
   'terminal.secrets.sealedRun': 'The vault is locked. Unlock it and run the command again.',
-  'terminal.connection.dismissedFor': 'Dismissed — {dest} will not be offered again as a connection.',
+  'terminal.connection.dismissedFor':
+    'Dismissed — {dest} will not be offered again as a connection.',
   'terminal.connection.savedName': 'Saved "{name}" as a connection.',
   'terminal.connection.saveError': 'Could not save connection: {error}',
   'scrollback.chrome.running': 'Running',
@@ -2317,7 +2344,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.table.addVariable': 'Add variable',
   'api.table.addParameter': 'Add parameter',
   'api.table.addHeader': 'Add header',
-  'api.table.emptyEnvVariables': 'No variables yet. A URL written in {{baseUrl}} resolves against one of these.',
+  'api.table.emptyEnvVariables':
+    'No variables yet. A URL written in {{baseUrl}} resolves against one of these.',
   'api.table.emptyFolderVariables': 'No variables declared in this folder.',
   'api.table.emptyQueryParameters': 'No query parameters.',
   'api.table.emptyRequestVariables': "No variables in this request's effective scope.",
@@ -2454,42 +2482,76 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── Shell-integration degrade sentences (integration/status.ts) ─────────
   'integration.notIntegrated.title': 'Not integrated',
   'integration.channel-lost.title': 'Integration lost',
-  'integration.channel-lost.description': 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
-  'integration.remote-command.description': 'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
-  'integration.command-too-long.description': 'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+  'integration.channel-lost.description':
+    'nocx lost its channel to this shell, so this tab is now a plain terminal.',
+  'integration.remote-command.description':
+    'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
+  'integration.command-too-long.description':
+    'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
   'integration.fish.detected': 'Detected Fish {version}.',
   'integration.fish.unavailable': 'Fish version is unavailable.',
-  'integration.handshake-timeout.description': 'Your shell did not answer nocx in time, so this tab is a plain terminal.',
-  'integration.startup-did-not-return.description': 'nocx’s shell integration never answered from inside your shell, so this tab is a plain terminal.',
-  'integration.unsupported-shell.description': 'nocx has no integration for this shell, so this tab is a plain terminal.',
-  'integration.unsupported-fish-startup.description': 'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
-  'integration.no-secure-temp.description': 'nocx could not create a private temporary file for this session, so integration was not installed.',
-  'integration.session-unavailable.description': 'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
-  'integration.pty-unavailable.description': 'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
-  'integration.exec-refused.description': 'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
-  'integration.exec-substituted.description': 'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
-  'integration.host-key-unconfirmed.description': 'The host key was not confirmed, so shell integration was not delivered.',
-  'integration.publish-unavailable.description': 'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
-  'integration.loader-termios-unavailable.description': 'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
-  'integration.bootstrap-interrupted.description': 'The connection ended while nocx was still setting this session up.',
-  'integration.bootstrap-protocol.description': 'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
-  'integration.bootstrap-timeout.description': 'The far host answered nocx once and then did not finish the setup in time.',
-  'integration.bootstrap-out-of-order.description': 'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
-  'integration.receiver-unready.description': 'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
-  'integration.stage-too-large.description': 'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
-  'integration.stage-digest-unavailable.description': 'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
-  'integration.stage-digest-mismatch.description': 'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
-  'integration.stage-fd-unavailable.description': 'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
-  'integration.stage-source-failed.description': 'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
-  'integration.secret-too-large.description': 'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
-  'integration.secret-malformed.description': 'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
-  'integration.secret-not-for-this-session.description': 'The key that reached the far host was addressed to a different session, so the far host refused it.',
-  'integration.capability-fd-unavailable.description': 'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
-  'integration.capability-unlink-failed.description': 'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
-  'integration.capability-write-failed.description': 'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
-  'integration.generation-unavailable.description': 'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
-  'integration.channel-unavailable.description': 'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
-  'integration.unknown.description': 'nocx could not set up shell integration for this session, and cannot say why.',
+  'integration.handshake-timeout.description':
+    'Your shell did not answer nocx in time, so this tab is a plain terminal.',
+  'integration.startup-did-not-return.description':
+    'nocx’s shell integration never answered from inside your shell, so this tab is a plain terminal.',
+  'integration.unsupported-shell.description':
+    'nocx has no integration for this shell, so this tab is a plain terminal.',
+  'integration.unsupported-fish-startup.description':
+    'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
+  'integration.no-secure-temp.description':
+    'nocx could not create a private temporary file for this session, so integration was not installed.',
+  'integration.session-unavailable.description':
+    'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
+  'integration.pty-unavailable.description':
+    'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
+  'integration.exec-refused.description':
+    'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
+  'integration.exec-substituted.description':
+    'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
+  'integration.host-key-unconfirmed.description':
+    'The host key was not confirmed, so shell integration was not delivered.',
+  'integration.publish-unavailable.description':
+    'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
+  'integration.loader-termios-unavailable.description':
+    'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
+  'integration.bootstrap-interrupted.description':
+    'The connection ended while nocx was still setting this session up.',
+  'integration.bootstrap-protocol.description':
+    'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
+  'integration.bootstrap-timeout.description':
+    'The far host answered nocx once and then did not finish the setup in time.',
+  'integration.bootstrap-out-of-order.description':
+    'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
+  'integration.receiver-unready.description':
+    'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
+  'integration.stage-too-large.description':
+    'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
+  'integration.stage-digest-unavailable.description':
+    'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
+  'integration.stage-digest-mismatch.description':
+    'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
+  'integration.stage-fd-unavailable.description':
+    'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
+  'integration.stage-source-failed.description':
+    'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
+  'integration.secret-too-large.description':
+    'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
+  'integration.secret-malformed.description':
+    'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
+  'integration.secret-not-for-this-session.description':
+    'The key that reached the far host was addressed to a different session, so the far host refused it.',
+  'integration.capability-fd-unavailable.description':
+    'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
+  'integration.capability-unlink-failed.description':
+    'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
+  'integration.capability-write-failed.description':
+    'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
+  'integration.generation-unavailable.description':
+    'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
+  'integration.channel-unavailable.description':
+    'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
+  'integration.unknown.description':
+    'nocx could not set up shell integration for this session, and cannot say why.',
   // ── Agent ask, editor submit and mark affordance (agent-ask.ts, editor.ts, mark-affordance.tsx) ──
   'agentAsk.undo': 'Undo',
   'agentAsk.managePermissions': 'Manage permissions',
@@ -2506,11 +2568,14 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── Undelivered stop notice (session-signal-undelivered.ts) ────────────
   'sessionSignal.attemptClosed': 'The command had ended before the stop could reach it.',
   'sessionSignal.unsupported': 'This command is running on a host nocx cannot signal from here.',
-  'sessionSignal.undelivered': 'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
+  'sessionSignal.undelivered':
+    'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
   'sessionSignal.unknown': 'nocx could not stop the command ({reason})',
   // ── Session reattach and operations empty state (ipc.ts, operations-view.tsx) ──
-  'ipc.reattach.unavailable': 'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
-  'ops.empty.description': 'Uploads and other background work appear here while they run, and stay for a while after they finish.',
+  'ipc.reattach.unavailable':
+    'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+  'ops.empty.description':
+    'Uploads and other background work appear here while they run, and stay for a while after they finish.',
   // ── Pane and connection toasts (panes.ts) ──────────────────────────────
   'panes.openTab.failed': 'Could not open a tab: {message}',
   'panes.connection.saved': 'Saved "{host}" as a connection',
@@ -2524,7 +2589,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'main.copied': 'Copied "{title}" to the clipboard.',
   'main.hostKey.untrusted': 'Could not trust the host key: {message}',
   'main.decision.failed': 'Could not record the decision: {message}',
-  'main.updateState.unreadable': 'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
+  'main.updateState.unreadable':
+    'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
   // ── Workspace colour names (layout/workspace-colours.ts) ──────────────
   'workspaceColour.grey': 'Grey',
   'workspaceColour.blue': 'Blue',
@@ -2544,14 +2610,17 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── nocx-dej6.3.16: copy the widened checker found (api, assistant, host-key, sidebar) ──
   'api.collection.new.submit': 'Create',
   'api.collection.new.fieldLabel': 'Name',
-  'api.collection.new.fieldDescription': 'A name, not a path — the folder is made where nocx keeps collections.',
+  'api.collection.new.fieldDescription':
+    'A name, not a path — the folder is made where nocx keeps collections.',
   'api.folder.new.fieldLabel': 'Name',
-  'api.folder.new.fieldDescription': 'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.',
+  'api.folder.new.fieldDescription':
+    'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.',
   'api.folder.new.submit': 'Create',
   'api.collection.fieldLabel.folder': 'Collection folder',
   'api.import.pickFile': 'Or select a file',
   'api.runs.status.aria': 'HTTP status {status}',
-  'api.commitNote.variables': 'A value bound to a variable stays in the vault: the file carries the name, never the value.',
+  'api.commitNote.variables':
+    'A value bound to a variable stays in the vault: the file carries the name, never the value.',
   'connections.group.keyPath.none': '— Not set (inherit) —',
   'keymat.pickFile': 'Choose file…',
   'nameColour.submit.create': 'Create',

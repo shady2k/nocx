@@ -847,7 +847,9 @@ abstract class TabStripBase implements TabStrip {
                   heading only places it. */}
               <IconButton
                 size="sm"
-                ariaLabel={t('tabs.closeWorkspace.named', 'Close workspace {name}', { name: item.heading })}
+                ariaLabel={t('tabs.closeWorkspace.named', 'Close workspace {name}', {
+                  name: item.heading,
+                })}
                 title={t('tabs.closeWorkspace.aria', 'Close workspace')}
                 onClick={(e: MouseEvent) => {
                   e.stopPropagation()
@@ -965,7 +967,11 @@ abstract class TabStripBase implements TabStrip {
                   offered only there would be unreachable for exactly the
                   person who has never made a workspace — nocx-isoph.7). */}
               <div class="tabstrip-actions">
-                <IconButton ariaLabel={t('tabs.newTab.aria', 'New tab')} square onClick={() => this.onNewPane?.()}>
+                <IconButton
+                  ariaLabel={t('tabs.newTab.aria', 'New tab')}
+                  square
+                  onClick={() => this.onNewPane?.()}
+                >
                   <PlusIcon />
                 </IconButton>
                 <IconButton
@@ -1166,7 +1172,10 @@ abstract class TabStripBase implements TabStrip {
               onPointerLeave={() => this.releaseTabWidths()}
               onPointerDown={() => this.freezeTabWidths()}
             >
-              <IconButton ariaLabel={t('tabs.newTab.aria', 'New tab')} onClick={() => this.onNewPane?.()}>
+              <IconButton
+                ariaLabel={t('tabs.newTab.aria', 'New tab')}
+                onClick={() => this.onNewPane?.()}
+              >
                 <PlusIcon />
               </IconButton>
               <IconButton

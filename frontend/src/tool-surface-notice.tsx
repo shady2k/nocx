@@ -32,9 +32,21 @@ export function mountToolSurfaceNotice(
       <StatusCard
         tone="danger"
         title={t('toolSurface.unavailable.title', 'Worker tools unavailable')}
-        description={t('toolSurface.unavailable.body', 'The nocx worker tool surface is unavailable: {reason}.', { reason: props.fact.reason ?? t('toolSurface.unavailable.noAnswer', 'the endpoint did not answer') })}
+        description={t(
+          'toolSurface.unavailable.body',
+          'The nocx worker tool surface is unavailable: {reason}.',
+          {
+            reason:
+              props.fact.reason ??
+              t('toolSurface.unavailable.noAnswer', 'the endpoint did not answer'),
+          },
+        )}
         action={
-          <IconButton ariaLabel={t('toolSurface.dismiss.aria', 'Dismiss')} size="sm" onClick={props.onDismiss}>
+          <IconButton
+            ariaLabel={t('toolSurface.dismiss.aria', 'Dismiss')}
+            size="sm"
+            onClick={props.onDismiss}
+          >
             <CloseIcon />
           </IconButton>
         }

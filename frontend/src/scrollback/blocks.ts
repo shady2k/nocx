@@ -587,7 +587,10 @@ export function toolCallExpansion(
   args: Record<string, unknown>,
   read: ToolResultSource,
 ): HTMLElement {
-  const note = createDisclosure({ kind: 'tool-result', summary: t('scrollback.disclosure.toolResult', 'Sent and returned') })
+  const note = createDisclosure({
+    kind: 'tool-result',
+    summary: t('scrollback.disclosure.toolResult', 'Sent and returned'),
+  })
   let sent: string
   try {
     sent = JSON.stringify(args, null, 2) ?? '{}'
@@ -1009,8 +1012,12 @@ function createHeader(
     // before Stop/the ⋮, the moment elapsed actually crosses the floor —
     // this header starts, and a block built with no ticker attached stays,
     // bare "Running".
-    right.appendChild(createSpinner({ label: t('scrollback.chrome.running', 'Running'), size: 'sm' }))
-    right.appendChild(createMeta([t('scrollback.chrome.running', 'Running')], { tone: 'accent', size: 'terminal' }))
+    right.appendChild(
+      createSpinner({ label: t('scrollback.chrome.running', 'Running'), size: 'sm' }),
+    )
+    right.appendChild(
+      createMeta([t('scrollback.chrome.running', 'Running')], { tone: 'accent', size: 'terminal' }),
+    )
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
     // thinking until the first delta lands, and the answer lifecycle removes
@@ -1357,7 +1364,10 @@ function buildOverflowMenu(
   const refuseCopy = (): void => {
     showToast({
       level: 'warning',
-      message: t('scrollback.chrome.copyRefused', 'The stored answer is not available, so nothing was copied.'),
+      message: t(
+        'scrollback.chrome.copyRefused',
+        'The stored answer is not available, so nothing was copied.',
+      ),
     })
   }
 
@@ -1875,7 +1885,10 @@ export function createRunningBlock(
       const interrupt = createIconButton({
         size: 'sm',
         ariaLabel: t('scrollback.chrome.interrupt', 'Interrupt'),
-        title: t('scrollback.chrome.interruptTitle', 'Interrupt (Ctrl+C) — focus controls: Alt+F10'),
+        title: t(
+          'scrollback.chrome.interruptTitle',
+          'Interrupt (Ctrl+C) — focus controls: Alt+F10',
+        ),
         icon: () => iconElement(PauseIcon),
         attrs: { 'data-block-control': 'interrupt', 'data-control': 'interrupt' },
         onClick: (e) => {

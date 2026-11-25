@@ -64,7 +64,10 @@ export function undeliveredNotice(
     case 'attempt-closed':
       return {
         level: 'info',
-        message: t('sessionSignal.attemptClosed', 'The command had ended before the stop could reach it.'),
+        message: t(
+          'sessionSignal.attemptClosed',
+          'The command had ended before the stop could reach it.',
+        ),
       }
     case 'unsupported':
       return {
@@ -88,7 +91,9 @@ export function undeliveredNotice(
       const unreachable: never = fact.reason
       return {
         level: 'warning',
-        message: t('sessionSignal.unknown', 'nocx could not stop the command ({reason})', { reason: String(unreachable) }),
+        message: t('sessionSignal.unknown', 'nocx could not stop the command ({reason})', {
+          reason: String(unreachable),
+        }),
       }
     }
   }

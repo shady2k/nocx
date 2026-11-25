@@ -35,7 +35,8 @@ const FAILURES: readonly { pattern: RegExp; key: string; fallback: string }[] = 
   {
     pattern: /exchange|rename|permission|not writable|read.only/i,
     key: 'update.failure.replace',
-    fallback: 'The update could not replace the app. Allow writes to the app’s folder and try again.',
+    fallback:
+      'The update could not replace the app. Allow writes to the app’s folder and try again.',
   },
   {
     pattern: /not installed|install target|app bundle/i,

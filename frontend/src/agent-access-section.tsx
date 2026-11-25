@@ -114,7 +114,15 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
             <div data-agent-access={key(answer)}>
               <RecordRow
                 title={answer.executable}
-                meta={t('agentAccess.row.meta', 'On {machine} · Every tab in the {workspace} workspace · {digest}', { machine: machineLabel(answer.machine), workspace: answer.workspace, digest: answer.digest })}
+                meta={t(
+                  'agentAccess.row.meta',
+                  'On {machine} · Every tab in the {workspace} workspace · {digest}',
+                  {
+                    machine: machineLabel(answer.machine),
+                    workspace: answer.workspace,
+                    digest: answer.digest,
+                  },
+                )}
                 status={
                   answer.answer === 'granted'
                     ? { tone: 'ok' as const, text: 'Allowed' }

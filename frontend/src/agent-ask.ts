@@ -375,7 +375,10 @@ export class AgentInputTarget implements InputTarget {
     const manage: BlockNoticeAction | null =
       this.seams.openPermissions === undefined
         ? null
-        : { label: t('agentAsk.managePermissions', 'Manage permissions'), onActivate: () => this.seams.openPermissions?.() }
+        : {
+            label: t('agentAsk.managePermissions', 'Manage permissions'),
+            onActivate: () => this.seams.openPermissions?.(),
+          }
     const withManage = (...before: BlockNoticeAction[]): BlockNoticeAction[] =>
       manage === null ? before : [...before, manage]
 
@@ -420,7 +423,10 @@ export class AgentInputTarget implements InputTarget {
       // No id, no Undo: a session overlay and a matrix row are not
       // addressable by one, and an action that cannot name what it would
       // undo is a button that advertises what it cannot deliver.
-      actions: saved.ruleId === '' ? withManage() : withManage({ label: t('agentAsk.undo', 'Undo'), onActivate: undo }),
+      actions:
+        saved.ruleId === ''
+          ? withManage()
+          : withManage({ label: t('agentAsk.undo', 'Undo'), onActivate: undo }),
     })
   }
 

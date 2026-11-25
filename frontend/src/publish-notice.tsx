@@ -154,7 +154,11 @@ export function mountPublishNotice(
         title={publishNoticeTitle()}
         description={publishFailureSentence(current())}
         action={
-          <IconButton ariaLabel={t('publish.dismiss.aria', 'Dismiss')} size="sm" onClick={onDismiss}>
+          <IconButton
+            ariaLabel={t('publish.dismiss.aria', 'Dismiss')}
+            size="sm"
+            onClick={onDismiss}
+          >
             <CloseIcon />
           </IconButton>
         }

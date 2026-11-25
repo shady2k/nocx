@@ -90,8 +90,15 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstall = async (d: FootprintDestination): Promise<void> => {
     if (!props.client || !d.removableProfileId) return
     const ok = await showConfirm(
-      t('footprint.confirm.uninstallShell', "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.", { identity: d.identity }),
-      confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
+      t(
+        'footprint.confirm.uninstallShell',
+        "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.",
+        { identity: d.identity },
+      ),
+      confirmLabels(
+        t('footprint.confirm.uninstall', 'Uninstall'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
     )
     if (!ok) return
     setBusy(d.identity)
@@ -122,8 +129,15 @@ export function FootprintSection(props: FootprintSectionProps) {
   const uninstallHelper = async (h: HelperInstall): Promise<void> => {
     if (!props.client || !h.removableProfileId) return
     const ok = await showConfirm(
-      t('footprint.confirm.uninstallHelper', 'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.', { identity: h.identity, path: h.path }),
-      confirmLabels(t('footprint.confirm.uninstall', 'Uninstall'), t('ui.confirm.cancel', 'Cancel')),
+      t(
+        'footprint.confirm.uninstallHelper',
+        'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.',
+        { identity: h.identity, path: h.path },
+      ),
+      confirmLabels(
+        t('footprint.confirm.uninstall', 'Uninstall'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
     )
     if (!ok) return
     setBusy(h.identity)
@@ -194,7 +208,16 @@ export function FootprintSection(props: FootprintSectionProps) {
                 <RecordRow
                   title={d.identity}
                   kind={{ label: d.generation, tone: 'info' }}
-                  meta={t('footprint.row.meta.agent', '{path} · protocol {protocol} · scripts {scripts} · last seen {seen}', { path: d.path, protocol: d.protocolVersion, scripts: d.scriptVersion, seen: formatLastSeen(d.lastObservedAt) })}
+                  meta={t(
+                    'footprint.row.meta.agent',
+                    '{path} · protocol {protocol} · scripts {scripts} · last seen {seen}',
+                    {
+                      path: d.path,
+                      protocol: d.protocolVersion,
+                      scripts: d.scriptVersion,
+                      seen: formatLastSeen(d.lastObservedAt),
+                    },
+                  )}
                   actions={
                     d.removableProfileId !== null ? (
                       <Button
@@ -226,7 +249,15 @@ export function FootprintSection(props: FootprintSectionProps) {
                 <RecordRow
                   title={h.identity}
                   kind={{ label: t('footprint.helper.word', 'helper'), tone: 'info' }}
-                  meta={t('footprint.row.meta.helper', '{path} · hash {hash}… · installed {installed}', { path: h.path, hash: h.hash.slice(0, 12), installed: formatLastSeen(h.installedAt) })}
+                  meta={t(
+                    'footprint.row.meta.helper',
+                    '{path} · hash {hash}… · installed {installed}',
+                    {
+                      path: h.path,
+                      hash: h.hash.slice(0, 12),
+                      installed: formatLastSeen(h.installedAt),
+                    },
+                  )}
                   actions={
                     h.removableProfileId !== null ? (
                       <Button

@@ -83,20 +83,22 @@ import type { ApiScopeVariable } from './api-store'
  *  is a picker that silently changes it. */
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
-const BODY_KINDS: Array<{ value: ApiRequest['body']['kind']; labelKey: string; fallback: string }> = [
-  { value: 'none', labelKey: 'api.form.body.none', fallback: 'None' },
-  { value: 'json', labelKey: 'api.form.body.json', fallback: 'JSON' },
-  { value: 'raw', labelKey: 'api.form.body.raw', fallback: 'Raw' },
-  { value: 'form', labelKey: 'api.form.body.form', fallback: 'Form' },
-  { value: 'file', labelKey: 'api.form.body.file', fallback: 'From a file in the collection' },
-]
+const BODY_KINDS: Array<{ value: ApiRequest['body']['kind']; labelKey: string; fallback: string }> =
+  [
+    { value: 'none', labelKey: 'api.form.body.none', fallback: 'None' },
+    { value: 'json', labelKey: 'api.form.body.json', fallback: 'JSON' },
+    { value: 'raw', labelKey: 'api.form.body.raw', fallback: 'Raw' },
+    { value: 'form', labelKey: 'api.form.body.form', fallback: 'Form' },
+    { value: 'file', labelKey: 'api.form.body.file', fallback: 'From a file in the collection' },
+  ]
 
-const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; labelKey: string; fallback: string }> = [
-  { value: 'none', labelKey: 'api.form.auth.none', fallback: 'None' },
-  { value: 'bearer', labelKey: 'api.form.auth.bearer', fallback: 'Bearer' },
-  { value: 'basic', labelKey: 'api.form.auth.basic', fallback: 'Basic' },
-  { value: 'apikey', labelKey: 'api.form.auth.apikey', fallback: 'API key' },
-]
+const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; labelKey: string; fallback: string }> =
+  [
+    { value: 'none', labelKey: 'api.form.auth.none', fallback: 'None' },
+    { value: 'bearer', labelKey: 'api.form.auth.bearer', fallback: 'Bearer' },
+    { value: 'basic', labelKey: 'api.form.auth.basic', fallback: 'Basic' },
+    { value: 'apikey', labelKey: 'api.form.auth.apikey', fallback: 'API key' },
+  ]
 
 /** The picker options for a kind table, labelled at render so the
  *  translation is read when the picker draws, not when the module loads. */
@@ -531,7 +533,12 @@ export function RequestEditor(props: RequestEditorProps) {
       <Show
         when={request()}
         fallback={
-          <p class="api-request__idle">{t('api.form.idle', 'Choose a request from a collection, or import a curl line, and it appears here.')}</p>
+          <p class="api-request__idle">
+            {t(
+              'api.form.idle',
+              'Choose a request from a collection, or import a curl line, and it appears here.',
+            )}
+          </p>
         }
       >
         {(req) => (
@@ -716,7 +723,10 @@ export function RequestEditor(props: RequestEditorProps) {
                         rows={scopeRows().filter(
                           (variable) => variable.scope !== 'request' && variable.refused === '',
                         )}
-                        emptyLabel={t('api.table.emptyRequestVariables', "No variables in this request's effective scope.")}
+                        emptyLabel={t(
+                          'api.table.emptyRequestVariables',
+                          "No variables in this request's effective scope.",
+                        )}
                         renderRow={(row) => (
                           <>
                             <td>{row().scope}</td>
@@ -786,7 +796,10 @@ export function RequestEditor(props: RequestEditorProps) {
                       <TextField
                         id="api-body-file"
                         label={t('api.form.fileInCollection', 'File in the collection')}
-                        description={t('api.form.filePathHint', "A path WITHIN the collection, read on send under the handle's path rules.")}
+                        description={t(
+                          'api.form.filePathHint',
+                          "A path WITHIN the collection, read on send under the handle's path rules.",
+                        )}
                         value={req().body.fileRef}
                         onInput={(v) => patch({ body: { ...req().body, fileRef: v } })}
                       />

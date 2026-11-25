@@ -597,7 +597,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
         label={t('api.import.curl.lineLabel', 'curl command line')}
         description={t(
           'api.import.curl.desc',
-          "Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.",
+          'Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.',
         )}
         multiline
         value={props.value}

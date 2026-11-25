@@ -281,7 +281,6 @@ interface MessageText {
   readonly fallback: string
 }
 
-
 interface MessageTemplate extends Omit<IntegrationMessage, 'fix' | 'title' | 'description'> {
   readonly title: MessageText
   readonly description: MessageText

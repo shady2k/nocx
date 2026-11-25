@@ -80,8 +80,7 @@ export type InputPresentation = 'editor' | 'terminal'
  *  authorisation and technical eligibility are resolved — never disabled
  *  and never rejected at click time. */
 export type RecoveryAction =
-  | { kind: 'enable-editor'; labelKey: string }
-  | { kind: 'restore-editor'; labelKey: string }
+  { kind: 'enable-editor'; labelKey: string } | { kind: 'restore-editor'; labelKey: string }
 
 /** The facts the action set is derived from. Authorisation and technical
  *  eligibility are separate gates, resolved BEFORE the action set is

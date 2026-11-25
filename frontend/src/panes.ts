@@ -1825,7 +1825,10 @@ export class PaneManager {
         this.panelsAwaitingRow.delete(opened.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a new tab', { error: message })
-        showToast({ level: 'danger', message: t('panes.openTab.failed', 'Could not open a tab: {message}', { message }) })
+        showToast({
+          level: 'danger',
+          message: t('panes.openTab.failed', 'Could not open a tab: {message}', { message }),
+        })
         const orphan = this.panes.find((p) => p.wireId === opened.paneId)
         if (orphan) this.dropChrome(orphan)
         return false
@@ -2120,12 +2123,18 @@ export class PaneManager {
         // is still empty here.
         tab.setAdoptState(false, () => {})
         log.info('nocx: alias adopted', { host, profileId: saved.id })
-        showToast({ level: 'success', message: t('panes.connection.saved', 'Saved "{host}" as a connection', { host }) })
+        showToast({
+          level: 'success',
+          message: t('panes.connection.saved', 'Saved "{host}" as a connection', { host }),
+        })
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: alias adoption failed', { host, error: message })
-        showToast({ level: 'danger', message: t('panes.save.failed', 'Could not save: {message}', { message }) })
+        showToast({
+          level: 'danger',
+          message: t('panes.save.failed', 'Could not save: {message}', { message }),
+        })
       })
   }
 
@@ -2145,12 +2154,21 @@ export class PaneManager {
       .then((saved) => {
         log.info('nocx: opened host as a connection', { host, profileId: saved.id })
         this.newSSHPane(saved.id, host, user)
-        showToast({ level: 'success', message: t('panes.connection.opened', 'Opened "{host}" as a connection', { host }) })
+        showToast({
+          level: 'success',
+          message: t('panes.connection.opened', 'Opened "{host}" as a connection', { host }),
+        })
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: open-as-connection failed', { host, error: message })
-        showToast({ level: 'danger', message: t('panes.connect.failed', 'Could not connect to {host}: {message}', { host, message }) })
+        showToast({
+          level: 'danger',
+          message: t('panes.connect.failed', 'Could not connect to {host}: {message}', {
+            host,
+            message,
+          }),
+        })
       })
   }
 
@@ -2700,7 +2718,12 @@ export class PaneManager {
         this.panelsAwaitingRow.delete(made.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a workspace', { error: message })
-        showToast({ level: 'danger', message: t('panes.createWorkspace.failed', 'Could not create the workspace: {message}', { message }) })
+        showToast({
+          level: 'danger',
+          message: t('panes.createWorkspace.failed', 'Could not create the workspace: {message}', {
+            message,
+          }),
+        })
         this.viewedWorkspaceId = null
         if (paneRef.current) this.dropChrome(paneRef.current)
         return false
@@ -2792,7 +2815,10 @@ export class PaneManager {
         name,
         open.map((pane) => this.liveWorkOf(pane)),
       ),
-      confirmLabels(t('panes.confirm.closeWorkspace', 'Close workspace'), t('ui.confirm.cancel', 'Cancel')),
+      confirmLabels(
+        t('panes.confirm.closeWorkspace', 'Close workspace'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
     )
     if (!proceed) return false
     for (const pane of open) {

@@ -1428,7 +1428,10 @@ export function ApiPane(props: ApiPaneProps) {
         // A folder's line says whether going in is worth it. "Empty" rather
         // than "0 items", because that is the word the tree uses for the
         // same state one column to the left.
-        meta: count === 0 ? t('api.folder.meta.empty', 'Empty') : tPlural('api.folder.meta.items', count, '{count} items'),
+        meta:
+          count === 0
+            ? t('api.folder.meta.empty', 'Empty')
+            : tPlural('api.folder.meta.items', count, '{count} items'),
         folder: true,
       }
     })
@@ -3178,7 +3181,10 @@ export function ApiPane(props: ApiPaneProps) {
           fieldId="api-new-collection-name"
           fieldLabel={t('api.collection.new.fieldLabel', 'Name')}
           fieldDescription={commitNote(
-            t('api.collection.new.fieldDescription', 'A name, not a path — the folder is made where nocx keeps collections.'),
+            t(
+              'api.collection.new.fieldDescription',
+              'A name, not a path — the folder is made where nocx keeps collections.',
+            ),
           )}
           placeholder={t('api.pane.placeholder.collection', 'orders-api')}
           value={name()}
@@ -3217,7 +3223,10 @@ export function ApiPane(props: ApiPaneProps) {
           submitLabel={t('api.dialog.createFolder', 'Create folder')}
           fieldId="api-new-folder-name"
           fieldLabel={t('api.folder.new.fieldLabel', 'Name')}
-          fieldDescription={t('api.folder.new.fieldDescription', 'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.')}
+          fieldDescription={t(
+            'api.folder.new.fieldDescription',
+            'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.',
+          )}
           placeholder={t('api.pane.placeholder.folder', 'reports')}
           value={folderName()}
           onInput={setFolderName}

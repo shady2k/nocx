@@ -118,7 +118,13 @@ const NameColourDialog: Component<{
       }
     >
       <Stack>
-        <TextField label={t('nameColour.name', 'Name')} value={name()} onInput={setName} autoFocus selectOnFocus />
+        <TextField
+          label={t('nameColour.name', 'Name')}
+          value={name()}
+          onInput={setName}
+          autoFocus
+          selectOnFocus
+        />
         <SwatchPicker
           options={swatches()}
           value={colour()}

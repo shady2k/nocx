@@ -139,7 +139,9 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
           checked={chosen() === ''}
           onChange={setChosen}
           label={t('api.move.rootOf', 'Root of {collection}', { collection: props.collectionName })}
-          ariaLabel={t('api.move.rootOf', 'Root of {collection}', { collection: props.collectionName })}
+          ariaLabel={t('api.move.rootOf', 'Root of {collection}', {
+            collection: props.collectionName,
+          })}
         />
         <For each={props.folders}>
           {(folder) => (

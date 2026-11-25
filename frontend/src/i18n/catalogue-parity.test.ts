@@ -156,7 +156,10 @@ describe('catalogue parity with the Go-minted dynamic families', () => {
   it('t() resolves the routing label and section under ru', () => {
     setActiveLocale('ru')
     expect(
-      t('settings.notifications.route.blockFinished.toast.label', 'Command finished → In-app toast'),
+      t(
+        'settings.notifications.route.blockFinished.toast.label',
+        'Command finished → In-app toast',
+      ),
     ).toBe('Команда завершена → Тост в приложении')
     expect(t('settings.section.history', 'History')).toBe('История')
     expect(t('settings.history.retentionDays.zeroLabel', 'Never switched off automatically')).toBe(

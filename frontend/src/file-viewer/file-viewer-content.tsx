@@ -373,7 +373,10 @@ export class FileViewerContent extends BasePaneContent {
             disabled: this.dead,
             label: t('fileViewer.reload.label', 'Reload'),
             reason: this.dead
-              ? t('fileViewer.unavailable.gone', 'The terminal or connection that provided this file is gone')
+              ? t(
+                  'fileViewer.unavailable.gone',
+                  'The terminal or connection that provided this file is gone',
+                )
               : t('fileViewer.unavailable.back', 'The source is back — re-read the file'),
           },
         }

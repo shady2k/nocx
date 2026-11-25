@@ -168,7 +168,8 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
               </p>
               <Show when={evidence.changed}>
                 <p>
-                  {t('hostKey.fingerprint.offered', 'Offered fingerprint')}: <code>{evidence.fingerprint}</code>
+                  {t('hostKey.fingerprint.offered', 'Offered fingerprint')}:{' '}
+                  <code>{evidence.fingerprint}</code>
                 </p>
               </Show>
             </>
@@ -320,7 +321,9 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
             { name: t('hostKey.fact.agent', 'Agent'), value: props.executable },
             {
               name: t('hostKey.fact.machine', 'Machine'),
-              value: props.machine ? machineLabel(props.machine) : t('hostKey.fact.noMachine', 'a machine nocx could not name'),
+              value: props.machine
+                ? machineLabel(props.machine)
+                : t('hostKey.fact.noMachine', 'a machine nocx could not name'),
               // THREE cases and not two: an ask with no machine is not an ask
               // about this machine. A note that fell through to the local
               // wording would describe a place the wire never named, which is

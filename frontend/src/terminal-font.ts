@@ -85,7 +85,10 @@ export async function applyTerminalFont(
     log.warn('Nordwand Mono could not be loaded', { error: String(error) })
     showToast({
       level: 'danger',
-      message: t('terminal.font.loadFailed', 'Nordwand Mono could not be loaded. The current font is unchanged.'),
+      message: t(
+        'terminal.font.loadFailed',
+        'Nordwand Mono could not be loaded. The current font is unchanged.',
+      ),
     })
   }
 }

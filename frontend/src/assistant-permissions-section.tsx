@@ -1122,7 +1122,9 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     if (answer.kind !== 'row') return undefined
     const scopes = matrix()?.[answer.effect].scopes ?? []
     if (scopes.length === 0) return undefined
-    return t('assistant.placesOnly', 'Only in {places}.', { places: scopes.map(placeName).join(', ') })
+    return t('assistant.placesOnly', 'Only in {places}.', {
+      places: scopes.map(placeName).join(', '),
+    })
   }
 
   // The panels ---------------------------------------------------------
@@ -1138,7 +1140,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       { name: t('assistant.fact.covers', 'It covers'), value: coverage(subjectOf(answer)) },
     ]
     if (answer.kind === 'rule') {
-      facts.push({ name: t('assistant.fact.provenance', 'Where it came from'), value: provenance(answer.rule) })
+      facts.push({
+        name: t('assistant.fact.provenance', 'Where it came from'),
+        value: provenance(answer.rule),
+      })
       if (answer.rule.grantedUnder) {
         facts.push({
           name: t('assistant.fact.givenWhile', 'Given while the command was doing'),
@@ -1260,7 +1265,12 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               <Show when={explained().resource} keyed>
                 {(resource) => (
                   <FactList
-                    facts={[{ name: t('assistant.fact.placeTouched', 'The place it touched'), value: placeName(resource) }]}
+                    facts={[
+                      {
+                        name: t('assistant.fact.placeTouched', 'The place it touched'),
+                        value: placeName(resource),
+                      },
+                    ]}
                     ariaLabel={t('perms.callPlace.aria', 'The place this call touched')}
                   />
                 )}

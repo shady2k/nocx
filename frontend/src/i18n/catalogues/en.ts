@@ -2190,4 +2190,20 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'Approving covers this call: it has not run, and no call after it in this response will. It does not promise the terminal is untouched — a permitted call earlier in this batch may already have run.',
   'approval.standing.lead':
     'An answer in this session lasts until this terminal session ends; restarting the shell starts a new one and the question comes back. An answer of always is a standing answer for {rule}, in every session, from now on, which you can change on the Assistant permissions page.',
+  // ── History-status sentences (history-status.ts) ────────────────────────
+  'history.unavailable.title': 'Commands are not being kept',
+  'history.unavailable.noKey':
+    'The key that encrypts the history database could not be read, so nothing is being stored.',
+  'history.unavailable.invalidBudget':
+    'The size limits below could not be applied, so the store was not opened and nothing is being stored.',
+  'history.unavailable.openFailed':
+    'The history database could not be opened, so nothing is being stored.',
+  'history.unavailable.writeFailed':
+    'The history database is refusing writes, so commands are running but not being kept.',
+  'history.unavailable.unknown': 'Nothing is being stored.',
+  'history.detached.title': 'Sessions keep running only while a window is open',
+  'history.detached.causeOutputOff': 'Command output is not being kept',
+  'history.detached.causeHistoryOff': 'History is turned off',
+  'history.detached.body':
+    '{cause}, so there is nowhere to write what a session prints while its window is closed. Such a session pauses once its output buffer fills and continues when a window is opened on it again. Nothing it printed is lost.',
 }

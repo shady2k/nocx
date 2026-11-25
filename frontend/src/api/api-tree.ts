@@ -27,6 +27,7 @@
 // soft degrade that lives only in a log is a feature that does not exist.
 
 import type { ApiCollection, ApiOpenCollection, ApiRequestRef } from './api-model'
+import { t } from '../i18n/locale-model'
 
 type ApiTreeRowKind = 'collection' | 'dir' | 'request' | 'malformed' | 'empty'
 
@@ -288,7 +289,7 @@ export function flattenCollections(
         key: `${open.handle}:${dir}/\u0000empty`,
         kind: 'empty',
         depth,
-        name: 'Empty',
+        name: t('api.tree.emptyRow', 'Empty'),
         handle: open.handle,
         relPath: dir,
         method: '',

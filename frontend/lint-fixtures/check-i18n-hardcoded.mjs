@@ -61,10 +61,20 @@ const FRONTEND_DIR = resolve(__dirname, '..')
 const BASELINE_PATH = resolve(__dirname, 'i18n-hardcoded-baseline.json')
 const ALLOWED_PATH = resolve(__dirname, 'i18n-hardcoded-allowed.json')
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', 'generated', 'i18n'])
+// `api-test-fixtures.ts` is the API workbench tests' shared fixture file: vitest
+// only, imported by no non-test module.
+const TEST_FIXTURE_FILES = new Set(['api-test-fixtures.ts'])
+// `test-support` is test scaffolding: its fixture descriptions (terminal
+// corpus names) are developer text no person reads, and nothing in the app
+// imports it.
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', 'generated', 'i18n', 'test-support'])
 
 /** Text-bearing prop/property names. `label` also carries option lists
- * ({ value, label }), which is intended: an option label is UI copy. */
+ * ({ value, label }), which is intended: an option label is UI copy.
+ * Widened at nocx-dej6.3.16 with the props measured to carry copy this set
+ * could not see. `name` is here, but a value that is a single lowercase token or
+ * an `…Error` class is an identifier (glyph names, fixture values, error
+ * classes) and is skipped: see isIdentifierLike. */
 const TEXT_PROPS = new Set([
   'title',
   'aria-label',
@@ -74,6 +84,21 @@ const TEXT_PROPS = new Set([
   'description',
   'hint',
   'message',
+  'submitLabel',
+  'addLabel',
+  'emptyLabel',
+  'summary',
+  'pickLabel',
+  'accessibleName',
+  'searchPlaceholder',
+  'searchLabel',
+  'fieldLabel',
+  'fieldDescription',
+  'name',
+  'buttonLabel',
+  'pathPlaceholder',
+  'pollingLabel',
+  'copyText',
 ])
 
 /** The left side of an assignment that puts TEXT on an element. `dataset.*`
@@ -146,6 +171,13 @@ function literalText(node) {
 
 /** JSX text worth reporting: something beyond whitespace. Pure punctuation
  * runs (—, …, ·) and JSX entities are layout, not copy. */
+/** A `name` value that is an identifier, not copy: one lowercase token (a glyph
+ * or state name, a fixture value) or an `…Error` class. A two-word `name` such as
+ * 'a terminal session' is still copy. */
+function isIdentifierLike(text) {
+  return /^[a-z][\w.-]*$/.test(text.trim()) || /Error$/.test(text.trim())
+}
+
 function reportableJsxText(value) {
   const text = value.replace(/&[a-z]+;|&#\d+;/g, '')
   return /\S/.test(text) && /[0-9A-Za-zА-Яа-яЁё]/u.test(text)
@@ -300,6 +332,7 @@ export function scanSource(file, source) {
       // separator, a bullet or a glyph is layout, and a value that is one
       // (`'×'`, `'…'`, `':'`) is not a sentence anybody translates.
       if (text === null || !reportableJsxText(text)) continue
+      if (context.endsWith(':name') && isIdentifierLike(text)) continue
       if (insideTranslateCall(literal, literal.parent ?? null)) continue
       report(literal, context, text.trim().slice(0, 60))
     }
@@ -374,6 +407,7 @@ export function scanTree(dir, base) {
         walkDir(full)
       } else if (
         (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) &&
+        !TEST_FIXTURE_FILES.has(entry.name) &&
         !entry.name.endsWith('.test.ts') &&
         !entry.name.endsWith('.test.tsx') &&
         !entry.name.endsWith('.d.ts')

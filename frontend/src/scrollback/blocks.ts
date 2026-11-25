@@ -587,7 +587,7 @@ export function toolCallExpansion(
   args: Record<string, unknown>,
   read: ToolResultSource,
 ): HTMLElement {
-  const note = createDisclosure({ kind: 'tool-result', summary: 'Sent and returned' })
+  const note = createDisclosure({ kind: 'tool-result', summary: t('scrollback.disclosure.toolResult', 'Sent and returned') })
   let sent: string
   try {
     sent = JSON.stringify(args, null, 2) ?? '{}'

@@ -181,7 +181,7 @@ export function showWorkspaceCreateDialog(
 ): Promise<NameColourDraft | null> {
   return ask({
     title: t('nameColour.newWorkspace', 'New workspace'),
-    submitLabel: 'Create',
+    submitLabel: t('nameColour.submit.create', 'Create'),
     colourLabel: 'Workspace colour',
     // A workspace's colour is its identity in the strip (§5.5): every one of
     // them has one, so there is nothing here to decline.
@@ -208,7 +208,7 @@ export function showWorkspaceEditDialog(
 ): Promise<NameColourDraft | null> {
   return ask({
     title: t('nameColour.renameWorkspace', 'Rename workspace'),
-    submitLabel: 'Save',
+    submitLabel: t('nameColour.submit.save', 'Save'),
     colourLabel: 'Workspace colour',
     allowNone: false,
     nameRequired: true,
@@ -231,7 +231,7 @@ export function showTabEditDialog(
 ): Promise<NameColourDraft | null> {
   return ask({
     title: t('nameColour.renameTab', 'Rename tab'),
-    submitLabel: 'Save',
+    submitLabel: t('nameColour.submit.save', 'Save'),
     colourLabel: 'Tab colour',
     allowNone: true,
     nameRequired: false,

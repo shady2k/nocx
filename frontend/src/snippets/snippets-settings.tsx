@@ -440,8 +440,8 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         searchValue={searchQuery()}
         actionsLabel={t('ui.collection.actions', 'Collection actions')}
         onSearch={setSearchQuery}
-        searchPlaceholder="Filter snippets"
-        searchLabel="Filter snippets"
+        searchPlaceholder={t('snippets.filter.aria', 'Filter snippets')}
+        searchLabel={t('snippets.filter.aria', 'Filter snippets')}
         actions={
           <Show when={state().kind === 'ready'}>
             <Button variant="primary" onClick={openNew}>

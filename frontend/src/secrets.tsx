@@ -589,8 +589,8 @@ export function SecretsSection(props: SecretsSectionProps) {
             searchValue={filter()}
             actionsLabel={t('ui.collection.actions', 'Collection actions')}
             onSearch={setFilter}
-            searchPlaceholder="Filter secrets"
-            searchLabel="Filter secrets"
+            searchPlaceholder={t('secrets.filter.aria', 'Filter secrets')}
+            searchLabel={t('secrets.filter.aria', 'Filter secrets')}
             actions={
               <Button variant="primary" onClick={() => openAdd()}>
                 {t('secrets.empty.add', '+ Add a secret')}

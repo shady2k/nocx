@@ -296,11 +296,11 @@ function placeName(scope: Scope): string {
     case 'destination':
       return scope.id === '*' ? 'anywhere on the network' : scope.id
     case 'session':
-      return 'a terminal session'
+      return t('assistant.scope.session', 'a terminal session')
     case 'environment':
-      return `the ${scope.id} environment`
+      return t('assistant.scope.environment', 'the {id} environment', { id: scope.id })
     case 'credential':
-      return `the ${scope.id} credential`
+      return t('assistant.scope.credential', 'the {id} credential', { id: scope.id })
   }
 }
 
@@ -1132,16 +1132,16 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   function detailFacts(answer: Answer): Fact[] {
     const facts: Fact[] = [
       {
-        name: 'Your answer',
+        name: t('assistant.answer.yours', 'Your answer'),
         value: t(`perms.answer.${decisionOf(answer)}`, ANSWER_LABEL[decisionOf(answer)]),
       },
-      { name: 'It covers', value: coverage(subjectOf(answer)) },
+      { name: t('assistant.fact.covers', 'It covers'), value: coverage(subjectOf(answer)) },
     ]
     if (answer.kind === 'rule') {
-      facts.push({ name: 'Where it came from', value: provenance(answer.rule) })
+      facts.push({ name: t('assistant.fact.provenance', 'Where it came from'), value: provenance(answer.rule) })
       if (answer.rule.grantedUnder) {
         facts.push({
-          name: 'Given while the command was doing',
+          name: t('assistant.fact.givenWhile', 'Given while the command was doing'),
           value: t(
             `perms.effect.${answer.rule.grantedUnder}`,
             EFFECT_LABEL[answer.rule.grantedUnder],
@@ -1152,7 +1152,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     } else {
       const scopes = matrix()?.[answer.effect].scopes ?? []
       facts.push({
-        name: 'Places it applies in',
+        name: t('assistant.fact.placesApplies', 'Places it applies in'),
         value: scopes.length === 0 ? 'No place named yet' : scopes.map(placeName).join(', '),
       })
     }
@@ -1260,7 +1260,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               <Show when={explained().resource} keyed>
                 {(resource) => (
                   <FactList
-                    facts={[{ name: 'The place it touched', value: placeName(resource) }]}
+                    facts={[{ name: t('assistant.fact.placeTouched', 'The place it touched'), value: placeName(resource) }]}
                     ariaLabel={t('perms.callPlace.aria', 'The place this call touched')}
                   />
                 )}
@@ -1306,11 +1306,11 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         <FactList
           facts={[
             {
-              name: 'Forgetting',
+              name: t('assistant.fact.forgetting', 'Forgetting'),
               value: `${t(`perms.answer.${decision}`, ANSWER_LABEL[decision])} — ${coverage(subject)}`,
             },
             {
-              name: 'The calls this changes',
+              name: t('assistant.fact.callsChanged', 'The calls this changes'),
               value: answer.kind === 'rule' ? subject : `everything under ${subject}`,
             },
           ]}
@@ -1354,7 +1354,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 <FactList
                   facts={[
                     {
-                      name: 'Still using this',
+                      name: t('assistant.fact.stillUsing', 'Still using this'),
                       value: `${q.count} ${q.count === 1 ? 'answer' : 'answers'} the assistant is writing right now`,
                     },
                   ]}
@@ -1493,12 +1493,12 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               ariaLabel={t('perms.allowCover.aria', 'What allowing this command would cover')}
               facts={[
                 {
-                  name: 'It would allow',
+                  name: t('assistant.fact.wouldAllow', 'It would allow'),
                   value: coverage(selectorSubject({ program: r().program })),
                   note: `Every ${r().program} command, including ones you have not run — while it does no more than ${EFFECT_LABEL[effect()]}.`,
                 },
                 {
-                  name: 'It would not allow',
+                  name: t('assistant.fact.wouldNotAllow', 'It would not allow'),
                   value: `a ${r().program} command that does anything more`,
                   note: `${otherLiveEffects(effect())} — those are still asked about, exactly as now. So is a command with a wrapper, more than one command in it, or a shell feature: none of them is within reach of a standing answer.`,
                 },
@@ -1528,7 +1528,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               ariaLabel={t('perms.wouldStop.aria', 'What this answer would stop')}
               facts={[
                 {
-                  name: 'nocx read this as',
+                  name: t('assistant.fact.readAs', 'nocx read this as'),
                   value:
                     r().effect === undefined
                       ? 'a command it could not place'

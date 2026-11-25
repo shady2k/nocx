@@ -373,7 +373,7 @@ function Run(props: {
                   <>
                     <StatusDot
                       tone={statusTone(res().status)}
-                      accessibleName={`HTTP status ${res().status}`}
+                      accessibleName={t('api.runs.status.aria', 'HTTP status {status}', { status: res().status })}
                     >
                       <span>{String(res().status)}</span>
                     </StatusDot>

@@ -668,7 +668,7 @@ function SidebarSolid(props: SidebarSolidProps) {
             ariaLabel={props.indicator?.title() ?? t('app.update.available', 'Update available')}
             onClick={() => props.indicator?.onActivate()}
           >
-            <StatusDot tone={props.indicator?.level() ?? 'neutral'} accessibleName="Update status">
+            <StatusDot tone={props.indicator?.level() ?? 'neutral'} accessibleName={t('sidebar.updateStatus.aria', 'Update status')}>
               <Dynamic component={props.indicator?.icon} />
             </StatusDot>
           </IconButton>

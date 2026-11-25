@@ -1536,7 +1536,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   }}
                   pathValue={groupKeyPathValue()}
                   onPathChange={(v) => handleGroupKeyPathChange(v || undefined)}
-                  pathPlaceholder="— Not set (inherit) —"
+                  pathPlaceholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
                   materialValue={groupKeyText()}
                   onMaterialChange={(v) => {
                     setGroupKeyText(v)

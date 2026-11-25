@@ -317,10 +317,10 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
         <FactList
           ariaLabel={t('hostKey.agent.allowed.aria', 'What is being allowed')}
           facts={[
-            { name: 'Agent', value: props.executable },
+            { name: t('hostKey.fact.agent', 'Agent'), value: props.executable },
             {
-              name: 'Machine',
-              value: props.machine ? machineLabel(props.machine) : 'a machine nocx could not name',
+              name: t('hostKey.fact.machine', 'Machine'),
+              value: props.machine ? machineLabel(props.machine) : t('hostKey.fact.noMachine', 'a machine nocx could not name'),
               // THREE cases and not two: an ask with no machine is not an ask
               // about this machine. A note that fell through to the local
               // wording would describe a place the wire never named, which is
@@ -332,17 +332,17 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
                   : 'The agent runs on this machine. Your answer is remembered for this machine alone.',
             },
             {
-              name: 'Fingerprint',
+              name: t('hostKey.fact.fingerprint', 'Fingerprint'),
               value: props.digest,
               note: 'The answer is remembered against these bytes, so a replaced program is asked about again.',
             },
             {
-              name: 'Applies to',
+              name: t('hostKey.fact.appliesTo', 'Applies to'),
               value: `Every tab in the ${props.workspace} workspace`,
               note: 'Not only this tab: the same agent started anywhere in this workspace is allowed without asking again.',
             },
             {
-              name: 'Lasts',
+              name: t('hostKey.fact.lasts', 'Lasts'),
               value: 'Until you undo it in Settings → Agent access',
               note: 'The answer survives a restart. Undoing it there means the next start of this agent asks again.',
             },

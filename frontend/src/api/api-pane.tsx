@@ -970,7 +970,7 @@ export function ApiPane(props: ApiPaneProps) {
   const commitNote = (lead: string): string => {
     const header = pastedCredential()
     if (header === '') {
-      return `${lead} A value bound to a variable stays in the vault: the file carries the name, never the value.`
+      return `${lead} ${t('api.commitNote.variables', 'A value bound to a variable stays in the vault: the file carries the name, never the value.')}`
     }
     return (
       `${lead} A value bound to a variable stays in the vault — but the request you have open ` +
@@ -3174,11 +3174,11 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={naming()}
           title={t('api.collection.new.title', 'New collection')}
-          submitLabel="Create"
+          submitLabel={t('api.collection.new.submit', 'Create')}
           fieldId="api-new-collection-name"
-          fieldLabel="Name"
+          fieldLabel={t('api.collection.new.fieldLabel', 'Name')}
           fieldDescription={commitNote(
-            'A name, not a path — the folder is made where nocx keeps collections.',
+            t('api.collection.new.fieldDescription', 'A name, not a path — the folder is made where nocx keeps collections.'),
           )}
           placeholder={t('api.pane.placeholder.collection', 'orders-api')}
           value={name()}
@@ -3193,7 +3193,7 @@ export function ApiPane(props: ApiPaneProps) {
           title={t('api.collection.open.title', 'Open a collection folder')}
           submitLabel={t('api.dialog.open', 'Open')}
           fieldId="api-collection-path"
-          fieldLabel="Collection folder"
+          fieldLabel={t('api.collection.fieldLabel.folder', 'Collection folder')}
           fieldDescription={commitNote('The folder you place.')}
           placeholder={t('api.pane.placeholder.folderPath', '/work/acme-api')}
           value={folderPath()}
@@ -3216,8 +3216,8 @@ export function ApiPane(props: ApiPaneProps) {
           title={folderAskTitle()}
           submitLabel={t('api.dialog.createFolder', 'Create folder')}
           fieldId="api-new-folder-name"
-          fieldLabel="Name"
-          fieldDescription="One folder, one name — not a path. A folder inside this one is made by asking again from its own row."
+          fieldLabel={t('api.folder.new.fieldLabel', 'Name')}
+          fieldDescription={t('api.folder.new.fieldDescription', 'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.')}
           placeholder={t('api.pane.placeholder.folder', 'reports')}
           value={folderName()}
           onInput={setFolderName}

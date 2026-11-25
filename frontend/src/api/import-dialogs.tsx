@@ -347,7 +347,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         target={API_IMPORT_DROP_TARGET}
         sessionId={props.dropSession}
         hint={t('api.import.dropHint', 'Drop a Postman export here to import it')}
-        pickLabel="Or select a file"
+        pickLabel={t('api.import.pickFile', 'Or select a file')}
         // What the browser picker offers. Postman exports are JSON documents
         // or ZIP archives (design §10, Postman v2.1), and this bounds the
         // PICKER only — a drop can carry anything, which the backend refuses

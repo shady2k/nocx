@@ -221,6 +221,7 @@ export function FolderView(props: FolderViewProps) {
             addLabel="Add variable"
             emptyLabel="No variables declared in this folder."
             removeLabel={(i) => `Remove variable ${i + 1}`}
+            removeTitle={t('ui.rowList.remove', 'Remove')}
             renderRow={(row, i) => (
               <>
                 <td>

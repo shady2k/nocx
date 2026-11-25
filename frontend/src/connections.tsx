@@ -3273,6 +3273,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     removeLabel={(i) =>
                       `${t('connections.forward.removeHead', 'Remove forward')} ${i + 1}`
                     }
+                    removeTitle={t('ui.rowList.remove', 'Remove')}
                     onRemove={removeForward}
                     onAdd={addForward}
                     renderRow={(row, i) => renderForwardRow(row, i)}

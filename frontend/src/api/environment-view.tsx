@@ -330,6 +330,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
               addLabel="Add variable"
               emptyLabel="No variables yet. A URL written in {{baseUrl}} resolves against one of these."
               removeLabel={(i) => `Remove variable ${i + 1}`}
+              removeTitle={t('ui.rowList.remove', 'Remove')}
               renderRow={(row, i) => (
                 <>
                   <td>

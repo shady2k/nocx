@@ -2001,4 +2001,15 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'recall.panel.aria': 'история команд',
   'recall.search.placeholder': 'поиск по истории',
   'recall.search.aria': 'поиск по истории',
+  // ── History status sentences ──
+  'history.unavailable.title': 'Команды не сохраняются',
+  'history.unavailable.noKey': 'Ключ, которым шифруется база истории, не удалось прочитать, поэтому ничего не сохраняется.',
+  'history.unavailable.invalidBudget': 'Ограничения размера ниже не удалось применить, поэтому хранилище не открыто и ничего не сохраняется.',
+  'history.unavailable.openFailed': 'База истории не открылась, поэтому ничего не сохраняется.',
+  'history.unavailable.writeFailed': 'База истории отказывается принимать записи, поэтому команды выполняются, но не сохраняются.',
+  'history.unavailable.unknown': 'Ничего не сохраняется.',
+  'history.detached.title': 'Сессии продолжают работать, только пока открыто окно',
+  'history.detached.causeOutputOff': 'Вывод команд не сохраняется',
+  'history.detached.causeHistoryOff': 'История отключена',
+  'history.detached.body': '{cause}, поэтому некуда записать то, что сессия выводит, пока её окно закрыто. Такая сессия приостанавливается, когда заполняется буфер вывода, и продолжает работу, когда окно снова открывают. Ничего из напечатанного не теряется.',
 }

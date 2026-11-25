@@ -2184,4 +2184,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.env.field.namePlaceholder': 'Production',
   'api.env.field.varPlaceholder': 'baseUrl',
   'api.env.field.valuePlaceholder': 'https://api.example.com',
+  'api.folder.field.send': 'Send',
+  'api.folder.field.varPlaceholder': 'baseUrl',
+  'api.folder.field.valuePlaceholder': 'https://api.example.com',
 }

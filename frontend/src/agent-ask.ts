@@ -21,6 +21,7 @@ import { standingAnswerReceipt } from './agent-approval-prompt'
 import { EFFECT_LABEL } from './effect-labels'
 import { PolicyClient } from './policy-client'
 import type { BlockNotice, BlockNoticeAction } from './ui/block-notice'
+import { t } from './i18n/locale-model'
 
 export interface AgentAskSeams {
   dispatcher: Dispatcher
@@ -374,7 +375,7 @@ export class AgentInputTarget implements InputTarget {
     const manage: BlockNoticeAction | null =
       this.seams.openPermissions === undefined
         ? null
-        : { label: 'Manage permissions', onActivate: () => this.seams.openPermissions?.() }
+        : { label: t('agentAsk.managePermissions', 'Manage permissions'), onActivate: () => this.seams.openPermissions?.() }
     const withManage = (...before: BlockNoticeAction[]): BlockNoticeAction[] =>
       manage === null ? before : [...before, manage]
 
@@ -404,7 +405,7 @@ export class AgentInputTarget implements InputTarget {
             // Still offered: the rule is still there, so the act is still
             // available, and a receipt that dropped its own action after a
             // failed attempt would leave the person nowhere to try again.
-            actions: withManage({ label: 'Undo', onActivate: undo }),
+            actions: withManage({ label: t('agentAsk.undo', 'Undo'), onActivate: undo }),
           })
         })
     }

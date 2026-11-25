@@ -14,6 +14,7 @@ import {
   type MenuSize,
   type ViewportSize,
 } from './ui/menu-geometry'
+import { t } from './i18n/locale-model'
 
 /** The gap between the selection's edge and the button. */
 export const SELECTION_GAP_PX = 4
@@ -81,7 +82,7 @@ export function createMarkAffordance(onMark: (grant: GrantBlock) => void): MarkA
       <Button
         variant="primary"
         size="sm"
-        ariaLabel={`${label()} for the question`}
+        ariaLabel={t('markAffordance.forQuestion.aria', '{label} for the question', { label: label() })}
         onClick={() => {
           if (offered !== null) onMark(offered)
         }}

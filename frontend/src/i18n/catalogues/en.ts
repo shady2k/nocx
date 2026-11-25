@@ -2331,4 +2331,17 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'integration.generation-unavailable.description': 'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
   'integration.channel-unavailable.description': 'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
   'integration.unknown.description': 'nocx could not set up shell integration for this session, and cannot say why.',
+  // ── Agent ask, editor submit and mark affordance (agent-ask.ts, editor.ts, mark-affordance.tsx) ──
+  'agentAsk.undo': 'Undo',
+  'agentAsk.managePermissions': 'Manage permissions',
+  'editor.runCommand.aria': 'Run command',
+  'markAffordance.forQuestion.aria': '{label} for the question',
+  // ── Desktop endpoint failure (endpoint-desktop.ts) ─────────────────────
+  'endpoint.noServer.message': 'The desktop backend could not be reached.',
+  'endpoint.noServer.remedy': 'Retry when the backend is available.',
+  // ── Workspace chip and command-history recall (workspace-chip.tsx, recall.ts) ──
+  'workspaceChip.title': 'Workspace: {name}',
+  'recall.panel.aria': 'command history',
+  'recall.search.placeholder': 'search history',
+  'recall.search.aria': 'search history',
 }

@@ -2260,4 +2260,15 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'hostKey.agent.denyBody':
     "If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer is remembered for this agent alone.",
   'hostKey.agent.deny': 'Deny',
+  // ── Shell-integration notice (integration/notice.tsx) ───────────────────
+  'integration.copy.copied': 'Copied',
+  'integration.copy.failed': 'Could not copy to the clipboard',
+  'integration.toolbar.aria': 'Shell integration',
+  'integration.notice.dontShowShell': "Don't show again for this shell",
+  'integration.notice.dismiss.aria': 'Dismiss',
+  'integration.notice.copy': 'Copy',
+  'integration.notice.learnMore': 'Learn more',
+  'integration.notice.close': 'Close',
+  'integration.commands.aria': 'Commands to run',
+  'integration.about.title': 'About shell integration',
 }

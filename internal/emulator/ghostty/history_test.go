@@ -407,6 +407,31 @@ func TestHistoryRowsCostOneGridResolutionPerRow(t *testing.T) {
 	}
 }
 
+func TestHistoryRowsReuseGrownScratchForLongGraphemes(t *testing.T) {
+	term := histTerm(t, 1, 2)
+	accents := strings.Repeat("\u0301", 40)
+	first, second := "e"+accents, "a"+accents
+	histFeed(t, term, first+"\r\n"+second+"\r\n\r\n")
+
+	before := ghosttytest.GridResolutions()
+	page := histPage(t, term, 0, 2)
+	spent := ghosttytest.GridResolutions() - before
+	if len(page.Rows) != 2 {
+		t.Fatalf("rows returned: %d, want 2", len(page.Rows))
+	}
+	if got := histText(page.Rows[0]); got != first {
+		t.Errorf("first history row = %q, want %q", got, first)
+	}
+	if got := histText(page.Rows[1]); got != second {
+		t.Errorf("second history row = %q, want %q", got, second)
+	}
+	// Each grapheme is 81 bytes. The first row retries with 256 bytes;
+	// the second must use that buffer rather than retrying at 64 bytes.
+	if spent != 3 {
+		t.Errorf("history read spent %d grid resolutions, want 3", spent)
+	}
+}
+
 // The read a range promises: whole pages, never a torn one. A program feeds
 // while a reader walks history by range, and every page that comes back must
 // be internally consistent — its rows the numbered lines its window names,

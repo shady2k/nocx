@@ -1740,6 +1740,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ports.copy': 'Copy',
   'ports.copy.head': 'Copy',
   'ports.open.head': 'Open',
+  'ports.forwarding': 'Forwarding {destination} on {host}:{port}',
+  'ports.cannotSee.title': 'Cannot see the ports on {target}',
+  'ports.cannotSee.desc':
+    'You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports.',
+  'ports.noConnection.sshFirst': 'Open an SSH session to this profile first — the ports it listens on will appear here.',
+  'ports.openAsConnection': 'Open as connection',
   'tabs.pinned': 'Pinned',
   'tabs.saveAsConnection': 'Save as connection',
   'tabs.close': 'Close tab',

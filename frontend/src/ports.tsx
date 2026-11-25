@@ -384,7 +384,11 @@ export function PortsPanel(props: PortsPanelProps) {
     setForwards((prev) => new Map(prev).set(rec.id, rec))
     showToast({
       level: 'success',
-      message: `Forwarding ${rec.destination} on ${rec.actualBind.host}:${rec.actualBind.port}`,
+      message: t('ports.forwarding', 'Forwarding {destination} on {host}:{port}', {
+        destination: rec.destination,
+        host: rec.actualBind.host,
+        port: rec.actualBind.port,
+      }),
     })
   }
 
@@ -660,8 +664,13 @@ export function PortsPanel(props: PortsPanelProps) {
               second half: the sentence tells the user to open the host as a
               connection, and the button does it (W2). */}
           <EmptyState
-            title={`Cannot see the ports on ${unavailableTarget()}`}
-            description="You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports."
+            title={t('ports.cannotSee.title', 'Cannot see the ports on {target}', {
+              target: unavailableTarget(),
+            })}
+            description={t(
+              'ports.cannotSee.desc',
+              'You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports.',
+            )}
             action={
               <Show when={props.onOpenAsConnection}>
                 <Button
@@ -671,7 +680,7 @@ export function PortsPanel(props: PortsPanelProps) {
                     props.onOpenAsConnection?.(host, user)
                   }}
                 >
-                  Open as connection
+                  {t('ports.openAsConnection', 'Open as connection')}
                 </Button>
               </Show>
             }
@@ -695,7 +704,10 @@ export function PortsPanel(props: PortsPanelProps) {
           <Show when={!host() && st()?.state === 'pending' && !isLocal()}>
             <EmptyState
               title={t('ports.noConnection.title', 'No active connection')}
-              description="Open an SSH session to this profile first — the ports it listens on will appear here."
+              description={t(
+                'ports.noConnection.sshFirst',
+                'Open an SSH session to this profile first — the ports it listens on will appear here.',
+              )}
             />
           </Show>
           <Show when={host() || (st()?.state ?? '') !== 'pending'}>

@@ -1521,6 +1521,12 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ports.copy': 'Копировать',
   'ports.copy.head': 'Копировать',
   'ports.open.head': 'Открыть',
+  'ports.forwarding': 'Пробрасывается {destination} на {host}:{port}',
+  'ports.cannotSee.title': 'Не удаётся увидеть порты на {target}',
+  'ports.cannotSee.desc':
+    'Вы открыли эту оболочку вручную, поэтому у nocx нет собственного подключения к ней и он не может узнать, что слушает порты. Откройте этот хост как подключение, чтобы увидеть его порты.',
+  'ports.noConnection.sshFirst': 'Сначала откройте SSH-сеанс для этого профиля — здесь появятся порты, которые он слушает.',
+  'ports.openAsConnection': 'Открыть как подключение',
   'tabs.pinned': 'Закреплена',
   'tabs.saveAsConnection': 'Сохранить как подключение',
   'tabs.close': 'Закрыть вкладку',

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionid"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -107,13 +107,13 @@ func (w *stubWatch) Close() error {
 
 // fakeCaller is a Caller that owns exactly the sessions it is told about.
 type fakeCaller struct {
-	owns map[session.ID]bool
+	owns map[sessionid.ID]bool
 }
 
-func (f fakeCaller) Owns(sid session.ID) bool { return f.owns[sid] }
+func (f fakeCaller) Owns(sid sessionid.ID) bool { return f.owns[sid] }
 
-func owner(sids ...session.ID) fakeCaller {
-	m := make(map[session.ID]bool, len(sids))
+func owner(sids ...sessionid.ID) fakeCaller {
+	m := make(map[sessionid.ID]bool, len(sids))
 	for _, s := range sids {
 		m[s] = true
 	}
@@ -526,7 +526,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 	reg := New()
 	ids := make([]string, 8)
 	for i := range ids {
-		id, err := reg.Register(newStubProvider(), session.ID("s1"), "", Capabilities{})
+		id, err := reg.Register(newStubProvider(), sessionid.ID("s1"), "", Capabilities{})
 		if err != nil {
 			t.Fatal(err)
 		}

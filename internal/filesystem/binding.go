@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionid"
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
@@ -19,7 +19,7 @@ import (
 // accessors expose only identity.
 type Binding struct {
 	id         string
-	sessionID  session.ID
+	sessionID  sessionid.ID
 	endpointID string // attestation; empty for local
 	provider   Provider
 	// sink is the binding's write half, or nil. It is nil exactly when the
@@ -121,9 +121,9 @@ type Handle interface {
 // the only one available: connState and wsConn are unexported in transport,
 // and a filesystem that imported transport would point the dependency
 // backwards. connState does not satisfy it as it stands (its method is has);
-// transport adds an exported Owns(session.ID) bool that forwards to it.
+// transport adds an exported Owns(sessionid.ID) bool that forwards to it.
 type Caller interface {
-	Owns(sessionID session.ID) bool
+	Owns(sessionID sessionid.ID) bool
 }
 
 // Capabilities are the optional seams a provider contributed, resolved once
@@ -175,7 +175,7 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // rather than something derived here because Register takes a Provider: the
 // assertions belong where the concrete provider is still in hand, beside the
 // endpoint attestation (design D7).
-func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string, caps Capabilities) (string, error) {
+func (r *Registry) Register(p Provider, sessionID sessionid.ID, endpointID string, caps Capabilities) (string, error) {
 	if p == nil || isNilProvider(p) {
 		return "", errors.New("filesystem: Register with nil provider")
 	}
@@ -273,7 +273,7 @@ func (r *Registry) Close(id string) error {
 // is the one Registry.Close returns, joined across bindings, so a teardown
 // that had to abandon a guard names it rather than staying silent
 // (ADR-8eej3e66 §15: this call was the unbounded half of Stop).
-func (r *Registry) CloseSession(sessionID session.ID) error {
+func (r *Registry) CloseSession(sessionID sessionid.ID) error {
 	r.mu.Lock()
 	var doomed []*Binding
 	for id, b := range r.bindings {

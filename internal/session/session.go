@@ -18,11 +18,17 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sessionid"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
 
-type ID string
+// ID is a session's identity. It is an ALIAS rather than a defined type
+// so that a package which only needs to name a session depends on
+// internal/sessionid instead of on this package and, through it, on the
+// whole connection stack (design C24, C30). Every existing session.ID
+// call site keeps compiling without a conversion.
+type ID = sessionid.ID
 
 // InstanceID names one backend instance: minted once per registry (one per
 // backend start), so two instances are never equal and a record from a

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.canonical.params.schema.json",
+  "title": "HelperFSCanonicalParams",
+  "description": "Params of the helper fs service's canonical op: one path to resolve.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "description": "The absolute, clean path to resolve.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

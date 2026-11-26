@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.root.schema.json",
+  "title": "HelperFSRootResult",
+  "description": "Result of the helper fs service's root op: where the file tree starts, how a header abbreviates it, and whether it is an inference. The reason is required alongside the flag — a root the product guessed must say why, or the person reads a guess as their own directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "display", "inferred", "inferredReason"],
+  "properties": {
+    "path": {
+      "description": "The root's real path, as the provider reports it.",
+      "type": "string"
+    },
+    "display": {
+      "description": "The abbreviated form for a header: a path under the account's home is written with a tilde.",
+      "type": "string"
+    },
+    "inferred": {
+      "description": "Whether this root is the home directory standing in for one the caller verified.",
+      "type": "boolean"
+    },
+    "inferredReason": {
+      "description": "Why it was inferred; empty when it was not. Required so 'not inferred' is an answer and not an absent field.",
+      "type": "string"
+    }
+  }
+}

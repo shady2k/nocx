@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.stat.schema.json",
+  "title": "HelperFSStatResult",
+  "description": "Result of the helper fs service's stat op: the metadata a row shows, without enumerating the parent. Kind never spells `symlink` here because the path is followed — it is the kind of the object a link names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "size", "mtimeNs", "mode"],
+  "properties": {
+    "kind": {
+      "description": "The kind of object, in internal/filesystem.Kind's own closed vocabulary: `regular`, `dir`, `symlink`, `other` (a FIFO, socket or device) or `unreadable` (the entry exists but its metadata could not be read).",
+      "type": "string",
+      "enum": ["regular", "dir", "symlink", "other", "unreadable"]
+    },
+    "size": {
+      "description": "The object's size in bytes. Zero is a real size — an empty file, a directory on some filesystems — not an absence.",
+      "type": "integer"
+    },
+    "mtimeNs": {
+      "description": "Modification time in Unix nanoseconds. Negative is a pre-epoch timestamp, which a digest and a version comparison treat as any other value.",
+      "type": "integer"
+    },
+    "mode": {
+      "description": "The object's os.FileMode bits, as Go states them: the permission bits plus the type flags. 32 bits, so a caller can round-trip it into a file mode.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  }
+}

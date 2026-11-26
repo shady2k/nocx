@@ -729,3 +729,53 @@ Two decisions worth naming rather than leaving to a reader:
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.2`, and why `Version` moved to 31
+
+The **`fs` service**, read half: `root`, `stat`, `list`, `canonical` and
+`read`. It is how a coordinator reads a host's filesystem once Files stops
+opening SFTP itself — the owner's invariant of 2026-09-13 puts every ssh
+connection in the helper, and SFTP is a subsystem on one of them
+(ADR-727g63tr, design §5.10). What crosses is a path, an offset and a length,
+never a descriptor and never a command.
+
+Four decisions in these shapes are worth naming rather than leaving to a
+reader:
+
+- **`read` has two contracts, and `whole` chooses one.** A whole-file read
+  answers a `version{size, mtimeNs, sha256}` over exactly the bytes it returns:
+  it samples the open descriptor before and after, retries while size or mtime
+  moves, and answers `changed-during-read` after three attempts rather than a
+  version of a mixture. A range read answers `identity` — `dev:ino` on a unix
+  build — and NO version: a window's version is not the file's, and an append
+  preserving the inode is the only fact that tells it from a replacement.
+- **A file that does not fit is refused, not truncated.** `whole` with a file
+  larger than the caller's `length` answers `too-large{observed, limit}`. A
+  prefix carrying a version would describe bytes the caller never saw, which is
+  the defect the version exists to prevent.
+- **The descriptor is the object.** `read` opens with `O_NONBLOCK` and
+  `fstat`s the SAME descriptor before the type check, so a FIFO or a device
+  swapped in for a regular file is answered `not-regular{kind}` instead of
+  blocking the daemon. `kind` spells `fifo`, `device`, `socket` or `dir` — the
+  finer vocabulary a refusal needs, beside the file row's own coarse `kind`.
+- **The refusal codes are the plan's closed list**, not the wire's generic
+  ones: `not-found`, `permission-denied`, `not-dir`, `not-regular`,
+  `invalid-path`, `invalid-page`, `too-large`, `too-large-size`, `timed-out`
+  and `changed-during-read`. `too-large` is the entry cap (or a whole-file read
+  past the caller's bound) and `too-large-size` is the listing's byte cap: two
+  limits on two different things, and a caller that recovers the error type
+  behind the refusal needs the word to tell them apart. A refused op is one
+  request's answer; the host keeps serving, which is what lets one unreadable
+  directory leave the rest of the panel working.
+
+The number moved because the wire grew a SERVICE whose every op a 30-helper
+answers `unknown_op` to. That refusal is the half that must be read correctly:
+it says "this machine's helper is older than this app" — the same sentence
+every generation boundary states — and NOT "this host refuses files", which a
+person would be told by a panel that read an empty answer as a permission
+problem. Two peers that disagree refuse each other at hello in both directions,
+and each generation installs beside the other (D7). The window protocol's
+number does not move: the renderer never speaks this wire.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.

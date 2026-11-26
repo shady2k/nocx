@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.read.schema.json",
+  "title": "HelperFSReadResult",
+  "description": "Result of the helper fs service's read op. Data is the bytes returned, base64 on the wire; Size is their count. Identity is the opened object's dev:ino on a unix build, so a caller can tell an append (identity preserved) from a replacement (identity changed) between two reads; it is empty only where the platform cannot say. Version is present ONLY for a whole-file read, where it describes exactly the returned bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["canonical", "identity", "data", "size", "mtimeNs", "changed"],
+  "properties": {
+    "canonical": {
+      "description": "The provider-canonical path of the object actually read — the identity a singleton or a cache keys on.",
+      "type": "string"
+    },
+    "identity": {
+      "description": "The object's dev:ino, so two reads can be compared without trusting size or mtime. Empty means this platform cannot state one; a caller must then treat every read as a possible replacement.",
+      "type": "string"
+    },
+    "data": {
+      "description": "The bytes returned, base64. Always a string: an empty file is \"\", never null.",
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "size": {
+      "description": "How many bytes `data` carries. Zero is an empty file or an empty range, not an error.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "mtimeNs": {
+      "description": "The object's modification time in Unix nanoseconds, sampled from the open descriptor.",
+      "type": "integer"
+    },
+    "changed": {
+      "description": "Whether this answer came from a retry: true means at least one earlier attempt saw the file move under it, so the version is of the attempt that finally settled. Always false for a range read, which does not retry.",
+      "type": "boolean"
+    },
+    "version": {
+      "description": "Present exactly when `whole` was true: the version of exactly the bytes in `data`. A range read omits it, because a window's version is not the file's.",
+      "$ref": "#/$defs/version"
+    }
+  },
+  "$defs": {
+    "version": {
+      "description": "What a whole-file read returned, as a value another party can compare against later: size, mtime and a digest over the returned bytes. The digest is the field that survives a rewrite of the same length inside one filesystem timestamp granule.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "mtimeNs", "sha256"],
+      "properties": {
+        "size": {
+          "description": "The number of bytes hashed, which is the number of bytes returned.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "mtimeNs": {
+          "description": "The object's modification time in Unix nanoseconds at the stat that proved the read stable.",
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "Hex SHA-256 over exactly the bytes in `data`. Sixty-four lower-case hex characters, the same spelling internal/filesystem and the write half use.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

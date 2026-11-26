@@ -37,6 +37,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	fshostsvc "github.com/shady2k/nocx/internal/filesystem/hostsvc"
+	filesystemlocal "github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -282,7 +284,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		// registerHelperServices, in one place (services.go) — including
 		// whether an ssh service is among them, which is the whole of what
 		// nocx_local_ssh changes about a helper.
-		registerHelperServices(h, hostsvc.New(factory), sessions, sshCap)
+		registerHelperServices(h, hostsvc.New(factory), sessions, fshostsvc.New(filesystemlocal.New()), sshCap)
 		// The connection is bound to the service, not the other way round:
 		// the sessions outlive it. These are the two lines that used to sit
 		// in main around one stdin/stdout connection and now sit inside the

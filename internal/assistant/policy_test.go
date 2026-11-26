@@ -17,6 +17,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 type fakeLedger struct {
@@ -266,6 +267,14 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 // the same one except where a test is about the relation.
 func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string) *kernelFixture {
 	t.Helper()
+	return middlewareForSeams(t, grant, ledger, approvals, requester, known, turnEntryID, localPaneEnvironment(), newLocalFileSource(t))
+}
+
+// middlewareForSeams is middlewareForTurn with the two facts a test about the
+// PANE supplies: where the pane is, and the binding its files are read
+// through. Every other caller takes the local pair.
+func middlewareForSeams(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string, pane content.Environment, files filesystem.HandleSource) *kernelFixture {
+	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -282,7 +291,7 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 	if source, ok := requester.(ScreenCaptureSource); ok {
 		screenCapture = source
 	}
-	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: pane, files: files})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}

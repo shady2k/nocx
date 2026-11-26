@@ -234,6 +234,40 @@ func TestAssistantFiles_CancelledWhileTheProviderIsBeingBuiltLeavesNothing(t *te
 	}
 }
 
+// TestAssistantFiles_NoProviderFactoryIsTheHonestRefusal: a build that wires
+// the registry and leaves the provider factory unset cannot reach any pane's
+// files. The assistant's answer is ErrNoAssistantFiles — the refusal the
+// composition promises — and not a nil dereference on the first acquisition.
+// The operations are still built (the panel's handlers answer the same build
+// in their own words), which is exactly why the gate has to be here.
+func TestAssistantFiles_NoProviderFactoryIsTheHonestRefusal(t *testing.T) {
+	f := newAssistantFilesFixture(t)
+	route := filesRoute{
+		open:    capability.NewFilesystemOpenOperation(control.Unrestricted(), f.sessions, nil, f.reg),
+		binding: capability.NewFilesystemBindingOperation(f.reg),
+	}
+	if route.open == nil || route.binding == nil {
+		t.Fatal("fixture precondition: the registry is wired, so both operations exist")
+	}
+	open, bind := filesOperationsForAgent(route)
+	if open != nil || bind != nil {
+		t.Fatalf("filesOperationsForAgent = %v, %v; a build with no provider factory has no route to any pane's files", open, bind)
+	}
+	h := agentHandlers{filesOpen: open, filesBind: bind}
+	if _, _, err := h.filesFor(f.sessionID).Acquire(context.Background()); !errors.Is(err, ErrNoAssistantFiles) {
+		t.Fatalf("Acquire = %v, want ErrNoAssistantFiles", err)
+	}
+	if factory, closed := f.counts(); factory != 0 || closed != 0 {
+		t.Fatalf("factory calls = %d, closed = %d; no provider may be built for a build that has no factory", factory, closed)
+	}
+	// A wired route is handed over unchanged: the gate refuses a build, not a
+	// call.
+	wired := filesRoute{open: route.open, binding: route.binding, factory: f.factory}
+	if open, bind := filesOperationsForAgent(wired); open == nil || bind == nil {
+		t.Fatalf("filesOperationsForAgent(wired) = %v, %v; a wired build keeps its route", open, bind)
+	}
+}
+
 // TestAssistantFiles_ACapabilityReadsThroughTheCallBinding is the path's own
 // proof: a files.read capability built over this source reads a real file, so
 // the factory, the registry, the acquisition and the conditional read are wired

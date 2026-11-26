@@ -40,7 +40,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -986,7 +985,7 @@ func (g kernelEvidenceGuard) Refuse(ctx context.Context, call Call) (string, boo
 	if !k.approvals.IsApproved(proposal) {
 		return "", false
 	}
-	if err := k.approvals.VerifyApprovedFileVersions(proposal); err != nil {
+	if err := k.approvals.VerifyApprovedFileVersions(ctx, k.runCtx.Files, proposal); err != nil {
 		return refusalResult(call.Tool(), RefusedFileChanged, "", err.Error()), true
 	}
 	if shown, ok := k.approvals.ApprovedExpansions(proposal); ok && len(shown) > 0 {
@@ -1233,10 +1232,15 @@ func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
 }
 
 // bindApprovalFileVersions captures path identities before an approval is
-// requested. files.create treats ENOENT as NotApplicable because creating a
+// requested, through the run's own pane binding (RunContext.Files). On an SSH
+// pane that read reaches the host behind the helper, so the evidence describes
+// the file the call will act on and never this machine's same-named one.
+//
+// files.create treats a missing path as NotApplicable because creating a
 // missing path is its successful precondition; every other capture failure
-// remains Required and therefore fails closed at execution.
-func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
+// remains Required and therefore fails closed at execution — "the evidence
+// could not be read" is never an approval that covers anything.
+func bindApprovalFileVersions(ctx context.Context, files filesystem.HandleSource, ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
 	pathCount := 0
 	versions := make([]FileVersion, 0, len(resources))
 	for _, resource := range resources {
@@ -1244,9 +1248,9 @@ func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []ag
 			continue
 		}
 		pathCount++
-		version, err := CaptureFileVersion(resource.ID)
+		version, err := CaptureFileVersion(ctx, files, resource.ID)
 		if err != nil {
-			if decl.Name == "files.create" && errors.Is(err, fs.ErrNotExist) {
+			if decl.Name == "files.create" && isNotFound(err) {
 				continue
 			}
 			ap.FileVersionState = FileVersionBindingRequired
@@ -1343,7 +1347,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	// method, on another connection's turn, and by then only the record
 	// remembers which resource the widening would have to cover.
 	ap.OutOfScope = outOfScope
-	bindApprovalFileVersions(&ap, decl, resources)
+	bindApprovalFileVersions(ctx, m.runCtx.Files, &ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap)

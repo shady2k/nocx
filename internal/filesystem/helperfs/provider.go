@@ -26,21 +26,67 @@ type Provider struct {
 	rootPath     string
 }
 
-var _ filesystem.Provider = (*Provider)(nil)
+var (
+	_ filesystem.Provider     = (*Provider)(nil)
+	_ filesystem.AxisProvider = (*Provider)(nil)
+)
 
 func New(reg Registry, connectionID, rootPath string) *Provider {
 	return &Provider{reg: reg, connectionID: connectionID, rootPath: rootPath}
 }
 
-func (p *Provider) unavailable() *filesystem.ErrUnavailable {
+// HelperAxis reports the connection's helper axis as the registry holds it
+// now, or the axis a binding reports when the connection is no longer known to
+// it. A helper-backed binding always has an axis — that is what makes it a
+// helper-backed binding — so the bool is always true here; the false case
+// belongs to providers with no axis at all, and this one is not among them.
+//
+// New performs no I/O, so a provider and its binding exist even while the
+// axis is unavailable (C28): the panel must be able to draw the reason on a
+// host where nothing is serving, which is exactly the moment a dial would
+// fail.
+func (p *Provider) HelperAxis() (filesystem.HelperAxis, bool) {
+	return p.axis(), true
+}
+
+// axis is the one place the binding's axis is derived from the registry, so
+// the reason a panel draws and the reason a failed call carries are the same
+// answer rather than two that agree until they do not (C28).
+func (p *Provider) axis() filesystem.HelperAxis {
 	status, known := p.reg.Axis(p.connectionID)
 	if !known {
-		return &filesystem.ErrUnavailable{Reason: string(farhelper.ReasonConnection), Action: string(farhelper.ActionNone)}
+		// The connection was unbound, or never reached the registry: the
+		// panel's reason is the connection itself, not a helper that this
+		// host may well be serving.
+		return filesystem.HelperAxis{
+			State:  string(farhelper.StateUnavailable),
+			Reason: string(farhelper.ReasonConnection),
+			Action: string(farhelper.ActionNone),
+		}
 	}
-	if status.Reason == "" {
-		return &filesystem.ErrUnavailable{Reason: string(farhelper.ReasonHelperLost), Action: string(farhelper.ActionNone)}
+	axis := filesystem.HelperAxis{State: string(status.State), Reason: string(status.Reason), Action: string(status.Action)}
+	if axis.State == string(farhelper.StateUnavailable) && axis.Reason == "" {
+		// An unavailable axis always carries a reason. One that does not is a
+		// publisher this code cannot read, and the helper being gone is the
+		// conservative reading — the alternative is a panel drawing an empty
+		// reason beside an error that names one.
+		axis.Reason = string(farhelper.ReasonHelperLost)
+		axis.Action = string(farhelper.ActionNone)
 	}
-	return &filesystem.ErrUnavailable{Reason: string(status.Reason), Action: string(status.Action)}
+	return axis
+}
+
+func (p *Provider) unavailable() *filesystem.ErrUnavailable {
+	axis := p.axis()
+	if axis.Reason == "" {
+		// The lease was lost while the axis still reads serving, or a state
+		// that publishes no reason could not be used. The helper is what is
+		// missing, and this is the one place the refusal adds that reading to
+		// the axis rather than reporting it beside it as if it were a state.
+		axis.Reason = string(farhelper.ReasonHelperLost)
+		axis.Action = string(farhelper.ActionNone)
+	}
+	return &filesystem.ErrUnavailable{Reason: axis.Reason, Action: axis.Action}
 }
 
 func (p *Provider) acquire(ctx context.Context) (*farhelper.Lease, error) {
@@ -153,6 +199,16 @@ func (p *Provider) Read(ctx context.Context, name string, maxBytes int64) (files
 func (p *Provider) readRange(ctx context.Context, name string, offset, length int64) (proto.FSReadResult, error) {
 	var out proto.FSReadResult
 	err := p.call(ctx, proto.OpRead, name, proto.FSReadParams{Path: name, Offset: offset, Length: length}, &out)
+	return out, err
+}
+
+// readWhole asks for one whole-file read. It is separate from readRange
+// because the two questions differ: a range reports the object's identity, a
+// whole read reports the version of exactly the bytes returned, and the host
+// refuses a whole read that did not start at zero.
+func (p *Provider) readWhole(ctx context.Context, name string, limit int64) (proto.FSReadResult, error) {
+	var out proto.FSReadResult
+	err := p.call(ctx, proto.OpRead, name, proto.FSReadParams{Path: name, Offset: 0, Length: limit, Whole: true}, &out)
 	return out, err
 }
 

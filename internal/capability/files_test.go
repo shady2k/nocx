@@ -233,3 +233,97 @@ func TestOpenBinding_ReportsAFactoryFailure(t *testing.T) {
 		t.Errorf("a binding %q was minted for a provider that was never built", bid)
 	}
 }
+
+// stubConditionalWrite is an identity for the conditional-write seam: this
+// test is about the wiring, and the behaviour belongs to helperfs.
+type stubConditionalWrite struct{}
+
+func (*stubConditionalWrite) ReadVersion(context.Context, string, int64) ([]byte, filesystem.Version, error) {
+	return nil, filesystem.Version{}, nil
+}
+
+func (*stubConditionalWrite) Commit(context.Context, string, []byte, filesystem.Expect) (filesystem.Version, error) {
+	return filesystem.Version{}, nil
+}
+
+// conditionalProvider carries the axis and the conditional write beside the
+// sink, the shape the composition root builds for a helper-backed session.
+type conditionalProvider struct {
+	writableProvider
+	axis  filesystem.HelperAxis
+	write filesystem.VersionedFiles
+}
+
+func (p conditionalProvider) HelperAxis() (filesystem.HelperAxis, bool) { return p.axis, true }
+
+func (p conditionalProvider) Versioned() filesystem.VersionedFiles { return p.write }
+
+// TestOpenBinding_AConditionalProviderContributesTheAxisAndTheWrite is the
+// registration half of C27/C28: the seams are resolved where the concrete
+// provider is still in hand, so they reach the handle. Nothing downstream can
+// perform these assertions — Binding.provider is unexported — which is why
+// losing one here would be a capability that quietly disappears while every
+// other files.* call kept working.
+func TestOpenBinding_AConditionalProviderContributesTheAxisAndTheWrite(t *testing.T) {
+	axis := filesystem.HelperAxis{State: "unavailable", Reason: "install-failed", Action: "refresh"}
+	write := &stubConditionalWrite{}
+	run, sess := openBindingHarness(t, func(session.Session, string) (filesystem.Provider, error) {
+		return conditionalProvider{writableProvider: writableProvider{sink: &recordingSink{}}, axis: axis, write: write}, nil
+	})
+
+	if err := run(func(ctx context.Context, svc capability.FilesystemOpenService) error {
+		bid, _, err := svc.OpenBinding(ctx, sess, "")
+		if err != nil {
+			return err
+		}
+		h, release, err := svc.Acquire(bid, callerOwningEverything{})
+		if err != nil {
+			return err
+		}
+		defer release()
+		got, known := h.HelperAxis()
+		if !known || got != axis {
+			t.Errorf("HelperAxis = %+v, %v; want the provider's axis", got, known)
+		}
+		gotWrite, err := h.Versioned()
+		if err != nil {
+			t.Errorf("Versioned: %v", err)
+		} else if gotWrite != filesystem.VersionedFiles(write) {
+			t.Errorf("Versioned returned %v, want the provider's own seam", gotWrite)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("files.open: %v", err)
+	}
+}
+
+// TestOpenBinding_AProviderWithoutTheSeamsContributesNeither is the same
+// assertion one direction over: absence at the provider is absence at the
+// handle, expressed as the false and the typed refusal a caller can act on
+// rather than as a nil that panics on first use.
+func TestOpenBinding_AProviderWithoutTheSeamsContributesNeither(t *testing.T) {
+	run, sess := openBindingHarness(t, func(session.Session, string) (filesystem.Provider, error) {
+		return readOnlyProvider{}, nil
+	})
+
+	if err := run(func(ctx context.Context, svc capability.FilesystemOpenService) error {
+		bid, _, err := svc.OpenBinding(ctx, sess, "")
+		if err != nil {
+			return err
+		}
+		h, release, err := svc.Acquire(bid, callerOwningEverything{})
+		if err != nil {
+			return err
+		}
+		defer release()
+		if got, known := h.HelperAxis(); known || got != (filesystem.HelperAxis{}) {
+			t.Errorf("HelperAxis = %+v, %v; want false for a provider with no axis", got, known)
+		}
+		if _, err := h.Versioned(); !errors.As(err, new(*filesystem.ErrVersionedUnsupported)) {
+			t.Errorf("Versioned = %v, want ErrVersionedUnsupported", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("files.open: %v", err)
+	}
+}

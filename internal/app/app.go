@@ -2964,9 +2964,12 @@ func filesystemProviderFactory(client fsLeaseProvider, helpers helperfs.Registry
 					current, bound := sessionConnection(paneID, sessionID)
 					return bound && current == id
 				}}
+				hf := helperfs.New(registry, id, rootPath)
 				return &endpointAttestedProvider{
-					writableProvider: helperfs.New(registry, id, rootPath),
+					writableProvider: hf,
 					endpointID:       endpointIDFor(sess),
+					axis:             hf.HelperAxis,
+					versioned:        hf.Versioned(),
 				}, nil
 			}
 		}
@@ -3112,9 +3115,34 @@ type writableProvider interface {
 type endpointAttestedProvider struct {
 	writableProvider
 	endpointID string
+	// axis and versioned are the two optional seams the wrapped provider
+	// contributed, carried beside the attestation for the reason the write
+	// and read-stream seams are named on the embedded interface: a wrapper
+	// only ever exposes what it declares, and files.open asserts these on the
+	// value the factory returned — which is this wrapper. A field rather than
+	// a second embedded interface, because a local or SFTP-backed wrapper
+	// has neither seam and an embedded nil interface would panic on the first
+	// assertion instead of answering "no axis" and "no conditional write".
+	axis      func() (filesystem.HelperAxis, bool)
+	versioned filesystem.VersionedFiles
 }
 
 func (p *endpointAttestedProvider) EndpointID() string { return p.endpointID }
+
+// HelperAxis forwards the wrapped provider's live axis, or answers false when
+// it contributed none — a local tab, or the temporary SFTP path.
+func (p *endpointAttestedProvider) HelperAxis() (filesystem.HelperAxis, bool) {
+	if p.axis == nil {
+		return filesystem.HelperAxis{}, false
+	}
+	return p.axis()
+}
+
+// Versioned forwards the wrapped provider's conditional write, or nil when it
+// contributed none. A nil here is the same refusal a missing interface is: the
+// binding then answers *ErrVersionedUnsupported rather than pretending a write
+// was checked against a version.
+func (p *endpointAttestedProvider) Versioned() filesystem.VersionedFiles { return p.versioned }
 
 // ── endpointId v1 (spec §5.1) ─────────────────────────────────────────────
 

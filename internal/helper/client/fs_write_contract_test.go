@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/filesystem/hostsvc"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -196,8 +195,8 @@ func TestFSWriteCommitRefusalReachesTheClientAsItsCode(t *testing.T) {
 	if !errors.As(err, &refusal) {
 		t.Fatalf("commit over a changed file = %v, want a *client.RefusalError", err)
 	}
-	if refusal.Code != hostsvc.ErrCodeChangedSinceRead {
-		t.Fatalf("code = %q, want %q", refusal.Code, hostsvc.ErrCodeChangedSinceRead)
+	if refusal.Code != proto.FSCodeChangedSinceRead {
+		t.Fatalf("code = %q, want %q", refusal.Code, proto.FSCodeChangedSinceRead)
 	}
 	landed, readErr := os.ReadFile(file) // #nosec G304 — the fixture this test created.
 	if readErr != nil {

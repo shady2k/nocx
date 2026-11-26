@@ -270,7 +270,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 		prompts:  prompts,
 		registry: registry,
 		modes:    modes,
-		factory:  filesystemProviderFactory(routes),
+		factory:  filesystemProviderFactory(routes, nil, noFilesPaneConnection),
 		opts: []ssh.ConnectOption{
 			ssh.WithUser(filesFixtureUser),
 			ssh.WithAuthMode("password"),

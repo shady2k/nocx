@@ -111,6 +111,9 @@ type ErrTimedOut struct {
 }
 
 func (e *ErrTimedOut) Error() string {
+	if e.Timeout == 0 {
+		return "filesystem: remote operation timed out"
+	}
 	return fmt.Sprintf("filesystem: directory enumeration exceeded the %s time cap", e.Timeout)
 }
 
@@ -127,6 +130,58 @@ type ErrTooLargeSize struct {
 
 func (e *ErrTooLargeSize) Error() string {
 	return fmt.Sprintf("filesystem: listing is about %d bytes, exceeding the %d-byte cap", e.ObservedBytes, e.Limit)
+}
+
+// ErrUnavailable says why the bound host cannot be reached through its helper.
+// Reason and Action are the connection's published values.
+type ErrUnavailable struct {
+	Reason, Action string
+}
+
+func (e *ErrUnavailable) Error() string { return "filesystem: helper unavailable (" + e.Reason + ")" }
+
+// ErrChangedDuringRead means the provider could not keep reading the same file.
+type ErrChangedDuringRead struct{ Path string }
+
+func (e *ErrChangedDuringRead) Error() string {
+	return fmt.Sprintf("filesystem: %s changed during read", e.Path)
+}
+
+// ErrChangedSinceRead means a conditional commit refused to replace a changed file.
+type ErrChangedSinceRead struct{ Path, Reason string }
+
+func (e *ErrChangedSinceRead) Error() string {
+	return fmt.Sprintf("filesystem: %s changed since read (%s)", e.Path, e.Reason)
+}
+
+// ErrUnknownWriteOutcome means a commit response was lost and the intended
+// bytes could not be confirmed. Installing the upload again is not safe.
+type ErrUnknownWriteOutcome struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrUnknownWriteOutcome) Error() string {
+	return fmt.Sprintf("filesystem: could not confirm the write to %s", e.Path)
+}
+
+func (e *ErrUnknownWriteOutcome) Unwrap() error { return e.Err }
+
+// ErrByteLimit is a file operation that exceeded its byte bound.
+type ErrByteLimit struct {
+	Path            string
+	Observed, Limit int64
+}
+
+func (e *ErrByteLimit) Error() string {
+	return fmt.Sprintf("filesystem: %s: %d bytes exceeds the %d-byte operation limit", e.Path, e.Observed, e.Limit)
+}
+
+// ErrWriteAborted reports the helper's definitive answer that it did not install the upload.
+type ErrWriteAborted struct{ Path string }
+
+func (e *ErrWriteAborted) Error() string {
+	return fmt.Sprintf("filesystem: write to %s was aborted", e.Path)
 }
 
 // ErrUnknownBinding — Acquire or Close named a binding id that does not exist

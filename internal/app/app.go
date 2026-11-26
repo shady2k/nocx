@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/filesystem/helperfs"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
@@ -1602,23 +1603,12 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
 
-		// The file-tree control plane (fm-w8): the binding registry is
-		// constructed here — without this line the whole filesystem
-		// package is reachable from its own tests and nowhere else
-		// (AGENTS.md check 5) — and the provider factory decides which
-		// sessions get which providers. Local sessions get a real local
-		// provider rooted at the caller's verified cwd when one is sent;
-		// remote sessions get the sftp provider over an ssh.FSConn lease
-		// acquired with the session's OWN connect options, so it resolves
-		// to the same destination the shell did (spec D3). The sftp
-		// provider and its lease were the last dead branch of fm-w8: this
-		// factory is the caller that makes the package reachable from
-		// main() (AGENTS.md check 5).
+		// A serving far helper owns remote Files. Until the SFTP path is
+		// retired, its fallback still rides the pane's pooled connection.
 		transport.WithFilesystemRegistry(filesystem.New()),
-		// The lease is this machine's helper's since nocx-50w7p.12: the sftp
-		// channel rides the same pooled connection the pane does, so a terminal
-		// and its Files panel authenticate once (AD-4, plan §3).
-		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases, farHelpers, func(paneID, sessionID string) (string, bool) {
+			return localOpener.paneConnections().SessionConnectionID(paneID, sessionID)
+		})),
 		// fs.complete reads the backend's own filesystem and has no binding
 		// to ask, so its failure domain comes from the same local provider's
 		// mount-table answer a local binding's handle gives. Without this the
@@ -2903,15 +2893,6 @@ type fsLeaseProvider interface {
 	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
 }
 
-// filesystemProviderFactory is the composition root's answer to
-// transport.FilesystemProviderFactory: local sessions get a real local
-// provider rooted at the caller's verified cwd when one is sent; remote
-// sessions get the sftp provider over an ssh.FSConn lease acquired with the
-// session's OWN connect options, so the lease resolves to the same
-// destination the shell did (spec D3, AD-4). The context is deliberately
-// background: the factory has no caller context, and the lease's own
-// hard-timeout lane is the bound that keeps a silent server from hanging
-// files.open.
 // The three D14 bounds, named once, here, rather than as defaults buried in
 // two provider packages that would then be free to disagree. Spec §9 calls
 // them starting numbers to be tuned once the panel is in daily use, and a
@@ -2933,7 +2914,32 @@ const (
 	fsRemoteListTimeout = 30 * time.Second
 )
 
-func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProviderFactory {
+// filesPaneRegistry checks that a binding's pane still rides the captured
+// connection. The pane's current ID is never used to route an RPC.
+type filesPaneRegistry struct {
+	helperfs.Registry
+	stillBound func(string) bool
+}
+
+func (r filesPaneRegistry) Axis(id string) (farhelper.Status, bool) {
+	if !r.stillBound(id) {
+		return farhelper.Status{State: farhelper.StateUnavailable, Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}, true
+	}
+	return r.Registry.Axis(id)
+}
+
+func (r filesPaneRegistry) Acquire(ctx context.Context, id string) (*farhelper.Lease, error) {
+	if !r.stillBound(id) {
+		return nil, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	lease, err := r.Registry.Acquire(ctx, id)
+	if !r.stillBound(id) {
+		return nil, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	return lease, err
+}
+
+func filesystemProviderFactory(client fsLeaseProvider, helpers helperfs.Registry, sessionConnection func(paneID, sessionID string) (string, bool)) transport.FilesystemProviderFactory {
 	return func(sess session.Session, rootPath string) (filesystem.Provider, error) {
 		if sess.Kind() != session.KindRemote {
 			localOpts := []local.Option{
@@ -2950,6 +2956,19 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			// upload while every other files.* call still works.
 			var p writableProvider = local.New(localOpts...)
 			return p, nil
+		}
+		paneID, sessionID := sess.PaneID(), string(sess.ID())
+		if id, bound := sessionConnection(paneID, sessionID); bound {
+			if status, known := helpers.Axis(id); known && status.State == farhelper.StateServing {
+				registry := filesPaneRegistry{Registry: helpers, stillBound: func(id string) bool {
+					current, bound := sessionConnection(paneID, sessionID)
+					return bound && current == id
+				}}
+				return &endpointAttestedProvider{
+					writableProvider: helperfs.New(registry, id, rootPath),
+					endpointID:       endpointIDFor(sess),
+				}, nil
+			}
 		}
 		fs, err := client.FSConn(context.Background(), sess.Host(), sess.SSHOptions()...)
 		if err != nil {

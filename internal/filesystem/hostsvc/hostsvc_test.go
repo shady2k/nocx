@@ -314,8 +314,8 @@ func TestListOnAFileIsNotDir(t *testing.T) {
 	mustWrite(t, path, nil)
 	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: path, Offset: 0, Limit: 10})
-	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodeNotDir {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeNotDir)
+	if code, _ := refusal(t, svc, err); code != proto.FSCodeNotDir {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeNotDir)
 	}
 }
 
@@ -364,8 +364,8 @@ func TestPermissionDeniedLeavesTheServiceServing(t *testing.T) {
 
 	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: closed, Offset: 0, Limit: 10})
-	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodePermissionDenied {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodePermissionDenied)
+	if code, _ := refusal(t, svc, err); code != proto.FSCodePermissionDenied {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodePermissionDenied)
 	}
 	if got := rootThrough(t, svc, proto.FSRootParams{}); got.Path != dir {
 		t.Fatalf("the service stopped answering after a refusal: root = %q, want %q", got.Path, dir)
@@ -386,8 +386,8 @@ func TestEntryCapIsTooLargeWithTheObservedCount(t *testing.T) {
 	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithEntryCap(2)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
 	code, details := refusal(t, svc, err)
-	if code != hostsvc.ErrCodeTooLarge {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeTooLarge)
+	if code != proto.FSCodeTooLarge {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeTooLarge)
 	}
 	var d struct {
 		Observed int `json:"observed"`
@@ -414,8 +414,8 @@ func TestSizeCapIsTooLargeSizeWithTheObservedBytes(t *testing.T) {
 	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithSizeCap(1)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
 	code, details := refusal(t, svc, err)
-	if code != hostsvc.ErrCodeTooLargeSize {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeTooLargeSize)
+	if code != proto.FSCodeTooLargeSize {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeTooLargeSize)
 	}
 	var d struct {
 		Observed int64 `json:"observed"`
@@ -436,8 +436,8 @@ func TestListElapsedCapIsTimedOut(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "a"), nil)
 	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithListTimeout(time.Nanosecond)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
-	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodeTimedOut {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeTimedOut)
+	if code, _ := refusal(t, svc, err); code != proto.FSCodeTimedOut {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeTimedOut)
 	}
 }
 
@@ -450,8 +450,8 @@ func TestInvalidAndMissingPathsKeepTheirOwnCodes(t *testing.T) {
 
 	_, err := call(t, svc, proto.OpStat, proto.FSPathParams{Path: "relative/path"})
 	code, details := refusal(t, svc, err)
-	if code != hostsvc.ErrCodeInvalidPath {
-		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeInvalidPath)
+	if code != proto.FSCodeInvalidPath {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeInvalidPath)
 	}
 	var d struct {
 		Reason string `json:"reason"`
@@ -464,7 +464,7 @@ func TestInvalidAndMissingPathsKeepTheirOwnCodes(t *testing.T) {
 	}
 
 	_, err = call(t, svc, proto.OpStat, proto.FSPathParams{Path: filepath.Join(dir, "absent")})
-	if got, _ := refusal(t, svc, err); got != hostsvc.ErrCodeNotFound {
-		t.Fatalf("code = %q, want %q", got, hostsvc.ErrCodeNotFound)
+	if got, _ := refusal(t, svc, err); got != proto.FSCodeNotFound {
+		t.Fatalf("code = %q, want %q", got, proto.FSCodeNotFound)
 	}
 }

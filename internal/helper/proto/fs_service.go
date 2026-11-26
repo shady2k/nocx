@@ -35,6 +35,71 @@ import filesystem "github.com/shady2k/nocx/internal/filesystem"
 // filesystem for a coordinator.
 const ServiceFS = "fs"
 
+// The fs service's refusal codes — the machine-readable half of an answer the
+// coordinator switches on. They are the plan's closed list (design §5.10) and
+// nothing else: a code invented here would be a vocabulary the coordinator has
+// no case for, which arrives as an unclassified failure wearing a name.
+const (
+	// FSCodeNotFound: the path does not exist, including a broken symlink.
+	FSCodeNotFound = "not-found"
+	// FSCodePermissionDenied: an explicit refusal, never an empty listing.
+	FSCodePermissionDenied = "permission-denied"
+	// FSCodeNotDir: the path is not a directory where one was required.
+	FSCodeNotDir = "not-dir"
+	// FSCodeNotRegular: a read was asked of something that is not a regular
+	// file. Details carries the finer kind (`fifo`, `device`, `socket`, `dir`)
+	// because "not a file" is not enough to tell a person what they clicked.
+	FSCodeNotRegular = "not-regular"
+	// FSCodeInvalidPath: the path violates the provider's syntax. Details
+	// carries the reason.
+	FSCodeInvalidPath = "invalid-path"
+	// FSCodeInvalidPage: the page cannot be asked for at all — a negative
+	// offset, a non-positive length, a whole-file read not at 0, or a length
+	// over the read ceiling. An offset past a directory's end is NOT this: it
+	// names a page the provider answers empty, with the real total and rev.
+	FSCodeInvalidPage = "invalid-page"
+	// FSCodeTooLarge: the entry cap, or a whole-file read of a file larger
+	// than the caller's bound. Details carries `observed` and `limit`.
+	FSCodeTooLarge = "too-large"
+	// FSCodeTooLargeSize: the listing's byte cap — the wire cost of the whole
+	// listing summed over its entries. It is not `too-large` because the two
+	// caps count different things against different limits, and a caller that
+	// must name the cap it hit, or recover the error type behind the refusal,
+	// cannot get either from one word.
+	FSCodeTooLargeSize = "too-large-size"
+	// FSCodeTimedOut: the operation's elapsed-time cap, or the request's own
+	// context being cancelled.
+	FSCodeTimedOut = "timed-out"
+	// FSCodeChangedDuringRead: three attempts and the file was still moving.
+	// The bytes were never returned, because a mixture of two versions has no
+	// version to name.
+	FSCodeChangedDuringRead = "changed-during-read"
+
+	// ── the write session's refusals (nocx-oalo1.12.3) ─────────────────
+
+	// FSCodeNoSpace: the filesystem refused bytes — ENOSPC, or EDQUOT when the
+	// account's quota is what ran out. One code, because the caller's action is
+	// the same in both and the difference is not the panel's to explain.
+	FSCodeNoSpace = "no-space"
+	// FSCodeChangedSinceRead: the commit's expectation no longer holds. The
+	// session stays open with its temporary, so the caller may re-read and send
+	// only the changed chunks rather than the whole file again.
+	FSCodeChangedSinceRead = "changed-since-read"
+	// FSCodeExists: `expect.absent` was asked of a name that is taken. Nothing
+	// was replaced; the session stays open so the caller can commit under
+	// another name (KeepBoth) without re-sending its bytes.
+	FSCodeExists = "exists"
+	// FSCodeBadOffset: a chunk that does not continue the session's stream.
+	// Details carries `expected` and `offset`.
+	FSCodeBadOffset = "bad-offset"
+	// FSCodeSizeMismatch: the commit states a byte count the session does not
+	// hold. Details carries `expected` and `size`.
+	FSCodeSizeMismatch = "size-mismatch"
+	// FSCodeBadSession: the id is malformed, already in use, or names a session
+	// that is no longer open. Details carries the reason.
+	FSCodeBadSession = "bad-session"
+)
+
 // The read ops. They are five because each answers a different question and
 // each has its own params type: a new FIELD on a frozen op is a break
 // (`additionalProperties: false`), while a new op is one an older helper
@@ -99,15 +164,15 @@ type FSPathParams struct {
 	Path string `json:"path"`
 }
 
-// FSStatResult is fs.stat's answer: the kind a row links by, and the three
-// metadata fields a listing row carries. A symlink is followed, so Kind never
-// spells `symlink` here — it describes the object the link would open or
-// expand, which is what a caller deciding whether to descend needs.
+// FSStatResult reports the opened kind and metadata without listing the parent.
+// A symlink is followed. Identity and Size describe the same sampled object,
+// letting a streaming download reject a replacement before its first read.
 type FSStatResult struct {
-	Kind    filesystem.Kind `json:"kind"`
-	Size    int64           `json:"size"`
-	MtimeNs int64           `json:"mtimeNs"`
-	Mode    uint32          `json:"mode"`
+	Kind     filesystem.Kind `json:"kind"`
+	Size     int64           `json:"size"`
+	MtimeNs  int64           `json:"mtimeNs"`
+	Mode     uint32          `json:"mode"`
+	Identity string          `json:"identity"`
 }
 
 // FSListParams addresses one page of one directory. Offset and Limit are the

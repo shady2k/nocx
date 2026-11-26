@@ -839,3 +839,12 @@ The window protocol's number does not move: the renderer never speaks this wire.
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.6`, and why `Version` moved to 34
+
+`fs.stat` returns `identity` alongside the size sampled from the same object.
+The Files panel pins both when it opens a download. Each range must report
+that identity, including the first, so an append does not extend the promised
+length and a replacement does not supply bytes for the wrong file. The field
+is required on the frozen stat response: helpers that disagree about the shape
+refuse at hello.

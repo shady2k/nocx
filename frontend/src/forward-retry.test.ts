@@ -68,9 +68,9 @@ describe('openForwardWithFallback', () => {
   })
 
   it('another typed cause never retries', async () => {
-    const open = vi.fn().mockRejectedValue(
-      new RpcError('no such profile', -32603, { reason: 'vault-changed' }),
-    )
+    const open = vi
+      .fn()
+      .mockRejectedValue(new RpcError('no such profile', -32603, { reason: 'vault-changed' }))
 
     await expect(openForwardWithFallback(open, 6768)).rejects.toThrow(/no such profile/)
     expect(open).toHaveBeenCalledTimes(1)

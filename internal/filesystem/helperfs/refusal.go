@@ -69,7 +69,7 @@ func classifyRefusal(name string, params any, err error) error {
 	case proto.FSCodeChangedSinceRead:
 		return &filesystem.ErrChangedSinceRead{Path: name, Reason: detail.Reason}
 	case proto.FSCodeExists:
-		return &fs.PathError{Op: "write", Path: name, Err: fs.ErrExist}
+		return &filesystem.ErrExists{Path: name, Err: fs.ErrExist}
 	case proto.FSCodeNoSpace:
 		return &fs.PathError{Op: "write", Path: name, Err: syscall.ENOSPC}
 	case proto.FSCodeSizeMismatch:

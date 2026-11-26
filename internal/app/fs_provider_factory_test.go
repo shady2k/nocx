@@ -221,6 +221,26 @@ func TestFilesystemProviderFactorySelectsServingHelperAndPinsConnection(t *testi
 				t.Fatalf("factory returned %T without the remote attestation or transfer seams", p)
 			}
 			p = attested
+
+			// The axis and the conditional write must survive the same wrapping
+			// the seams above had to survive: the composition site asserts these
+			// on what the factory returned, which is the wrapper, so a wrapper
+			// that carries only the embedded interface's methods would leave the
+			// panel with no reason to draw and the write with no version to check
+			// — while every other files.* call kept working.
+			axis, ok := any(p).(filesystem.AxisProvider)
+			if !ok {
+				t.Fatal("the factory's remote provider carries no axis; C28's reason could never reach a panel")
+			}
+			got, known := axis.HelperAxis()
+			if !known || got.State != string(farhelper.StateServing) {
+				t.Fatalf("HelperAxis = %+v, %v; want the serving axis the registry publishes", got, known)
+			}
+			versioned, ok := any(p).(filesystem.VersionedProvider)
+			if !ok || versioned.Versioned() == nil {
+				t.Fatal("the factory's helper-backed provider carries no conditional write")
+			}
+
 			var unavailable *filesystem.ErrUnavailable
 			if _, err := p.Root(t.Context()); !errors.As(err, &unavailable) || unavailable.Reason != "consent-denied" {
 				t.Fatalf("Root: %v; want registry refusal", err)
@@ -228,6 +248,13 @@ func TestFilesystemProviderFactorySelectsServingHelperAndPinsConnection(t *testi
 			current = "replacement"
 			if _, err := p.Root(t.Context()); !errors.As(err, &unavailable) || unavailable.Reason != "connection" {
 				t.Fatalf("Root after pane moved: %v; want connection refusal", err)
+			}
+			// The axis follows the PANE's binding, not only the connection's
+			// lifetime: the connection is still in the registry, and a panel that
+			// went on drawing its old state would name a helper this tab is no
+			// longer behind.
+			if moved, _ := axis.HelperAxis(); moved.Reason != "connection" {
+				t.Fatalf("HelperAxis after the pane moved = %+v; want the connection reason", moved)
 			}
 			if len(registry.asked) != 1 || registry.asked[0] != "original" {
 				t.Fatalf("acquisitions = %v; want [original]", registry.asked)

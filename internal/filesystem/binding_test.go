@@ -232,6 +232,13 @@ func TestHandleValidUntilReleaseInvalidAfter(t *testing.T) {
 	if _, err := h.Watch(ctx, []string{"/"}); err != nil {
 		t.Fatalf("Watch before release: %v", err)
 	}
+	// A binding whose provider contributed no conditional write refuses it
+	// with a statement about the BINDING, not about the handle: that is the
+	// distinction the last assertion below separates.
+	var unsupported *ErrVersionedUnsupported
+	if _, err := h.Versioned(); !errors.As(err, &unsupported) {
+		t.Fatalf("Versioned before release = %v, want ErrVersionedUnsupported — the stub contributed no such seam", err)
+	}
 	release()
 	// Second end of the interval: every method errors.
 	var hr *ErrHandleReleased
@@ -247,8 +254,94 @@ func TestHandleValidUntilReleaseInvalidAfter(t *testing.T) {
 	if _, err := h.Watch(ctx, []string{"/"}); !errors.As(err, &hr) {
 		t.Errorf("Watch after release = %v, want ErrHandleReleased", err)
 	}
-	// The provider was never reached after release: the stub is still open.
-	// (Nothing further to assert — the errors above are the proof.)
+	if _, err := h.Versioned(); !errors.As(err, &hr) {
+		t.Errorf("Versioned after release = %v, want ErrHandleReleased", err)
+	}
+	if _, ok := h.HelperAxis(); ok {
+		t.Error("HelperAxis after release answered an axis; a released handle names none, the same statement its false makes for a local tab")
+	}
+}
+
+// conditionalWrite is an identity for the conditional-write seam: this test
+// compares the value the binding carries, and the behaviour is helperfs's
+// subject (versioned_test.go).
+type conditionalWrite struct{ calls int }
+
+func (w *conditionalWrite) ReadVersion(context.Context, string, int64) ([]byte, Version, error) {
+	w.calls++
+	return nil, Version{}, nil
+}
+
+func (w *conditionalWrite) Commit(context.Context, string, []byte, Expect) (Version, error) {
+	w.calls++
+	return Version{}, nil
+}
+
+// TestHandleCarriesTheLiveAxisAndTheConditionalWrite pins the two seams this
+// step adds: a helper-backed binding reports its axis as the connection holds
+// it NOW rather than as it stood at files.open, and the conditional write
+// reaches the caller unchanged.
+func TestHandleCarriesTheLiveAxisAndTheConditionalWrite(t *testing.T) {
+	reg := New()
+	axis := HelperAxis{State: "unavailable", Reason: "consent-denied", Action: "ask-consent"}
+	versioned := &conditionalWrite{}
+	id, err := reg.Register(newStubProvider(), "s1", "v1:abc", Capabilities{
+		Axis:      func() (HelperAxis, bool) { return axis, true },
+		Versioned: versioned,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, release, err := reg.Acquire(id, owner("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if got, ok := h.HelperAxis(); !ok || got != axis {
+		t.Fatalf("HelperAxis = %+v, %v; want the connection's axis and true", got, ok)
+	}
+	// The axis moves while the binding lives, and the binding must say so:
+	// a captured status would still read consent-denied after the consent was
+	// given, which is the panel drawing a state the connection has left.
+	axis = HelperAxis{State: "serving"}
+	if got, ok := h.HelperAxis(); !ok || got != axis {
+		t.Fatalf("HelperAxis after the connection moved = %+v, %v; want the new state", got, ok)
+	}
+
+	v, err := h.Versioned()
+	if err != nil {
+		t.Fatalf("Versioned: %v", err)
+	}
+	if v != VersionedFiles(versioned) {
+		t.Fatalf("Versioned returned %v, want the provider's own seam", v)
+	}
+}
+
+// TestHandleWithoutAnAxisOrAConditionalWriteRefusesBoth is the local tab's
+// half of C28 and the SFTP tab's refusal, from the binding's side: no axis is
+// answered false, and the missing conditional write is a typed refusal naming
+// the binding rather than a nil that panics on use.
+func TestHandleWithoutAnAxisOrAConditionalWriteRefusesBoth(t *testing.T) {
+	reg := New()
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, release, err := reg.Acquire(id, owner("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if got, ok := h.HelperAxis(); ok || got != (HelperAxis{}) {
+		t.Fatalf("HelperAxis = %+v, %v; want false and the zero axis for a binding with none", got, ok)
+	}
+	_, err = h.Versioned()
+	var unsupported *ErrVersionedUnsupported
+	if !errors.As(err, &unsupported) || unsupported.BindingID != id {
+		t.Fatalf("Versioned = %v, want ErrVersionedUnsupported naming %q", err, id)
+	}
 }
 
 func TestReleaseIsIdempotent(t *testing.T) {

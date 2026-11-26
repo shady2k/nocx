@@ -112,3 +112,71 @@ func TestEndpointAttestedProviderCarriesTheReadStreamSeam(t *testing.T) {
 		t.Errorf("Source() returned %v, want the wrapped provider's own", down.Source())
 	}
 }
+
+// stubConditionalWrite is an identity for the conditional-write seam: these
+// tests compare the value the wrapper hands back, and the behaviour belongs to
+// helperfs (versioned_test.go).
+type stubConditionalWrite struct{}
+
+func (*stubConditionalWrite) ReadVersion(context.Context, string, int64) ([]byte, filesystem.Version, error) {
+	return nil, filesystem.Version{}, nil
+}
+
+func (*stubConditionalWrite) Commit(context.Context, string, []byte, filesystem.Expect) (filesystem.Version, error) {
+	return filesystem.Version{}, nil
+}
+
+// TestEndpointAttestedProviderCarriesTheAxisAndTheConditionalWrite is the
+// third and fourth instance of the wrapper's one trap: it holds its provider as
+// an interface, so a seam it does not declare is a seam the composition site
+// cannot see. The symptom of losing either is narrow and quiet — the panel
+// would show no reason on a host whose helper is absent (C28), and the
+// assistant's write would silently fall back to an unconditional one — which
+// is exactly why the assertion is here rather than left to review.
+func TestEndpointAttestedProviderCarriesTheAxisAndTheConditionalWrite(t *testing.T) {
+	axis := filesystem.HelperAxis{State: "paused", Reason: "connection", Action: "none"}
+	write := &stubConditionalWrite{}
+	wrapped := &endpointAttestedProvider{
+		writableProvider: &stubRemoteProvider{},
+		endpointID:       "v1:abc",
+		axis:             func() (filesystem.HelperAxis, bool) { return axis, true },
+		versioned:        write,
+	}
+
+	provider, ok := any(wrapped).(filesystem.AxisProvider)
+	if !ok {
+		t.Fatal("the attested wrapper dropped the helper axis; a panel over an unavailable host would have no reason to draw")
+	}
+	if got, known := provider.HelperAxis(); !known || got != axis {
+		t.Fatalf("HelperAxis = %+v, %v; want the wrapped axis and true", got, known)
+	}
+	conditional, ok := any(wrapped).(filesystem.VersionedProvider)
+	if !ok {
+		t.Fatal("the attested wrapper dropped the conditional write; a write would go out unchecked")
+	}
+	if conditional.Versioned() != filesystem.VersionedFiles(write) {
+		t.Fatalf("Versioned returned %v, want the wrapped provider's own seam", conditional.Versioned())
+	}
+}
+
+// TestEndpointAttestedProviderWithoutTheSeamsAnswersNeither is the other end:
+// a local or SFTP-backed wrapper contributed no axis and no conditional write,
+// and the wrapper says so — an axis that answers false and a nil seam the
+// binding turns into *ErrVersionedUnsupported. It must not panic, which an
+// embedded nil interface would.
+func TestEndpointAttestedProviderWithoutTheSeamsAnswersNeither(t *testing.T) {
+	wrapped := &endpointAttestedProvider{
+		writableProvider: &stubRemoteProvider{},
+		endpointID:       "v1:abc",
+	}
+	provider, ok := any(wrapped).(filesystem.AxisProvider)
+	if !ok {
+		t.Fatal("the wrapper stopped answering the axis interface at all")
+	}
+	if got, known := provider.HelperAxis(); known || got != (filesystem.HelperAxis{}) {
+		t.Fatalf("HelperAxis = %+v, %v; want false and the zero axis", got, known)
+	}
+	if v, _ := any(wrapped).(filesystem.VersionedProvider); v.Versioned() != nil {
+		t.Fatalf("Versioned returned %v; want nil for a provider with no conditional write", v.Versioned())
+	}
+}

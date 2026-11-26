@@ -155,6 +155,17 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if d, ok := provider.(filesystem.Downloader); ok {
 		caps.Source = d.Source()
 	}
+	// The axis and the conditional write are resolved here beside them, and
+	// for the same reason: this is the last moment the concrete provider is in
+	// hand. The axis is carried as the METHOD rather than as a status — a status
+	// sampled now would be the axis's state at files.open, and the panel has to
+	// draw the connection as it stands (C28).
+	if a, ok := provider.(filesystem.AxisProvider); ok {
+		caps.Axis = a.HelperAxis
+	}
+	if v, ok := provider.(filesystem.VersionedProvider); ok {
+		caps.Versioned = v.Versioned()
+	}
 	// The failure domain is resolved here for the sink's reason: this is the
 	// last moment the provider is in hand. A provider that can name its own
 	// domains supplies the namer itself; a provider that cannot — the SFTP

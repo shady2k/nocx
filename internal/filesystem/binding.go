@@ -38,6 +38,13 @@ type Binding struct {
 	// like sink and source: resolved once where the provider is still in
 	// hand, and read for the binding's whole life.
 	domain func(path string) Domain
+	// axis and versioned are the two seams a helper-backed provider
+	// contributes, captured beside sink, source and domain for the same
+	// reason: at Register the concrete provider is still in hand and
+	// afterwards it is not. Nil means the binding has none of it, which is
+	// the local tab's answer and the SFTP tab's answer respectively.
+	axis      func() (HelperAxis, bool)
+	versioned VersionedFiles
 
 	mu       sync.Mutex
 	closed   bool
@@ -104,6 +111,23 @@ type Handle interface {
 	// whose provider could not name one answers a domain of its own, so two
 	// bindings never share a bulkhead by accident.
 	DomainKey(path string) Domain
+	// HelperAxis reports the connection's helper axis as it stands — the same
+	// reason a failed call answers with, from one source rather than two
+	// (C28). A local tab has no helper axis and answers false.
+	//
+	// It takes the use-guard like every other method, so an axis is never
+	// read through a closing binding; a released handle answers false, which
+	// is the only refusal this signature can express and the same statement
+	// the bool already makes — "there is no axis here for you".
+	HelperAxis() (HelperAxis, bool)
+	// Versioned returns the binding's conditional-write half, or
+	// *ErrVersionedUnsupported when its provider contributed none. It is
+	// Uploader's mirror in shape and in reasoning: the refusal is a missing
+	// field rather than a check, and the guard covers the hand-off (D8) —
+	// what the caller then runs on the returned value is a write of its own,
+	// bounded by the helper's mutation budget, and closing the binding
+	// closes the lease underneath it rather than waiting for it.
+	Versioned() (VersionedFiles, error)
 	// Downloader returns the binding's read-stream half — the source one
 	// download runs on — or *ErrDownloadUnsupported when the binding has
 	// none. It is Uploader's mirror in every respect that matters, and the
@@ -126,6 +150,74 @@ type Caller interface {
 	Owns(sessionID sessionid.ID) bool
 }
 
+// HelperAxis is the connection's helper axis in this package's own vocabulary:
+// the state it is in, why it is not serving when it is not, and the action a
+// surface may offer. It is neutral on purpose (C30): internal/filesystem is
+// linked into the artifact we deploy onto somebody else's host, so it may not
+// reach internal/farhelper — and the panel must still be able to name the
+// reason the connection published.
+//
+// The values are farhelper's closed vocabulary, carried as strings for exactly
+// that reason. An empty Reason is "nothing to say yet" — a serving axis — and
+// is not an error.
+type HelperAxis struct {
+	State  string
+	Reason string
+	Action string
+}
+
+// Version identifies the bytes a whole-file read returned, and is the fence a
+// later conditional write compares against. Size and MtimeNs are the cheap
+// fields; SHA256 is the one a rewrite of the same length inside one filesystem
+// timestamp granule cannot fool.
+type Version struct {
+	Size    int64
+	MtimeNs int64
+	SHA256  string
+}
+
+// Expect is the condition a conditional write checks at the instant of the
+// rename. Version says "this file, still exactly as I read it"; Absent says
+// "nothing is at this name". They are alternatives, never a conjunction — a
+// caller that asks for both has not decided what it wants, and the host
+// refuses that request (bad_params) rather than picking one silently. Neither
+// set means the write is unconditional.
+type Expect struct {
+	Version *Version
+	Absent  bool
+}
+
+// VersionedFiles is the conditional write: read a file whole with the version
+// of exactly those bytes, then install new bytes on the host only if the file
+// still matches that version. The check is the HOST's, at the rename — a
+// coordinator-side compare would leave the window it exists to close — and
+// Commit either installs the bytes and answers the version they landed with,
+// or refuses with a typed error (ErrChangedSinceRead, ErrExists) and installs
+// nothing.
+//
+// ReadVersion refuses a file larger than maxBytes rather than returning a
+// prefix: a version of a prefix is not the file's version, and a caller that
+// got one would commit a fence describing bytes it never saw.
+type VersionedFiles interface {
+	ReadVersion(ctx context.Context, path string, maxBytes int64) (data []byte, version Version, err error)
+	Commit(ctx context.Context, path string, data []byte, expect Expect) (Version, error)
+}
+
+// AxisProvider is the optional seam a provider contributes when the bindings
+// it registers have a helper axis to report. The composition site asserts it
+// where the concrete provider is still in hand, the same way it asserts
+// Uploader and Downloader, and carries the method onto Capabilities.Axis.
+type AxisProvider interface {
+	HelperAxis() (HelperAxis, bool)
+}
+
+// VersionedProvider is the optional seam a provider contributes when it can
+// serve VersionedFiles. A provider that does not implement it contributes no
+// conditional write, and its binding refuses with *ErrVersionedUnsupported.
+type VersionedProvider interface {
+	Versioned() VersionedFiles
+}
+
 // Capabilities are the optional seams a provider contributed, resolved once
 // at files.open where the concrete provider is still in hand and carried on
 // the binding beside the endpoint attestation (design D7).
@@ -146,6 +238,18 @@ type Caller interface {
 type Capabilities struct {
 	Sink   transfer.Sink
 	Source transfer.Source
+	// Axis reports the binding's helper axis as it stands WHEN ASKED, or
+	// false for a binding that has no helper axis at all — a local tab. It
+	// is a function rather than a captured status for the reason the axis
+	// exists: it moves while the binding lives (a pause, a lost helper, a
+	// reconnect), and a value sampled at files.open would leave the panel
+	// drawing a state the connection had already left (C28, §5.10).
+	Axis func() (HelperAxis, bool)
+	// Versioned is the conditional-write seam, or nil. The nil is rule R1
+	// in the write direction: a provider that cannot check a version
+	// contributes nothing here and its binding refuses the conditional
+	// write with *ErrVersionedUnsupported.
+	Versioned VersionedFiles
 	// Domain names the failure domain one of this binding's paths draws on,
 	// or nil when the provider cannot say (a provider that implements
 	// filesystem.DomainNamer supplies its own through the composition site).
@@ -191,6 +295,8 @@ func (r *Registry) Register(p Provider, sessionID sessionid.ID, endpointID strin
 		sink:       caps.Sink,
 		source:     caps.Source,
 		domain:     caps.Domain,
+		axis:       caps.Axis,
+		versioned:  caps.Versioned,
 		watches:    make(map[string]Watch),
 		drained:    make(chan struct{}),
 	}
@@ -587,6 +693,54 @@ func (h *handle) Downloader() (transfer.Source, error) {
 		return nil, &ErrDownloadUnsupported{BindingID: h.b.id}
 	}
 	return h.b.source, nil
+}
+
+// HelperAxis reports the connection's helper axis as it stands.
+//
+// It reads the binding's live source rather than a value captured at
+// files.open, which is the whole point of carrying a function: a paused axis
+// that came back serving, or a connection that went away, must be reportable
+// without reopening the panel (C28). The provider is not touched — an axis is
+// a fact the registry holds, not a question to ask the host — so a surface can
+// draw the reason without spending a round trip on a host that is not
+// answering.
+//
+// The guard is taken for the same reason every other method takes it, and the
+// refusal is `false`: this signature has no error to carry ErrHandleReleased,
+// and "no axis here" is the same answer a local tab gives. A caller that must
+// tell the two apart asks before it releases the handle, which is the contract
+// the whole Handle surface states.
+func (h *handle) HelperAxis() (HelperAxis, bool) {
+	drop, err := h.begin()
+	if err != nil {
+		return HelperAxis{}, false
+	}
+	defer drop()
+	if h.b.axis == nil {
+		return HelperAxis{}, false
+	}
+	return h.b.axis()
+}
+
+// Versioned hands back the binding's conditional-write half.
+//
+// It is Uploader's mirror: the refusal is rule R1 expressed as a nil field
+// rather than a condition somebody must remember to check, the provider is not
+// touched on either path, and the use-guard covers the hand-off only (D8).
+// What the caller runs on the returned value is a write of its own, bounded by
+// the helper's mutation budget; closing the binding closes the lease underneath
+// it, so a write racing a close fails and names what it stranded rather than
+// writing through a torn-down lease.
+func (h *handle) Versioned() (VersionedFiles, error) {
+	drop, err := h.begin()
+	if err != nil {
+		return nil, err
+	}
+	defer drop()
+	if h.b.versioned == nil {
+		return nil, &ErrVersionedUnsupported{BindingID: h.b.id}
+	}
+	return h.b.versioned, nil
 }
 
 // release drops the use-guard. It is idempotent: the second call is a no-op,

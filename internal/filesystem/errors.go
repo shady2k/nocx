@@ -154,6 +154,24 @@ func (e *ErrChangedSinceRead) Error() string {
 	return fmt.Sprintf("filesystem: %s changed since read (%s)", e.Path, e.Reason)
 }
 
+// ErrExists means a conditional write that asked for an absent name found the
+// name taken, so nothing was replaced. It is typed here rather than left as
+// the filesystem's fs.ErrExist because the two answer different questions:
+// fs.ErrExist is "this name is occupied", which is how the upload sink's
+// KeepBoth retry recognises a collision, and ErrExists is "the condition you
+// committed under did not hold", which is what the panel tells a person.
+// Unwrap carries fs.ErrExist so both readings survive one error.
+type ErrExists struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrExists) Error() string {
+	return fmt.Sprintf("filesystem: %s exists", e.Path)
+}
+
+func (e *ErrExists) Unwrap() error { return e.Err }
+
 // ErrUnknownWriteOutcome means a commit response was lost and the intended
 // bytes could not be confirmed. Installing the upload again is not safe.
 type ErrUnknownWriteOutcome struct {
@@ -268,6 +286,23 @@ type ErrDownloadUnsupported struct {
 
 func (e *ErrDownloadUnsupported) Error() string {
 	return fmt.Sprintf("filesystem: binding %q has no read-stream seam; files cannot be downloaded from this tab", e.BindingID)
+}
+
+// ErrVersionedUnsupported — Versioned was called on a binding with no
+// conditional-write seam, which is a binding whose provider did not implement
+// VersionedProvider. Same shape and same reasoning as its two siblings above:
+// the refusal is the seam's absence rather than a check somebody performs, so
+// the local tab and the temporary SFTP tab inherit it without anybody adding a
+// check for the tab that cannot do it.
+//
+// It names the binding rather than the path, because the refusal is a property
+// of the binding and not of what was being written.
+type ErrVersionedUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrVersionedUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no conditional-write seam; a write cannot be checked against a version on this tab", e.BindingID)
 }
 
 // ErrCloseAbandoned — a binding was closed while a use-guard was still held,

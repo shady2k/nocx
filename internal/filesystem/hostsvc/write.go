@@ -28,13 +28,16 @@ package hostsvc
 //
 // # What the state machine guarantees
 //
-// open → committing → committed is the only forward path. Every refusal —
-// `size-mismatch`, `changed-since-read`, `exists`, a failed fsync or rename —
-// returns to open with the temporary still on disk, so the caller may fix the
-// condition (another name for KeepBoth, a fresh read for a changed file) and
-// commit again WITHOUT sending the bytes a second time. The one transition that
-// cannot fail back is the rename itself, and a session that has made it answers
-// its first outcome forever after.
+// opening → open → committing → committed is the only forward path. Every
+// refusal that leaves the temporary usable — `size-mismatch`,
+// `changed-since-read`, `exists`, a failed rename — returns to open with the
+// temporary still on disk, so the caller may fix the condition (another name
+// for KeepBoth, a fresh read for a changed file) and commit again WITHOUT
+// sending the bytes a second time. The two transitions that cannot fail back
+// are the rename, after which a session answers its first outcome forever, and
+// a failed fsync, after which the session is poisoned: the descriptor's
+// writeback error is reported once, a retry would read as healthy, and only
+// `write-abort` can end such a session.
 import (
 	"context"
 	"crypto/sha256"
@@ -81,9 +84,14 @@ const writeIDHexLen = 32
 type writeState int32
 
 const (
+	// writeOpening: the session is registered but its temporary is still being
+	// created. Nothing may be written or committed yet — those answer
+	// `bad-session` rather than waiting — and either end may still be taken by
+	// the caller or by its connection going away.
+	writeOpening writeState = iota
 	// writeOpen: the temporary accepts chunks and either end may still be
 	// taken by the caller or by its connection going away.
-	writeOpen writeState = iota
+	writeOpen
 	// writeCommitting: the rename is being prepared or has happened. A
 	// connection closing here does NOT abort — the answer is what the next
 	// connection asks for.
@@ -93,6 +101,12 @@ const (
 	writeCommitted
 	// writeAborted: the temporary is gone and the target was never touched.
 	writeAborted
+	// writeBroken: the commit's fsync reported a writeback failure. The
+	// session keeps its temporary and its bytes, but it can no longer be
+	// written or committed: the kernel reports a descriptor's writeback error
+	// ONCE, so a second fsync on this descriptor answers clean over pages that
+	// may never have reached the disk. Only abort can end it.
+	writeBroken
 )
 
 // writeSession is one caller's write in progress. Its fields are guarded by mu
@@ -127,7 +141,8 @@ type writeSession struct {
 // untouched" without a race or a sleep.
 type writeSeams struct {
 	createTemp   func(dir, name string) (*os.File, error)
-	writeChunk   func(f *os.File, data []byte) (int, error)
+	writeChunk   func(f *os.File, data []byte, offset int64) (int, error)
+	applyMode    func(temp, candidate string) error
 	syncTemp     func(f *os.File) error
 	rename       func(oldpath, newpath string, noReplace bool) error
 	beforeRename func()
@@ -203,23 +218,34 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	}
 	dir := filepath.Dir(resolved)
 
-	// The map lock is held across the creation on purpose: the temporary and
-	// its registration are ONE step, so a connection cannot end between them
-	// and leave a file whose session nobody recorded — the closure would have
-	// nothing to abort. It costs a create under a lock, which is a syscall on
-	// a directory the caller already named.
+	// Registration and creation are two critical sections, and the order is
+	// deliberate. The session is registered FIRST: a connection cannot end
+	// between the two and leave a temporary whose session nobody recorded —
+	// the closure would have nothing to abort — and while it is writeOpening a
+	// chunk or a commit of it is refused rather than made to wait. The
+	// creation itself is file I/O on the target's directory, and a directory
+	// on a hung mount does not answer: holding the service's lock across it
+	// would stall every other session, every other connection's teardown and
+	// the daemon's own ConnectionClosed.
+	sess := &writeSession{conn: host.ConnectionFrom(ctx), dir: dir}
+	sess.state.Store(int32(writeOpening))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.sessions == nil {
 		s.sessions = map[string]*writeSession{}
 	}
 	if _, busy := s.sessions[p.ID]; busy {
+		s.mu.Unlock()
 		return nil, &badSession{reason: "write session id is already in use"}
 	}
+	s.sessions[p.ID] = sess
+	s.mu.Unlock()
+
+	temp := filepath.Join(dir, writeTempPrefix+p.ID)
 	// #nosec G304 — the name is derived from the caller's id after it was
 	// checked to be hex, and the directory is the target's own, resolved above.
 	f, err := s.createTemp(dir, writeTempPrefix+p.ID)
 	if err != nil {
+		s.forget(p.ID, sess)
 		if errors.Is(err, fs.ErrExist) {
 			// A leftover from an earlier generation, or another session that
 			// chose the same id. Either way the caller must not write into it.
@@ -231,27 +257,44 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	// exact rather than dependent on a setting this process did not choose.
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
-		_ = os.Remove(filepath.Join(dir, writeTempPrefix+p.ID))
+		_ = os.Remove(temp)
+		s.forget(p.ID, sess)
 		return nil, err
 	}
-	// A request the caller withdrew — the connection went away — must not
-	// leave its temporary behind. The registration below and this check are
-	// the two orderings of one race: cancellation first is caught here, and a
-	// closure first is caught by ConnectionClosed, which sees whatever the
-	// map holds when it runs.
-	if err := ctx.Err(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(filepath.Join(dir, writeTempPrefix+p.ID))
-		return nil, err
+
+	sess.mu.Lock()
+	ctxErr := ctx.Err()
+	if ctxErr == nil && writeState(sess.state.Load()) == writeOpening {
+		sess.temp = temp
+		sess.file = f
+		sess.digest = sha256.New()
+		sess.state.Store(int32(writeOpen))
+		sess.mu.Unlock()
+		return proto.FSWriteOpenResult{Resolved: resolved}, nil
 	}
-	s.sessions[p.ID] = &writeSession{
-		conn:   host.ConnectionFrom(ctx),
-		dir:    dir,
-		temp:   filepath.Join(dir, writeTempPrefix+p.ID),
-		file:   f,
-		digest: sha256.New(),
+	// The request ended while its temporary was being created: the context was
+	// cancelled, or the connection closed. This call is the only one that knows
+	// the file's name yet, so removing it is its job too — and the mutex is
+	// released BEFORE the removal, so a connection closing elsewhere never
+	// waits behind an unlink on a directory that has stopped answering.
+	sess.state.Store(int32(writeAborted))
+	sess.mu.Unlock()
+	_ = f.Close()
+	_ = os.Remove(temp)
+	if ctxErr != nil {
+		return nil, ctxErr
 	}
-	return proto.FSWriteOpenResult{Resolved: resolved}, nil
+	return nil, &badSession{reason: "the write session ended before its temporary was ready"}
+}
+
+// forget removes a session that never became usable. The identity check keeps
+// a slow creation from deleting a session that reused its id afterwards.
+func (s *Service) forget(id string, sess *writeSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions[id] == sess {
+		delete(s.sessions, id)
+	}
 }
 
 // writeChunk appends one chunk to an open session. Only the next sequential
@@ -278,11 +321,29 @@ func (s *Service) writeChunk(ctx context.Context, raw json.RawMessage) (any, err
 	if p.Offset != sess.size {
 		return nil, &badOffset{expected: sess.size, got: p.Offset}
 	}
-	n, err := s.writeTo(sess.file, p.Data)
-	if err != nil {
-		return nil, err
-	}
-	if n != len(p.Data) {
+	n, err := s.writeTo(sess.file, p.Data, sess.size)
+	if err != nil || n != len(p.Data) {
+		// Either the write failed after it had already moved bytes, or it moved
+		// fewer than asked — ENOSPC arrives WITH a partial count on the
+		// ordinary filesystems, and the answer the caller receives is the size
+		// from before this chunk. The caller will send the same chunk again at
+		// the offset the session still reports, and a retry that landed behind
+		// the abandoned half would leave a temporary longer than the size this
+		// session acknowledges — which the commit would either install as a
+		// corrupted file or refuse forever. Cutting back to the acknowledged
+		// size is the one place that tail can be removed.
+		if truncErr := sess.file.Truncate(sess.size); truncErr != nil {
+			// The temporary no longer matches what this session counted, so
+			// nothing may be committed from it. Abort still removes it.
+			sess.state.Store(int32(writeBroken))
+			if err != nil {
+				return nil, err
+			}
+			return nil, truncErr
+		}
+		if err != nil {
+			return nil, err
+		}
 		return nil, io.ErrShortWrite
 	}
 	sess.size += int64(n)
@@ -334,6 +395,10 @@ func (s *Service) writeCommit(ctx context.Context, raw json.RawMessage) (any, er
 		return sess.outcome, nil
 	case writeAborted:
 		return proto.FSWriteCommitResult{Outcome: proto.FSOutcomeAborted, Path: p.Path}, nil
+	case writeOpening:
+		return nil, &badSession{reason: "the write session's temporary is not ready yet"}
+	case writeBroken:
+		return nil, &badSession{reason: "the write session's temporary failed on disk and cannot be committed"}
 	}
 	if p.Size != sess.size {
 		// The session stays open and its temporary stays alive: the caller's
@@ -348,8 +413,14 @@ func (s *Service) writeCommit(ctx context.Context, raw json.RawMessage) (any, er
 	sess.state.Store(int32(writeCommitting))
 	result, err := s.install(sess, candidate, p)
 	if err != nil {
-		// Every refusal before the rename leaves the session exactly as it
-		// was: open, with its temporary and its bytes.
+		if writeState(sess.state.Load()) == writeBroken {
+			// install poisoned the session: its fsync already reported the
+			// writeback failure once, so a retry on that descriptor would read
+			// as healthy and install pages that never reached the disk.
+			return nil, err
+		}
+		// Every other refusal leaves the session exactly as it was: open, with
+		// its temporary and its bytes.
 		sess.state.Store(int32(writeOpen))
 		return nil, err
 	}
@@ -362,30 +433,47 @@ func (s *Service) writeCommit(ctx context.Context, raw json.RawMessage) (any, er
 // already at writeCommitting.
 func (s *Service) install(sess *writeSession, candidate string, p proto.FSWriteCommitParams) (proto.FSWriteCommitResult, error) {
 	if err := s.syncFile(sess.file); err != nil {
+		// A writeback failure — EIO, or ENOSPC/EDQUOT reported at fsync — is not
+		// the error the caller may retry. On Linux and NFS the kernel clears the
+		// descriptor's error flag after the first report, so a second fsync on
+		// this descriptor answers 0 and would install a file with pages that
+		// never reached the disk. The session is poisoned instead, and only
+		// write-abort can end it.
+		sess.state.Store(int32(writeBroken))
 		return proto.FSWriteCommitResult{}, err
 	}
 	info, err := sess.file.Stat()
 	if err != nil {
 		return proto.FSWriteCommitResult{}, err
 	}
+	if info.Size() != sess.size {
+		// Second line: the temporary holds something this session never
+		// acknowledged — a partially written chunk on a filesystem that does
+		// not shorten it, say. Installing it would land a file whose length and
+		// digest disagree with the version this commit answers, so the commit
+		// refuses and leaves the session open for the caller to abort.
+		return proto.FSWriteCommitResult{}, fmt.Errorf(
+			"hostsvc: the temporary holds %d bytes, the session acknowledges %d", info.Size(), sess.size)
+	}
 	mtimeNs := info.ModTime().UnixNano()
 
 	unlock := s.locks.lock(candidate)
 	defer unlock()
 
-	if err := s.applyMode(sess.temp, candidate); err != nil {
-		return proto.FSWriteCommitResult{}, err
-	}
-	// The mode the file will LAND with is applied to the temporary, so a
-	// refusal below must put the session's privacy back: the bytes are the
-	// caller's until they are installed, and a temporary left at the target's
-	// 0755 would let the rest of the account read a write that never happened.
+	// The mode the file will LAND with is applied to the temporary, so it is
+	// registered as private BEFORE the widening: a failure inside applyMode —
+	// a chmod that half succeeded, an owner step that fails after the mode
+	// already moved — would otherwise leave the temporary at the target's 0755
+	// with no defer in place to put it back.
 	stillPrivate := true
 	defer func() {
 		if stillPrivate && sess.temp != "" {
 			_ = os.Chmod(sess.temp, 0o600)
 		}
 	}()
+	if err := s.applyMode(sess.temp, candidate); err != nil {
+		return proto.FSWriteCommitResult{}, err
+	}
 	if err := checkExpectation(candidate, p.Expect); err != nil {
 		return proto.FSWriteCommitResult{}, err
 	}
@@ -464,16 +552,26 @@ func (s *Service) ConnectionClosed(h *host.Host) {
 		if sess.conn != any(h) {
 			continue
 		}
-		if writeState(sess.state.Load()) != writeOpen {
-			continue
-		}
-		sess.mu.Lock()
-		if writeState(sess.state.Load()) == writeOpen {
-			if err := s.discard(sess); err == nil {
+		switch writeState(sess.state.Load()) {
+		case writeOpening:
+			// The temporary is still being created. Marking the session over
+			// is all this can do — the write-open that owns the file's name
+			// removes it on its way out, and the mark is the only evidence it
+			// needs.
+			sess.mu.Lock()
+			if writeState(sess.state.Load()) == writeOpening {
 				sess.state.Store(int32(writeAborted))
 			}
+			sess.mu.Unlock()
+		case writeOpen:
+			sess.mu.Lock()
+			if writeState(sess.state.Load()) == writeOpen {
+				if err := s.discard(sess); err == nil {
+					sess.state.Store(int32(writeAborted))
+				}
+			}
+			sess.mu.Unlock()
 		}
-		sess.mu.Unlock()
 	}
 }
 
@@ -537,11 +635,11 @@ func (s *Service) createTemp(dir, name string) (*os.File, error) {
 	return os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 }
 
-func (s *Service) writeTo(f *os.File, data []byte) (int, error) {
+func (s *Service) writeTo(f *os.File, data []byte, offset int64) (int, error) {
 	if s.seams.writeChunk != nil {
-		return s.seams.writeChunk(f, data)
+		return s.seams.writeChunk(f, data, offset)
 	}
-	n, err := f.Write(data)
+	n, err := f.WriteAt(data, offset)
 	if err != nil {
 		return n, diskFull(err)
 	}
@@ -578,6 +676,14 @@ func (s *Service) renameFile(oldpath, newpath string, noReplace bool) error {
 // package initialisation, because reading a umask means SETTING it for a
 // moment and a helper serves several connections at a time.
 func (s *Service) applyMode(temp, candidate string) error {
+	if s.seams.applyMode != nil {
+		return s.seams.applyMode(temp, candidate)
+	}
+	return applyTargetMode(temp, candidate)
+}
+
+// applyTargetMode is applyMode's real body, one call away from the seam.
+func applyTargetMode(temp, candidate string) error {
 	info, err := os.Lstat(candidate)
 	switch {
 	case err == nil:

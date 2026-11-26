@@ -3,7 +3,6 @@
 package hostsvc
 
 import (
-	"errors"
 	"os"
 	"syscall"
 )
@@ -32,21 +31,22 @@ func newFileMode() os.FileMode { return 0o666 &^ processUmask }
 
 // chownToTarget gives the temporary the existing target's owner and group, so
 // the file that lands is owned as the file it replaces was. The attempt is
-// best effort: a helper runs as the account, and giving a file away is
-// privileged — EPERM is the ordinary answer when the target belongs to
-// somebody else, and it is not a reason to refuse a write the account could
-// otherwise make.
+// best effort and EVERY failure of it is swallowed: a helper runs as the
+// account, giving a file away is privileged, and the refusal is spelled
+// differently by each kernel and each mount — EPERM when the target belongs to
+// somebody else, EINVAL on an NFSv4 mount whose idmap does not know the id,
+// EACCES, ENOTSUP, or ENOENT for a temporary that vanished under us. None of
+// them is a reason to refuse a write the account could otherwise make, and a
+// commit that failed here would be a save that cannot be made at all on that
+// mount.
 func chownToTarget(temp string, info os.FileInfo) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil
 	}
 	// #nosec G115 — uid/gid are the kernel's own 32-bit account identities.
-	err := os.Chown(temp, int(st.Uid), int(st.Gid))
-	if err == nil || errors.Is(err, syscall.EPERM) {
-		return nil
-	}
-	return err
+	_ = os.Chown(temp, int(st.Uid), int(st.Gid))
+	return nil
 }
 
 // syncDir flushes a directory entry to disk, which is what makes a rename

@@ -823,7 +823,7 @@ func TestWriteCommitFailureLeavesTheSessionWhole(t *testing.T) {
 		svc := newWriteService(t, dir)
 		id := writeID(t.Name())
 		writeOpenOK(t, svc, id, file)
-		svc.seams.writeChunk = func(*os.File, []byte) (int, error) {
+		svc.seams.writeChunk = func(*os.File, []byte, int64) (int, error) {
 			return 0, &os.PathError{Op: "write", Path: file, Err: syscall.ENOSPC}
 		}
 		_, err := callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: 0, Data: []byte("bytes")})
@@ -855,13 +855,30 @@ func TestWriteCommitFailureLeavesTheSessionWhole(t *testing.T) {
 		if left := temps(t, dir); len(left) != 1 {
 			t.Fatalf("a failed fsync left %d temporaries, want the session's one", len(left))
 		}
+		// A retry must not be accepted: on Linux and NFS the kernel clears the
+		// error flag on the descriptor after the first report, so the SECOND
+		// fsync would answer 0 and install pages that never reached the disk.
 		svc.seams.syncTemp = nil
-		result := commitOK(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
-		if result.Outcome != proto.FSOutcomeCommitted {
-			t.Fatalf("the retried commit answered %q, want committed", result.Outcome)
+		_, err = commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
+		if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
+			t.Fatalf("a commit after a failed fsync refused %q, want %q", code, ErrCodeBadSession)
 		}
-		if got := mustRead(t, file); got != "new\n" {
-			t.Fatalf("the retried commit left %q, want the new bytes", got)
+		_, err = callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: wrote.Size, Data: []byte("!")})
+		if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
+			t.Fatalf("a chunk after a failed fsync refused %q, want %q", code, ErrCodeBadSession)
+		}
+		if got := mustRead(t, file); got != "old\n" {
+			t.Fatalf("a session poisoned by a failed fsync installed the file: %q", got)
+		}
+		// abort is the way out: the temporary goes and the target stays.
+		if abort := abortOK(t, svc, id); abort.Outcome != proto.FSOutcomeAborted {
+			t.Fatalf("abort of a poisoned session answered %q, want %q", abort.Outcome, proto.FSOutcomeAborted)
+		}
+		if left := temps(t, dir); len(left) != 0 {
+			t.Fatalf("abort of a poisoned session left temporaries %v", left)
+		}
+		if got := mustRead(t, file); got != "old\n" {
+			t.Fatalf("target holds %q after aborting the poisoned session", got)
 		}
 	})
 
@@ -893,6 +910,303 @@ func TestWriteCommitFailureLeavesTheSessionWhole(t *testing.T) {
 			t.Fatalf("the retried commit left %q, want the new bytes", got)
 		}
 	})
+}
+
+// waitDone is a guard against a hang, not a timing assertion: it fails the
+// test when the work it waits for never finishes. The assertions above it are
+// what the test is about; this exists so a lock held across the temporary's
+// creation reports itself as a failure instead of a timeout of the whole
+// package.
+func waitDone(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s waited for the temporary's creation to return", what)
+	}
+}
+
+// TestWriteChunkRetriedAfterAPartialWriteLeavesNoTail is the ENOSPC hole:
+// write(2) may put some of a chunk on disk AND report no space, while the
+// answer the caller receives is the size from BEFORE the chunk. Retrying that
+// chunk at the offset the session still reports must produce exactly the
+// caller's bytes — a temporary carrying the abandoned half behind them would
+// be installed as a file longer than the version the commit answers.
+func TestWriteChunkRetriedAfterAPartialWriteLeavesNoTail(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "note.txt")
+	mustWrite(t, file, []byte("old\n"))
+	svc := newWriteService(t, dir)
+	id := writeID(t.Name())
+	writeOpenOK(t, svc, id, file)
+
+	const chunk = "0123456789"
+	svc.seams.writeChunk = func(f *os.File, data []byte, offset int64) (int, error) {
+		// Half the chunk lands — through the same position-moving call the
+		// real write makes — and then the filesystem says there is no room.
+		n, err := f.Write(data[:len(data)/2])
+		if err != nil {
+			return n, err
+		}
+		return n, syscall.ENOSPC
+	}
+	_, err := callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: 0, Data: []byte(chunk)})
+	if code, _ := refusalCode(t, svc, err); code != ErrCodeNoSpace {
+		t.Fatalf("refusal = %q, want %q", code, ErrCodeNoSpace)
+	}
+	svc.seams.writeChunk = nil
+
+	// The caller retries the same chunk at the same offset, as the answer it
+	// received says it should.
+	wrote := writeOK(t, svc, id, 0, chunk)
+	result := commitOK(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
+
+	if got := mustRead(t, file); got != chunk {
+		t.Fatalf("target holds %q, want exactly the chunk the caller sent", got)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(len(chunk)) {
+		t.Fatalf("the installed file is %d bytes, want %d — a partial write left a tail", info.Size(), len(chunk))
+	}
+	sum := sha256.Sum256([]byte(chunk))
+	if result.Version == nil || result.Version.Size != int64(len(chunk)) || result.Version.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("committed version = %+v, want the digest of the chunk", result.Version)
+	}
+}
+
+// TestWriteCommitRefusesATemporaryLongerThanTheSession is the second line: even
+// if bytes reach the temporary through a path the chunk op did not count, the
+// commit must not install a file whose size and digest would then disagree with
+// the version it reports.
+func TestWriteCommitRefusesATemporaryLongerThanTheSession(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "note.txt")
+	mustWrite(t, file, []byte("old\n"))
+	svc := newWriteService(t, dir)
+	id := writeID(t.Name())
+	writeOpenOK(t, svc, id, file)
+
+	svc.seams.writeChunk = func(f *os.File, data []byte, offset int64) (int, error) {
+		n, err := f.WriteAt(append(append([]byte{}, data...), "tail"...), offset)
+		if err != nil {
+			return n, err
+		}
+		return len(data), nil
+	}
+	wrote := writeOK(t, svc, id, 0, "new\n")
+	svc.seams.writeChunk = nil
+
+	if _, err := commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size}); err == nil {
+		t.Fatal("a commit installed a temporary longer than the size the session acknowledges")
+	}
+	if got := mustRead(t, file); got != "old\n" {
+		t.Fatalf("a commit of a longer temporary replaced the target: %q", got)
+	}
+	if left := temps(t, dir); len(left) != 1 {
+		t.Fatalf("the refusal left %d temporaries, want the session's one", len(left))
+	}
+}
+
+// TestWriteCommitPutsTheTemporariesPrivacyBackWhenTheModeStepFails: the
+// temporary receives the target's mode before the commit knows whether it may
+// land, so a failure anywhere after that widening must return the temporary to
+// 0600. Otherwise a write that never happened leaves the caller's bytes
+// readable by the rest of the account.
+func TestWriteCommitPutsTheTemporariesPrivacyBackWhenTheModeStepFails(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "note.txt")
+	mustWrite(t, file, []byte("old\n"))
+	// #nosec G302 — the fixture needs a mode the commit would have to
+	// preserve; nothing here is a secret.
+	if err := os.Chmod(file, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc := newWriteService(t, dir)
+	id := writeID(t.Name())
+	writeOpenOK(t, svc, id, file)
+	wrote := writeOK(t, svc, id, 0, "new\n")
+
+	boom := errors.New("mode step failed after widening the temporary")
+	svc.seams.applyMode = func(temp, _ string) error {
+		// The real order is the mode first, the owner second: this is a
+		// failure after the widening, which is the case that must not leak.
+		// #nosec G302 — widening is exactly what this test is about: the
+		// commit gives the temporary the target's mode before it may land.
+		if err := os.Chmod(temp, 0o755); err != nil {
+			return err
+		}
+		return boom
+	}
+	_, err := commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
+	if !errors.Is(err, boom) {
+		t.Fatalf("commit = %v, want the injected mode failure", err)
+	}
+	svc.seams.applyMode = nil
+
+	left := temps(t, dir)
+	if len(left) != 1 {
+		t.Fatalf("the refusal left %d temporaries, want the session's one", len(left))
+	}
+	info, err := os.Stat(left[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("a refused commit left its temporary at %v, want 0600", info.Mode().Perm())
+	}
+	if got := mustRead(t, file); got != "old\n" {
+		t.Fatalf("the failed commit replaced the target: %q", got)
+	}
+
+	// The session is still whole: the same bytes commit once the step works.
+	result := commitOK(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
+	if result.Outcome != proto.FSOutcomeCommitted || mustRead(t, file) != "new\n" {
+		t.Fatalf("the retried commit answered %+v, want a commit of the session's bytes", result)
+	}
+}
+
+// TestWriteOpenDoesNotHoldTheServiceLockWhileItCreatesTheTemporary: creating
+// the temporary is a file I/O call on the target's directory, and a directory
+// on a hung mount does not answer. Holding the service's lock across it would
+// stall every other session and every other connection's teardown, so the lock
+// covers the registration and nothing else.
+func TestWriteOpenDoesNotHoldTheServiceLockWhileItCreatesTheTemporary(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "note.txt")
+	mustWrite(t, file, []byte("old\n"))
+	svc := newWriteService(t, dir)
+
+	// Another connection with an open session of its own.
+	other := host.New(strings.NewReader(""), io.Discard, "hash", "instance", discardLog())
+	otherCtx := host.WithConnection(context.Background(), other)
+	elsewhere := writeID(t.Name() + "-elsewhere")
+	if _, err := svc.Call(otherCtx, proto.OpWriteOpen, callParams(t, proto.FSWriteOpenParams{ID: elsewhere, Path: file})); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
+	svc.seams.createTemp = func(dir, name string) (*os.File, error) {
+		close(entered)
+		<-releaseCh
+		// #nosec G304 — the test's own directory and the service's own name.
+		return os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	}
+	t.Cleanup(func() { svc.seams.createTemp = nil })
+
+	slow := writeID(t.Name() + "-slow")
+	slowParams := callParams(t, proto.FSWriteOpenParams{ID: slow, Path: file})
+	slowAgain := callParams(t, proto.FSWriteOpenParams{ID: slow, Path: file})
+	abortParams := callParams(t, proto.FSWriteAbortParams{ID: elsewhere})
+	opened := make(chan error, 1)
+	go func() {
+		_, err := svc.Call(context.Background(), proto.OpWriteOpen, slowParams)
+		opened <- err
+	}()
+	<-entered
+
+	// Everything below runs while the temporary is still being created.
+	var (
+		duplicate     error
+		abortedResult any
+		abortedErr    error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, duplicate = svc.Call(context.Background(), proto.OpWriteOpen, slowAgain)
+		svc.ConnectionClosed(other)
+		abortedResult, abortedErr = svc.Call(context.Background(), proto.OpWriteAbort, abortParams)
+	}()
+	waitDone(t, done, "a second write-open, an abort of another session and a foreign connection's close")
+
+	release()
+	if err := <-opened; err != nil {
+		t.Fatalf("the slow write-open failed: %v", err)
+	}
+
+	if code, _ := refusalCode(t, svc, duplicate); code != ErrCodeBadSession {
+		t.Fatalf("a duplicate id during the creation refused %q, want %q", code, ErrCodeBadSession)
+	}
+	if abortedErr != nil {
+		t.Fatalf("abort of another session during the creation: %v", abortedErr)
+	}
+	if aborted, ok := abortedResult.(proto.FSWriteAbortResult); !ok || aborted.Outcome != proto.FSOutcomeAborted {
+		t.Fatalf("abort of another session during the creation = %+v, want %q", abortedResult, proto.FSOutcomeAborted)
+	}
+
+	// The slow session survived all of it and is the only one left.
+	if abort := abortOK(t, svc, slow); abort.Outcome != proto.FSOutcomeAborted {
+		t.Fatalf("abort of the slow session answered %q, want %q", abort.Outcome, proto.FSOutcomeAborted)
+	}
+	if left := temps(t, dir); len(left) != 0 {
+		t.Fatalf("the sessions left temporaries %v", left)
+	}
+}
+
+// TestWriteOpenCleansUpWhenItIsAbandonedWhileCreatingTheTemporary: the caller
+// may go away — its context is cancelled, or its connection closes — while the
+// temporary is still being created. The file must not outlive the request, and
+// the session must not stay half-registered.
+func TestWriteOpenCleansUpWhenItIsAbandonedWhileCreatingTheTemporary(t *testing.T) {
+	for _, name := range []string{"connection closed", "context cancelled"} {
+		t.Run(name, func(t *testing.T) {
+			dir := tempDir(t)
+			file := filepath.Join(dir, "note.txt")
+			mustWrite(t, file, []byte("old\n"))
+			svc := newWriteService(t, dir)
+
+			conn := host.New(strings.NewReader(""), io.Discard, "hash", "instance", discardLog())
+			ctx, cancel := context.WithCancel(host.WithConnection(context.Background(), conn))
+			t.Cleanup(cancel)
+
+			entered := make(chan struct{})
+			releaseCh := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+			defer release()
+			svc.seams.createTemp = func(dir, name string) (*os.File, error) {
+				close(entered)
+				<-releaseCh
+				// #nosec G304 — the test's own directory and the service's own name.
+				return os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			}
+			t.Cleanup(func() { svc.seams.createTemp = nil })
+
+			params := callParams(t, proto.FSWriteOpenParams{ID: writeID(t.Name()), Path: file})
+			opened := make(chan error, 1)
+			go func() {
+				_, err := svc.Call(ctx, proto.OpWriteOpen, params)
+				opened <- err
+			}()
+			<-entered
+
+			abandoned := make(chan struct{})
+			go func() {
+				defer close(abandoned)
+				if name == "connection closed" {
+					svc.ConnectionClosed(conn)
+					return
+				}
+				cancel()
+			}()
+			waitDone(t, abandoned, "the abandonment of a write-open in flight")
+			release()
+
+			if err := <-opened; err == nil {
+				t.Fatal("an abandoned write-open answered success")
+			}
+			if left := temps(t, dir); len(left) != 0 {
+				t.Fatalf("an abandoned write-open left temporaries %v", left)
+			}
+		})
+	}
 }
 
 // TestWriteAbortOfACommittedSessionReportsTheCommit: the caller that aborts

@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // The fs service's refusal codes — the machine-readable half of an answer the
@@ -49,6 +50,30 @@ const (
 	// The bytes were never returned, because a mixture of two versions has no
 	// version to name.
 	ErrCodeChangedDuringRead = "changed-during-read"
+
+	// ── the write session's refusals (nocx-oalo1.12.3) ─────────────────
+
+	// ErrCodeNoSpace: the filesystem refused bytes — ENOSPC, or EDQUOT when the
+	// account's quota is what ran out. One code, because the caller's action is
+	// the same in both and the difference is not the panel's to explain.
+	ErrCodeNoSpace = "no-space"
+	// ErrCodeChangedSinceRead: the commit's expectation no longer holds. The
+	// session stays open with its temporary, so the caller may re-read and send
+	// only the changed chunks rather than the whole file again.
+	ErrCodeChangedSinceRead = "changed-since-read"
+	// ErrCodeExists: `expect.absent` was asked of a name that is taken. Nothing
+	// was replaced; the session stays open so the caller can commit under
+	// another name (KeepBoth) without re-sending its bytes.
+	ErrCodeExists = "exists"
+	// ErrCodeBadOffset: a chunk that does not continue the session's stream.
+	// Details carries `expected` and `offset`.
+	ErrCodeBadOffset = "bad-offset"
+	// ErrCodeSizeMismatch: the commit states a byte count the session does not
+	// hold. Details carries `expected` and `size`.
+	ErrCodeSizeMismatch = "size-mismatch"
+	// ErrCodeBadSession: the id is malformed, already in use, or names a session
+	// that is no longer open. Details carries the reason.
+	ErrCodeBadSession = "bad-session"
 )
 
 // Refusal gives the service's errors their wire codes and structured details.
@@ -83,6 +108,35 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 	var moving *changedDuringRead
 	if errors.As(err, &moving) {
 		return ErrCodeChangedDuringRead, nil, true
+	}
+
+	var badParams *badParams
+	if errors.As(err, &badParams) {
+		return proto.ErrCodeBadParams, nil, true
+	}
+	var badSession *badSession
+	if errors.As(err, &badSession) {
+		return ErrCodeBadSession, mustJSON(reasonDetails{Reason: badSession.reason}), true
+	}
+	var offset *badOffset
+	if errors.As(err, &offset) {
+		return ErrCodeBadOffset, mustJSON(offsetDetails{Expected: offset.expected, Offset: offset.got}), true
+	}
+	var mismatch *sizeMismatch
+	if errors.As(err, &mismatch) {
+		return ErrCodeSizeMismatch, mustJSON(mismatchDetails{Expected: mismatch.expected, Size: mismatch.got}), true
+	}
+	var changed *changedSinceRead
+	if errors.As(err, &changed) {
+		return ErrCodeChangedSinceRead, mustJSON(reasonDetails{Reason: changed.reason}), true
+	}
+	var exists *targetExists
+	if errors.As(err, &exists) {
+		return ErrCodeExists, nil, true
+	}
+	var full *noSpace
+	if errors.As(err, &full) {
+		return ErrCodeNoSpace, nil, true
 	}
 
 	var notFound *filesystem.ErrNotFound
@@ -133,6 +187,8 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 		return ErrCodePermissionDenied, nil, true
 	case errors.Is(err, syscall.ENOTDIR):
 		return ErrCodeNotDir, nil, true
+	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		return ErrCodeNoSpace, nil, true
 	}
 	return "", nil, false
 }
@@ -184,6 +240,69 @@ func (e *changedDuringRead) Error() string {
 	return "hostsvc: " + e.path + " changed during every read attempt"
 }
 
+// ── the write session's own error types ───────────────────────────────
+
+// badParams is a request whose parts contradict each other — an expectation
+// that asks for two conditions at once, a negative size. It carries the wire's
+// generic `bad_params` rather than a code of its own because it says nothing
+// about the host: the request was wrong.
+type badParams struct{ reason string }
+
+func (e *badParams) Error() string { return "hostsvc: bad params: " + e.reason }
+
+// badSession is an id this service cannot serve: malformed, already taken, or
+// naming a session that is no longer open.
+type badSession struct{ reason string }
+
+func (e *badSession) Error() string { return "hostsvc: bad session: " + e.reason }
+
+// badOffset is a chunk that does not continue the stream. Details carries both
+// ends so the caller can resend from where the session actually is.
+type badOffset struct{ expected, got int64 }
+
+func (e *badOffset) Error() string {
+	return "hostsvc: chunk does not continue the write session"
+}
+
+// sizeMismatch is a commit stating a byte count the session does not hold.
+type sizeMismatch struct{ expected, got int64 }
+
+func (e *sizeMismatch) Error() string {
+	return "hostsvc: the commit's size is not the session's size"
+}
+
+// changedSinceRead is the fence's refusal: the target moved between the read
+// the caller's version came from and this commit.
+type changedSinceRead struct{ path, reason string }
+
+func (e *changedSinceRead) Error() string {
+	return "hostsvc: " + e.path + " changed since it was read (" + e.reason + ")"
+}
+
+// targetExists is `expect.absent` meeting a name that is taken.
+type targetExists struct{ path string }
+
+func (e *targetExists) Error() string {
+	return "hostsvc: " + e.path + " already exists"
+}
+
+// noSpace is the filesystem refusing bytes. diskFull wraps the raw errno in it
+// so the refusal code does not depend on which call noticed.
+type noSpace struct{ err error }
+
+func (e *noSpace) Error() string { return "hostsvc: no space left for the write" }
+
+func (e *noSpace) Unwrap() error { return e.err }
+
+// diskFull turns ENOSPC and EDQUOT into the one refusal the caller acts on and
+// leaves every other error as it was.
+func diskFull(err error) error {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return &noSpace{err: err}
+	}
+	return err
+}
+
 type kindDetails struct {
 	Kind string `json:"kind"`
 }
@@ -200,6 +319,16 @@ type countDetails struct {
 type sizeDetails struct {
 	Observed int64 `json:"observed"`
 	Limit    int64 `json:"limit"`
+}
+
+type offsetDetails struct {
+	Expected int64 `json:"expected"`
+	Offset   int64 `json:"offset"`
+}
+
+type mismatchDetails struct {
+	Expected int64 `json:"expected"`
+	Size     int64 `json:"size"`
 }
 
 func mustJSON(v any) json.RawMessage {

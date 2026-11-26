@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-abort.schema.json",
+  "title": "HelperFSWriteAbortResult",
+  "description": "Result of the helper fs service's write-abort op: what became of the session. `aborted` means the temporary is gone and the target was never touched — including for an id this daemon never held, because there is then no temporary of ours, which is the state the caller asked for. `committed` means the session had already installed its file; the abort of a finished session is a fact the caller wanted, not an error, and the target is not touched.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome"],
+  "properties": {
+    "outcome": {
+      "description": "Which of the two outcomes the session had when the abort reached it.",
+      "type": "string",
+      "enum": ["aborted", "committed"]
+    }
+  }
+}

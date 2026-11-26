@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-commit.params.schema.json",
+  "title": "HelperFSWriteCommitParams",
+  "description": "Params of the helper fs service's write-commit op: install one session's temporary file, but only over the version the caller expected. The path must remain in the directory write-open resolved — the name may differ, which is how a KeepBoth collision is answered without sending the bytes again — and anything that escapes that directory is refused `invalid-path`. The size is the caller's own count of what it sent: a session holding another number answers `size-mismatch` and stays open, which is the cheap check that catches a chunk the caller believed delivered.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "path", "size"],
+  "properties": {
+    "id": {
+      "description": "The session id write-open was given.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "path": {
+      "description": "The absolute path to install at. Its directory must resolve to the one write-open resolved; its final component may name another file in that directory.",
+      "type": "string",
+      "minLength": 1
+    },
+    "size": {
+      "description": "The number of bytes the caller believes it wrote. It must equal the session's own count, or the commit is refused `size-mismatch`.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "expect": {
+      "description": "The condition the target must still satisfy. Omitted or empty means no condition: the temporary replaces whatever is at the name. Its two members are ALTERNATIVES — a request carrying both is refused `bad_params`, because two conditions at once mean the caller has not decided what it wants.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "description": "What a whole-file read answered: the target must still have this size, this mtime and this digest, or the commit is refused `changed-since-read`. Size and mtime are the cheap fields; the digest is what survives a rewrite of the same length inside one filesystem timestamp granule.",
+          "$ref": "https://nocx.local/contracts/helper/fs.read.schema.json#/$defs/version"
+        },
+        "absent": {
+          "description": "True asks that nothing exist at this name: an occupied name answers `exists` and nothing is replaced. False says nothing at all, and is refused `bad_params`.",
+          "const": true
+        }
+      }
+    }
+  }
+}

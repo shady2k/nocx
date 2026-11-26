@@ -278,13 +278,20 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	})
 	defer sessions.Close()
 
+	// The fs service is a property of the DAEMON, like the sessions: a write
+	// session's temporary and the outcome a lost reply is answered with must
+	// outlive the connection that started them, so one service serves every
+	// host this process accepts and an id it never held is what answers
+	// `unknown-outcome` after a restart (nocx-oalo1.12.3).
+	files := fshostsvc.New(filesystemlocal.New())
+
 	if err := endpoint.Serve(daemonCtx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
 		// Which services this build answers is decided by
 		// registerHelperServices, in one place (services.go) — including
 		// whether an ssh service is among them, which is the whole of what
 		// nocx_local_ssh changes about a helper.
-		registerHelperServices(h, hostsvc.New(factory), sessions, fshostsvc.New(filesystemlocal.New()), sshCap)
+		registerHelperServices(h, hostsvc.New(factory), sessions, files, sshCap)
 		// The connection is bound to the service, not the other way round:
 		// the sessions outlive it. These are the two lines that used to sit
 		// in main around one stdin/stdout connection and now sit inside the

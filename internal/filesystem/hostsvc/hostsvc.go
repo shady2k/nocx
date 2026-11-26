@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"syscall"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
@@ -58,6 +59,14 @@ const maxReadLength = local.MaxReadBytes + 1
 const wholeReadAttempts = 3
 
 // Service is the helper's `fs` service.
+//
+// ONE SERVICE PER DAEMON, NOT PER CONNECTION. The read ops are stateless, but a
+// write session is not: its temporary belongs to the process, and an outcome
+// has to survive the connection that asked for it — a commit whose reply was
+// lost is answered on the NEXT connection, and an id this process never held
+// must answer `unknown-outcome` rather than a second write. The service is
+// therefore constructed once, like the session service, and registered on every
+// host the daemon accepts.
 type Service struct {
 	provider *local.Provider
 
@@ -66,6 +75,17 @@ type Service struct {
 	// whether the file moved. A test rewrites the file there, which models
 	// "somebody wrote during the read" without a sleeping writer goroutine.
 	afterRead func(attempt int)
+
+	// seams fail one step of a commit deterministically; every nil field is
+	// the real call (see writeSeams).
+	seams writeSeams
+
+	// mu guards sessions. locks serialises installs that land on one resolved
+	// path, so the conditional check and the rename are one critical section
+	// for everybody in this process.
+	mu       sync.Mutex
+	sessions map[string]*writeSession
+	locks    *pathLocks
 }
 
 // New builds the fs service over a local provider. The provider is the
@@ -73,22 +93,27 @@ type Service struct {
 // local.WithRoot, WithEntryCap or WithListTimeout — the same division
 // git/hostsvc.New(factory) keeps.
 func New(provider *local.Provider) *Service {
-	return &Service{provider: provider}
+	return &Service{provider: provider, sessions: map[string]*writeSession{}, locks: newPathLocks()}
 }
 
 // Name is the reserved service name the host registers it under.
 func (s *Service) Name() string { return proto.ServiceFS }
 
-// Ops is the closed set of operations this service serves. The write half is
-// deliberately absent: an op this generation does not have is one a
-// coordinator learns about at hello, not one it learns about by writing.
+// Ops is the closed set of operations this service serves: the five read ops
+// and the four that make one write a session. An op this generation does not
+// have is one a coordinator learns about at hello, not one it learns about by
+// writing.
 func (s *Service) Ops() []string {
-	return []string{proto.OpRoot, proto.OpStat, proto.OpList, proto.OpCanonical, proto.OpRead}
+	return []string{
+		proto.OpRoot, proto.OpStat, proto.OpList, proto.OpCanonical, proto.OpRead,
+		proto.OpWriteOpen, proto.OpWrite, proto.OpWriteCommit, proto.OpWriteAbort,
+	}
 }
 
 // ParamsSchema declares each op's params type; the host decodes a request's
-// params through it and audits it for argv at registration (D3). None of the
-// five takes a command, a script or a bare string list.
+// params through it and audits it for argv at registration (D3). None of them
+// takes a command, a script or a bare string list — a write carries bytes and a
+// destination, never a way to run them.
 func (s *Service) ParamsSchema(op string) *host.Schema {
 	switch op {
 	case proto.OpRoot:
@@ -99,6 +124,14 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.FSListParams{})
 	case proto.OpRead:
 		return host.SchemaFor(proto.FSReadParams{})
+	case proto.OpWriteOpen:
+		return host.SchemaFor(proto.FSWriteOpenParams{})
+	case proto.OpWrite:
+		return host.SchemaFor(proto.FSWriteParams{})
+	case proto.OpWriteCommit:
+		return host.SchemaFor(proto.FSWriteCommitParams{})
+	case proto.OpWriteAbort:
+		return host.SchemaFor(proto.FSWriteAbortParams{})
 	}
 	return nil
 }
@@ -121,6 +154,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		return s.canonical(ctx, params)
 	case proto.OpRead:
 		return s.read(ctx, params)
+	case proto.OpWriteOpen:
+		return s.writeOpen(ctx, params)
+	case proto.OpWrite:
+		return s.writeChunk(ctx, params)
+	case proto.OpWriteCommit:
+		return s.writeCommit(ctx, params)
+	case proto.OpWriteAbort:
+		return s.writeAbort(ctx, params)
 	}
 	return nil, fmt.Errorf("hostsvc: no op %q", op)
 }

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ports.sample.params.schema.json",
+  "title": "HelperPortsSampleParams",
+  "description": "Params of the helper ports service's sample op, and they are deliberately empty. The host is the connection's, the ladder and its order are the helper's, and the pass bound is the helper's own, so a caller has nothing to say about a sample that would not be a command by another name. The empty shape is also the one every older generation accepts, which keeps this op's refusal a fact about the generation (`unknown_service`) instead of a `bad_params` lie about a request that was well-formed.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

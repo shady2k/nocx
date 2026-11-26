@@ -23,9 +23,16 @@ import (
 // the host the helper runs on is what Files does once it stops opening SFTP,
 // and an artifact that could not do it would fall back to the connection stack
 // the deployed helper must not link (C30).
-func registerHelperServices(h *host.Host, git host.Service, sessions host.Service, fs host.Service, sshCap sshSeam) {
+//
+// `ports` is registered by every build for the same reason (nocx-oalo1.13.2):
+// the ladder runs the HOST's own tools and needs no ssh client to do it, so a
+// deployed artifact can answer "what listens here" for the connection it is
+// already serving. It is constructed per accepted connection beside the others,
+// because its probe selection is that connection's.
+func registerHelperServices(h *host.Host, git host.Service, sessions host.Service, fs host.Service, ports host.Service, sshCap sshSeam) {
 	h.Register(git)
 	h.Register(sessions)
 	h.Register(fs)
+	h.Register(ports)
 	sshCap.register(h)
 }

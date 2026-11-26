@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	portshostsvc "github.com/shady2k/nocx/internal/portsprobe/hostsvc"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -87,6 +88,7 @@ func (manualTimer) Stop() bool { return true }
 type panelStand struct {
 	sessions *session.Service
 	files    *fshostsvc.Service
+	ports    *portshostsvc.Service
 	timers   *manualTimers
 	drained  chan struct{}
 	client   *client.Client
@@ -183,6 +185,10 @@ func standUpPanelDaemonWithAdmission(t *testing.T, admission fshostsvc.Admission
 		}
 	})
 	stand.files = files
+	// The ports service the accept loop registers beside it: the host it runs
+	// on is the stand's own quiet runner, so a sample never executes a probe on
+	// the machine running the tests.
+	stand.ports = portshostsvc.New(quietPortTools{})
 
 	helperEnd, coordEnd := net.Pipe()
 	// The helper's end of the socket is watched, so a test can tell whether the
@@ -195,6 +201,7 @@ func standUpPanelDaemonWithAdmission(t *testing.T, admission fshostsvc.Admission
 	h.Register(stubService{"git-stub"})
 	h.Register(stand.sessions)
 	h.Register(stand.files)
+	h.Register(stand.ports)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -268,6 +275,30 @@ func TestAPanelClientOutlivesTheConnectedIdleBound(t *testing.T) {
 			return false
 		}
 	})
+}
+
+// TestAPortsPanelClientOutlivesTheConnectedIdleBound is nocx-oalo1.13.2's half
+// of the .12.5 rule, at the seam a Ports panel reaches: this connection asked
+// `ports.sample`, which is panel work, so the bound armed by the bind must
+// retire nothing. The silent client beside it is still retired — the exemption
+// is the errand and not the connection.
+func TestAPortsPanelClientOutlivesTheConnectedIdleBound(t *testing.T) {
+	stand := standUpPanelDaemon(t)
+
+	var sample proto.PortsSampleResult
+	if err := stand.client.Call(context.Background(), proto.ServicePorts, proto.OpPortsSample, proto.PortsSampleParams{}, &sample); err != nil {
+		t.Fatalf("%s.%s: %v", proto.ServicePorts, proto.OpPortsSample, err)
+	}
+	if sample.State != proto.PortsStateAvailable {
+		t.Fatalf("sample state = %q (%s), want available", sample.State, sample.Classification)
+	}
+
+	stand.timers.fire(session.ConnectedIdleGrace)
+	select {
+	case <-stand.drained:
+		t.Fatal("a helper retired while a panel client was sampling its host's ports")
+	default:
+	}
 }
 
 // TestASilentClientIsStillRetired is the other half, end to end (nocx-398ca

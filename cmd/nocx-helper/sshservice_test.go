@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/portsprobe"
+	portshostsvc "github.com/shady2k/nocx/internal/portsprobe/hostsvc"
 )
 
 const helperHash = "testhash"
@@ -40,6 +43,18 @@ func (s stubService) Call(context.Context, string, json.RawMessage) (any, error)
 	return struct{}{}, nil
 }
 
+// quietPortTools is a host whose own ss answers an empty table: it is the ports
+// service's runner in this package's stands, so a test that asks for a sample
+// never executes a real probe on the machine running the tests.
+type quietPortTools struct{}
+
+func (quietPortTools) Run(_ context.Context, c portsprobe.Command) (*portsprobe.Result, error) {
+	if c.Argv[0] == "ss" {
+		return &portsprobe.Result{}, nil
+	}
+	return nil, fmt.Errorf("%w: %s", portsprobe.ErrCommandAbsent, c.Argv[0])
+}
+
 // standUpHelper runs one real helper connection — the same host, the same
 // handshake, the same client a coordinator uses — with the services THIS BUILD
 // registers on it.
@@ -52,7 +67,7 @@ func standUpHelper(t *testing.T, seam sshSeam) *client.Client {
 	t.Helper()
 	helperEnd, coordEnd := net.Pipe()
 	h := host.New(helperEnd, helperEnd, helperHash, "instance-1", discardLog())
-	registerHelperServices(h, stubService{"git-stub"}, stubService{"session-stub"}, stubService{"fs-stub"}, seam)
+	registerHelperServices(h, stubService{"git-stub"}, stubService{"session-stub"}, stubService{"fs-stub"}, portshostsvc.New(quietPortTools{}), seam)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

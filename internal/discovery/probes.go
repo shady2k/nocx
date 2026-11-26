@@ -2,7 +2,6 @@ package discovery
 
 import (
 	"bytes"
-	"strings"
 
 	"github.com/shady2k/nocx/internal/portsprobe"
 	"github.com/shady2k/nocx/internal/remoteprobe"
@@ -79,24 +78,4 @@ func splitFrame(out []byte) (body []byte, leading, trailing bool) {
 		return nil, true, false
 	}
 	return bytes.Join(lines[1:len(lines)-1], []byte("\n")), true, true
-}
-
-// notFoundOnStderr reports whether stderr says the tool was not found — the
-// shell's "sh: ss: not found" / "command not found" — independent of the
-// exit status, for shells that report it with a non-127 status.
-func notFoundOnStderr(stderr []byte) bool {
-	low := strings.ToLower(string(stderr))
-	return strings.Contains(low, "not found") || strings.Contains(low, "no such file")
-}
-
-// stderrExcerpt bounds the stderr carried on a Sample for diagnostics: the
-// design shows truncated stderr, never an uncontrolled dump of remote output
-// (spec §6).
-const stderrExcerptCap = 2 << 10
-
-func stderrExcerpt(b []byte) string {
-	if len(b) > stderrExcerptCap {
-		return string(b[:stderrExcerptCap]) + " [truncated]"
-	}
-	return string(b)
 }

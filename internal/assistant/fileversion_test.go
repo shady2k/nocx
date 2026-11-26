@@ -59,7 +59,8 @@ func TestFileVersion_RejectsChangedFileAndNamesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CaptureFileVersion: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("after"), 0o600); err != nil {
+	err = os.WriteFile(path, []byte("after"), 0o600)
+	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -111,17 +112,20 @@ func TestFileVersion_RejectsAPathThatNowNamesAnotherObject(t *testing.T) {
 	if version.Canonical != canonicalOf(t, target) {
 		t.Fatalf("canonical = %q, want the symlink's target %q", version.Canonical, target)
 	}
-	if err := os.Remove(link); err != nil {
+	err = os.Remove(link)
+	if err != nil {
 		t.Fatalf("Remove link: %v", err)
 	}
-	if err := os.WriteFile(link, []byte("same bytes"), 0o600); err != nil {
+	err = os.WriteFile(link, []byte("same bytes"), 0o600)
+	if err != nil {
 		t.Fatalf("WriteFile link: %v", err)
 	}
 	info, err := os.Stat(target)
 	if err != nil {
 		t.Fatalf("Stat target: %v", err)
 	}
-	if err := os.Chtimes(link, info.ModTime(), info.ModTime()); err != nil {
+	err = os.Chtimes(link, info.ModTime(), info.ModTime())
+	if err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
 

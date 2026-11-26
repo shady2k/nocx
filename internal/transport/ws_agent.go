@@ -2894,6 +2894,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
 	}
+	// The assistant's route to the pane's files is the same two operations —
+	// or neither, when no provider factory is wired. See
+	// filesOperationsForAgent: the honest refusal, not a nil dereference.
+	filesOpen, filesBind := filesOperationsForAgent(files)
 	// buildFor is every dependency an agent handler has EXCEPT the two that
 	// only a connection can supply. It is split out because the run-stopping
 	// path has a caller that is not on the agent lane: policy.setRule and
@@ -2910,7 +2914,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 			harness: s.agentHarness, harnessID: s.agentHarnessID,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
-			filesOpen: files.open, filesBind: files.binding,
+			filesOpen: filesOpen, filesBind: filesBind,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

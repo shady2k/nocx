@@ -84,6 +84,24 @@ func (h agentHandlers) filesFor(sessionID session.ID) assistantFiles {
 // stage exists to close.
 var ErrNoAssistantFiles = errors.New("transport: no file binding is available to the assistant")
 
+// filesOperationsForAgent is the assistant's half of the files route: the two
+// operations the Files panel runs on, or neither of them.
+//
+// A build can wire the registry and leave the provider factory unset — the
+// honest shape of "no filesystem anywhere", and the state a transport test
+// names when it wants the unwired answer. Handing the operations over anyway
+// would give the run a route whose every acquisition dereferences a nil
+// factory: a panic where the composition promises ErrNoAssistantFiles
+// (ws_agent.go's field comment says so, and this is the line that keeps it
+// true). The panel keeps its own answer for the same build; only the
+// assistant's route is gated here.
+func filesOperationsForAgent(route filesRoute) (capability.FilesystemOpenOperation, capability.FilesystemBindingOperation) {
+	if route.factory == nil {
+		return nil, nil
+	}
+	return route.open, route.binding
+}
+
 // Acquire builds the pane's provider, registers it as a binding of its own, and
 // hands back a guarded Handle over it. The release closes the binding, so the
 // provider is torn down with the call.

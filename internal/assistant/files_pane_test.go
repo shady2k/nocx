@@ -1,10 +1,12 @@
 package assistant
 
 // A file tool on a pane that is not this machine is REFUSED, and this
-// machine's disk is not touched (ADR-anntnxdj §5, decision 3): until stage 8
-// the file tools are built on local.New(), so `files.*` refuse on a non-local
-// pane, say that the remote file tools are coming, and stay declared — the
-// tool list is the cache prefix and it does not move when they arrive.
+// machine's disk is not touched (ADR-anntnxdj §5, decision 3): the tools act
+// through the pane's own binding — a HandleSource, from which each call takes a
+// short-lived filesystem.Handle and closes it — and agenttools.localPaneOnly
+// refuses a pane that is not local until .11.4. So `files.*` refuse on a
+// non-local pane, say that the remote file tools are coming, and stay declared
+// — the tool list is the cache prefix and it does not move when they arrive.
 //
 // The refusal is a REFUSAL AND NOT A FAULT: the call's own slot carries our
 // sentence, the run continues, and the person is never handed a failure about

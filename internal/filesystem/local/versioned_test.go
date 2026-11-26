@@ -8,6 +8,7 @@ package local
 // (AGENTS.md testing rule 3).
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -44,6 +45,29 @@ func TestReadVersionAnswersTheVersionOfTheBytesItReturned(t *testing.T) {
 	}
 	if version.Size != int64(len(data)) || version.SHA256 != filesystem.ContentDigest(data) || version.MtimeNs == 0 {
 		t.Fatalf("version = %+v, want the size and digest of exactly these bytes", version)
+	}
+}
+
+// TestReadVersionReadsALinuxPseudoFileWhole pins the regression that answered a
+// Linux pseudo-file as one byte: /proc/version is regular by mode and empty by
+// st_size, so a read sized from the stat returned the first byte as though it
+// were the whole file, with no error and a version that agreed with itself. The
+// bound is the only thing that may shorten a read (nocx-a62cl.11.1).
+func TestReadVersionReadsALinuxPseudoFileWhole(t *testing.T) {
+	const path = "/proc/version"
+	want, err := os.ReadFile(path) //nolint:gosec // a fixed kernel path this test is about
+	if err != nil {
+		t.Skipf("%s is not readable on this machine: %v", path, err)
+	}
+	data, version, err := New().ReadVersion(context.Background(), path, filesystem.MaxReadBytes)
+	if err != nil {
+		t.Fatalf("ReadVersion(%s): %v", path, err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("bytes = %d bytes, want the %d the file answered", len(data), len(want))
+	}
+	if version.Size != int64(len(want)) || version.SHA256 != filesystem.ContentDigest(want) || version.MtimeNs == 0 {
+		t.Fatalf("version = %+v, want the size and digest of all %d bytes", version, len(want))
 	}
 }
 

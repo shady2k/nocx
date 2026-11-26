@@ -87,19 +87,16 @@ func (p *Provider) ReadVersion(ctx context.Context, path string, maxBytes int64)
 	if !before.Mode().IsRegular() {
 		return nil, filesystem.Version{}, &filesystem.ErrNotRegular{Path: path, Kind: filesystem.KindOf(before.Mode())}
 	}
-	// The buffer is one byte past the file's OWN size — enough to see EOF and no
-	// more — rather than one byte past the bound, which allocated the whole
-	// 2 MiB default for every read of a small file. The file is larger than the
-	// bound exactly when the read could fill limit+1 bytes, so the two sizes
-	// agree about which case this is; a file that outgrew the smaller buffer is
-	// caught by the size comparison below, before its bytes are trusted.
-	bufSize := before.Size() + 1
-	if max := limit + 1; bufSize > max {
-		bufSize = max
-	}
-	buf := make([]byte, bufSize)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	// The read is bounded by limit+1 bytes and NEVER sized from st_size: a Linux
+	// pseudo-file such as /proc/version is regular by mode and reports size 0, so
+	// a buffer sized from the stat reads one byte and answers that byte as the
+	// whole file. io.ReadAll grows from what the stream actually returns, so the
+	// memory bound is still limit+1 and a small file still costs a small buffer.
+	// The file is over the bound exactly when more than limit bytes came back,
+	// and the stat taken around the read is compared only to notice a change
+	// landing during it.
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
 		return nil, filesystem.Version{}, wrapPathErr("read", path, err)
 	}
 	if p.afterRead != nil {
@@ -109,13 +106,19 @@ func (p *Provider) ReadVersion(ctx context.Context, path string, maxBytes int64)
 	if err != nil {
 		return nil, filesystem.Version{}, wrapPathErr("read", path, err)
 	}
-	if int64(n) == limit+1 {
-		return nil, filesystem.Version{}, &filesystem.ErrByteLimit{Path: path, Observed: before.Size(), Limit: limit}
+	// Observed answers how many bytes the file has: its own size when the stat
+	// knows it, and what was actually read when it does not — a pseudo-file's
+	// st_size says 0 while the read gets the whole answer.
+	observed := before.Size()
+	if int64(len(data)) > observed {
+		observed = int64(len(data))
+	}
+	if int64(len(data)) > limit {
+		return nil, filesystem.Version{}, &filesystem.ErrByteLimit{Path: path, Observed: observed, Limit: limit}
 	}
 	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return nil, filesystem.Version{}, &filesystem.ErrChangedDuringRead{Path: path}
 	}
-	data := buf[:n]
 	return data, filesystem.Version{
 		Size:    int64(len(data)),
 		MtimeNs: after.ModTime().UnixNano(),

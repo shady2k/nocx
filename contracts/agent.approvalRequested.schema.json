@@ -33,6 +33,8 @@
       "minLength": 1,
       "enum": [
         "files.read",
+        "files.list",
+        "files.search",
         "fetch.url",
         "session.list",
         "session.read",

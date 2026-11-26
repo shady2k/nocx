@@ -26,6 +26,8 @@ export interface AgentApprovalRetired {
    */
   tool:
     | 'files.read'
+    | 'files.list'
+    | 'files.search'
     | 'fetch.url'
     | 'session.list'
     | 'session.read'

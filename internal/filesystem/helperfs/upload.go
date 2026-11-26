@@ -90,9 +90,13 @@ type uploadWrite struct {
 }
 
 func (w *uploadWrite) Write(data []byte) (int, error) {
+	lease, err := w.p.openingLease(w.ctx, w.opening.Client())
+	if err != nil {
+		return 0, err
+	}
 	params := proto.FSWriteParams{ID: w.id, Offset: w.offset, Data: data}
 	var out proto.FSWriteResult
-	if err := w.p.call(w.ctx, proto.OpWrite, w.resolved, params, &out); err != nil {
+	if err := w.p.callLease(w.ctx, lease, proto.OpWrite, w.resolved, params, &out); err != nil {
 		return 0, err
 	}
 	if size := w.offset + int64(len(data)); out.Size != size {
@@ -116,14 +120,11 @@ func (w *uploadWrite) Commit(ctx context.Context, name string, size int64, expec
 	// appear determinate. The same budget covers a lost result and its replay.
 	mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadMutationTimeout)
 	defer cancel()
-	lease, err := w.p.acquire(mutationCtx)
+	lease, err := w.p.openingLease(mutationCtx, w.opening.Client())
 	if err != nil {
+		// Nothing attempted the commit yet, so a peer that did not open the
+		// session cannot change what this upload has to answer.
 		return err
-	}
-	if lease.Ctx.Err() != nil || lease.Client() != w.opening.Client() {
-		// Nothing attempted the commit yet. A different peer cannot prove an
-		// upload was installed before the first commit was sent.
-		return w.p.unavailable()
 	}
 	var result proto.FSWriteCommitResult
 	err = lease.Client().Call(mutationCtx, proto.ServiceFS, proto.OpWriteCommit, params, &result)
@@ -159,6 +160,20 @@ func (w *uploadWrite) Commit(ctx context.Context, name string, size int64, expec
 	}
 }
 
+// recoverable reports whether the axis can still hand out a peer that answers
+// for the same write session: a paused transport that reconnects, a decision in
+// progress, or a helper the registry will redial. Every other unavailable axis
+// is a final answer, and waiting for it would only spend the mutation budget.
+func recoverable(status farhelper.Status) bool {
+	switch status.State {
+	case farhelper.StateServing, farhelper.StateStarting, farhelper.StatePaused:
+		return true
+	case farhelper.StateUnavailable:
+		return status.Reason == farhelper.ReasonHelperLost
+	}
+	return false
+}
+
 func (p *Provider) replacementLease(ctx context.Context, old *client.Client) (*farhelper.Lease, error) {
 	changed := make(chan struct{}, 1)
 	stop := p.reg.Watch(func(id string, _ farhelper.Status) {
@@ -172,12 +187,25 @@ func (p *Provider) replacementLease(ctx context.Context, old *client.Client) (*f
 	defer stop()
 	for {
 		lease, err := p.acquire(ctx)
-		var unavailable *filesystem.ErrUnavailable
-		switch {
-		case err == nil && lease.Client() != old:
-			return lease, nil
-		case err != nil && (!errors.As(err, &unavailable) || unavailable.Reason != string(farhelper.ReasonHelperLost)):
-			return nil, err
+		if err == nil {
+			if lease.Client() != old {
+				return lease, nil
+			}
+		} else {
+			var unavailable *filesystem.ErrUnavailable
+			if !errors.As(err, &unavailable) {
+				// The caller's own context ended: no axis answer improves it.
+				return nil, err
+			}
+			status, known := p.reg.Axis(p.connectionID)
+			if !known || !recoverable(status) {
+				return nil, err
+			}
+			if status.State == farhelper.StateServing {
+				// The axis started serving between the refusal and this reading,
+				// so ask again now instead of waiting for a change already made.
+				continue
+			}
 		}
 		// Watch was registered before acquiring, so neither retirement of the
 		// old peer nor publication of a replacement can be missed.

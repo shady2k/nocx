@@ -60,6 +60,14 @@ func (p *Provider) call(ctx context.Context, op, name string, params, out any) e
 	if err != nil {
 		return err
 	}
+	return p.callLease(ctx, lease, op, name, params, out)
+}
+
+// callLease runs one request on a lease already in hand, so a caller that must
+// refuse a peer can check it first and still use the one request path every
+// other call takes: cancellation follows the lease, and a lost lane becomes the
+// axis's own reason rather than the transport's.
+func (p *Provider) callLease(ctx context.Context, lease *farhelper.Lease, op, name string, params, out any) error {
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(lease.Ctx, cancel)
@@ -67,11 +75,26 @@ func (p *Provider) call(ctx context.Context, op, name string, params, out any) e
 	if lease.Ctx.Err() != nil {
 		return p.unavailable()
 	}
-	err = lease.Client().Call(child, proto.ServiceFS, op, params, out)
+	err := lease.Client().Call(child, proto.ServiceFS, op, params, out)
 	if lease.Ctx.Err() != nil || errors.Is(err, client.ErrLost) {
 		return p.unavailable()
 	}
 	return classifyRefusal(name, params, err)
+}
+
+// openingLease acquires the axis and refuses every peer but the one that opened
+// the write session. A helper that never saw the session answers the next chunk
+// or the replay with bad-session, which is not an answer about this upload, and
+// the bytes must not be offered to it in the first place.
+func (p *Provider) openingLease(ctx context.Context, opening *client.Client) (*farhelper.Lease, error) {
+	lease, err := p.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if lease.Ctx.Err() != nil || lease.Client() != opening {
+		return nil, p.unavailable()
+	}
+	return lease, nil
 }
 
 func (p *Provider) Root(ctx context.Context) (filesystem.Root, error) {

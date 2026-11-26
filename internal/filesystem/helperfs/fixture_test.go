@@ -177,9 +177,11 @@ type panelConnections struct {
 func panelConnection(id string) farhelper.Connection {
 	return farhelper.Connection{ID: id, HostKeyFingerprint: id, State: hostconn.Connected, Generation: 1, Shells: 1}
 }
+
 func (*panelConnections) List() []farhelper.Connection {
 	return []farhelper.Connection{panelConnection(panelID)}
 }
+
 func (s *panelConnections) Watch(f func(farhelper.Connection)) func() { s.change = f; return func() {} }
 
 type panelConsent struct {
@@ -212,12 +214,15 @@ type panelRemote struct {
 func (*panelRemote) Probe(context.Context, farhelper.Target) (farhelper.Platform, error) {
 	return farhelper.Platform{GOOS: "linux", GOARCH: "amd64"}, nil
 }
+
 func (*panelRemote) Find(context.Context, farhelper.Target, farhelper.Platform) (farhelper.Installed, bool, error) {
 	return farhelper.Installed{Dir: "/fixture", Generation: peerHash}, true, nil
 }
+
 func (*panelRemote) Install(context.Context, farhelper.Target, farhelper.Platform) (farhelper.Installed, error) {
 	return farhelper.Installed{}, errors.New("fixture already has a helper")
 }
+
 func (p *panelRemote) Dial(_ context.Context, target farhelper.Target, _ farhelper.Installed) (*client.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

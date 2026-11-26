@@ -137,7 +137,8 @@ func TestHelperFilesystemTypedRefusals(t *testing.T) {
 func TestHelperFilesystemConsentRevokesHeldList(t *testing.T) {
 	root := tempTree(t)
 	entered := make(chan struct{})
-	svc := &fsObserver{Service: newHostService(t, local.New(local.WithRoot(root))),
+	svc := &fsObserver{
+		Service: newHostService(t, local.New(local.WithRoot(root))),
 		intercept: func(ctx context.Context, op string, _ json.RawMessage, next func() (any, error)) (any, error) {
 			if op != proto.OpList {
 				return next()
@@ -145,7 +146,8 @@ func TestHelperFilesystemConsentRevokesHeldList(t *testing.T) {
 			close(entered)
 			<-ctx.Done()
 			return nil, ctx.Err()
-		}}
+		},
+	}
 	reg, consent := singlePeer(t, svc)
 	p := helperfs.New(reg, panelID, root)
 	ctx := testContext(t)

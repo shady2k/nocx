@@ -85,6 +85,13 @@ const (
 	// spawn. It is distinct from a spawn failure because the caller can act on
 	// it — close a session — and cannot act on a failed fork.
 	ErrCodeWindowBudget = "window_budget"
+	// ErrCodeDraining is a helper generation that has stopped admitting new
+	// work. The session service's lifecycle has always spelled it this way on
+	// the wire (`session.Admit`), and the fs service's write-open takes the
+	// same reservation — so a caller told `internal` instead would read a
+	// deliberate retirement as a broken helper and replay against a daemon on
+	// its way out (review m1).
+	ErrCodeDraining = "draining"
 	// ErrCodeSpawnFailed is the shell or its PTY not starting.
 	ErrCodeSpawnFailed = "spawn_failed"
 	// ErrCodeNoSSHClient is a spawn-ssh on a helper built without

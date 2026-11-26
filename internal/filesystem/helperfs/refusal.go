@@ -13,6 +13,16 @@ import (
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
+// drainingRefusal reports whether the helper refused because its generation
+// has stopped admitting new write sessions. That is a retirement, not a
+// failure: the daemon is on its way out, the lease this call used is about to
+// end, and the panel should be told the helper is unavailable rather than the
+// host being broken (review m1).
+func drainingRefusal(err error) bool {
+	var refusal *client.RefusalError
+	return errors.As(err, &refusal) && refusal.Code == proto.ErrCodeDraining
+}
+
 // Classify the host's closed vocabulary without dropping the filesystem or
 // transfer contracts. The underlying refusal still identifies protocol errors
 // that do not have a filesystem equivalent (such as bad_params).

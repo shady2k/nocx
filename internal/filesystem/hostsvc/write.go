@@ -116,8 +116,11 @@ const (
 type writeSession struct {
 	// conn is the host.Host the session was opened on, nil outside a host.
 	// Only its identity is used: a connection ending aborts what is still
-	// open on it.
-	conn any
+	// open on it. It is atomic because a connection's teardown asks about it
+	// without waiting behind a commit that is legitimately slow, and the
+	// commit's failure path may move ownership to the caller's own connection
+	// while that teardown is deciding (review M3).
+	conn atomic.Pointer[host.Host]
 	// dir is the resolved directory the target lives in. A commit may name
 	// another file in it (KeepBoth); it may not leave it.
 	dir    string
@@ -130,6 +133,23 @@ type writeSession struct {
 	// journal.go). It is cleared by the same transitions that remove the
 	// temporary, so "is there an entry" and "is there a file" cannot drift.
 	journalEntry string
+
+	// admission is the daemon reservation this session holds for its whole
+	// life: taken before its temporary exists, given back when it reaches
+	// committed or aborted, or when its connection or the service ends it. It
+	// is nil for a service built without one — a test's, or a `fs` service
+	// compiled into something that is not a daemon.
+	admission     func()
+	admissionOnce sync.Once
+
+	// ownerClosed records that the connection which opened this session has
+	// ENDED, whatever state the session was in when it did. A commit in flight
+	// deliberately survives its opener, so the session can outlive the owner it
+	// still names; without this flag nothing would ever notice that the
+	// connection in `conn` is dead, and a failed install would leave the
+	// admission held behind an owner no teardown will look for again (review
+	// M3). It is atomic for the same reason conn is.
+	ownerClosed atomic.Bool
 
 	state atomic.Int32
 
@@ -203,7 +223,10 @@ func (l *pathLocks) lock(path string) func() {
 }
 
 // writeOpen resolves the target ONCE, refuses anything that is not a regular
-// file, and creates the temporary beside it.
+// file, and creates the temporary beside it. It also takes the daemon's
+// admission before anything reaches the disk: the session holds it until it
+// commits, aborts, or is ended by its connection or the service
+// (nocx-oalo1.12.5).
 //
 // The resolution happens here and not at commit because the caller shows this
 // answer: a path that crossed a symlink writes to the file the link points at,
@@ -218,11 +241,38 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	if !validWriteID(p.ID) {
 		return nil, &badSession{reason: fmt.Sprintf("id %q is not 32 lower-case hex characters", p.ID)}
 	}
+	// THE DAEMON IS TOLD BEFORE ANYTHING EXISTS ON DISK. An open write session
+	// is work the last hosted session's drain must wait for (nocx-oalo1.12.5),
+	// and the reservation precedes the session it covers: a temporary created
+	// first would leave a window in which the daemon drained under a write that
+	// already had bytes on disk. The refusal a draining daemon gives is passed
+	// through unchanged, which is how a coordinator learns to re-acquire.
+	var admission func()
+	if s.admissions != nil {
+		release, err := s.admissions.Admit()
+		if err != nil {
+			return nil, err
+		}
+		admission = release
+	}
+	sess := &writeSession{admission: admission}
+	sess.conn.Store(connectionOf(ctx))
+	// Every refusal on the way to an open session gives the reservation back:
+	// the session does not exist yet, and a leak here is a helper that never
+	// retires even though nobody is writing to it.
+	opened := false
+	defer func() {
+		if !opened {
+			sess.releaseAdmission()
+		}
+	}()
+
 	resolved, err := resolveWriteTarget(p.Path)
 	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Dir(resolved)
+	sess.dir = dir
 
 	// Registration and creation are two critical sections, and the order is
 	// deliberate. The session is registered FIRST: a connection cannot end
@@ -233,7 +283,6 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	// on a hung mount does not answer: holding the service's lock across it
 	// would stall every other session, every other connection's teardown and
 	// the daemon's own ConnectionClosed.
-	sess := &writeSession{conn: host.ConnectionFrom(ctx), dir: dir}
 	sess.state.Store(int32(writeOpening))
 	s.mu.Lock()
 	if s.closed {
@@ -293,6 +342,7 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 		sess.digest = sha256.New()
 		sess.state.Store(int32(writeOpen))
 		sess.mu.Unlock()
+		opened = true
 		return proto.FSWriteOpenResult{Resolved: resolved}, nil
 	}
 	// The request ended while its temporary was being created: the context was
@@ -314,6 +364,18 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 		return nil, ctxErr
 	}
 	return nil, &badSession{reason: "the write session ended before its temporary was ready"}
+}
+
+// releaseAdmission gives the daemon back the reservation this session's
+// existence holds. Every way a session ends calls it, and the first call wins:
+// a session can be committed and then asked again, a connection can close
+// under a commit that is finishing, and the daemon must be released once and
+// only once (nocx-oalo1.12.5).
+func (sess *writeSession) releaseAdmission() {
+	if sess.admission == nil {
+		return
+	}
+	sess.admissionOnce.Do(sess.admission)
 }
 
 // forget removes a session that never became usable. The identity check keeps
@@ -442,20 +504,64 @@ func (s *Service) writeCommit(ctx context.Context, raw json.RawMessage) (any, er
 	sess.state.Store(int32(writeCommitting))
 	result, err := s.install(sess, candidate, p)
 	if err != nil {
-		if writeState(sess.state.Load()) == writeBroken {
-			// install poisoned the session: its fsync already reported the
-			// writeback failure once, so a retry on that descriptor would read
-			// as healthy and install pages that never reached the disk.
-			return nil, err
-		}
-		// Every other refusal leaves the session exactly as it was: open, with
-		// its temporary and its bytes.
-		sess.state.Store(int32(writeOpen))
+		s.afterFailedInstallLocked(ctx, sess)
 		return nil, err
 	}
 	sess.outcome = result
 	sess.state.Store(int32(writeCommitted))
+	// The bytes are at the path the caller named, so the work this reservation
+	// covered is finished (nocx-oalo1.12.5). A repeat of this commit answers the
+	// stored outcome and finds the reservation already given back. Over a host
+	// the reservation rides the answer to ResponseWritten: the daemon's drain
+	// closes every connection, the one carrying this answer included, and a
+	// release fired here would race the host's write (review M2).
+	if sess.admission != nil && connectionOf(ctx) != nil {
+		return committedOverHost{FSWriteCommitResult: result, release: sess.releaseAdmission}, nil
+	}
+	sess.releaseAdmission()
 	return result, nil
+}
+
+// afterFailedInstallLocked puts a session whose install failed back where its
+// caller can finish it, and checks who still owns it (review M3).
+//
+// A commit deliberately outlives the connection that opened it — the rename is
+// the point of no return and the answer belongs to whoever asks next — so the
+// opener can end while the install is running, and ConnectionClosed skips a
+// committing session on purpose. If the install then FAILS, the session is
+// back to open (or broken) under a connection that is already gone: the caller's
+// own teardown matches on the new connection and would never look at it, so the
+// admission would be held for the daemon's life. The caller of the commit is
+// the live owner when there is one; otherwise nothing can ever finish this
+// session and it is ended here.
+func (s *Service) afterFailedInstallLocked(ctx context.Context, sess *writeSession) {
+	broken := writeState(sess.state.Load()) == writeBroken
+	if !broken {
+		// The refusal left the temporary usable, which is what a caller's retry
+		// needs. Publish this before checking ownerClosed so a simultaneous
+		// teardown either sees writeOpen or is seen by this handler.
+		sess.state.Store(int32(writeOpen))
+	}
+	if !sess.ownerClosed.Load() {
+		return
+	}
+	if caller := connectionOf(ctx); caller != nil && caller != sess.conn.Load() {
+		// Host.Serve waits for its in-flight requests before it closes the
+		// connection, so this caller cannot end before this handler returns.
+		sess.conn.Store(caller)
+		sess.ownerClosed.Store(false)
+		return
+	}
+	// Nobody is left to ask about these bytes. A removal that succeeds ends the
+	// session; one that fails leaves the temporary to fs.inventory and the
+	// session in the state that refuses writes and commits, so only a later
+	// abort may touch it. Either way the daemon is not held for it.
+	if err := s.discard(sess); err == nil {
+		sess.state.Store(int32(writeAborted))
+	} else {
+		sess.state.Store(int32(writeBroken))
+	}
+	sess.releaseAdmission()
 }
 
 // install is the commit's body, run under the session's lock with the state
@@ -566,15 +672,88 @@ func (s *Service) writeAbort(ctx context.Context, raw json.RawMessage) (any, err
 	defer sess.mu.Unlock()
 	switch writeState(sess.state.Load()) {
 	case writeCommitted:
-		return proto.FSWriteAbortResult{Outcome: proto.FSOutcomeCommitted}, nil
+		return s.answerAbortLocked(ctx, sess, proto.FSWriteAbortResult{Outcome: proto.FSOutcomeCommitted}), nil
 	case writeAborted:
-		return proto.FSWriteAbortResult{Outcome: proto.FSOutcomeAborted}, nil
+		return s.answerAbortLocked(ctx, sess, proto.FSWriteAbortResult{Outcome: proto.FSOutcomeAborted}), nil
 	}
 	if err := s.discard(sess); err != nil {
+		// The temporary survived — or a descriptor that reported a failed close
+		// still ended — so this session has no file to write and no commit
+		// left; its state says so rather than leaving a half-session that a
+		// chunk would find. A later abort may still take the removal the
+		// failure left behind, and fs.inventory reports the temporary until it
+		// does (review M3).
+		sess.state.Store(int32(writeBroken))
+		// Hold the admission through the refusal frame. Its release can close
+		// the connection carrying the error when the daemon is draining.
+		if sess.admission != nil && connectionOf(ctx) != nil {
+			return nil, &abortRefusal{err: err, release: sess.releaseAdmission}
+		}
+		sess.releaseAdmission()
 		return nil, err
 	}
 	sess.state.Store(int32(writeAborted))
-	return proto.FSWriteAbortResult{Outcome: proto.FSOutcomeAborted}, nil
+	return s.answerAbortLocked(ctx, sess, proto.FSWriteAbortResult{Outcome: proto.FSOutcomeAborted}), nil
+}
+
+// answerAbortLocked is a successful write-abort's answer. Like a commit's, its
+// reservation is given back in ResponseWritten when the answer crosses a host,
+// because the drain it releases closes the connection that carries it (review
+// M2). `opening`'s refusal and a repeat abort find the reservation already
+// given back, so the release is a no-op either way.
+func (s *Service) answerAbortLocked(ctx context.Context, sess *writeSession, result proto.FSWriteAbortResult) any {
+	if sess.admission != nil && connectionOf(ctx) != nil {
+		return abortedOverHost{FSWriteAbortResult: result, release: sess.releaseAdmission}
+	}
+	sess.releaseAdmission()
+	return result
+}
+
+// committedOverHost and abortedOverHost are successful write answers whose
+// daemon reservation is still held. They marshal exactly as the plain results —
+// the unexported field never reaches the wire — and ResponseWritten gives the
+// reservation back once the frame is written, so a helper that is draining
+// cannot cut off the very answer that says the bytes landed (review M2).
+type committedOverHost struct {
+	proto.FSWriteCommitResult
+	release func()
+}
+
+type abortedOverHost struct {
+	proto.FSWriteAbortResult
+	release func()
+}
+
+type abortRefusal struct {
+	err     error
+	release func()
+}
+
+func (e *abortRefusal) Error() string { return e.err.Error() }
+func (e *abortRefusal) Unwrap() error { return e.err }
+
+func (s *Service) RefusalWritten(_ context.Context, _ string, err error) {
+	if refusal, ok := err.(*abortRefusal); ok {
+		refusal.release()
+	}
+}
+
+// ResponseWritten is host.ResponseObserver: the answer is on the wire, so the
+// work it reported is finished and the daemon may retire. It runs for a
+// withdrawn answer too — a frame that reached nobody still ended the session it
+// answered, and a reservation kept for it would be a leak in the other
+// direction.
+func (s *Service) ResponseWritten(_ context.Context, _ string, result any, _ host.AnswerDelivery) {
+	switch answer := result.(type) {
+	case committedOverHost:
+		if answer.release != nil {
+			answer.release()
+		}
+	case abortedOverHost:
+		if answer.release != nil {
+			answer.release()
+		}
+	}
 }
 
 // ConnectionClosed aborts every session still open or broken on the connection
@@ -594,13 +773,26 @@ func (s *Service) ConnectionClosed(h *host.Host) {
 		return
 	}
 	for _, sess := range s.allSessions() {
-		if sess.conn != any(h) {
+		if sess.conn.Load() != h {
 			continue
 		}
+		// The owner is gone from this moment, WHATEVER state the session is in
+		// (review M3). The switch below deliberately leaves a committing
+		// session alone — its answer belongs to whoever asks next — but a commit
+		// that fails afterwards must be able to see that its opener has ended
+		// and hand the session to its caller instead of leaving it behind a
+		// connection no teardown will look at again.
+		sess.ownerClosed.Store(true)
 		if st := writeState(sess.state.Load()); st != writeOpening && st != writeOpen && st != writeBroken {
 			continue
 		}
 		sess.mu.Lock()
+		if sess.conn.Load() != h {
+			// The failed commit handed the session to its live caller while
+			// this teardown was waiting for the lock.
+			sess.mu.Unlock()
+			continue
+		}
 		switch writeState(sess.state.Load()) {
 		case writeOpening:
 			// The temporary is still being created. Marking the session over
@@ -614,10 +806,35 @@ func (s *Service) ConnectionClosed(h *host.Host) {
 			// only this removes its temporary and closes its descriptor.
 			if err := s.discard(sess); err == nil {
 				sess.state.Store(int32(writeAborted))
+			} else {
+				// The descriptor went with the removal attempt, so this session
+				// can no longer be written or committed; a later abort may still
+				// take the removal this one could not. Leaving it open would be a
+				// session that accepts a chunk into no file at all.
+				sess.state.Store(int32(writeBroken))
 			}
+		default:
+			// The state moved to committing while this was waiting for the
+			// lock: the answer belongs to whoever asks next, and the owner
+			// flag above is what a failed install reads.
+			sess.mu.Unlock()
+			continue
 		}
 		sess.mu.Unlock()
+		// The caller is gone and this session can never be finished by anyone:
+		// whatever became of its temporary, the daemon must not be held for a
+		// file nobody will commit. A removal that failed leaves the temporary
+		// to fs.inventory, which is a report rather than work in progress
+		// (nocx-oalo1.12.5).
+		sess.releaseAdmission()
 	}
+}
+
+// connectionOf is the host.Host this request arrived on, or nil for a direct
+// caller (a unit test's svc.Call, or a service that is not behind a daemon).
+func connectionOf(ctx context.Context) *host.Host {
+	conn, _ := host.ConnectionFrom(ctx).(*host.Host)
+	return conn
 }
 
 // RefusesCancel declares the two ends of a session uncancellable (D11): a
@@ -664,23 +881,27 @@ func (s *Service) allSessions() []*writeSession {
 // must stop being reported: a warning about a file that is not there is worse
 // than no warning.
 func (s *Service) discard(sess *writeSession) error {
+	var closeErr error
 	if sess.file != nil {
-		if err := sess.file.Close(); err != nil {
-			return err
-		}
+		// The descriptor is dropped from the session BEFORE the close is asked:
+		// a close that reports a failure has still ended the descriptor, and a
+		// session that kept it would refuse every later abort and leave the
+		// temporary on disk for ever (review M3).
+		f := sess.file
 		sess.file = nil
+		closeErr = f.Close()
 	}
 	if sess.temp == "" {
-		return nil
+		return closeErr
 	}
 	if err := s.removeTemp(sess.temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		s.recordStranded(sess.temp, fmt.Sprint(err))
-		return err
+		return errors.Join(closeErr, err)
 	}
 	s.forgetStranded(sess.temp)
 	sess.temp = ""
 	s.dropJournalEntry(sess)
-	return nil
+	return closeErr
 }
 
 // ── the seams, defaulted ───────────────────────────────────────────────

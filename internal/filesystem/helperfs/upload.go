@@ -74,6 +74,12 @@ func (f uploadFS) start(ctx context.Context, name string, noFollow bool) (*uploa
 	switch {
 	case lease.Ctx.Err() != nil || errors.Is(err, client.ErrLost):
 		err = f.p.unavailable()
+	case drainingRefusal(err):
+		// The daemon has stopped admitting new sessions because it is draining;
+		// its replacement, not a retry against this lease, is what can serve
+		// the upload. Report the axis as unavailable so the panel pauses with a
+		// reason instead of surfacing a raw wire refusal (review m1).
+		err = f.p.unavailable()
 	case err != nil:
 		err = classifyRefusal(name, params, err)
 	default:
@@ -100,6 +106,7 @@ type uploadWrite struct {
 	id       string
 	resolved string
 	opening  *farhelper.Lease
+	replay   *farhelper.Lease
 	digest   hash.Hash
 	offset   int64
 }
@@ -169,6 +176,12 @@ func (w *uploadWrite) commit(ctx context.Context, name string, size int64, expec
 		// current target so the digest can establish whether our bytes landed.
 		result = proto.FSWriteCommitResult{}
 		err = lease.Client().Call(mutationCtx, proto.ServiceFS, proto.OpWriteCommit, params, &result)
+		if err != nil {
+			// A refused replay can take ownership of the session, so its
+			// lease also carries any later abort. A result already tells
+			// us the session has ended or the helper never had it.
+			w.replay = lease
+		}
 	}
 	if errors.Is(err, client.ErrLost) || errors.Is(err, context.DeadlineExceeded) {
 		return proto.FSWriteCommitResult{}, &filesystem.ErrUnknownWriteOutcome{Path: name, Err: err}
@@ -271,11 +284,13 @@ func (w *uploadWrite) Abort(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadMutationTimeout)
 	defer cancel()
 	// A pane rebind prevents new writes but must not abandon the temporary
-	// on an originating peer that is still alive. Abort only names that id.
+	// on a peer that is still alive. Abort only names the session ID.
 	lease := w.opening
+	if w.replay != nil {
+		lease = w.replay
+	}
 	if lease.Ctx.Err() != nil {
-		// Retiring the originating connection discards its open write sessions.
-		// The registry owns the retirement, not this provider.
+		// Connection teardown discards the writes that peer still owns.
 		return nil
 	}
 	params := proto.FSWriteAbortParams{ID: w.id}

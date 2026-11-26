@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // Service is the helper's "git" service.
@@ -38,8 +39,11 @@ func New(factory git.RepoFactory) *Service {
 	return &Service{factory: factory, repos: make(map[string]git.Repo)}
 }
 
-// Name is the reserved service name the host registers it under.
-func (s *Service) Name() string { return "git" }
+// Name is the reserved service name the host registers it under. It is
+// proto.ServiceGit's value and not a literal, because the dispatcher also has
+// to recognise a panel's `git` request by name (nocx-oalo1.12.5), and two
+// spellings of one name is how they stop agreeing.
+func (s *Service) Name() string { return proto.ServiceGit }
 
 // Ops is the closed set of operations this service serves.
 func (s *Service) Ops() []string {

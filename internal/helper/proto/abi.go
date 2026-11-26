@@ -93,6 +93,13 @@ package proto
 // claiming any name, which is what the reservation was protecting.
 const ServiceSession = "session"
 
+// ServiceGit is the name of the helper service that runs git on the host. It
+// lives here rather than as a literal in internal/git/hostsvc because more than
+// one package names it: the service that registers under it, and the dispatcher
+// that must recognise a panel's request by the service it named
+// (nocx-oalo1.12.5).
+const ServiceGit = "git"
+
 // The operations of the session service. Frozen with the envelopes below; an
 // op renamed later is an op an older generation does not answer.
 const (

@@ -39,6 +39,7 @@ import (
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/hostconn"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -241,7 +242,42 @@ func (d *farHelperDial) Dial(ctx context.Context, target farhelper.Target, insta
 		_ = lane.Close()
 		return nil, classifyFarHelperDial(err)
 	}
+	d.reportStrandedTemporaries(ctx, target, peer)
 	return peer, nil
+}
+
+// reportStrandedTemporaries asks a freshly dialled helper what an earlier
+// generation of it could not clean up, and warns about each temporary.
+//
+// The question is asked HERE — right after the hello, on the lane that will
+// carry the pane's own requests — because the answer is about this host's disk
+// and this coordinator is the one party that will tell the person about it. The
+// helper's start-up sweep has already tried to remove every one of these; what
+// comes back is the set it could not, with the operating system's reason.
+//
+// A helper that does not answer does NOT fail the dial, and that asymmetry is
+// deliberate: `unknown_service` and `unknown_op` are how a generation older
+// than this app says it has no journal to report — a fact about the install,
+// not about the connection, and one a pane must not be refused over. Neither is
+// a transport failure disguised: a lost lane fails the dial below it, where the
+// error belongs.
+func (d *farHelperDial) reportStrandedTemporaries(ctx context.Context, target farhelper.Target, peer *helperclient.Client) {
+	var inventory proto.FSInventoryResult
+	if err := peer.Call(ctx, proto.ServiceFS, proto.OpInventory, proto.FSInventoryParams{}, &inventory); err != nil {
+		nocxlog.From(ctx).Debug("far helper: the write-session inventory was not answered",
+			"host", target.Destination.Host, "connection_id", target.ConnectionID, "error", err)
+		return
+	}
+	for _, temporary := range inventory.Stranded {
+		// A WARNING, not an informational line: this is a file this product left
+		// in a directory somebody owns, it is not going away by itself, and the
+		// reason is what says what would have to change before it can.
+		nocxlog.From(ctx).Warn("far helper: a write session left a temporary file behind",
+			"host", target.Destination.Host,
+			"connection_id", target.ConnectionID,
+			"path", temporary.Path,
+			"reason", temporary.Reason)
+	}
 }
 
 // classifyFarHelperRefusal maps the refusals the helper already speaks onto

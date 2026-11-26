@@ -512,6 +512,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'helper.hostSettingsTitle': 'Open the saved connection\u2019s integration method',
   'helper.refreshTitle': 'Redial the nocx helper on this connection',
   'helper.saveConnection': 'Save this connection to change how nocx integrates with its host.',
+  'helper.waitingObservation': 'Waiting for nocx to learn how this connection reaches its host.',
   'connections.load.failedHead': 'Could not load connections:',
   'connections.load.failedTail': '. The list may be out of date',
   'connections.password.bindingRecovery':
@@ -1349,6 +1350,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'files.filter.ph': 'Filter by name…',
   'files.filter.aria': 'Filter files by name',
   'files.panel.title': 'Files',
+  'files.helperBlocked.title': 'Files needs the nocx helper on this connection',
+  'files.helperStarting.title': 'Waiting for the nocx helper',
+  'files.helperStarting.desc':
+    'The files of this machine open when the nocx helper starts serving this connection.',
   'files.upload.noConnection': 'no connection to the backend',
   'git.branch.copied': 'Branch name copied',
   'git.commit.openAria.head': 'Open commit',

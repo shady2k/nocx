@@ -295,6 +295,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'helper.refreshTitle': 'Переподключить helper nocx на этом соединении',
   'helper.saveConnection':
     'Сохраните подключение, чтобы изменить способ интеграции nocx с его хостом.',
+  'helper.waitingObservation': 'Ждём, пока nocx узнает, как это соединение достигает своего хоста.',
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',
   'connections.password.bindingRecovery':
@@ -1134,6 +1135,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'files.filter.ph': 'Фильтр по имени…',
   'files.filter.aria': 'Фильтр файлов по имени',
   'files.panel.title': 'Файлы',
+  'files.helperBlocked.title': 'Файлам нужен helper nocx на этом соединении',
+  'files.helperStarting.title': 'Ждём helper nocx',
+  'files.helperStarting.desc':
+    'Файлы этой машины откроются, когда helper nocx начнёт обслуживать это соединение.',
   'files.upload.noConnection': 'нет соединения с бэкендом',
   'git.link.failedHead': 'Не удалось открыть ссылку в браузере',
   'git.branch.copied': 'Имя ветки скопировано',

@@ -42,6 +42,7 @@ import {
 } from './files-store'
 import { downloadReachesTheBytes } from './download-eligibility'
 import type { DownloadSurface } from './download-surface'
+import { HelperAxisCard } from '../connection/helper-axis-card'
 import { filterIsActive, narrowFilesRows } from './files-filter'
 import { uploadMovesTheFile } from './upload-eligibility'
 import { pickUploadSources } from './upload-picker'
@@ -142,6 +143,18 @@ interface FilesPanelProps {
    *  cannot stop it by simply not asking: the flag has to travel
    *  (nocx-8hdia.1). */
   visible: () => boolean
+  /** The shared helper card's one action (connection/helper-axis-card.tsx):
+   *  redial a helper that was serving and is gone. The pane it was drawn for
+   *  is named by the card; the composition root checks that the tab is still
+   *  in front. Optional: a panel handed no action draws the card without a
+   *  button, never one that reaches nothing. */
+  onRefreshHelper?: (paneId: string) => void
+  /** The card's other action: open the saved connection's editor on its
+   *  host-integration field. Optional for the same reason. */
+  onHostSettings?: (profileId: string) => void
+  /** The saved connection this tab was opened from, or null for a hand-typed
+   *  one — which has no host record to edit. */
+  activeProfileId: () => string | null
   /** The app's single upload surface, or null where none was injected —
    *  the panel then shows no transfers and offers no Upload action, rather
    *  than offering one that reaches nothing. */
@@ -502,6 +515,18 @@ function FilesPanel(props: FilesPanelProps) {
   const visibleRows = createMemo<FilesFlatRow[]>(() =>
     narrowFilesRows(props.store.filterRows(), props.store.filter()),
   )
+  type EntryRow = Extract<FilesFlatRow, { kind: 'entry' }>
+  const keyedRows = createMemo(() => {
+    // Directory polls rebuild the projection. Keep each entry's DOM attached
+    // to its path so a refresh cannot interrupt a click on a surviving row.
+    const entries = new Map<string, EntryRow>()
+    const order = visibleRows().map((row) => {
+      if (row.kind !== 'entry') return row
+      entries.set(row.node.path, row)
+      return row.node.path
+    })
+    return { entries, order }
+  })
   /** A filter is typed AND the tree has nothing to show for it. Not "the
    *  tree is empty": an empty directory with no filter is a different state
    *  and says a different thing. A memo because both this and the list read
@@ -512,60 +537,54 @@ function FilesPanel(props: FilesPanelProps) {
     props.store.filterSettled() &&
     visibleRows().length === 0
 
-  const renderRow = (row: FilesFlatRow) => {
-    if (row.kind === 'entry') {
-      const node = row.node
-      return (
-        <div
-          class="files-row"
-          data-testid="files-row"
-          data-path={node.path}
-          onClick={() => {
-            if (openable(node)) {
-              void openFile(node)
-              return
-            }
-            if (row.projected) {
-              void props.store.revealPath(node.path)
-              return
-            }
-            // A click anywhere on a directory row expands or collapses it —
-            // the disclosure is a 16px target and the row is the whole
-            // width, and every file manager the product is measured against
-            // behaves this way. Expandability is asked of the kit rather
-            // than re-derived here (AD-8): the row that draws the disclosure
-            // is the one that decides there is one. A busy or unreadable row
-            // is left alone, matching its disabled disclosure.
-            if (node.busy === true || node.state === 'error') return
-            if (isExpandable(node.kind, node.linkKind, node.cyclic)) {
-              props.store.toggle(node)
-            }
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault()
-            setMenu({ x: e.clientX, y: e.clientY, node })
-          }}
-        >
-          <TreeRow
-            name={node.name}
-            depth={row.depth}
-            kind={node.kind}
-            linkKind={node.linkKind}
-            cyclic={node.cyclic}
-            disabled={node.state === 'error'}
-            busy={node.busy}
-            expanded={node.expanded}
-            // The reveal's selection: the row whose path the last
-            // completed reveal reached. The kit row owns the rendering
-            // (data-selected); the panel only names the target.
-            selected={node.path === props.store.revealTarget()}
-            onToggle={() =>
-              row.projected ? void props.store.revealPath(node.path) : props.store.toggle(node)
-            }
-          />
-        </div>
-      )
-    }
+  const renderEntry = (row: () => EntryRow) => {
+    const node = () => row().node
+    return (
+      <div
+        class="files-row"
+        data-testid="files-row"
+        data-path={node().path}
+        onClick={() => {
+          const entry = node()
+          if (openable(entry)) {
+            void openFile(entry)
+            return
+          }
+          if (row().projected) {
+            void props.store.revealPath(entry.path)
+            return
+          }
+          // Clicking anywhere on a directory row works like its disclosure.
+          // The kit decides which rows can expand and when they are disabled.
+          if (entry.busy === true || entry.state === 'error') return
+          if (isExpandable(entry.kind, entry.linkKind, entry.cyclic)) {
+            props.store.toggle(entry)
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          setMenu({ x: e.clientX, y: e.clientY, node: node() })
+        }}
+      >
+        <TreeRow
+          name={node().name}
+          depth={row().depth}
+          kind={node().kind}
+          linkKind={node().linkKind}
+          cyclic={node().cyclic}
+          disabled={node().state === 'error'}
+          busy={node().busy}
+          expanded={node().expanded}
+          selected={node().path === props.store.revealTarget()}
+          onToggle={() =>
+            row().projected ? void props.store.revealPath(node().path) : props.store.toggle(node())
+          }
+        />
+      </div>
+    )
+  }
+
+  const renderStatusRow = (row: Exclude<FilesFlatRow, EntryRow>) => {
     if (row.kind === 'filter-searching') {
       return (
         <div
@@ -678,9 +697,36 @@ function FilesPanel(props: FilesPanelProps) {
   // and the store deliberately has no bindingId to answer it with. It would
   // also bring back exactly what the owner asked to be rid of: a finished
   // transfer sitting above the tree until somebody dismissed it.
+  // THE AXIS IS THE FIRST DISCRIMINATOR (design §5.10, C25/C26). While the
+  // far helper does not serve this SSH tab the panel is the card and nothing
+  // else: no spinner, no retry, no empty tree — a "could not open" message
+  // here would name a local failure for a connection that has a reason of its
+  // own. The card draws the one fold's sentence and the backend's action, the
+  // same card the Git panel draws.
+  const gated = (): boolean => props.store.axisGate() !== null
+  const axisHelper = () => props.activeOrigin()?.connection?.helper
+  const axisPaneId = () => props.activeOrigin()?.connection?.paneId ?? null
+
   return (
     <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
-      <Show when={props.store.phase() === 'no-origin'}>
+      <Show when={gated()}>
+        <HelperAxisCard
+          surface="files"
+          title={t('files.helperBlocked.title', 'Files needs the nocx helper on this connection')}
+          startingTitle={t('files.helperStarting.title', 'Waiting for the nocx helper')}
+          startingDescription={t(
+            'files.helperStarting.desc',
+            'The files of this machine open when the nocx helper starts serving this connection.',
+          )}
+          helper={axisHelper()}
+          paneId={axisPaneId()}
+          livePaneId={() => props.activeOrigin()?.connection?.paneId ?? null}
+          profileId={props.activeProfileId()}
+          onRefresh={props.onRefreshHelper}
+          onHostSettings={props.onHostSettings}
+        />
+      </Show>
+      <Show when={!gated() && props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}
           title={t('files.empty.title', 'No files to show')}
@@ -690,12 +736,12 @@ function FilesPanel(props: FilesPanelProps) {
           )}
         />
       </Show>
-      <Show when={props.store.phase() === 'opening'}>
+      <Show when={!gated() && props.store.phase() === 'opening'}>
         <div class="files-loading" data-testid="files-loading">
           <Spinner label={t('files.opening.label', 'Opening files')} />
         </div>
       </Show>
-      <Show when={props.store.phase() === 'failed'}>
+      <Show when={!gated() && props.store.phase() === 'failed'}>
         <div class="files-error" data-testid="files-error">
           <p>{props.store.openError()}</p>
           <Button size="sm" data-testid="files-retry-open" onClick={() => props.store.refresh()}>
@@ -703,7 +749,7 @@ function FilesPanel(props: FilesPanelProps) {
           </Button>
         </div>
       </Show>
-      <Show when={props.store.phase() === 'ready'}>
+      <Show when={!gated() && props.store.phase() === 'ready'}>
         {/* Refresh degradation (§5.5): a sticky INLINE message with Retry —
             not a toast, because a toast cannot answer "why is this stale?"
             ten minutes later. Two distinct facts share the surface:
@@ -749,7 +795,12 @@ function FilesPanel(props: FilesPanelProps) {
           />
         </Show>
         <div class="files-tree" role="tree" aria-label={t('files.aria', 'Files')} ref={treeEl}>
-          <For each={visibleRows()}>{(row) => renderRow(row)}</For>
+          <For each={keyedRows().order}>
+            {(row) => {
+              if (typeof row !== 'string') return renderStatusRow(row)
+              return <Show when={keyedRows().entries.get(row)}>{renderEntry}</Show>
+            }}
+          </For>
         </div>
       </Show>
       <ContextMenu
@@ -804,6 +855,18 @@ export interface FilesViewDeps {
    *  two environments at once and each rule has four combinations that all
    *  have to be watched. */
   native?: () => boolean
+  /** The shared helper card's one action: redial a helper that was serving
+   *  and is gone. `connection.helperRefresh`, addressed by the backend pane
+   *  the card was drawn for. Optional like the other seams — a panel handed
+   *  no action draws the card without a button rather than one that reaches
+   *  nothing. */
+  onRefreshHelper?: (paneId: string) => void
+  /** The card's other action: the saved connection's host-integration field. */
+  onHostSettings?: (profileId: string) => void
+  /** The saved connection this tab was opened from, or null for a hand-typed
+   *  tab — which has no host record to edit (helper-axis.ts's savedProfileId
+   *  normalises Quick Connect's empty id to null too). */
+  activeProfileId?: () => string | null
 }
 
 /** Build the Files view descriptor. The store is created once, per
@@ -817,6 +880,11 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const upload = deps.upload ?? null
   const download = deps.download ?? null
   const native = deps.native ?? hasWailsWebview
+  /** The helper card's two actions, passed through AS GIVEN: a panel that
+   *  was handed no action draws the card without a button rather than a
+   *  button that reaches nothing, which the card decides from the absent
+   *  seam alone. */
+  const activeProfileId = deps.activeProfileId ?? (() => null)
   /** Who asks the person for files. The default is the real picker; a
    *  test substitutes its own, because raising a picker is the one step a
    *  test cannot perform. */
@@ -848,7 +916,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   }
 
   const uploadHere = async (): Promise<void> => {
-    if (upload === null) return
+    if (upload === null || store.axisGate() !== null) return
     const destination = uploadDestination()
     if (destination === null) {
       showToast({
@@ -887,6 +955,10 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
     const overflowItems = (): ContextMenuItem[] => {
       const items: ContextMenuItem[] = []
       const o = store.origin()
+      // NOTHING IS OFFERED WHILE THE AXIS DOES NOT SERVE (design §5.10): the
+      // panel is the card, and an Upload that could only answer "I do not
+      // know which folder" would be a promise the connection cannot keep.
+      if (store.axisGate() !== null) return items
       if (upload !== null && o !== null && uploadMovesTheFile({ native: native(), kind: o.kind })) {
         items.push({
           id: 'upload',
@@ -1014,6 +1086,9 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         download={download}
         pickSources={pick}
         native={native}
+        onRefreshHelper={deps.onRefreshHelper}
+        onHostSettings={deps.onHostSettings}
+        activeProfileId={activeProfileId}
       />
     ),
     order: FILES_VIEW_ORDER,

@@ -77,7 +77,7 @@ import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { GitMutationError, GitStore } from './git-store'
 import type { GitError } from '../generated/git.error'
-import { helperAxis, savedProfileId, withSavedConnection } from '../connection/helper-axis'
+import { HelperAxisCard } from '../connection/helper-axis-card'
 
 /** The diff-tab opener seam (worker G's surface, design §5.4): the panel
  *  calls this fixed contract and never builds the tab itself. A no-op
@@ -604,53 +604,6 @@ export function GitPanel(props: GitPanelProps) {
 
   const mutationBusy = () => props.store.mutationInFlight()
 
-  // THE FAR HELPER'S AXIS, drawn from the ONE fold the head draws
-  // (connection/helper-axis.ts). The panel decides nothing about it: the
-  // sentence, tone and action are the contract member's answer, and the
-  // action is rendered only where the backend offered it.
-  const axis = () =>
-    withSavedConnection(
-      helperAxis(props.activeOrigin()?.connection?.helper ?? null),
-      props.activeProfileId(),
-    )
-  const axisConnection = () => props.activeOrigin()?.connection ?? null
-  const axisDescription = (): string | undefined => axis()?.sentence ?? undefined
-  const axisAction = () => {
-    const facts = axis()
-    const connection = axisConnection()
-    if (facts?.action === 'refresh' && connection !== null) {
-      return (
-        <Button
-          size="sm"
-          data-testid="git-helper-refresh"
-          onClick={() => {
-            // The tab may have changed between this button's paint and the
-            // press: the live origin is the authority, so a press aimed at
-            // a pane that is no longer in front is dropped here (ALX-1019).
-            const live = props.activeOrigin()?.connection?.paneId
-            if (live !== connection.paneId) return
-            props.onRefreshHelper(connection.paneId)
-          }}
-        >
-          {t('helper.refresh', 'Refresh')}
-        </Button>
-      )
-    }
-    const saved = savedProfileId(props.activeProfileId())
-    if (facts?.action === 'host-settings' && saved !== null) {
-      return (
-        <Button
-          size="sm"
-          data-testid="git-host-settings"
-          onClick={() => props.onHostSettings(saved)}
-        >
-          {t('helper.hostSettings', 'Host settings')}
-        </Button>
-      )
-    }
-    return undefined
-  }
-
   return (
     <div class="git-panel" data-testid="git-panel">
       <Switch>
@@ -686,27 +639,28 @@ export function GitPanel(props: GitPanelProps) {
             )}
           />
         </Match>
-        <Match when={props.store.state() === 'helperStarting'}>
-          <div data-testid="git-helper-axis" data-helper="starting">
-            <StatusCard
-              tone="neutral"
-              title={t('git.helperStarting.title', 'Waiting for the nocx helper')}
-              description={t(
-                'git.helperStarting.desc',
-                'The repository opens when the nocx helper starts serving this connection.',
-              )}
-            />
-          </div>
-        </Match>
-        <Match when={props.store.state() === 'helperBlocked'}>
-          <div data-testid="git-helper-axis" data-helper={axis()?.state}>
-            <StatusCard
-              tone="warning"
-              title={t('git.helperBlocked.title', 'Git needs the nocx helper on this connection')}
-              description={axisDescription()}
-              action={axisAction()}
-            />
-          </div>
+        <Match
+          when={props.store.state() === 'helperStarting' || props.store.state() === 'helperBlocked'}
+        >
+          {/* THE CARD IS SHARED, not this panel's (connection/helper-axis-card.tsx):
+              the sentence, the tone and the action are the one fold's answer, the
+              waiting state is the neutral one every healthy SSH tab passes
+              through, and the same card draws in Files. */}
+          <HelperAxisCard
+            surface="git"
+            title={t('git.helperBlocked.title', 'Git needs the nocx helper on this connection')}
+            startingTitle={t('git.helperStarting.title', 'Waiting for the nocx helper')}
+            startingDescription={t(
+              'git.helperStarting.desc',
+              'The repository opens when the nocx helper starts serving this connection.',
+            )}
+            helper={props.activeOrigin()?.connection?.helper}
+            paneId={props.activeOrigin()?.connection?.paneId ?? null}
+            livePaneId={() => props.activeOrigin()?.connection?.paneId ?? null}
+            profileId={props.activeProfileId()}
+            onRefresh={props.onRefreshHelper}
+            onHostSettings={props.onHostSettings}
+          />
         </Match>
         <Match when={props.store.state() === 'noCwd'}>
           <StatusCard

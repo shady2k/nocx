@@ -35,6 +35,7 @@ import type { AgentApprovalRequested } from './generated/agent.approvalRequested
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher, RpcError } from './dispatcher'
+import { openForwardWithFallback } from './forward-retry'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
 import { CheckoutsStatusStore } from './checkouts-status'
@@ -1649,18 +1650,11 @@ function main(): void {
         scope: `palette:${profileId}`,
       })
     try {
-      announce(await open(port))
+      // A taken local port is the wire's typed `address-in-use` cause; the
+      // same one retry the Ports panel makes lives in forward-retry.ts.
+      announce(await openForwardWithFallback(open, port))
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/address already in use|EADDRINUSE/i.test(msg)) {
-        showToast({ level: 'danger', message: msg })
-        return
-      }
-      try {
-        announce(await open(0))
-      } catch (e2) {
-        showToast({ level: 'danger', message: e2 instanceof Error ? e2.message : String(e2) })
-      }
+      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
     }
   }
 

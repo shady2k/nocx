@@ -48,7 +48,10 @@ func (l *local) start(ctx context.Context, host string, opts []ssh.ConnectOption
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		_ = lease.Close()
-		return Bind{}, err
+		// Marked, not merely wrapped: only this failure means the LOCAL
+		// port is held, and the wire's typed cause is drawn from the mark
+		// (IsLocalBind) — the acquire above can carry the same syscall.
+		return Bind{}, &localBindError{err: err}
 	}
 	if !l.fl.publish(lease, ln) {
 		_ = lease.Close()

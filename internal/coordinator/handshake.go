@@ -188,7 +188,16 @@ package coordinator
 // against 41 and took 42 for itself; main took 42 first for the embedded
 // integration's wrapper (ADR-0104), so this is the MERGED surface one above it
 // and the golden below is written over the merged tree.
-const ProtocolVersion = 43
+//
+// 44 (nocx-oalo1.13.5): tunnel.open's refusal carries a typed cause. Its error
+// payload gains a required `reason` with one value, `address-in-use`, for the
+// failure this build can act on — a local bind somebody else already holds —
+// and the window answers it by opening the same forward again on a port the OS
+// allocates, exactly once. The schema that describes it,
+// contracts/tunnel.error.schema.json, is part of the surface (ADR-0104), so a
+// 43 window validating the payload against the previous shape refuses one that
+// now conforms: the number moves with the contract.
+const ProtocolVersion = 44
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

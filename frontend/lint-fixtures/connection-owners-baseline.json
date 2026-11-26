@@ -102,22 +102,6 @@
     },
     {
       "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/main.tsx",
-      "symbol": "openForward",
-      "target": "test:/address already in use|EADDRINUSE/i",
-      "count": 1,
-      "reason": "reads a bind failure's message to tell a taken port from another failure. A local socket, not an SSH connection; leaves when the forward reports a typed cause"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "forward",
-      "target": "test:/address already in use|EADDRINUSE/i",
-      "count": 1,
-      "reason": "the Ports panel's copy of the same bind-failure match. One owner with main.tsx: a typed cause on the forward result"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
       "symbol": "listingFailureMessage",
       "target": "includes:\"disconnected\"",

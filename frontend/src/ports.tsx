@@ -26,6 +26,7 @@
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { Dispatcher } from './dispatcher'
+import { openForwardWithFallback } from './forward-retry'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import type { TunnelStopResult } from './generated/tunnel.stop'
@@ -389,7 +390,8 @@ export function PortsPanel(props: PortsPanelProps) {
   }
 
   /** One action from the row (spec §9). When the same numeric port is busy
-   *  locally, default to an allocated loopback port. */
+   *  locally — the wire's typed `address-in-use` cause, never the message —
+   *  the forward is opened on an allocated loopback port instead. */
   const forward = async (destination: string, port: number): Promise<void> => {
     const pid = profileId()
     // Nothing to forward from the machine you are on: local rows offer
@@ -397,24 +399,21 @@ export function PortsPanel(props: PortsPanelProps) {
     // invariant structural — the row button is already swapped, but a
     // stray call must never dial tunnel.open with the "local" target.
     if (pid === null || pid === LOCAL_TARGET_ID) return
+    // Bind the service once, here: the retry callback below closes over this
+    // and the request only, so it reads no reactive prop when it runs.
+    const openOn = props.services.openForward.bind(props.services)
     try {
-      const rec = await props.services.openForward(pid, destination, port)
+      const rec = await openForwardWithFallback(
+        (bindPort) => openOn(pid, destination, bindPort),
+        port,
+      )
       if (profileId() !== pid) return
       recordForward(rec)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/address already in use|EADDRINUSE/i.test(msg)) {
-        if (profileId() === pid) showToast({ level: 'danger', message: msg })
-        return
+      if (profileId() === pid) {
+        showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
       }
-      try {
-        const rec = await props.services.openForward(pid, destination, 0)
-        if (profileId() !== pid) return
-        recordForward(rec)
-      } catch (e2) {
-        const msg2 = e2 instanceof Error ? e2.message : String(e2)
-        if (profileId() === pid) showToast({ level: 'danger', message: msg2 })
-      }
+      return
     }
     if (profileId() === pid) await refresh()
   }

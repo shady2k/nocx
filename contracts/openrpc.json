@@ -26490,6 +26490,9 @@
       "$ref": "https://nocx.local/contracts/transport.ping.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/tunnel.error.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/tunnel.open.schema.json"
     },
     {

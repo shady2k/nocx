@@ -58,7 +58,7 @@ import (
 // extra byte is what a truncation probe needs; the op's shape has no truncation
 // flag because a whole-file read refuses a file it cannot return in one piece
 // (too-large) rather than returning a labelled prefix.
-const maxReadLength = local.MaxReadBytes + 1
+const maxReadLength = filesystem.MaxReadBytes + 1
 
 // wholeReadAttempts is the retry budget of a whole-file read. Three attempts
 // is the plan's number: one to detect movement, two to let a writer finish,
@@ -261,10 +261,11 @@ func (s *Service) stat(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return proto.FSStatResult{
-		Kind:    filesystem.KindOf(info.Mode()),
-		Size:    info.Size(),
-		MtimeNs: info.ModTime().UnixNano(),
-		Mode:    uint32(info.Mode()), //nolint:gosec // os.FileMode is 32 bits of defined flags; this is its wire form
+		Kind:     filesystem.KindOf(info.Mode()),
+		Identity: fileIdentity(info),
+		Size:     info.Size(),
+		MtimeNs:  info.ModTime().UnixNano(),
+		Mode:     uint32(info.Mode()), //nolint:gosec // os.FileMode is 32 bits of defined flags; this is its wire form
 	}, nil
 }
 

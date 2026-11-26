@@ -420,11 +420,8 @@ package proto
 // that read the empty answer as a permission problem. The service is also the
 // closed set of ops a reader switches on, and two peers that disagree refuse
 // each other at hello in both directions, which is what makes the number the
-// whole of the compatibility story. The write half of the same service lands
-// with its own leaves and each round moves this number: watch is 33, because a
-// generation is published with the next nightly and the argument that let 15
-// widen in place — nothing was published to gain it against — is spent by the
-// time the next round lands.
+// whole of the compatibility story. Later expansions move this number again
+// because published generations keep their wire contracts.
 //
 // This is 32 rather than 31 because the wire grew the WRITE SESSION
 // (nocx-oalo1.12.3): `write-open`, `write`, `write-commit` and `write-abort` on
@@ -452,8 +449,10 @@ package proto
 // there is no shape to misread — only a question that never gets asked, and a
 // coordinator that would then report a host whose leftovers it never saw.
 //
-// The number that will move next is 34, for `watch` (nocx-oalo1.12.10), and it
-// is named here rather than discovered later: the sentence above is the one
-// every generation boundary states, and the plan fixes the order so two
-// branches cannot take the same number.
-const Version = "33"
+// This is 34 rather than 33 because fs.stat now records the same object's
+// size and dev:ino. A ranged download must pin both before its first read:
+// matching only the lengths lets a replacement supply a different file.
+// `identity` is a required field on a frozen response, so hello must fence a
+// peer that cannot send or accept it. The next fs.watch extension moves the
+// number again (nocx-oalo1.12.10).
+const Version = "34"

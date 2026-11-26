@@ -228,8 +228,8 @@ func TestFSListPermissionDenialKeepsTheConnectionServing(t *testing.T) {
 	if !errors.As(err, &refusal) {
 		t.Fatalf("list on an unreadable directory = %v, want a *client.RefusalError", err)
 	}
-	if refusal.Code != hostsvc.ErrCodePermissionDenied {
-		t.Fatalf("code = %q, want %q", refusal.Code, hostsvc.ErrCodePermissionDenied)
+	if refusal.Code != proto.FSCodePermissionDenied {
+		t.Fatalf("code = %q, want %q", refusal.Code, proto.FSCodePermissionDenied)
 	}
 
 	var rootRaw json.RawMessage

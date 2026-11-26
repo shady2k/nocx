@@ -125,8 +125,8 @@ func TestReadWholeRefusesAFileBiggerThanTheBound(t *testing.T) {
 		t.Fatal("a whole-file read of a file larger than the bound succeeded")
 	}
 	code, details := refusalCode(t, svc, err)
-	if code != ErrCodeTooLarge {
-		t.Fatalf("code = %q, want %q", code, ErrCodeTooLarge)
+	if code != proto.FSCodeTooLarge {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeTooLarge)
 	}
 	var d struct {
 		Observed int64 `json:"observed"`
@@ -163,8 +163,8 @@ func TestReadRefusesPagesItCannotRead(t *testing.T) {
 			if err == nil {
 				t.Fatal("the read succeeded")
 			}
-			if code, _ := refusalCode(t, svc, err); code != ErrCodeInvalidPage {
-				t.Fatalf("code = %q, want %q", code, ErrCodeInvalidPage)
+			if code, _ := refusalCode(t, svc, err); code != proto.FSCodeInvalidPage {
+				t.Fatalf("code = %q, want %q", code, proto.FSCodeInvalidPage)
 			}
 		})
 	}
@@ -203,8 +203,8 @@ func TestReadWholeRefusesAFileRewrittenOnEveryAttempt(t *testing.T) {
 	if err == nil {
 		t.Fatal("a file rewritten during every read attempt was read as if stable")
 	}
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeChangedDuringRead {
-		t.Fatalf("code = %q, want %q", code, ErrCodeChangedDuringRead)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeChangedDuringRead {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeChangedDuringRead)
 	}
 	if attempts != wholeReadAttempts {
 		t.Fatalf("attempts = %d, want %d", attempts, wholeReadAttempts)
@@ -396,8 +396,8 @@ func assertNotRegular(t *testing.T, svc *Service, path, wantKind string) {
 			t.Fatal("the read succeeded")
 		}
 		code, details := refusalCode(t, svc, got.err)
-		if code != ErrCodeNotRegular {
-			t.Fatalf("code = %q, want %q", code, ErrCodeNotRegular)
+		if code != proto.FSCodeNotRegular {
+			t.Fatalf("code = %q, want %q", code, proto.FSCodeNotRegular)
 		}
 		var d struct {
 			Kind string `json:"kind"`
@@ -423,8 +423,8 @@ func TestReadRefusesADirectory(t *testing.T) {
 		t.Fatal("reading a directory succeeded")
 	}
 	code, details := refusalCode(t, svc, err)
-	if code != ErrCodeNotRegular {
-		t.Fatalf("code = %q, want %q", code, ErrCodeNotRegular)
+	if code != proto.FSCodeNotRegular {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeNotRegular)
 	}
 	var d struct {
 		Kind string `json:"kind"`
@@ -475,7 +475,7 @@ func TestReadIsRefusedByACancelledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("a cancelled read succeeded")
 	}
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeTimedOut {
-		t.Fatalf("code = %q, want %q", code, ErrCodeTimedOut)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeTimedOut {
+		t.Fatalf("code = %q, want %q", code, proto.FSCodeTimedOut)
 	}
 }

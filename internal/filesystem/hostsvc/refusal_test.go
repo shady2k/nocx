@@ -11,6 +11,7 @@ import (
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // TestRefusalCodesAndDetails pins the plan's closed list, one row per code.
@@ -26,21 +27,21 @@ func TestRefusalCodesAndDetails(t *testing.T) {
 		code string
 		want map[string]any
 	}{
-		{name: "cancelled request", err: context.Canceled, code: ErrCodeTimedOut},
-		{name: "expired deadline", err: context.DeadlineExceeded, code: ErrCodeTimedOut},
-		{name: "not found", err: &filesystem.ErrNotFound{Path: "/x"}, code: ErrCodeNotFound},
-		{name: "permission denied", err: &filesystem.ErrPermission{Path: "/x"}, code: ErrCodePermissionDenied},
-		{name: "not a directory", err: &filesystem.ErrNotDir{Path: "/x"}, code: ErrCodeNotDir},
-		{name: "not regular", err: &filesystem.ErrNotRegular{Path: "/x", Kind: filesystem.KindDir}, code: ErrCodeNotRegular, want: map[string]any{"kind": "dir"}},
-		{name: "invalid path", err: &filesystem.ErrInvalidPath{Path: "x", Reason: "path is not absolute"}, code: ErrCodeInvalidPath, want: map[string]any{"reason": "path is not absolute"}},
-		{name: "invalid page", err: &filesystem.ErrInvalidPage{Offset: -1, Limit: 0}, code: ErrCodeInvalidPage},
-		{name: "entry cap", err: &filesystem.ErrTooLarge{ObservedCount: 3, Limit: 2}, code: ErrCodeTooLarge, want: map[string]any{"observed": 3.0, "limit": 2.0}},
+		{name: "cancelled request", err: context.Canceled, code: proto.FSCodeTimedOut},
+		{name: "expired deadline", err: context.DeadlineExceeded, code: proto.FSCodeTimedOut},
+		{name: "not found", err: &filesystem.ErrNotFound{Path: "/x"}, code: proto.FSCodeNotFound},
+		{name: "permission denied", err: &filesystem.ErrPermission{Path: "/x"}, code: proto.FSCodePermissionDenied},
+		{name: "not a directory", err: &filesystem.ErrNotDir{Path: "/x"}, code: proto.FSCodeNotDir},
+		{name: "not regular", err: &filesystem.ErrNotRegular{Path: "/x", Kind: filesystem.KindDir}, code: proto.FSCodeNotRegular, want: map[string]any{"kind": "dir"}},
+		{name: "invalid path", err: &filesystem.ErrInvalidPath{Path: "x", Reason: "path is not absolute"}, code: proto.FSCodeInvalidPath, want: map[string]any{"reason": "path is not absolute"}},
+		{name: "invalid page", err: &filesystem.ErrInvalidPage{Offset: -1, Limit: 0}, code: proto.FSCodeInvalidPage},
+		{name: "entry cap", err: &filesystem.ErrTooLarge{ObservedCount: 3, Limit: 2}, code: proto.FSCodeTooLarge, want: map[string]any{"observed": 3.0, "limit": 2.0}},
 		{name: "listing size cap", err: &filesystem.ErrTooLargeSize{ObservedBytes: 9, Limit: 8}, code: "too-large-size", want: map[string]any{"observed": 9.0, "limit": 8.0}},
-		{name: "entry cap is not the size cap", err: &filesystem.ErrTooLarge{ObservedCount: 9, Limit: 8}, code: ErrCodeTooLarge, want: map[string]any{"observed": 9.0, "limit": 8.0}},
-		{name: "elapsed cap", err: &filesystem.ErrTimedOut{Timeout: time.Second}, code: ErrCodeTimedOut},
-		{name: "raw EACCES", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.EACCES}, code: ErrCodePermissionDenied},
-		{name: "raw ENOENT", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.ENOENT}, code: ErrCodeNotFound},
-		{name: "raw ENOTDIR", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.ENOTDIR}, code: ErrCodeNotDir},
+		{name: "entry cap is not the size cap", err: &filesystem.ErrTooLarge{ObservedCount: 9, Limit: 8}, code: proto.FSCodeTooLarge, want: map[string]any{"observed": 9.0, "limit": 8.0}},
+		{name: "elapsed cap", err: &filesystem.ErrTimedOut{Timeout: time.Second}, code: proto.FSCodeTimedOut},
+		{name: "raw EACCES", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.EACCES}, code: proto.FSCodePermissionDenied},
+		{name: "raw ENOENT", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.ENOENT}, code: proto.FSCodeNotFound},
+		{name: "raw ENOTDIR", err: &os.PathError{Op: "open", Path: "/x", Err: syscall.ENOTDIR}, code: proto.FSCodeNotDir},
 		{name: "unclassified", err: errors.New("boom"), code: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -435,7 +435,7 @@ func (s *Service) writeCommit(ctx context.Context, raw json.RawMessage) (any, er
 		// about the file, and re-sending what is missing is the caller's call.
 		return nil, &sizeMismatch{expected: sess.size, got: p.Size}
 	}
-	candidate, err := commitTarget(sess, p.Path)
+	candidate, err := commitTarget(sess, p.Path, expectsAbsent(p.Expect))
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,12 @@ func (s *Service) install(sess *writeSession, candidate string, p proto.FSWriteC
 			_ = os.Chmod(sess.temp, 0o600)
 		}
 	}()
-	if err := s.applyMode(sess.temp, candidate); err != nil {
+	noReplace := expectsAbsent(p.Expect)
+	if noReplace {
+		if err := os.Chmod(sess.temp, newFileMode()); err != nil {
+			return proto.FSWriteCommitResult{}, err
+		}
+	} else if err := s.applyMode(sess.temp, candidate); err != nil {
 		return proto.FSWriteCommitResult{}, err
 	}
 	if err := checkExpectation(candidate, p.Expect); err != nil {
@@ -509,7 +514,6 @@ func (s *Service) install(sess *writeSession, candidate string, p proto.FSWriteC
 	if s.seams.beforeRename != nil {
 		s.seams.beforeRename()
 	}
-	noReplace := p.Expect != nil && p.Expect.Absent != nil && *p.Expect.Absent
 	if err := s.renameFile(sess.temp, candidate, noReplace); err != nil {
 		return proto.FSWriteCommitResult{}, err
 	}
@@ -763,6 +767,10 @@ func applyTargetMode(temp, candidate string) error {
 	}
 }
 
+func expectsAbsent(expect *proto.FSWriteExpect) bool {
+	return expect != nil && expect.Absent != nil && *expect.Absent
+}
+
 // checkExpectation is the conditional half of the commit: the target must
 // still be the file the caller read, or must not be there at all.
 func checkExpectation(candidate string, expect *proto.FSWriteExpect) error {
@@ -861,8 +869,14 @@ func currentTarget(path string, size int64) *proto.FSWriteCurrent {
 // is answered without sending the bytes again — but a path that resolves into
 // another directory is a caller writing somewhere it never opened a session
 // for, and it is refused before anything is touched.
-func commitTarget(sess *writeSession, path string) (string, error) {
-	candidate, err := resolveWriteTarget(path)
+func commitTarget(sess *writeSession, path string, noReplace bool) (string, error) {
+	resolve := resolveWriteTarget
+	if noReplace {
+		// Any existing directory entry is a collision, including a symlink
+		// whose target is absent or sits outside the opened directory.
+		resolve = resolveWriteName
+	}
+	candidate, err := resolve(path)
 	if err != nil {
 		return "", err
 	}
@@ -892,11 +906,7 @@ func resolveWriteTarget(path string) (string, error) {
 		if info, lerr := os.Lstat(clean); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 			return "", &notRegular{path: path, kind: "symlink"}
 		}
-		dir, dirErr := filepath.EvalSymlinks(filepath.Dir(clean))
-		if dirErr != nil {
-			return "", dirErr
-		}
-		return filepath.Join(dir, filepath.Base(clean)), nil
+		return resolveWriteName(clean)
 	}
 	info, err := os.Lstat(resolved)
 	if err != nil {
@@ -906,6 +916,19 @@ func resolveWriteTarget(path string) (string, error) {
 		return "", &notRegular{path: path, kind: kindName(info.Mode())}
 	}
 	return resolved, nil
+}
+
+// resolveWriteName resolves the directory but does not follow the final name.
+func resolveWriteName(path string) (string, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) == string(filepath.Separator) {
+		return "", &filesystem.ErrInvalidPath{Path: path, Reason: "a write target must be an absolute file path"}
+	}
+	clean := filepath.Clean(path)
+	dir, err := filepath.EvalSymlinks(filepath.Dir(clean))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(clean)), nil
 }
 
 // validWriteID accepts 128 bits spelled as lower-case hex and nothing else.

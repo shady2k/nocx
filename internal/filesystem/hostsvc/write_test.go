@@ -32,6 +32,44 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
+func TestKeepBothTreatsDirectoriesAndSymlinksAsOccupied(t *testing.T) {
+	dir := t.TempDir()
+	external := filepath.Join(t.TempDir(), "target.txt")
+	if err := os.WriteFile(external, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(dir, "target.txt")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "target (1).txt")
+	if err := os.Symlink(external, link); err != nil {
+		t.Fatal(err)
+	}
+	svc := newWriteService(t, dir)
+	id := writeID(t.Name())
+	writeOpenOK(t, svc, id, filepath.Join(dir, "staging-target"))
+	writeOK(t, svc, id, 0, "replacement")
+	absent := true
+	params := proto.FSWriteCommitParams{ID: id, Size: int64(len("replacement")), Expect: &proto.FSWriteExpect{Absent: &absent}}
+	for _, occupied := range []string{directory, link} {
+		params.Path = occupied
+		_, err := commitTry(t, svc, params)
+		var collision *targetExists
+		if !errors.As(err, &collision) {
+			t.Fatalf("commit for %s: %v; want collision", occupied, err)
+		}
+	}
+	params.Path = filepath.Join(dir, "target (2).txt")
+	if got := commitOK(t, svc, params); got.Outcome != proto.FSOutcomeCommitted {
+		t.Fatalf("commit after collisions = %+v", got)
+	}
+	bytes, err := os.ReadFile(external) // #nosec G304 -- test-owned path.
+	if err != nil || string(bytes) != "original" {
+		t.Fatalf("existing symlink target = %q, %v", bytes, err)
+	}
+}
+
 func newWriteService(t *testing.T, root string) *Service {
 	t.Helper()
 	return newTestService(t, local.New(local.WithRoot(root)))
@@ -217,8 +255,8 @@ func TestWriteCommitRefusesAFileChangedSinceItWasRead(t *testing.T) {
 	_, err := commitTry(t, svc, proto.FSWriteCommitParams{
 		ID: id, Path: file, Size: wrote.Size, Expect: &proto.FSWriteExpect{Version: &read},
 	})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeChangedSinceRead {
-		t.Fatalf("refusal = %q, want %q", code, ErrCodeChangedSinceRead)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeChangedSinceRead {
+		t.Fatalf("refusal = %q, want %q", code, proto.FSCodeChangedSinceRead)
 	}
 	if got := mustRead(t, file); got != "somebody else's edit\n" {
 		t.Fatalf("the other writer's bytes were replaced: %q", got)
@@ -283,8 +321,8 @@ func TestWriteCommitComparesTheDigestWhenSizeAndMtimeAgree(t *testing.T) {
 	_, err = commitTry(t, svc, proto.FSWriteCommitParams{
 		ID: id, Path: file, Size: wrote.Size, Expect: &proto.FSWriteExpect{Version: &read},
 	})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeChangedSinceRead {
-		t.Fatalf("refusal = %q, want %q — the digest is what caught it", code, ErrCodeChangedSinceRead)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeChangedSinceRead {
+		t.Fatalf("refusal = %q, want %q — the digest is what caught it", code, proto.FSCodeChangedSinceRead)
 	}
 	if got := mustRead(t, file); got != "cccc\n" {
 		t.Fatalf("the write landed over a same-size rewrite: %q", got)
@@ -558,9 +596,9 @@ func TestConcurrentCommitsInstallExactlyOne(t *testing.T) {
 					committed++
 					continue
 				}
-				want := ErrCodeChangedSinceRead
+				want := proto.FSCodeChangedSinceRead
 				if absent {
-					want = ErrCodeExists
+					want = proto.FSCodeExists
 				}
 				if code, _ := refusalCode(t, svc, r.err); code != want {
 					t.Fatalf("the losing commit refused %q, want %q", code, want)
@@ -683,8 +721,8 @@ func TestExpectAbsentRefusesAnOccupiedNameAndLetsKeepBothRetry(t *testing.T) {
 	_, err := commitTry(t, svc, proto.FSWriteCommitParams{
 		ID: id, Path: file, Size: wrote.Size, Expect: &proto.FSWriteExpect{Absent: &yes},
 	})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeExists {
-		t.Fatalf("refusal = %q, want %q", code, ErrCodeExists)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeExists {
+		t.Fatalf("refusal = %q, want %q", code, proto.FSCodeExists)
 	}
 	if got := mustRead(t, file); got != "taken\n" {
 		t.Fatalf("the occupied name holds %q, want it untouched", got)
@@ -723,8 +761,8 @@ func TestWriteCommitCannotLeaveTheDirectoryItOpened(t *testing.T) {
 	writeOpenOK(t, svc, id, file)
 	wrote := writeOK(t, svc, id, 0, "new\n")
 	_, err := commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: outside, Size: wrote.Size})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeInvalidPath {
-		t.Fatalf("refusal = %q, want %q", code, ErrCodeInvalidPath)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeInvalidPath {
+		t.Fatalf("refusal = %q, want %q", code, proto.FSCodeInvalidPath)
 	}
 	if _, statErr := os.Stat(outside); statErr == nil {
 		t.Fatalf("the commit created %s outside the session's directory", outside)
@@ -746,33 +784,33 @@ func TestWriteSessionRefusesWhatItCannotWrite(t *testing.T) {
 
 	for _, id := range []string{"", "abc", strings.Repeat("A", 32), strings.Repeat("z", 32), strings.Repeat("a", 31), "../" + strings.Repeat("a", 29)} {
 		_, err := callAs[proto.FSWriteOpenResult](t, svc, proto.OpWriteOpen, proto.FSWriteOpenParams{ID: id, Path: file})
-		if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
-			t.Fatalf("write-open with id %q refused %q, want %q", id, code, ErrCodeBadSession)
+		if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadSession {
+			t.Fatalf("write-open with id %q refused %q, want %q", id, code, proto.FSCodeBadSession)
 		}
 	}
 
 	taken := writeID(t.Name() + "-taken")
 	writeOpenOK(t, svc, taken, file)
 	_, err := callAs[proto.FSWriteOpenResult](t, svc, proto.OpWriteOpen, proto.FSWriteOpenParams{ID: taken, Path: file})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
-		t.Fatalf("a second session on a taken id refused %q, want %q", code, ErrCodeBadSession)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadSession {
+		t.Fatalf("a second session on a taken id refused %q, want %q", code, proto.FSCodeBadSession)
 	}
 
 	id := writeID(t.Name())
 	writeOpenOK(t, svc, id, file)
 	_, err = callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: 4, Data: []byte("x")})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeBadOffset {
-		t.Fatalf("an out-of-order chunk refused %q, want %q", code, ErrCodeBadOffset)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadOffset {
+		t.Fatalf("an out-of-order chunk refused %q, want %q", code, proto.FSCodeBadOffset)
 	}
 	_, err = callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: writeID(t.Name() + "-unknown"), Offset: 0, Data: []byte("x")})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
-		t.Fatalf("a chunk for an unknown session refused %q, want %q", code, ErrCodeBadSession)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadSession {
+		t.Fatalf("a chunk for an unknown session refused %q, want %q", code, proto.FSCodeBadSession)
 	}
 
 	wrote := writeOK(t, svc, id, 0, "new\n")
 	_, err = commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size + 1})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeSizeMismatch {
-		t.Fatalf("a commit of the wrong size refused %q, want %q", code, ErrCodeSizeMismatch)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeSizeMismatch {
+		t.Fatalf("a commit of the wrong size refused %q, want %q", code, proto.FSCodeSizeMismatch)
 	}
 	if left := temps(t, dir); len(left) != 2 {
 		t.Fatalf("a size-mismatched commit left %d temporaries, want both sessions'", len(left))
@@ -822,11 +860,11 @@ func TestWriteSessionRefusesWhatIsNotARegularFile(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := callAs[proto.FSWriteOpenResult](t, svc, proto.OpWriteOpen, proto.FSWriteOpenParams{ID: writeID(t.Name()), Path: tc.path})
-			if code, _ := refusalCode(t, svc, err); code != ErrCodeNotRegular {
-				t.Fatalf("refusal = %q, want %q", code, ErrCodeNotRegular)
+			if code, _ := refusalCode(t, svc, err); code != proto.FSCodeNotRegular {
+				t.Fatalf("refusal = %q, want %q", code, proto.FSCodeNotRegular)
 			}
 			code, details := svc.Refusal(err)
-			if code != ErrCodeNotRegular {
+			if code != proto.FSCodeNotRegular {
 				t.Fatalf("code = %q", code)
 			}
 			var d kindDetails
@@ -871,8 +909,8 @@ func TestWriteCommitFailureLeavesTheSessionWhole(t *testing.T) {
 			return 0, &os.PathError{Op: "write", Path: file, Err: syscall.ENOSPC}
 		}
 		_, err := callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: 0, Data: []byte("bytes")})
-		if code, _ := refusalCode(t, svc, err); code != ErrCodeNoSpace {
-			t.Fatalf("refusal = %q, want %q", code, ErrCodeNoSpace)
+		if code, _ := refusalCode(t, svc, err); code != proto.FSCodeNoSpace {
+			t.Fatalf("refusal = %q, want %q", code, proto.FSCodeNoSpace)
 		}
 		svc.seams.writeChunk = nil
 		if out := writeOK(t, svc, id, 0, "bytes"); out.Size != 5 {
@@ -904,12 +942,12 @@ func TestWriteCommitFailureLeavesTheSessionWhole(t *testing.T) {
 		// fsync would answer 0 and install pages that never reached the disk.
 		svc.seams.syncTemp = nil
 		_, err = commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: wrote.Size})
-		if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
-			t.Fatalf("a commit after a failed fsync refused %q, want %q", code, ErrCodeBadSession)
+		if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadSession {
+			t.Fatalf("a commit after a failed fsync refused %q, want %q", code, proto.FSCodeBadSession)
 		}
 		_, err = callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: wrote.Size, Data: []byte("!")})
-		if code, _ := refusalCode(t, svc, err); code != ErrCodeBadSession {
-			t.Fatalf("a chunk after a failed fsync refused %q, want %q", code, ErrCodeBadSession)
+		if code, _ := refusalCode(t, svc, err); code != proto.FSCodeBadSession {
+			t.Fatalf("a chunk after a failed fsync refused %q, want %q", code, proto.FSCodeBadSession)
 		}
 		if got := mustRead(t, file); got != "old\n" {
 			t.Fatalf("a session poisoned by a failed fsync installed the file: %q", got)
@@ -995,8 +1033,8 @@ func TestWriteChunkRetriedAfterAPartialWriteLeavesNoTail(t *testing.T) {
 		return n, syscall.ENOSPC
 	}
 	_, err := callAs[proto.FSWriteResult](t, svc, proto.OpWrite, proto.FSWriteParams{ID: id, Offset: 0, Data: []byte(chunk)})
-	if code, _ := refusalCode(t, svc, err); code != ErrCodeNoSpace {
-		t.Fatalf("refusal = %q, want %q", code, ErrCodeNoSpace)
+	if code, _ := refusalCode(t, svc, err); code != proto.FSCodeNoSpace {
+		t.Fatalf("refusal = %q, want %q", code, proto.FSCodeNoSpace)
 	}
 	svc.seams.writeChunk = nil
 
@@ -1175,8 +1213,8 @@ func TestWriteOpenDoesNotHoldTheServiceLockWhileItCreatesTheTemporary(t *testing
 		t.Fatalf("the slow write-open failed: %v", err)
 	}
 
-	if code, _ := refusalCode(t, svc, duplicate); code != ErrCodeBadSession {
-		t.Fatalf("a duplicate id during the creation refused %q, want %q", code, ErrCodeBadSession)
+	if code, _ := refusalCode(t, svc, duplicate); code != proto.FSCodeBadSession {
+		t.Fatalf("a duplicate id during the creation refused %q, want %q", code, proto.FSCodeBadSession)
 	}
 	if abortedErr != nil {
 		t.Fatalf("abort of another session during the creation: %v", abortedErr)

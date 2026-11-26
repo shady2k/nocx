@@ -6,7 +6,6 @@
 package local
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,22 +17,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
 )
-
-// MaxReadBytes is the read ceiling of spec §5.1: the effective limit is
-// min(requested, 2 MiB), so the parameter can only lower the ceiling. It is a
-// number rather than a knob because the viewer must never present more than
-// this much of a file; it is a starting number, to be tuned once the panel is
-// in daily use (spec §9).
-//
-// It is exported because a second reader applies the same ceiling: the far
-// helper's `fs.read` accepts at most this plus one byte (the extra byte is the
-// truncation probe), and a bound copied into that service would be a number
-// two places could tune apart.
-const MaxReadBytes = 2 << 20 // 2 MiB
 
 // defaultEntryCap is the D14 product limit: a directory with more entries
 // than this is a tooLarge state, not a listing. Total, the deterministic
@@ -366,10 +352,7 @@ func (p *Provider) Read(ctx context.Context, path string, maxBytes int64) (files
 	if err := checkPath(path); err != nil {
 		return filesystem.Content{}, err
 	}
-	limit := maxBytes
-	if limit <= 0 || limit > MaxReadBytes {
-		limit = MaxReadBytes
-	}
+	limit := filesystem.ReadLimit(maxBytes)
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return filesystem.Content{}, wrapPathErr("read", path, err)
@@ -409,24 +392,8 @@ func (p *Provider) Read(ctx context.Context, path string, maxBytes int64) (files
 	if truncated {
 		data = data[:int(limit)]
 	}
-	binary := bytes.IndexByte(data, 0) >= 0 // the NUL heuristic of spec §5.1
-	c := filesystem.Content{
-		Path:      path,
-		Canonical: canonical,
-		Size:      int64(len(data)),
-		ModTime:   after.ModTime(),
-		Truncated: truncated,
-		Binary:    binary,
-		Changed:   after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()),
-	}
-	if !binary {
-		c.Text = string(data)
-		if !utf8.Valid(data) {
-			c.Lossy = true
-			c.Text = strings.ToValidUTF8(c.Text, "\uFFFD")
-		}
-	}
-	return c, nil
+	changed := after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime())
+	return filesystem.PreviewContent(path, canonical, data, after.ModTime(), truncated, changed), nil
 }
 
 // Watch is declared by the Provider contract (spec §5.1), but watching is a

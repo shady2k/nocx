@@ -15,8 +15,6 @@ import (
 	"testing"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
-	"github.com/shady2k/nocx/internal/filesystem/local"
-	"github.com/shady2k/nocx/internal/hashline"
 )
 
 // TestScopedReader_FilesystemRootFenceReadsARealFile: a reader whose root is
@@ -27,15 +25,12 @@ func TestScopedReader_FilesystemRootFenceReadsARealFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("real"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(), []string{"/"}, []string{path})
-	if err != nil {
-		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
-	}
-	got, err := s.Read(ctx, path, 1<<20)
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t), []string{"/"}, []string{path})
+	got, err := s.ReadSnapshot(ctx, path, 1<<20)
 	if err != nil {
 		t.Fatalf("read under a %q fence: %v", "/", err)
 	}
-	if got.Text != "real" {
+	if got.Text != "1:real" {
 		t.Fatalf("read under a %q fence = %q, want the file's content", "/", got.Text)
 	}
 }
@@ -50,23 +45,18 @@ func TestScopedEditor_FilesystemRootFenceEditsAndCreates(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	editor, err := filesystem.NewScopedEditorWithExactFiles(ctx, local.New(), []string{"/"}, []string{existing})
+	source := newLocalSource(t)
+	editor := filesystem.NewScopedEditorWithExactFiles(source, []string{"/"}, []string{existing})
+	snapshot, err := filesystem.NewScopedReaderWithExactFiles(source, []string{"/"}, []string{existing}).ReadSnapshot(ctx, existing, 64<<10)
 	if err != nil {
-		t.Fatalf("NewScopedEditorWithExactFiles: %v", err)
-	}
-	snapshot, err := hashline.Read(existing, 64<<10)
-	if err != nil {
-		t.Fatalf("hashline.Read: %v", err)
+		t.Fatalf("ReadSnapshot: %v", err)
 	}
 	if _, editErr := editor.Edit(ctx, existing, snapshot.Revision, "PUT 1.=1:\n+after"); editErr != nil {
 		t.Fatalf("edit under a %q fence: %v", "/", editErr)
 	}
 
 	target := filepath.Join(dir, "new.txt")
-	creator, err := filesystem.NewScopedEditorWithExactParents(ctx, local.New(), []string{"/"}, []string{dir})
-	if err != nil {
-		t.Fatalf("NewScopedEditorWithExactParents: %v", err)
-	}
+	creator := filesystem.NewScopedEditorWithExactParents(newLocalSource(t), []string{"/"}, []string{dir})
 	if _, createErr := creator.Create(ctx, target, "created\n"); createErr != nil {
 		t.Fatalf("create under a %q fence: %v", "/", createErr)
 	}

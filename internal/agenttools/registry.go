@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -76,10 +77,11 @@ type RunContext struct {
 	// transport's environmentForSession, the one owner of "where is this
 	// session" — never anything a call's parameters could name.
 	//
-	// The zero value names no pane. The file tools refuse that rather than
-	// assume this machine: they are built on local.New() until the pane's
-	// own provider exists (ADR-anntnxdj §5, stage 8), so a capability that
-	// cannot prove the pane is local must not reach this disk.
+	// The zero value names no pane. The file tools refuse it rather than
+	// assume this machine: they act through the pane's own binding
+	// (RunContext.Files below), and a run that never said where its pane is
+	// has not said it is here. localPaneOnly is that refusal, and
+	// it keeps a non-local pane out until the stage can reach one (.11.4).
 	Environment content.Environment
 	// Participant is the worker participant this run IS, when the run belongs
 	// to a worker rather than to a coordinator. Empty for every ordinary run,
@@ -108,6 +110,19 @@ type RunContext struct {
 	// worker: a delegation's authority is bound to WHICH INCARNATION of the
 	// controller session granted it, not to the session id alone.
 	ControllerIdentity session.Identity
+	// Files is the pane's OWN file binding, minted per tool call by the
+	// transport's assistant files source (stage 10, ADR-anntnxdj §5). It is a
+	// source rather than a handle, and that is the whole authority rule: the
+	// capability acquires one short-lived Handle per operation, so a binding's
+	// lifetime is the call's and not the run's, and the tool never holds a
+	// provider it could reach through later.
+	//
+	// Nil means no adapter bound one — a build with no files composition, or a
+	// caller that never wired it — and the file tools then build no capability
+	// at all rather than reaching this machine's disk by default. That default
+	// is the same guarantee localPaneOnly gives a non-local pane: a capability
+	// that cannot prove where it acts must not act.
+	Files filesystem.HandleSource
 	// PaneAccess is the DescendantPaneAccess capability (internal/app) bound
 	// for this run by the same adapter, before dispatch — never inferred
 	// from a call's parameters (design §7.1). It is `any` because this

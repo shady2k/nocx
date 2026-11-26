@@ -63,8 +63,8 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 }
 
 // And the paired half, so "refuses a remote pane" cannot be satisfied by a
-// constructor that refuses everything: the same call on this machine builds
-// the capability it always did.
+// constructor that refuses everything: the same call on this machine, with the
+// pane's file binding present, builds the capability it always did.
 func TestFileToolsBuildOnThisMachine(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "ordinary.txt")
@@ -76,7 +76,7 @@ func TestFileToolsBuildOnThisMachine(t *testing.T) {
 		t.Fatalf("Assemble: %v", err)
 	}
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
-	here := RunContext{Environment: thisMachine()}
+	here := RunContext{Environment: thisMachine(), Files: newTestFileSource(t)}
 
 	for _, name := range []string{"files.read", "files.edit", "files.create"} {
 		t.Run(name, func(t *testing.T) {
@@ -92,6 +92,38 @@ func TestFileToolsBuildOnThisMachine(t *testing.T) {
 				t.Fatal("Narrow returned no capability on this machine")
 			}
 		})
+	}
+}
+
+// TestFileToolsBuildNoCapabilityWithoutAFileBinding is the other guard: a pane
+// on this machine whose run carries no Files source gets no capability either.
+// It is the fail-closed shape stage 10 keeps — a tool that cannot prove it has a
+// route to the pane's files must not fall back to this machine's disk, which is
+// exactly what the old local.New() constructors did.
+func TestFileToolsBuildNoCapabilityWithoutAFileBinding(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "ordinary.txt")
+	if err := os.WriteFile(file, []byte("here\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
+	unbound := RunContext{Environment: thisMachine()}
+	for _, name := range []string{"files.read", "files.edit", "files.create"} {
+		tool, ok := reg.Lookup(name)
+		if !ok {
+			t.Fatalf("%s is not in the assembled registry", name)
+		}
+		capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: file}}, unbound)
+		if err == nil {
+			t.Fatalf("%s built a capability with no file binding", name)
+		}
+		if capability != nil {
+			t.Fatalf("%s returned a capability with no file binding", name)
+		}
 	}
 }
 

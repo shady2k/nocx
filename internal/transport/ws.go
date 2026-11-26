@@ -2181,7 +2181,11 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(gates.configVault, gates.vault, contentOrder)...)
 	specs = append(specs, s.gitSpecs(gates.session, gitOrder, gitBulkhead)...)
-	specs = append(specs, s.filesSpecs(gates.session)...)
+	// One files route for the panel and the assistant: the same two operations,
+	// so the assistant's per-call binding is registered and closed inside the
+	// same scopes a files.* request uses.
+	files := s.filesOperations(gates.session)
+	specs = append(specs, s.filesSpecs(files)...)
 	specs = append(specs, s.apiSpecs(orders.api, gates.vault)...)
 	specs = append(specs, s.contentSpecs(contentOrder, work)...)
 	// history.status rides the plain submission, not the content order: it is
@@ -2189,7 +2193,7 @@ func (s *WSServer) buildControlPlane() {
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(work)...)
 	specs = append(specs, s.checkoutsStatusSpecs(work)...)
-	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, noteOp, snippetOp, s.agentTools, s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, noteOp, snippetOp, s.agentTools, s.assistantClient, s.askSub, files)...)
 	specs = append(specs, s.ledgerSpecs(work, contentOrder)...)
 	specs = append(specs, s.layoutSpecs(work, contentOrder)...)
 	specs = append(specs, s.shellSpecs(gates.session)...)

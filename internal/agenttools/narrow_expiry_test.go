@@ -54,7 +54,7 @@ func TestNarrowRefusesAnExpiredGrant(t *testing.T) {
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
 	grant.ExpiresAt = time.Now().Add(-time.Millisecond).UnixMilli()
 
-	capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: path}}, localPane())
+	capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: path}}, localPane(t))
 	if !errors.Is(err, content.ErrGrantExpired) {
 		t.Fatalf("Narrow under an expired grant: err = %v, want content.ErrGrantExpired", err)
 	}
@@ -82,7 +82,7 @@ func TestNarrowSucceedsOnAFreshlyMintedGrant(t *testing.T) {
 	}
 
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
-	capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: path}}, localPane())
+	capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: path}}, localPane(t))
 	if err != nil {
 		t.Fatalf("Narrow under a freshly minted grant: %v", err)
 	}

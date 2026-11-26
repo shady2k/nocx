@@ -1551,26 +1551,49 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 	}
 }
 
+// filesRoute is the files domain's two operation surfaces, built together from
+// the wired registry and provider factory: files.open's (resolve the session,
+// open and register a provider, take a use-guard) and the binding's (acquire a
+// handle for a binding, close it).
+//
+// It is one value because two things now reach the same domain — the files.*
+// handlers and the assistant's per-call file binding — and building the pair
+// twice would give the same domain two guards, which is two answers to "is a
+// provider call in scope" (ADR-8eej3e66 §4; internal/operation/scopes). The
+// zero value is the wiring that names no filesystem, and every member is then
+// nil, which the handlers answer as "files not available".
+type filesRoute struct {
+	open    capability.FilesystemOpenOperation
+	binding capability.FilesystemBindingOperation
+	factory capability.ProviderFactory
+}
+
+// filesOperations builds the route from the wired store. A server with no
+// filesystem registry gets the zero route rather than operations over a nil
+// registry.
+func (s *WSServer) filesOperations(sessionGate control.Admission) filesRoute {
+	if s.filesys == nil {
+		return filesRoute{}
+	}
+	// The transport-side and capability-side factory types have the same
+	// shape; this converts the wired one (AD-8, the dependency stays
+	// filesystem ← capability). nil converts to nil, preserving the old "no
+	// provider factory wired" answer.
+	factory := capability.ProviderFactory(s.filesProviderFor)
+	return filesRoute{
+		open:    capability.NewFilesystemOpenOperation(sessionGate, s.registry, factory, s.filesys),
+		binding: capability.NewFilesystemBindingOperation(s.filesys),
+		factory: factory,
+	}
+}
+
 // filesSpecs declares the files.* control methods. Every method needs the
 // connection's connState — files.open for the session-ownership check (D15)
 // and the binding methods as the Acquire caller — so each is registered with
-// reg and runs on the ordinary lane. The FilesystemOpenOperation and
-// FilesystemBindingOperation are built here from the wired stores
-// (composition root for this domain); when no filesystem registry is wired,
-// every handler answers -32601 "files not available".
-func (s *WSServer) filesSpecs(sessionGate control.Admission) []methodSpec {
-	var openOp capability.FilesystemOpenOperation
-	var bindingOp capability.FilesystemBindingOperation
-	var factory capability.ProviderFactory
-	if s.filesys != nil {
-		// The transport-side and capability-side factory types have the
-		// same shape; this converts the wired one (AD-8, the dependency
-		// stays filesystem ← capability). nil converts to nil, preserving
-		// the old "no provider factory wired" answer.
-		factory = capability.ProviderFactory(s.filesProviderFor)
-		openOp = capability.NewFilesystemOpenOperation(sessionGate, s.registry, factory, s.filesys)
-		bindingOp = capability.NewFilesystemBindingOperation(s.filesys)
-	}
+// reg and runs on the ordinary lane. The two operations arrive as one
+// filesRoute, built once per server from the wired stores; when no filesystem
+// registry is wired, every handler answers -32601 "files not available".
+func (s *WSServer) filesSpecs(route filesRoute) []methodSpec {
 	openSub := s.work
 	bindingSub := s.work
 	// One FIFO per binding for the operations that CHANGE it, shared by every
@@ -1582,28 +1605,28 @@ func (s *WSServer) filesSpecs(sessionGate control.Admission) []methodSpec {
 	}
 	specs := []methodSpec{
 		reg(openSub, catalog.OpFilesOpen, params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, revealAvailable: s.revealer != nil, r: r}
+			h := filesOpenHandlers{op: route.open, factory: route.factory, machine: s, revealAvailable: s.revealer != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
 		reg(bindingSub, catalog.OpFilesList, params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
 		}),
 		reg(bindingSub, catalog.OpFilesStat, params(validateFilesStatRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStat(ctx, state, req) }
 		}),
 		reg(bindingSub, catalog.OpFilesRead, params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
 		orderedByBinding(reg(bindingOrder, catalog.OpFilesVisible, params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(_ context.Context, req jsonrpcRequest) { h.handleVisible(state, req) }
 		})),
 		orderedByBinding(reg(bindingOrder, catalog.OpFilesWatch, params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{
-				op:       bindingOp,
+				op:       route.binding,
 				machine:  s,
 				revealer: s.revealer,
 				r:        r,
@@ -1611,26 +1634,26 @@ func (s *WSServer) filesSpecs(sessionGate control.Admission) []methodSpec {
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		})),
 		orderedByBinding(reg(bindingOrder, catalog.OpFilesClose, params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
 		reg(bindingSub, catalog.OpFilesReveal, params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{op: route.binding, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
 		reg(bindingSub, catalog.OpFilesUpload, params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := uploadHandlers{op: bindingOp, machine: s, sources: s.sources, r: r}
+			h := uploadHandlers{op: route.binding, machine: s, sources: s.sources, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUpload(ctx, state, req) }
 		}),
 		reg(bindingSub, catalog.OpFilesUploadCancel, params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := uploadHandlers{op: bindingOp, machine: s, r: r}
+			h := uploadHandlers{op: route.binding, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUploadCancel(ctx, state, req) }
 		}),
 	}
 	// The download half is declared in ws_download.go and appended here,
 	// on the SAME bounded submission, so both directions of the binding
 	// domain queue against one bound rather than two.
-	return append(specs, s.filesDownloadSpecs(bindingOp, bindingSub)...)
+	return append(specs, s.filesDownloadSpecs(route.binding, bindingSub)...)
 }
 
 // ── notification delivery ─────────────────────────────────────────────────

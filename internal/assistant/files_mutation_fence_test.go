@@ -30,7 +30,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/hashline"
 )
 
 // mutationFence mints the state every test here is about: a run whose write
@@ -91,7 +90,7 @@ func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLe
 	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
 		watch.seen = append(watch.seen, c)
 		return nil
-	}, toolSeams{paneEnvironment: localPaneEnvironment()})
+	}, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}
@@ -147,12 +146,8 @@ func assertThePersonSaw(t *testing.T, tool string, watch *watchedCalls, ledger *
 // it are untouched.
 func TestFilesEdit_AFenceRefusalAnswersInOurWordsNotTheFilesystems(t *testing.T) {
 	grant, fence, link, beyond, target := mutationFence(t)
-	snapshot, err := hashline.Read(target, testResultMaxBytes())
-	if err != nil {
-		t.Fatalf("hashline.Read(target): %v", err)
-	}
 	args := string(mustJSON(t, map[string]string{
-		"path": link, "revision": snapshot.Revision, "patch": "PUT 1.=1:\n+changed",
+		"path": link, "revision": revisionOf(t, target, testResultMaxBytes()), "patch": "PUT 1.=1:\n+changed",
 	}))
 
 	ledger := &fakeLedger{}
@@ -285,11 +280,11 @@ func TestExecuteFilesMutations_HandTheCapabilityRefusalToTheKernelSeam(t *testin
 			if !ok {
 				t.Fatalf("%s not registered", tc.tool)
 			}
-			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, localRunContext())
+			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, localRunContext(t))
 			if err != nil {
 				t.Fatalf("ResolveResources: %v", err)
 			}
-			capability, err := decl.Narrow(grant, refs, localRunContext())
+			capability, err := decl.Narrow(grant, refs, localRunContext(t))
 			if err != nil {
 				t.Fatalf("Narrow: %v", err)
 			}

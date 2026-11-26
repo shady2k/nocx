@@ -161,12 +161,12 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the write session of the `fs` service (nocx-oalo1.12.3), whose four
-// ops a 31-helper answers `unknown_op` to, which a coordinator must read as
-// "older helper" rather than as a host whose file it may overwrite.
+// moved — the write-session journal's reader (nocx-oalo1.12.4), whose
+// `inventory` op a 32-helper answers `unknown_op` to, which a coordinator must
+// read as "older helper" rather than as a host with no leftover temporaries.
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "32" {
-		t.Fatalf("helper protocol version = %q, want 32", Version)
+	if Version != "33" {
+		t.Fatalf("helper protocol version = %q, want 33", Version)
 	}
 }
 

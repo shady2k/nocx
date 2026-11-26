@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,16 @@ import (
 func hostedFS(t *testing.T, root string) *client.Client {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := hostsvc.New(filesystemlocal.New(filesystemlocal.WithRoot(root)))
+	svc, svcErr := hostsvc.New(filesystemlocal.New(filesystemlocal.WithRoot(root)),
+		hostsvc.JournalConfig{
+			Root:       t.TempDir(),
+			Hostname:   "contract-host",
+			InstanceID: strings.Repeat("a", 32),
+		})
+	if svcErr != nil {
+		t.Fatalf("new fs service: %v", svcErr)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
 	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
 		h := hostFor(in, out, log)
 		h.Register(svc)
@@ -228,5 +238,38 @@ func TestFSListPermissionDenialKeepsTheConnectionServing(t *testing.T) {
 	}
 	if err := validateHelperJSON(loadHelperSchema(t, "fs.root.schema.json"), rootRaw); err != nil {
 		t.Fatalf("the root answer after a refusal does not satisfy its contract: %v", err)
+	}
+}
+
+// TestFSInventoryConformsToItsContract freezes the op that reports what a
+// generation could not clean up: its params, its result with entries, and the
+// REAL answer off the socket — which must be an empty ARRAY and never null,
+// because a coordinator that read null as "no answer" would report a clean host
+// as an unknown one.
+func TestFSInventoryConformsToItsContract(t *testing.T) {
+	if err := validateHelperJSON(loadHelperSchema(t, "fs.inventory.params.schema.json"),
+		mustMarshal(t, proto.FSInventoryParams{})); err != nil {
+		t.Fatalf("the params the caller sends do not satisfy the contract: %v", err)
+	}
+
+	// The shape with entries: the two fields are both required, and a stranded
+	// file without its reason would be a warning nobody can act on.
+	stranded := proto.FSInventoryResult{Stranded: []proto.FSStrandedTemp{
+		{Path: "/home/dev/project/.nocx-write-0123456789abcdef0123456789abcdef", Reason: "permission denied"},
+	}}
+	if err := validateHelperJSON(loadHelperSchema(t, "fs.inventory.schema.json"), mustMarshal(t, stranded)); err != nil {
+		t.Fatalf("a stranded inventory does not satisfy the contract: %v", err)
+	}
+
+	c := hostedFS(t, fsTempDir(t))
+	var raw json.RawMessage
+	if err := c.Call(context.Background(), proto.ServiceFS, proto.OpInventory, proto.FSInventoryParams{}, &raw); err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	if err := validateHelperJSON(loadHelperSchema(t, "fs.inventory.schema.json"), raw); err != nil {
+		t.Fatalf("the inventory off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, raw)
+	}
+	if string(raw) != `{"stranded":[]}` {
+		t.Fatalf("an empty inventory came off the socket as %s, want {\"stranded\":[]}", raw)
 	}
 }

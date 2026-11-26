@@ -439,4 +439,21 @@ package proto
 // answered an outcome would not be reaching for this one. Two peers that
 // disagree refuse each other at hello in both directions, which is what makes
 // the number the whole of the compatibility story.
-const Version = "32"
+// This is 33 rather than 32 because the wire grew the WRITE-SESSION JOURNAL's
+// reader (nocx-oalo1.12.4): `inventory` on the same `fs` service, whose answer
+// names every temporary an earlier generation left behind and could not
+// delete. The op alone would have been answerable as `unknown_op` — a sentence
+// a coordinator reads as "this machine's helper is older than this app" — and
+// the bump is still taken, for the reason 32 took it: a generation whose closed
+// set of ops differs is a generation that disagrees about what the wire
+// carries, and hello is where that is decided rather than discovered. The
+// second half is the ANSWER's shape: `stranded` is a list whose empty case must
+// be `[]` and never `null`, and a 32-generation has no op to ask it with, so
+// there is no shape to misread — only a question that never gets asked, and a
+// coordinator that would then report a host whose leftovers it never saw.
+//
+// The number that will move next is 34, for `watch` (nocx-oalo1.12.10), and it
+// is named here rather than discovered later: the sentence above is the one
+// every generation boundary states, and the plan fixes the order so two
+// branches cannot take the same number.
+const Version = "33"

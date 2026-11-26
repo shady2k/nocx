@@ -19,7 +19,7 @@ import (
 // EACCES is covered both here (by the error the provider produces) and by the
 // end-to-end test (skipped only where the kernel overrules the mode bits).
 func TestRefusalCodesAndDetails(t *testing.T) {
-	svc := New(local.New())
+	svc := newTestService(t, local.New())
 	for _, tc := range []struct {
 		name string
 		err  error

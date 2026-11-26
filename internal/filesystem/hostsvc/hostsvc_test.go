@@ -3,9 +3,11 @@ package hostsvc_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,32 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
+
+// journalInstanceSeq gives every service this package constructs its own
+// journal instance id: two services in one test binary must not contend for one
+// directory, and only a test that WANTS them to share one arranges it.
+var journalInstanceSeq atomic.Uint64
+
+// newTestService builds the shipped service over provider with a journal under
+// this test's own temporary directory — never the machine's home — and closes it
+// after the test, which is what releases the journal's lock.
+func newTestService(t *testing.T, provider *local.Provider) *hostsvc.Service {
+	t.Helper()
+	svc, err := hostsvc.New(provider, hostsvc.JournalConfig{
+		Root:       t.TempDir(),
+		Hostname:   "test-host",
+		InstanceID: fmt.Sprintf("%032x", journalInstanceSeq.Add(1)),
+	})
+	if err != nil {
+		t.Fatalf("new fs service: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := svc.Close(); err != nil {
+			t.Errorf("closing the fs service: %v", err)
+		}
+	})
+	return svc
+}
 
 func tempDir(t *testing.T) string {
 	t.Helper()
@@ -118,7 +146,7 @@ func TestRootAnswersTheVerifiedPath(t *testing.T) {
 	verified := filepath.Join(base, "project")
 	mustMkdir(t, verified)
 
-	svc := hostsvc.New(local.New(local.WithRoot(verified)))
+	svc := newTestService(t, local.New(local.WithRoot(verified)))
 	got := rootThrough(t, svc, proto.FSRootParams{})
 	if got.Path != verified {
 		t.Fatalf("root path = %q, want the provider's verified override %q", got.Path, verified)
@@ -140,7 +168,7 @@ func TestRootAnswersTheVerifiedPath(t *testing.T) {
 // root that does not exist and not an error.
 func TestRootFallsBackToHomeWithAReason(t *testing.T) {
 	base := tempDir(t)
-	svc := hostsvc.New(local.New())
+	svc := newTestService(t, local.New())
 	got := rootThrough(t, svc, proto.FSRootParams{Path: filepath.Join(base, "vanished")})
 	if !got.Inferred {
 		t.Fatal("an unusable path was reported as a verified root")
@@ -160,7 +188,7 @@ func TestStatReportsTheMetadataARowShows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	got := statThrough(t, svc, path)
 	if got.Kind != "regular" || got.Size != 5 || got.Mode != uint32(info.Mode()) {
 		t.Fatalf("stat = %+v, want a regular 5-byte file with mode %#o", got, info.Mode())
@@ -186,7 +214,7 @@ func TestListPagesAndCarriesTheWholeDirectoryDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "b.txt"), nil)
 	mustWrite(t, filepath.Join(dir, "c.txt"), nil)
 
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	first := listThrough(t, svc, dir, 0, 1)
 	if len(first.Entries) != 1 || first.Total != 3 || !first.HasMore {
 		t.Fatalf("first page = %d entries, total %d, hasMore %v; want 1 of 3 with more", len(first.Entries), first.Total, first.HasMore)
@@ -229,7 +257,7 @@ func TestListKeepsLexicalEntryPathsUnderASymlinkedParent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := hostsvc.New(local.New(local.WithRoot(base)))
+	svc := newTestService(t, local.New(local.WithRoot(base)))
 	got := listThrough(t, svc, link, 0, 10)
 	if got.Canonical != dir {
 		t.Fatalf("canonical = %q, want the resolved %q", got.Canonical, dir)
@@ -258,7 +286,7 @@ func TestListPastTheEndIsAnEmptyPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local.List: %v", err)
 	}
-	got := listThrough(t, hostsvc.New(provider), dir, 5, 10)
+	got := listThrough(t, newTestService(t, provider), dir, 5, 10)
 	if got.Entries == nil || len(got.Entries) != 0 {
 		t.Fatalf("entries = %#v, want an empty non-nil slice", got.Entries)
 	}
@@ -284,7 +312,7 @@ func TestListOnAFileIsNotDir(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "file.txt")
 	mustWrite(t, path, nil)
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: path, Offset: 0, Limit: 10})
 	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodeNotDir {
 		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeNotDir)
@@ -301,7 +329,7 @@ func TestCanonicalResolvesThePath(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	result, err := call(t, svc, proto.OpCanonical, proto.FSPathParams{Path: link})
 	if err != nil {
 		t.Fatalf("canonical: %v", err)
@@ -334,7 +362,7 @@ func TestPermissionDeniedLeavesTheServiceServing(t *testing.T) {
 	// its traversal bits back for cleanup to remove what is inside it.
 	t.Cleanup(func() { _ = os.Chmod(closed, 0o750) })
 
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: closed, Offset: 0, Limit: 10})
 	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodePermissionDenied {
 		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodePermissionDenied)
@@ -355,7 +383,7 @@ func TestEntryCapIsTooLargeWithTheObservedCount(t *testing.T) {
 	for _, name := range []string{"a", "b", "c"} {
 		mustWrite(t, filepath.Join(dir, name), nil)
 	}
-	svc := hostsvc.New(local.New(local.WithRoot(dir), local.WithEntryCap(2)))
+	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithEntryCap(2)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
 	code, details := refusal(t, svc, err)
 	if code != hostsvc.ErrCodeTooLarge {
@@ -383,7 +411,7 @@ func TestEntryCapIsTooLargeWithTheObservedCount(t *testing.T) {
 func TestSizeCapIsTooLargeSizeWithTheObservedBytes(t *testing.T) {
 	dir := tempDir(t)
 	mustWrite(t, filepath.Join(dir, "a.txt"), nil)
-	svc := hostsvc.New(local.New(local.WithRoot(dir), local.WithSizeCap(1)))
+	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithSizeCap(1)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
 	code, details := refusal(t, svc, err)
 	if code != hostsvc.ErrCodeTooLargeSize {
@@ -406,7 +434,7 @@ func TestSizeCapIsTooLargeSizeWithTheObservedBytes(t *testing.T) {
 func TestListElapsedCapIsTimedOut(t *testing.T) {
 	dir := tempDir(t)
 	mustWrite(t, filepath.Join(dir, "a"), nil)
-	svc := hostsvc.New(local.New(local.WithRoot(dir), local.WithListTimeout(time.Nanosecond)))
+	svc := newTestService(t, local.New(local.WithRoot(dir), local.WithListTimeout(time.Nanosecond)))
 	_, err := call(t, svc, proto.OpList, proto.FSListParams{Path: dir, Offset: 0, Limit: 10})
 	if code, _ := refusal(t, svc, err); code != hostsvc.ErrCodeTimedOut {
 		t.Fatalf("code = %q, want %q", code, hostsvc.ErrCodeTimedOut)
@@ -418,7 +446,7 @@ func TestListElapsedCapIsTimedOut(t *testing.T) {
 // not-found — two facts a caller acts on differently.
 func TestInvalidAndMissingPathsKeepTheirOwnCodes(t *testing.T) {
 	dir := tempDir(t)
-	svc := hostsvc.New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 
 	_, err := call(t, svc, proto.OpStat, proto.FSPathParams{Path: "relative/path"})
 	code, details := refusal(t, svc, err)

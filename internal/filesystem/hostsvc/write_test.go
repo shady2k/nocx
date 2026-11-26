@@ -34,7 +34,7 @@ import (
 
 func newWriteService(t *testing.T, root string) *Service {
 	t.Helper()
-	return New(local.New(local.WithRoot(root)))
+	return newTestService(t, local.New(local.WithRoot(root)))
 }
 
 // writeID is a valid session id derived from the test's name, so a failure

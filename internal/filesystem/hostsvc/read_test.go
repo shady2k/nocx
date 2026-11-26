@@ -79,7 +79,7 @@ func TestReadWholeReturnsTheVersionOfTheReturnedBytes(t *testing.T) {
 	content := []byte("a quiet file\n")
 	mustWrite(t, path, content)
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	r, err := readThrough(t, svc, proto.FSReadParams{Path: path, Offset: 0, Length: 1 << 20, Whole: true})
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -119,7 +119,7 @@ func TestReadWholeRefusesAFileBiggerThanTheBound(t *testing.T) {
 	path := filepath.Join(dir, "big.txt")
 	mustWrite(t, path, []byte("0123456789"))
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := readThrough(t, svc, proto.FSReadParams{Path: path, Offset: 0, Length: 4, Whole: true})
 	if err == nil {
 		t.Fatal("a whole-file read of a file larger than the bound succeeded")
@@ -148,7 +148,7 @@ func TestReadRefusesPagesItCannotRead(t *testing.T) {
 	path := filepath.Join(dir, "file.txt")
 	mustWrite(t, path, []byte("data"))
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	for _, tc := range []struct {
 		name string
 		p    proto.FSReadParams
@@ -193,7 +193,7 @@ func TestReadWholeRefusesAFileRewrittenOnEveryAttempt(t *testing.T) {
 	path := filepath.Join(dir, "moving.txt")
 	mustWrite(t, path, []byte("attempt zero\n"))
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	attempts := 0
 	svc.afterRead = func(attempt int) {
 		attempts++
@@ -221,7 +221,7 @@ func TestReadWholeSucceedsOnceTheFileSettles(t *testing.T) {
 	mustWrite(t, path, []byte("first state\n"))
 	settled := []byte("second, settled state\n")
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	attempts := 0
 	svc.afterRead = func(attempt int) {
 		attempts++
@@ -256,7 +256,7 @@ func TestReadRangeKeepsIdentityAcrossAnAppendAndLosesItOnAReplacement(t *testing
 	path := filepath.Join(dir, "log.txt")
 	mustWrite(t, path, []byte("one\n"))
 
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	read := func() proto.FSReadResult {
 		t.Helper()
 		r, err := readThrough(t, svc, proto.FSReadParams{Path: path, Offset: 0, Length: 1 << 20})
@@ -318,7 +318,7 @@ func TestReadRefusesASpecialFileWithoutBlocking(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	assertNotRegular(t, svc, fifo, "fifo")
 }
 
@@ -354,7 +354,7 @@ func TestReadRefusesASocket(t *testing.T) {
 		t.Fatalf("listen unix %s: %v", socket, err)
 	}
 	defer func() { _ = listener.Close() }()
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	assertNotRegular(t, svc, socket, "socket")
 }
 
@@ -369,7 +369,7 @@ func TestReadRefusesADeviceWithoutBlocking(t *testing.T) {
 		t.Skipf("no device at %s", devNull)
 	}
 	dir := tempDir(t)
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	assertNotRegular(t, svc, devNull, "device")
 }
 
@@ -417,7 +417,7 @@ func assertNotRegular(t *testing.T, svc *Service, path, wantKind string) {
 // whose open succeeds and whose fstat is what classifies it.
 func TestReadRefusesADirectory(t *testing.T) {
 	dir := tempDir(t)
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	_, err := readThrough(t, svc, proto.FSReadParams{Path: dir, Offset: 0, Length: 1 << 20, Whole: true})
 	if err == nil {
 		t.Fatal("reading a directory succeeded")
@@ -444,7 +444,7 @@ func TestReadEmptyFileIsAnEmptyStringOnTheWire(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "empty.txt")
 	mustWrite(t, path, nil)
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	r, err := readThrough(t, svc, proto.FSReadParams{Path: path, Offset: 0, Length: 16, Whole: true})
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -468,7 +468,7 @@ func TestReadIsRefusedByACancelledContext(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "file.txt")
 	mustWrite(t, path, []byte("data"))
-	svc := New(local.New(local.WithRoot(dir)))
+	svc := newTestService(t, local.New(local.WithRoot(dir)))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := svc.Call(ctx, proto.OpRead, callParams(t, proto.FSReadParams{Path: path, Offset: 0, Length: 4}))

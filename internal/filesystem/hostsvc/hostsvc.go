@@ -20,6 +20,13 @@
 // blocked on — the interval local.Read closed for the panel, kept here because
 // this is a second open and would otherwise be a second window.
 //
+// The write half (write.go) and its journal (journal.go) are the other place
+// this package does more than map. A write is a session the caller holds across
+// a lost reply, the temporary it streams into belongs to this process, and the
+// journal is what makes that temporary recoverable after this process is gone.
+// `inventory` reports what a previous generation could not remove, so a person
+// is told about a `.nocx-write-…` file instead of finding one.
+//
 // # The artifact it runs inside
 //
 // This package is compiled into the helper written to hosts we do not own, so
@@ -70,6 +77,12 @@ const wholeReadAttempts = 3
 type Service struct {
 	provider *local.Provider
 
+	// journal is this daemon's durable record of the write sessions it has
+	// started (journal.go). It is required: a service without one could answer
+	// every read op, but a write session it opened would leave a temporary
+	// nobody could name after a crash — the state the journal exists to end.
+	journal *journal
+
 	// afterRead is the test seam for the interval a whole-file read guards:
 	// it runs after the bytes were read and BEFORE the after-stat that decides
 	// whether the file moved. A test rewrites the file there, which models
@@ -80,33 +93,66 @@ type Service struct {
 	// the real call (see writeSeams).
 	seams writeSeams
 
-	// mu guards sessions. locks serialises installs that land on one resolved
-	// path, so the conditional check and the rename are one critical section
-	// for everybody in this process.
+	// mu guards sessions and closed. locks serialises installs that land on one
+	// resolved path, so the conditional check and the rename are one critical
+	// section for everybody in this process.
 	mu       sync.Mutex
+	closed   bool
 	sessions map[string]*writeSession
 	locks    *pathLocks
+
+	// strandedMu guards the snapshot fs.inventory answers with: the
+	// temporaries this daemon found on start and the ones it could not remove
+	// itself. It is a snapshot rather than a fresh disk walk, because a
+	// temporary that this daemon already knows is unreachable is not made
+	// reachable by asking again — and a walk on every inventory would answer a
+	// question about the journal's readability that nobody asked.
+	strandedMu    sync.Mutex
+	stranded      []proto.FSStrandedTemp
+	strandedPaths map[string]bool
 }
 
-// New builds the fs service over a local provider. The provider is the
-// caller's — the composition root constructs it, and a test injects one with
-// local.WithRoot, WithEntryCap or WithListTimeout — the same division
-// git/hostsvc.New(factory) keeps.
-func New(provider *local.Provider) *Service {
-	return &Service{provider: provider, sessions: map[string]*writeSession{}, locks: newPathLocks()}
+// New builds the fs service over a local provider and opens its write-session
+// journal. The provider is the caller's — the composition root constructs it,
+// and a test injects one with local.WithRoot, WithEntryCap or WithListTimeout —
+// the same division git/hostsvc.New(factory) keeps.
+//
+// The journal is opened HERE rather than lazily before the first write: opening
+// it is also the start-up sweep, and a helper that has only ever been read from
+// still owes the temporaries of the generation before it. A journal that cannot
+// be opened fails the construction, because a helper that silently served
+// writes with no crash recovery would be a helper whose product promise is a
+// log line nobody reads.
+func New(provider *local.Provider, journal JournalConfig) (*Service, error) {
+	j, stranded, err := openJournal(journal)
+	if err != nil {
+		return nil, err
+	}
+	s := &Service{
+		provider:      provider,
+		journal:       j,
+		sessions:      map[string]*writeSession{},
+		locks:         newPathLocks(),
+		strandedPaths: map[string]bool{},
+	}
+	for _, temp := range stranded {
+		s.recordStranded(temp.Path, temp.Reason)
+	}
+	return s, nil
 }
 
 // Name is the reserved service name the host registers it under.
 func (s *Service) Name() string { return proto.ServiceFS }
 
-// Ops is the closed set of operations this service serves: the five read ops
-// and the four that make one write a session. An op this generation does not
-// have is one a coordinator learns about at hello, not one it learns about by
-// writing.
+// Ops is the closed set of operations this service serves: the five read ops,
+// the four that make one write a session, and the inventory of what an earlier
+// generation could not clean up. An op this generation does not have is one a
+// coordinator learns about at hello, not one it learns about by writing.
 func (s *Service) Ops() []string {
 	return []string{
 		proto.OpRoot, proto.OpStat, proto.OpList, proto.OpCanonical, proto.OpRead,
 		proto.OpWriteOpen, proto.OpWrite, proto.OpWriteCommit, proto.OpWriteAbort,
+		proto.OpInventory,
 	}
 }
 
@@ -132,6 +178,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.FSWriteCommitParams{})
 	case proto.OpWriteAbort:
 		return host.SchemaFor(proto.FSWriteAbortParams{})
+	case proto.OpInventory:
+		return host.SchemaFor(proto.FSInventoryParams{})
 	}
 	return nil
 }
@@ -162,6 +210,8 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		return s.writeCommit(ctx, params)
 	case proto.OpWriteAbort:
 		return s.writeAbort(ctx, params)
+	case proto.OpInventory:
+		return s.inventory(ctx)
 	}
 	return nil, fmt.Errorf("hostsvc: no op %q", op)
 }
@@ -416,4 +466,23 @@ func readRange(f *os.File, p proto.FSReadParams, canonical, identity string, inf
 		MtimeNs:   info.ModTime().UnixNano(),
 		Changed:   false,
 	}, nil
+}
+
+// inventory answers the temporaries this helper knows it could not remove: the
+// ones a previous generation left and the ones this one failed to delete. See
+// journal.go for why the list exists at all.
+//
+// Stranded is built with make, so an empty answer is [] and never null: the
+// caller is a coordinator that warns per entry, and a decoder forced to tell
+// "nothing stranded" from "no answer" is a decoder that will one day warn
+// about nothing or stay silent about something.
+func (s *Service) inventory(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.strandedMu.Lock()
+	defer s.strandedMu.Unlock()
+	out := make([]proto.FSStrandedTemp, len(s.stranded))
+	copy(out, s.stranded)
+	return proto.FSInventoryResult{Stranded: out}, nil
 }

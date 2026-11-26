@@ -125,6 +125,11 @@ type writeSession struct {
 	file   *os.File
 	size   int64
 	digest hash.Hash
+	// journalEntry is the file name of this session's journal record, relative
+	// to the daemon's journal directory, or "" once the record is gone (see
+	// journal.go). It is cleared by the same transitions that remove the
+	// temporary, so "is there an entry" and "is there a file" cannot drift.
+	journalEntry string
 
 	state atomic.Int32
 
@@ -230,6 +235,10 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	sess := &writeSession{conn: host.ConnectionFrom(ctx), dir: dir}
 	sess.state.Store(int32(writeOpening))
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errServiceClosed
+	}
 	if s.sessions == nil {
 		s.sessions = map[string]*writeSession{}
 	}
@@ -241,11 +250,23 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	s.mu.Unlock()
 
 	temp := filepath.Join(dir, writeTempPrefix+p.ID)
+	// THE JOURNAL ENTRY IS WRITTEN AND SYNCED BEFORE THE TEMPORARY EXISTS, and
+	// that order is the whole of what makes a crashed session recoverable
+	// (journal.go). A failure here leaves nothing on disk to find: no entry,
+	// and the temporary was never created.
+	if journalErr := s.startJournal(sess, p.ID, temp); journalErr != nil {
+		s.forget(p.ID, sess)
+		return nil, journalErr
+	}
 	// #nosec G304 — the name is derived from the caller's id after it was
 	// checked to be hex, and the directory is the target's own, resolved above.
 	f, err := s.createTemp(dir, writeTempPrefix+p.ID)
 	if err != nil {
 		s.forget(p.ID, sess)
+		// The temporary was never created, so its entry names nothing that
+		// could be left behind; removing it keeps the directory from growing a
+		// record per failed open.
+		s.dropJournalEntry(sess)
 		if errors.Is(err, fs.ErrExist) {
 			// A leftover from an earlier generation, or another session that
 			// chose the same id. Either way the caller must not write into it.
@@ -258,6 +279,7 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
 		_ = os.Remove(temp)
+		s.dropJournalEntry(sess)
 		s.forget(p.ID, sess)
 		return nil, err
 	}
@@ -280,7 +302,13 @@ func (s *Service) writeOpen(ctx context.Context, raw json.RawMessage) (any, erro
 	sess.state.Store(int32(writeAborted))
 	sess.mu.Unlock()
 	_ = f.Close()
-	_ = os.Remove(temp)
+	if err := os.Remove(temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// The temporary outlived the request that created it. Its entry is the
+		// only record of the file's name, so it stays and the file is reported.
+		s.recordStranded(temp, fmt.Sprint(err))
+	} else {
+		s.dropJournalEntry(sess)
+	}
 	if ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -493,6 +521,11 @@ func (s *Service) install(sess *writeSession, candidate string, p proto.FSWriteC
 	_ = sess.file.Close()
 	sess.file = nil
 	sess.temp = ""
+	// The bytes are at the path the caller named, so the temporary this entry
+	// named no longer exists: the entry is spent. A failure to remove it is not
+	// reported as a failed write — the next start finds the entry naming a file
+	// that is not there and removes it (journal.go).
+	s.dropJournalEntry(sess)
 	// A directory sync failure does not change what happened: the rename has
 	// already installed the file. It costs durability across a crash, which is
 	// reported rather than pretended, but the answer stays `committed` because
@@ -614,6 +647,11 @@ func (s *Service) allSessions() []*writeSession {
 // discard closes and removes a session's temporary. A missing temporary is not
 // a failure: the only caller that can see one gone is a session that already
 // installed it, and that path never reaches here.
+//
+// A removal that FAILS is the one case the journal exists for after the fact: the
+// temporary outlives the session, so its entry stays on disk and the file is
+// reported through fs.inventory. Deleting the entry anyway would erase the only
+// record of a file this product created and cannot remove.
 func (s *Service) discard(sess *writeSession) error {
 	if sess.file != nil {
 		if err := sess.file.Close(); err != nil {
@@ -625,9 +663,11 @@ func (s *Service) discard(sess *writeSession) error {
 		return nil
 	}
 	if err := os.Remove(sess.temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.recordStranded(sess.temp, fmt.Sprint(err))
 		return err
 	}
 	sess.temp = ""
+	s.dropJournalEntry(sess)
 	return nil
 }
 

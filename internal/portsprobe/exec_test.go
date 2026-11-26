@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writeRung installs an executable script named name into dir and returns dir.
@@ -81,6 +82,63 @@ func TestExecRunnerReportsACappedStreamAsTruncated(t *testing.T) {
 	s := NewDetector(NewExecRunner()).Sample(context.Background())
 	if s.State != StateFailedTransiently || s.Classification != "probe output incomplete" {
 		t.Fatalf("a truncated table answered %q / %q, want failed-transiently (incomplete)", s.State, s.Classification)
+	}
+}
+
+// TestExecRunnerAbandonsADescendantThatHoldsTheCapture is rule 3's external
+// call that does not come back: the rung's program exits at once, but the child
+// it forked inherits stdout and outlives the pass. A runner that signals only
+// the direct child waits for that descendant's EOF — the bound is then the
+// descendant's lifetime, not the pass's — so the assertion is the bound.
+func TestExecRunnerAbandonsADescendantThatHoldsTheCapture(t *testing.T) {
+	dir := t.TempDir()
+	// The script is a wrapper: the shell forks the tool it names and waits for
+	// it, so the process this runner signals is not the one holding stdout. The
+	// tool runs for six seconds, twelve times the pass's bound.
+	writeRung(t, dir, "ss", "sleep 6\n")
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	bound := 500 * time.Millisecond
+	start := time.Now()
+	s := NewDetector(NewExecRunner(), WithSampleTimeout(bound)).Sample(context.Background())
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Fatalf("the sample took %v under a %v bound: the pass waited for a descendant's capture", elapsed, bound)
+	}
+	if s.State != StateFailedTransiently || s.Classification != "probe timed out" {
+		t.Fatalf("state/classification = %q/%q, want failed-transiently/probe timed out", s.State, s.Classification)
+	}
+}
+
+// TestExecRunnerStopsARungThatFloodsItsStderr: the cap is per stream, and
+// crossing it ends the child on the stream that crossed it. A tool that only
+// ever writes to stderr would otherwise run until the pass's own deadline.
+func TestExecRunnerStopsARungThatFloodsItsStderr(t *testing.T) {
+	dir := t.TempDir()
+	// Past the 64 KiB cap on stderr, then it keeps running: nothing but the cap
+	// can end it before the context below does.
+	writeRung(t, dir, "ss", "i=0; while [ $i -lt 3000 ]; do echo 'noise padding-padding-padding-padding' 1>&2; i=$((i+1)); done\nwhile :; do sleep 1; done\n")
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	res, err := NewExecRunner().Run(ctx, Command{Argv: []string{"ss", "-H", "-lntp"}})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatal("stderr past the cap was not reported truncated")
+	}
+	if len(res.Stderr) != OutputCap {
+		t.Fatalf("captured %d stderr bytes, want the %d-byte cap", len(res.Stderr), OutputCap)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the rung ran %v: a stderr overflow did not end it", elapsed)
 	}
 }
 

@@ -7,6 +7,7 @@ package hostsvc_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -97,6 +98,41 @@ func TestAnUnavailableHostAnswersEmptyListsRatherThanNull(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"listeners":[]`) {
 		t.Fatalf("marshalled sample %s does not carry an empty listener list", raw)
+	}
+}
+
+// blockingRunner holds the pass open until the request is withdrawn, which is
+// the one state a caller can put the ladder in: a request that stopped
+// mattering.
+type blockingRunner struct{ started chan struct{} }
+
+func (r blockingRunner) Run(ctx context.Context, _ portsprobe.Command) (*portsprobe.Result, error) {
+	close(r.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestAWithdrawnSampleIsRefusedRatherThanAnswered: a sample whose request was
+// withdrawn has no sample to report, so the service must refuse. Answering
+// anyway sends `state:"pending"`, which the contract does not have — a value
+// outside the enum that only a reader who has already gone away would receive.
+func TestAWithdrawnSampleIsRefusedRatherThanAnswered(t *testing.T) {
+	started := make(chan struct{})
+	svc := hostsvc.New(blockingRunner{started: started})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	out, err := svc.Call(ctx, proto.OpPortsSample, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a withdrawn sample answered %#v / %v, want a context.Canceled refusal", out, err)
+	}
+	if out != nil {
+		t.Fatalf("a withdrawn sample still carried %#v", out)
 	}
 }
 

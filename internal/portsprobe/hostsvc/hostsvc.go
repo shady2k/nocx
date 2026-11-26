@@ -67,7 +67,18 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 	if op != proto.OpPortsSample {
 		return nil, fmt.Errorf("hostsvc: no op %q", op)
 	}
-	return sampleResult(s.detector.Sample(ctx)), nil
+	res := s.detector.Sample(ctx)
+	if res.Canceled {
+		// A withdrawn request has no sample to report. Answering anyway would
+		// send the carry-over state — `pending`, which the contract does not
+		// have — to a caller who has already stopped listening; the refusal is
+		// what the host sends instead of a value outside the enum.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	}
+	return sampleResult(res), nil
 }
 
 // sampleResult is the wire's spelling of one sample. The two list fields are

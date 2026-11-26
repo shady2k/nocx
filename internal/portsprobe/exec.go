@@ -16,6 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/shady2k/nocx/internal/proc"
 )
 
 // OutputCap bounds what one rung's stdout and stderr may capture, per stream.
@@ -90,22 +93,36 @@ func (r *ExecRunner) Run(ctx context.Context, cmd Command) (*Result, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stdout := &cappedBuffer{limit: r.cap, overflow: cancel}
-	stderr := &cappedBuffer{limit: r.cap}
+	stderr := &cappedBuffer{limit: r.cap, overflow: cancel}
 
-	proc := exec.CommandContext(runCtx, cmd.Argv[0], cmd.Argv[1:]...) // #nosec G204 — argv is this package's own ladder, never caller text
-	proc.Env = append(os.Environ(), cmd.Env...)
-	proc.Stdout = stdout
-	proc.Stderr = stderr
+	child := exec.CommandContext(runCtx, cmd.Argv[0], cmd.Argv[1:]...) // #nosec G204 — argv is this package's own ladder, never caller text
+	child.Env = append(os.Environ(), cmd.Env...)
+	child.Stdout = stdout
+	child.Stderr = stderr
+	// The whole GROUP dies with the request, not just the program this runner
+	// spawned: a rung is often a wrapper whose tool runs as a child of it, and a
+	// child that inherited stdout keeps the capture open after its parent is
+	// killed. Without the group, Run waits for that descendant's EOF and the
+	// pass's bound becomes its lifetime — the one promise this seam makes.
+	proc.InOwnGroup(child)
+	child.Cancel = func() error { return proc.KillGroupImmediately(child) }
+	// A descendant may still hold the pipe after the leader is reaped; this
+	// bounds the wait the group kill did not have to see.
+	child.WaitDelay = time.Second
 
-	runErr := proc.Run()
+	runErr := child.Run()
+	// Cleanup for every ending, not only the deadline: a wrapper that exits
+	// successfully leaving a helper behind would otherwise keep the group alive
+	// for the rest of the daemon's life.
+	_ = proc.KillGroupImmediately(child)
 	res := &Result{
 		Stdout:     stdout.buf,
 		Stderr:     stderr.buf,
 		Truncated:  stdout.truncated || stderr.truncated,
 		ExitStatus: -1, // no process state: killed, or never started
 	}
-	if proc.ProcessState != nil {
-		res.ExitStatus = proc.ProcessState.ExitCode()
+	if child.ProcessState != nil {
+		res.ExitStatus = child.ProcessState.ExitCode()
 	}
 	if res.Truncated {
 		return res, nil

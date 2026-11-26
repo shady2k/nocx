@@ -760,13 +760,18 @@ reader:
   finer vocabulary a refusal needs, beside the file row's own coarse `kind`.
 - **The refusal codes are the plan's closed list**, not the wire's generic
   ones: `not-found`, `permission-denied`, `not-dir`, `not-regular`,
-  `invalid-path`, `invalid-page`, `too-large`, `too-large-size`, `timed-out`
-  and `changed-during-read`. `too-large` is the entry cap (or a whole-file read
-  past the caller's bound) and `too-large-size` is the listing's byte cap: two
-  limits on two different things, and a caller that recovers the error type
-  behind the refusal needs the word to tell them apart. A refused op is one
-  request's answer; the host keeps serving, which is what lets one unreadable
-  directory leave the rest of the panel working.
+  `invalid-path`, `invalid-page`, `too-large`, `too-large-size`, `timed-out`,
+  `changed-during-read`, and the write session's own — `no-space`,
+  `changed-since-read`, `exists`, `bad-offset`, `size-mismatch` and
+  `bad-session` (nocx-oalo1.12.3). `too-large` is the entry cap (or a whole-file
+  read past the caller's bound) and `too-large-size` is the listing's byte cap:
+  two limits on two different things, and a caller that recovers the error type
+  behind the refusal needs the word to tell them apart. `bad-offset` and
+  `size-mismatch` are the same rule for a session: both carry both ends in
+  `details`, because the caller's next chunk depends on where the session
+  actually is. A refused op is one request's answer; the host keeps serving,
+  which is what lets one unreadable directory — or one changed file — leave the
+  rest of the panel working.
 
 The number moved because the wire grew a SERVICE whose every op a 30-helper
 answers `unknown_op` to. That refusal is the half that must be read correctly:
@@ -776,6 +781,61 @@ person would be told by a panel that read an empty answer as a permission
 problem. Two peers that disagree refuse each other at hello in both directions,
 and each generation installs beside the other (D7). The window protocol's
 number does not move: the renderer never speaks this wire.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.3`, and why `Version` moved to 32
+
+The **write session**: `write-open`, `write`, `write-commit` and `write-abort`.
+A write is not one request — the bytes cross in chunks that each fit a frame,
+the target's version has to be checked at the instant of the install, and an
+answer that never arrives must not become a second write — so the caller opens a
+session with an id it chose, streams chunks into a temporary file beside the
+target, and ends it by committing or aborting.
+
+Five decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **The id is the caller's, and that is what makes a retry safe.** 128 bits,
+  lower-case hex only (`^[0-9a-f]{32}$`), because the same value is the
+  temporary's filename: an id that could spell `..` or a separator would be a
+  path traversal waiting for the first caller that is not ours. A repeat of a
+  commit answers the FIRST outcome and touches no file, so the target's inode
+  does not move; an id this daemon never held answers `unknown-outcome` with the
+  target's `current`, and the caller decides by comparing digests. There is no
+  eviction: an outcome lives as long as the process, because a caller that lost
+  its reply may ask minutes later.
+- **`expect.version` and `expect.absent` are alternatives, and the schema says
+  so.** Both at once is `bad_params`, decided before anything is mutated.
+  `absent` is `const: true`: "must not be absent" states no condition at all.
+  `version` is not declared again here — it `$ref`s the whole-file read's
+  `version` in `fs.read.schema.json`, because an expectation that spoke a
+  different version shape from the read it came from would be two truths about
+  one file.
+- **A refusal leaves the session usable, and that is the design rather than a
+  courtesy.** `size-mismatch`, `changed-since-read`, `exists` and even a failed
+  fsync or rename all return the session to `open` with the temporary and its
+  bytes intact, so a caller answers a KeepBoth collision by committing under
+  another name in the same directory without sending a byte again. Only the
+  rename is a point of no return, and the outcome it produced is then answered
+  forever.
+- **A commit may change the name, never the directory.** `path` is resolved
+  again, so a symlink named at commit time still installs at its target — the
+  link survives a write through it — and a path that resolves outside the
+  directory `write-open` answered is `invalid-path`, decided before anything is
+  touched.
+- **A version is three fields and not two.** `size` and `mtimeNs` are the cheap
+  check; `sha256` is what catches a rewrite of the same length inside one
+  filesystem timestamp granule. The reverse is why `current` offers a digest
+  ONLY when the target's size is the one the caller stated: hashing a file of
+  another size answers a question nobody asked.
+
+The number moved because the wire grew four ops a 31-helper answers
+`unknown_op` to — and because of what the refusal would mean if it were not
+read: "this machine's helper is older than this app" arriving as a conditional
+write that silently did not happen. Two peers that disagree refuse each other at
+hello in both directions, and each generation installs beside the other (D7).
+The window protocol's number does not move: the renderer never speaks this wire.
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.

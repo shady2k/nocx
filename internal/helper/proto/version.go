@@ -421,8 +421,22 @@ package proto
 // closed set of ops a reader switches on, and two peers that disagree refuse
 // each other at hello in both directions, which is what makes the number the
 // whole of the compatibility story. The write half of the same service lands
-// with its own leaves and each round moves this number: the write half is 32
-// and watch is 33, because a generation is published with the next nightly and
-// the argument that let 15 widen in place — nothing was published to gain it
-// against — is spent by the time the next round lands.
-const Version = "31"
+// with its own leaves and each round moves this number: watch is 33, because a
+// generation is published with the next nightly and the argument that let 15
+// widen in place — nothing was published to gain it against — is spent by the
+// time the next round lands.
+//
+// This is 32 rather than 31 because the wire grew the WRITE SESSION
+// (nocx-oalo1.12.3): `write-open`, `write`, `write-commit` and `write-abort` on
+// the same `fs` service, and with them the expectation a commit is checked
+// against and the outcome it answers. Four ops added would each have been
+// answerable as `unknown_op`, and the bump is taken anyway because of what they
+// mean together: a 31-helper has no conditional write at all, and a caller that
+// read an unchanged answer from it would be reading a refusal — "this machine's
+// helper is older than this app" — as "the file was fine to overwrite". The
+// other half is the SHAPE: an outcome carries `current` and a `version`, both
+// `additionalProperties: false` on their own terms, and a generation that never
+// answered an outcome would not be reaching for this one. Two peers that
+// disagree refuse each other at hello in both directions, which is what makes
+// the number the whole of the compatibility story.
+const Version = "32"

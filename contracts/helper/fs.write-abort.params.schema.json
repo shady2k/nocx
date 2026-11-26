@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-abort.params.schema.json",
+  "title": "HelperFSWriteAbortParams",
+  "description": "Params of the helper fs service's write-abort op: the session to discard. Nothing else is said, because the id identifies everything the abort needs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "description": "The session id write-open was given.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    }
+  }
+}

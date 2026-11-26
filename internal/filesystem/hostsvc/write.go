@@ -151,6 +151,7 @@ type writeSeams struct {
 	syncTemp     func(f *os.File) error
 	rename       func(oldpath, newpath string, noReplace bool) error
 	beforeRename func()
+	removeTemp   func(path string) error
 }
 
 // pathLocks serialises the installs that land on one resolved path, so two
@@ -652,6 +653,12 @@ func (s *Service) allSessions() []*writeSession {
 // temporary outlives the session, so its entry stays on disk and the file is
 // reported through fs.inventory. Deleting the entry anyway would erase the only
 // record of a file this product created and cannot remove.
+//
+// A removal that SUCCEEDS forgets the path in the inventory too. The snapshot is
+// what a coordinator dials this helper for, so a temporary that was reported by
+// a failed abort and removed by a later one — or by the connection closing —
+// must stop being reported: a warning about a file that is not there is worse
+// than no warning.
 func (s *Service) discard(sess *writeSession) error {
 	if sess.file != nil {
 		if err := sess.file.Close(); err != nil {
@@ -662,16 +669,24 @@ func (s *Service) discard(sess *writeSession) error {
 	if sess.temp == "" {
 		return nil
 	}
-	if err := os.Remove(sess.temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := s.removeTemp(sess.temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		s.recordStranded(sess.temp, fmt.Sprint(err))
 		return err
 	}
+	s.forgetStranded(sess.temp)
 	sess.temp = ""
 	s.dropJournalEntry(sess)
 	return nil
 }
 
 // ── the seams, defaulted ───────────────────────────────────────────────
+
+func (s *Service) removeTemp(path string) error {
+	if s.seams.removeTemp != nil {
+		return s.seams.removeTemp(path)
+	}
+	return os.Remove(path)
+}
 
 func (s *Service) createTemp(dir, name string) (*os.File, error) {
 	if s.seams.createTemp != nil {

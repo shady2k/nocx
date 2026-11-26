@@ -551,3 +551,204 @@ func writeAbortOK(t *testing.T, svc *Service, id string) proto.FSWriteAbortResul
 	}
 	return out
 }
+
+// TestSweepNeverTouchesAHostWhoseNameSharesThisOnesPrefix is the shared-home
+// case with a prefix that is genuinely ambiguous: `build` and `build-arm` are
+// two machines whose directories differ only by the rest of the hostname, and
+// `<host>-` matches both. Only the instance id after that separator says which
+// machine wrote a directory, so a sweep of `test-host` must leave
+// `test-host-2`'s directory — its entry and its temporary — exactly as it is.
+func TestSweepNeverTouchesAHostWhoseNameSharesThisOnesPrefix(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+
+	neighbour, err := New(local.New(local.WithRoot(dir)), JournalConfig{
+		Root: root, Hostname: "test-host-2", InstanceID: crashedInstance,
+	})
+	if err != nil {
+		t.Fatalf("new fs service for the neighbouring host: %v", err)
+	}
+	t.Cleanup(func() { _ = neighbour.Close() })
+	id := writeID(t.Name())
+	temp := filepath.Join(dir, writeTempPrefix+id)
+	writeOpenOK(t, neighbour, id, target)
+	writeOK(t, neighbour, id, 0, "half")
+	neighbourDir := neighbour.journal.dir
+	crashForTest(t, neighbour)
+
+	ours := journalRooted(t, local.New(local.WithRoot(dir)), root, successorInstance)
+
+	mustExist(t, temp)
+	mustExist(t, neighbourDir)
+	if got := journalEntries(t, neighbourDir); len(got) != 1 {
+		t.Fatalf("the neighbouring host's journal lost its entry: %v", got)
+	}
+	if got := inventoryOf(t, ours); len(got.Stranded) != 0 {
+		t.Fatalf("a host whose name shares this one's prefix was swept: %+v", got.Stranded)
+	}
+}
+
+// TestOpenJournalSurvivesASweepOfItsOwnStillEmptyDirectory reproduces the window
+// between creating this run's lock file and taking its flock: a daemon starting
+// at the same moment takes the still-free lock, sees no entries, and removes the
+// directory and the lock. The flock this daemon then holds is on an unlinked
+// inode, so the directory has to be recreated and locked again — otherwise every
+// write-open fails with ENOENT until this daemon restarts.
+func TestOpenJournalSurvivesASweepOfItsOwnStillEmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+
+	swept := 0
+	beforeLock = func(dir string) {
+		if swept > 0 {
+			return
+		}
+		swept++
+		_ = reapJournalDir(dir)
+	}
+	t.Cleanup(func() { beforeLock = nil })
+
+	svc, err := New(local.New(local.WithRoot(dir)), JournalConfig{
+		Root: root, Hostname: "test-host", InstanceID: successorInstance,
+	})
+	if err != nil {
+		t.Fatalf("new fs service after a sweep of its own directory: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	if swept == 0 {
+		t.Fatal("the seam never ran, so the race this test is about was never arranged")
+	}
+	id := writeID(t.Name())
+	temp := filepath.Join(dir, writeTempPrefix+id)
+	writeOpenOK(t, svc, id, target)
+	writeOK(t, svc, id, 0, "half")
+	mustExist(t, temp)
+	if got := journalEntries(t, svc.journal.dir); len(got) != 1 {
+		t.Fatalf("journal entries after the race = %v, want the session's own", got)
+	}
+}
+
+// TestAbortForgetsAStrandedTemporaryOnceItIsGone is the closing event of the
+// inventory interval: a temporary a failed abort reported, and a later abort
+// removed, must stop being reported. The removal failure is injected rather than
+// arranged with permissions, because a test running as root — the box and the
+// container both do — cannot make a directory refuse a removal.
+func TestAbortForgetsAStrandedTemporaryOnceItIsGone(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := newWriteService(t, dir)
+	id := writeID(t.Name())
+	temp := filepath.Join(dir, writeTempPrefix+id)
+	writeOpenOK(t, svc, id, target)
+	writeOK(t, svc, id, 0, "half")
+
+	refused := errors.New("removal refused")
+	svc.seams.removeTemp = func(string) error { return refused }
+	if _, err := callAs[proto.FSWriteAbortResult](t, svc, proto.OpWriteAbort, proto.FSWriteAbortParams{ID: id}); err == nil {
+		t.Fatal("abort answered success for a temporary it could not remove")
+	}
+	mustExist(t, temp)
+	if got := inventoryOf(t, svc); len(got.Stranded) != 1 || got.Stranded[0].Path != temp {
+		t.Fatalf("inventory = %+v, want the temporary the abort could not remove", got.Stranded)
+	}
+
+	svc.seams.removeTemp = nil
+	aborted := writeAbortOK(t, svc, id)
+	if aborted.Outcome != proto.FSOutcomeAborted {
+		t.Fatalf("abort outcome = %q, want %q", aborted.Outcome, proto.FSOutcomeAborted)
+	}
+	mustNotExist(t, temp)
+	if got := journalEntries(t, svc.journal.dir); len(got) != 0 {
+		t.Fatalf("journal entries after a successful abort = %v, want none", got)
+	}
+	if got := inventoryOf(t, svc); len(got.Stranded) != 0 {
+		t.Fatalf("inventory after the temporary was removed = %+v, want nothing stranded", got.Stranded)
+	}
+}
+
+// TestSweepKeepsARecordItCouldNotRead is the state an unreadable entry file
+// leaves: what it names may exist, so neither the entry, nor the temporary, nor
+// the directory is touched — on this start or any later one. The read failure is
+// injected for the same reason as the removal failure above.
+func TestSweepKeepsARecordItCouldNotRead(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+	journalDir := filepath.Join(root, journalDirName("test-host", crashedInstance))
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalDir, journalLockName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("d", 32)
+	temp := filepath.Join(dir, writeTempPrefix+id)
+	if err := os.WriteFile(temp, []byte("half\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(journalRecord{ID: id, Temp: temp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(journalDir, id+journalEntrySuffix)
+	if err := os.WriteFile(entry, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := errors.New("read refused")
+	readJournalEntryBytes = func(path string) ([]byte, error) {
+		if path == entry {
+			return nil, refused
+		}
+		return os.ReadFile(path) // #nosec G304 — the fixture this test built.
+	}
+	t.Cleanup(func() { readJournalEntryBytes = os.ReadFile })
+
+	svc := journalRooted(t, local.New(local.WithRoot(dir)), root, successorInstance)
+
+	mustExist(t, temp)
+	mustExist(t, entry)
+	mustExist(t, journalDir)
+	if got := inventoryOf(t, svc); len(got.Stranded) != 0 {
+		t.Fatalf("an entry that could not be read was reported as a stranded temporary: %+v", got.Stranded)
+	}
+}
+
+// TestSweepStillRemovesAnEntryItToreWhileWritingIt is the other side of that
+// distinction: bytes that WERE read and are not JSON can only be an entry this
+// product tore before it created the temporary, so keeping it would leave a
+// directory no start could finish with.
+func TestSweepStillRemovesAnEntryItToreWhileWritingIt(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+	journalDir := filepath.Join(root, journalDirName("test-host", crashedInstance))
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalDir, journalLockName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("e", 32)
+	entry := filepath.Join(journalDir, id+journalEntrySuffix)
+	if err := os.WriteFile(entry, []byte(`{"id":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := journalRooted(t, local.New(local.WithRoot(dir)), root, successorInstance)
+
+	mustNotExist(t, entry)
+	mustNotExist(t, journalDir)
+	if got := inventoryOf(t, svc); len(got.Stranded) != 0 {
+		t.Fatalf("a torn entry was reported as a stranded temporary: %+v", got.Stranded)
+	}
+}

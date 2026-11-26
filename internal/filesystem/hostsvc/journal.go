@@ -51,10 +51,13 @@ package hostsvc
 // because a directory whose permissions changed under us must not turn into a
 // mechanism for removing whatever a hostile entry spells.
 //
-// An entry whose JSON cannot be read at all IS removed, and the ordering above
-// is the proof that this is safe: a torn entry means the crash happened before
-// the temporary existed. Keeping it would leave a directory that no start can
-// ever finish with.
+// An entry whose BYTES were read and whose JSON does not parse IS removed, and
+// the ordering above is the proof that this is safe: a torn entry means the
+// crash happened before the temporary existed. Keeping it would leave a
+// directory that no start can ever finish with. An entry that could not be READ
+// at all is a different state — the temporary it names may well exist — so it
+// is kept, counted, and its directory survives with it. The same holds for an
+// entry that is not a plain file.
 import (
 	"encoding/json"
 	"errors"
@@ -91,6 +94,18 @@ const (
 	journalEntrySuffix = ".json"
 )
 
+// beforeLock is the seam for the window between creating this run's lock file
+// and taking its flock (openJournal). A test uses it to let another starting
+// daemon sweep the still-empty directory in exactly that window; in the shipped
+// helper it is nil.
+var beforeLock func(dir string)
+
+// readJournalEntryBytes reads one entry file. It is a variable so a test can
+// make a read fail for a file that exists and is a plain file — the state that
+// must keep the entry — without relying on permission bits, which a test
+// running as root cannot use to refuse a read.
+var readJournalEntryBytes = os.ReadFile
+
 // journal is one daemon's journal directory and the lock that proves it is
 // alive. It is constructed once, at start, and closed once, at shutdown.
 type journal struct {
@@ -108,13 +123,24 @@ type journalRecord struct {
 	Temp string `json:"temp"`
 }
 
+// journalOpenAttempts bounds how many times openJournal recreates its directory
+// and retries the lock. A retry happens only when a sweep removed a directory
+// that was still empty (see openLockedJournalDir); one sweep is the ordinary
+// case, so three attempts is already beyond what a start should ever need, and
+// an unbounded loop would turn a lock held by a live daemon into a busy wait.
+const journalOpenAttempts = 3
+
 // openJournal creates this run's directory, takes its lock, and sweeps the
 // directories a previous generation left behind.
 //
 // THE LOCK IS TAKEN BEFORE THE SWEEP, and that order is load-bearing: another
 // generation sweeping the same root treats a directory whose lock it can take
 // as abandoned, so a directory that has been created but not yet locked would
-// be swept out from under the daemon that is about to use it.
+// be swept out from under the daemon that is about to use it. That window
+// cannot be closed by ordering alone — the directory has to exist before the
+// lock file does — so openLockedJournalDir proves after taking the lock that
+// the file it holds is still the one on disk, and recreates the directory when
+// it is not.
 func openJournal(cfg JournalConfig) (*journal, []proto.FSStrandedTemp, error) {
 	if cfg.Root == "" {
 		return nil, nil, errors.New("hostsvc: the write-session journal needs a root directory")
@@ -127,28 +153,82 @@ func openJournal(cfg JournalConfig) (*journal, []proto.FSStrandedTemp, error) {
 	}
 	name := journalDirName(cfg.Hostname, cfg.InstanceID)
 	dir := filepath.Join(cfg.Root, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, nil, err
-	}
-	// MkdirAll applies the umask, and the journal holds paths of files this
-	// account is writing: nothing else on the machine has any business
-	// reading them.
-	// #nosec G302 — a directory's mode, and 0700 is the tightest one that is
-	// still usable: this process has to create files in it.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, nil, err
-	}
-	// #nosec G304 — dir is this run's own directory under the caller's root.
-	lock, err := os.OpenFile(filepath.Join(dir, journalLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	lock, err := openLockedJournalDir(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := lockExclusive(lock); err != nil {
-		_ = lock.Close()
-		return nil, nil, fmt.Errorf("hostsvc: the write-session journal %s is in use: %w", dir, err)
-	}
 	j := &journal{dir: dir, lock: lock}
 	return j, sweepJournal(cfg.Root, cfg.Hostname, name), nil
+}
+
+// openLockedJournalDir creates dir, takes its lock, and answers only once that
+// lock belongs to the file still on disk.
+//
+// THE PROOF IS THE REASON THIS LOOPS. Creating the lock file and taking its
+// flock are two steps, and a daemon starting at the same moment sweeps what
+// looks like an abandoned directory between them: it finds the file, takes the
+// still-free flock, sees no entries, and removes the lock and the directory.
+// The flock this daemon then holds is on an unlinked inode, so the directory it
+// believes it owns does not exist — and every write-open fails with ENOENT
+// until the daemon restarts. os.SameFile is what makes that state observable;
+// recreating the directory and locking it again is the answer.
+//
+// A flock that is HELD is not retried: "this instance id is in use" is the
+// ordinary answer for a second daemon of the same generation, and the caller
+// reports it as such.
+func openLockedJournalDir(dir string) (*os.File, error) {
+	lockPath := filepath.Join(dir, journalLockName)
+	var lastErr error
+	for attempt := 0; attempt < journalOpenAttempts; attempt++ {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		// MkdirAll applies the umask, and the journal holds paths of files this
+		// account is writing: nothing else on the machine has any business
+		// reading them.
+		// #nosec G302 — a directory's mode, and 0700 is the tightest one that is
+		// still usable: this process has to create files in it.
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, err
+		}
+		// #nosec G304 — dir is this run's own directory under the caller's root.
+		lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		if beforeLock != nil {
+			beforeLock(dir)
+		}
+		if err := lockExclusive(lock); err != nil {
+			_ = lock.Close()
+			return nil, fmt.Errorf("hostsvc: the write-session journal %s is in use: %w", dir, err)
+		}
+		if err := lockBelongsTo(lock, lockPath); err != nil {
+			_ = lock.Close()
+			lastErr = err
+			continue
+		}
+		return lock, nil
+	}
+	return nil, fmt.Errorf("hostsvc: the write-session journal %s kept disappearing while it was being locked: %w", dir, lastErr)
+}
+
+// lockBelongsTo answers whether the file the flock was taken on is still the
+// one at path. A sweep of an empty directory unlinks the lock and leaves the
+// flock on the unlinked inode, which is exactly the difference this reports.
+func lockBelongsTo(lock *os.File, path string) error {
+	held, err := lock.Stat()
+	if err != nil {
+		return err
+	}
+	onDisk, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(held, onDisk) {
+		return fmt.Errorf("%s was replaced while it was being locked", path)
+	}
+	return nil
 }
 
 // record writes one session's entry and makes it durable BEFORE the caller
@@ -171,8 +251,8 @@ func (j *journal) record(id, temp string) error {
 	closeErr := f.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 		// A half-written entry names a temporary that was never created, so
-		// removing it here loses nothing — and the sweep would remove it as
-		// unreadable anyway.
+		// removing it here loses nothing — and the sweep would remove it as a
+		// torn entry anyway.
 		_ = os.Remove(path)
 		return err
 	}
@@ -196,39 +276,52 @@ func (j *journal) forget(id string) error {
 	return nil
 }
 
-// close releases the lock and removes this run's directory when nothing is
-// left in it. A directory that still holds an entry SURVIVES with its lock
-// file: the next generation must be able to take that lock to report the entry,
-// and removing the lock would leave a directory the sweep skips forever.
+// close removes this run's directory when nothing is left in it, and releases
+// the lock.
+//
+// The directory and its lock file go BEFORE the release, while the flock is
+// still held: releasing first would let a daemon starting right now take a lock
+// that is about to be unlinked underneath it — the race openJournal detects and
+// retries, but one an orderly shutdown has no reason to create. Unlinking a
+// locked file does not release the lock, so this stays single-writer until the
+// close below.
+//
+// A directory that still holds an entry SURVIVES with its lock file: the next
+// generation must be able to take that lock to report the entry, and removing
+// the lock would leave a directory the sweep skips forever.
 func (j *journal) close() error {
 	if j.lock == nil {
 		return nil
 	}
-	err := j.lock.Close()
-	j.lock = nil
-	if err != nil {
-		return err
-	}
-	entries, readErr := os.ReadDir(j.dir)
-	if readErr != nil {
-		return nil
-	}
-	for _, e := range entries {
-		if e.Name() != journalLockName {
-			return nil
+	if entries, readErr := os.ReadDir(j.dir); readErr == nil {
+		empty := true
+		for _, e := range entries {
+			if e.Name() != journalLockName {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			_ = os.Remove(filepath.Join(j.dir, journalLockName))
+			_ = os.Remove(j.dir)
 		}
 	}
-	_ = os.Remove(filepath.Join(j.dir, journalLockName))
-	_ = os.Remove(j.dir)
-	return nil
+	err := j.lock.Close()
+	j.lock = nil
+	return err
 }
 
 // sweepJournal reaps the directories of earlier generations of THIS host.
 //
-// A directory is a candidate when its name starts with `<host>-`, which is the
-// prefix every daemon of this host writes; another host's directories on a
-// shared home are never opened at all. The daemon's own directory is skipped
-// because there is nothing in it to reap.
+// A directory is a candidate when its name is exactly `<host>-` followed by an
+// instance id — the form journalDirName writes — and not merely when it carries
+// the prefix. The difference is a home shared over NFS: `build-` is a prefix of
+// `build-arm-<id>`, so a prefix test lets the `build` host reap the entries and
+// temporaries of a live `build-arm`, and on a filesystem whose locks do not
+// cross machines even delete them. The id after the separator is what tells two
+// machines apart; a directory whose remainder is not 128 bits of hex is not one
+// this product wrote, so it is left alone. The daemon's own directory is
+// skipped because there is nothing in it to reap.
 func sweepJournal(root, hostname, ownName string) []proto.FSStrandedTemp {
 	dirs, err := os.ReadDir(root)
 	if err != nil {
@@ -238,7 +331,10 @@ func sweepJournal(root, hostname, ownName string) []proto.FSStrandedTemp {
 	var stranded []proto.FSStrandedTemp
 	for _, d := range dirs {
 		name := d.Name()
-		if name == ownName || !strings.HasPrefix(name, prefix) || !d.IsDir() {
+		if name == ownName || !d.IsDir() || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if !validWriteID(strings.TrimPrefix(name, prefix)) {
 			continue
 		}
 		stranded = append(stranded, reapJournalDir(filepath.Join(root, name))...)
@@ -269,11 +365,14 @@ func reapJournalDir(dir string) []proto.FSStrandedTemp {
 		return nil
 	}
 	stranded, remaining := reapJournalRecords(dir)
-	_ = lock.Close()
 	if remaining == 0 {
+		// The lock and the directory go BEFORE the release, while the flock is
+		// still held: releasing first would let a daemon starting right now
+		// take a lock that is about to be unlinked underneath it.
 		_ = os.Remove(filepath.Join(dir, journalLockName))
 		_ = os.Remove(dir)
 	}
+	_ = lock.Close()
 	return stranded
 }
 
@@ -297,18 +396,21 @@ func reapJournalRecords(dir string) (stranded []proto.FSStrandedTemp, remaining 
 			continue
 		}
 		path := filepath.Join(dir, name)
-		rec, ok := readJournalRecord(path)
-		if !ok {
-			// A record this product could not have finished writing, or one
-			// that is not a plain file at all. The first is provably
-			// temp-free (the entry is synced before the temporary exists); the
-			// second is left alone and counted, because a symlink in the
-			// journal is not something to follow or delete on the strength of
-			// its name.
-			if readableEntryFile(path) {
-				_ = os.Remove(path)
-				continue
-			}
+		rec, entry := readJournalRecord(path)
+		switch entry {
+		case entryTornJSON:
+			// The bytes were read and are not JSON, which can only be an entry
+			// this product tore BEFORE creating the temporary it names:
+			// removing it is safe, and keeping it would leave a directory no
+			// start could ever finish with.
+			_ = os.Remove(path)
+			continue
+		case entryUnreadable, entryNotRegular:
+			// The entry's own state is unknown — the disk refused a read, or
+			// the file is a symlink, a directory or a device. What it names may
+			// exist, and a symlink is not something to follow or delete on the
+			// strength of its name, so nothing is deleted and the directory is
+			// kept with it.
 			remaining++
 			continue
 		}
@@ -380,28 +482,42 @@ func temporaryOf(rec journalRecord) (path string, verdict tempVerdict, refusal s
 	return rec.Temp, tempRemoved, ""
 }
 
-// readJournalRecord parses one entry file. ok is false for anything this
-// product did not finish writing.
-func readJournalRecord(path string) (journalRecord, bool) {
-	if !readableEntryFile(path) {
-		return journalRecord{}, false
+// entryVerdict is what reading one entry file answered.
+type entryVerdict int
+
+const (
+	// entryRecord: the bytes were read and parsed.
+	entryRecord entryVerdict = iota
+	// entryTornJSON: the bytes were read and are not the JSON this product
+	// writes. That is an entry this product tore while writing it, which the
+	// ordering makes proof that the temporary it names was never created.
+	entryTornJSON
+	// entryUnreadable: the entry exists but could not be read, so nothing
+	// about the temporary it names is known — and it may exist.
+	entryUnreadable
+	// entryNotRegular: the entry is not a plain file (a symlink, a directory),
+	// so it is never followed, read, or deleted on the strength of its name.
+	entryNotRegular
+)
+
+// readJournalRecord reads and parses one entry file and answers which of the
+// four states it is in. The distinction between entryTornJSON and
+// entryUnreadable is the whole point: only the first proves the temporary was
+// never created, and only that proof licenses a deletion.
+func readJournalRecord(path string) (journalRecord, entryVerdict) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return journalRecord{}, entryNotRegular
 	}
-	body, err := os.ReadFile(path) // #nosec G304 — the journal directory is this daemon's own.
+	body, err := readJournalEntryBytes(path)
 	if err != nil {
-		return journalRecord{}, false
+		return journalRecord{}, entryUnreadable
 	}
 	var rec journalRecord
 	if err := json.Unmarshal(body, &rec); err != nil {
-		return journalRecord{}, false
+		return journalRecord{}, entryTornJSON
 	}
-	return rec, true
-}
-
-// readableEntryFile answers whether the entry itself is a plain file this
-// product could have written — never a symlink, never a directory.
-func readableEntryFile(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && info.Mode().IsRegular()
+	return rec, entryRecord
 }
 
 // journalDirPrefix is the part of a directory name every daemon of this host
@@ -491,7 +607,8 @@ func (s *Service) Close() error {
 
 // recordStranded remembers a temporary this daemon could not remove. The path
 // is the key: the same file reported by the sweep and then by a failed abort is
-// one warning, not two.
+// one warning, not two, and a path this daemon removed itself is forgotten so it
+// stops being reported.
 func (s *Service) recordStranded(path, reason string) {
 	if path == "" {
 		return
@@ -506,6 +623,29 @@ func (s *Service) recordStranded(path, reason string) {
 	}
 	s.strandedPaths[path] = true
 	s.stranded = append(s.stranded, proto.FSStrandedTemp{Path: path, Reason: reason})
+}
+
+// forgetStranded drops one path from the inventory snapshot, once the temporary
+// it names is provably gone. The snapshot is not a log of everything that ever
+// failed: it answers "what can a person still find and remove", and a file this
+// daemon removed is no longer part of that answer.
+func (s *Service) forgetStranded(path string) {
+	if path == "" {
+		return
+	}
+	s.strandedMu.Lock()
+	defer s.strandedMu.Unlock()
+	if !s.strandedPaths[path] {
+		return
+	}
+	delete(s.strandedPaths, path)
+	kept := s.stranded[:0]
+	for _, temp := range s.stranded {
+		if temp.Path != path {
+			kept = append(kept, temp)
+		}
+	}
+	s.stranded = kept
 }
 
 // startJournal records one write session's temporary BEFORE the temporary

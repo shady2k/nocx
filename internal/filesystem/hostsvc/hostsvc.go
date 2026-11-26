@@ -103,10 +103,11 @@ type Service struct {
 
 	// strandedMu guards the snapshot fs.inventory answers with: the
 	// temporaries this daemon found on start and the ones it could not remove
-	// itself. It is a snapshot rather than a fresh disk walk, because a
-	// temporary that this daemon already knows is unreachable is not made
-	// reachable by asking again — and a walk on every inventory would answer a
-	// question about the journal's readability that nobody asked.
+	// itself, minus the ones it has since removed. It is a snapshot rather than
+	// a fresh disk walk, because a temporary that this daemon already knows is
+	// unreachable is not made reachable by asking again — and a walk on every
+	// inventory would answer a question about the journal's readability that
+	// nobody asked.
 	strandedMu    sync.Mutex
 	stranded      []proto.FSStrandedTemp
 	strandedPaths map[string]bool

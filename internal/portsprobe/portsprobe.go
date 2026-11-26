@@ -5,20 +5,25 @@
 // The split exists for one reason, and it is a link, not a style (design
 // §5.10, C30): the far helper runs on a host we do not own, is cross-compiled
 // from this tree, and must answer "what listens here" itself. Whatever that
-// artifact links, it carries — so the parsers and the types they return may
-// reach the standard library and nothing else from this repository. A
-// package that also named internal/ssh, internal/helper/... or
-// internal/farhelper would drag the coordinator's whole connection stack into
-// the binary the helper deploys to somebody else's machine. The same fact is
-// what makes internal/nativeports (this machine's kernel read) importable by
-// both sides: it returns these types too, so the local panel and the far
-// host's sample render identically.
+// artifact links, it carries — so the parsers, the types they return and the
+// ladder that runs them may reach the standard library and nothing else from
+// this repository. A package that also named internal/ssh, internal/helper/...
+// or internal/farhelper would drag the coordinator's whole connection stack
+// into the binary the helper deploys to somebody else's machine.
 //
-// The ladder that decides WHICH parser to run stays in the caller: today
-// internal/discovery's Detector over the exec seam. This package answers two
-// questions only — "is this text the dialect of ss/netstat/busybox
-// netstat/lsof/sockstat, and if so what does it say" and "what does this set
-// of listeners mean as an outcome".
+// Two readers produce these types, and neither is the other's caller:
+// internal/nativeports reads THIS machine's kernel and is the local panel's
+// only path (the far helper never uses it — the host it runs on may not be
+// Linux at all), and Detector below runs the host's own tools as argv and is
+// the far helper's only path. One vocabulary and one parser set for both is
+// what makes the local panel and a far host's sample render identically; the
+// external ladder in internal/discovery stays until nocx-oalo1.13.3 deletes
+// it.
+//
+// So this package answers three questions: "is this text the dialect of
+// ss/netstat/busybox netstat/lsof/sockstat, and if so what does it say",
+// "what does this set of listeners mean as an outcome", and "which of the
+// host's tools answers that, and what did it say when it did not".
 package portsprobe
 
 import "time"
@@ -81,7 +86,7 @@ type Sample struct {
 	State          State
 	Listeners      []Listener
 	Probe          string        // dialect that produced the sample; "" when none did
-	ProbesTried    []string      // probes attempted for this pass, in order
+	ProbesTried    []string      // rungs attempted, in order — the diagnostics half of an unavailable answer
 	Duration       time.Duration // wall time of the sampling pass
 	Classification string        // human-readable why: refusal detail, truncation, ...
 	Stderr         string        // bounded excerpt of the probe's stderr, for diagnostics

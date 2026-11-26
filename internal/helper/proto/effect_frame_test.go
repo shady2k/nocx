@@ -159,11 +159,11 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 
 // The version is PINNED LITERALLY, and that is the whole of what this test is
 // for: the fence's job is to refuse a peer that does not agree about this
-// number. The last change adds the required identity field to fs.stat so a
-// ranged download can reject a replacement before the first read.
+// number. The last change grew the wire's services: `ports`, one `sample` op
+// that answers this host's listening sockets (nocx-oalo1.13.2).
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "34" {
-		t.Fatalf("helper protocol version = %q, want 34", Version)
+	if Version != "35" {
+		t.Fatalf("helper protocol version = %q, want 35", Version)
 	}
 }
 

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ports.sample.schema.json",
+  "title": "HelperPortsSampleResult",
+  "description": "Result of the helper ports service's sample op: one pass over the host's own tools, and what it found. The four states are answers and not refusals — `unavailable` in particular means this host has no port tool at all, which is the service's answer, so the connection's helper axis stays `serving` and Git and Files keep working on it (design scenario 8). `listeners` and `probesTried` are never null: a reader must not have to tell 'nothing listens' or 'nothing was tried' from 'no answer'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "listeners", "probe", "probesTried", "classification", "stderr"],
+  "properties": {
+    "state": {
+      "description": "The pass's outcome. `available` with an empty listener list means nothing is listening; every other state means the table could not be read.",
+      "type": "string",
+      "enum": ["available", "available-limited", "unavailable", "failed-transiently"]
+    },
+    "listeners": {
+      "description": "The listening TCP ports the pass read. Never null: a pass with nothing to report answers [], which is a fact about the host.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/listener"
+      }
+    },
+    "probe": {
+      "description": "The rung that produced the sample — ss, netstat, busybox-netstat, lsof or sockstat — and the empty string when no rung produced one. It is what a person is shown as 'which tool answered', so it is reported rather than inferred.",
+      "type": "string",
+      "enum": ["", "ss", "netstat", "busybox-netstat", "lsof", "sockstat"]
+    },
+    "probesTried": {
+      "description": "Every rung this connection has run, in order, each named once. Never null, and deduped because a connection samples for as long as it lives. It is the diagnostics half of `unavailable`: a host with no tools names the four that were looked for.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["ss", "netstat", "busybox-netstat", "lsof", "sockstat"]
+      }
+    },
+    "classification": {
+      "description": "The helper's own sentence about why this is the answer — a timeout, a truncated capture, a tool's refusal, or the ladder having nothing left. Displayed to a person and never matched by a caller: the typed `state` is what a caller switches on.",
+      "type": "string"
+    },
+    "stderr": {
+      "description": "A bounded excerpt (2 KiB) of the probe's stderr, for a person looking at a host whose tool rejected its flags. Empty when there was nothing to say.",
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "listener": {
+      "description": "One listening TCP port, as the host's own tool reported it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "address", "port", "process"],
+      "properties": {
+        "family": {
+          "description": "The IP family of the bind address.",
+          "type": "string",
+          "enum": ["ipv4", "ipv6"]
+        },
+        "address": {
+          "description": "The bind address as the probe reported it, which may be a wildcard (0.0.0.0, *, [::]). It is the probe's spelling and not a normalised one: a reader that wants a socket identity derives it.",
+          "type": "string"
+        },
+        "port": {
+          "description": "The bound TCP port.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "process": {
+          "$ref": "#/$defs/process"
+        }
+      }
+    },
+    "process": {
+      "description": "The process evidence for one listener. Three-valued and never an empty string: 'nobody owns it' and 'I was not allowed to see' are different facts and are rendered differently.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "name", "pid"],
+      "properties": {
+        "evidence": {
+          "description": "known — the tool named the owner, so name and pid are valid; permission-denied — the socket is real and its owner was not visible; unsupported — the tool cannot report owners at all (busybox netstat without -p).",
+          "type": "string",
+          "enum": ["known", "permission-denied", "unsupported"]
+        },
+        "name": {
+          "description": "The process name, valid when evidence is `known`.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The process id, valid when evidence is `known`.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

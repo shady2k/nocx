@@ -76,9 +76,11 @@ func answeringService(name string, ops ...string) *fakeService {
 
 // TestAPanelRequestMarksItsConnection: the first request that names a panel
 // service tells the session service this connection is working, and exactly
-// once — the fact is a property of the connection, not of each request.
+// once — the fact is a property of the connection, not of each request. `ports`
+// is a panel service for the same reason `git` and `fs` are (nocx-oalo1.13.2):
+// the Ports panel asks the helper for the host its connection already serves.
 func TestAPanelRequestMarksItsConnection(t *testing.T) {
-	for _, service := range []string{proto.ServiceGit, proto.ServiceFS} {
+	for _, service := range []string{proto.ServiceGit, proto.ServiceFS, proto.ServicePorts} {
 		t.Run(service, func(t *testing.T) {
 			observer := &panelObserver{}
 			panel := answeringService(service, "op")

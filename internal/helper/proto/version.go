@@ -455,4 +455,25 @@ package proto
 // `identity` is a required field on a frozen response, so hello must fence a
 // peer that cannot send or accept it. The next fs.watch extension moves the
 // number again (nocx-oalo1.12.10).
-const Version = "34"
+//
+// This is 35 rather than 34 because the wire grew a SERVICE (nocx-oalo1.13.2):
+// `ports`, whose single `sample` op answers the listening sockets of the host
+// the helper is deployed to, read by that host's own tools. It is the far
+// helper's half of port discovery — the ladder and its parsers moved into
+// internal/portsprobe in .13.1, and this is the op a coordinator asks them
+// with.
+//
+// Every op of it is one a 34-helper answers `unknown_service` to — there is no
+// service by that name at all — and that is the half that must be read
+// correctly: the refusal says "this machine's helper is older than this app",
+// the same sentence every generation boundary states, and not "this host has
+// no ports", which is what a panel would be told by a reader that treated an
+// empty answer as an empty host. The states the op answers with are NOT a
+// refusal at all: a host with no port tool is `unavailable`, an ANSWER, so the
+// connection's helper axis stays `serving` and Git and Files keep working on
+// the same connection (design scenario 8). The number moves because a
+// generation whose closed set of services differs is a generation that
+// disagrees about what the wire carries, and hello is where that is decided
+// rather than discovered. The next expansion — `fs.watch` in .12.10 — moves it
+// again, by the same rule.
+const Version = "35"

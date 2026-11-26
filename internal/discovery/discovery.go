@@ -440,25 +440,25 @@ func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
 		return probeResult{
 			kind:   outcomeRefused,
 			class:  "output not framed — forced command, banner or policy wrapper suspected",
-			stderr: stderrExcerpt(res.Stderr),
+			stderr: portsprobe.StderrExcerpt(res.Stderr),
 		}
 	}
-	if res.ExitStatus == 127 || res.ExitStatus == 126 || notFoundOnStderr(res.Stderr) {
+	if res.ExitStatus == 127 || res.ExitStatus == 126 || portsprobe.NotFoundOnStderr(res.Stderr) {
 		return probeResult{kind: outcomeAbsent, class: string(st.name) + " not present"}
 	}
 	if !trailing || res.Truncated {
 		// The body was cut short: bounded output hit, or the remote died
 		// mid-write. A partial table must not surface as "no ports".
-		return probeResult{kind: outcomeTransient, class: "probe output incomplete", stderr: stderrExcerpt(res.Stderr)}
+		return probeResult{kind: outcomeTransient, class: "probe output incomplete", stderr: portsprobe.StderrExcerpt(res.Stderr)}
 	}
 	if res.ExitStatus != 0 && res.ExitStatus != st.noMatchExit {
 		// The tool exists but cannot do its job (usage error, permission,
 		// broken build): cache it as failed and try the next probe.
-		return probeResult{kind: outcomeUnsupported, class: string(st.name) + " exited " + strconv.Itoa(res.ExitStatus), stderr: stderrExcerpt(res.Stderr)}
+		return probeResult{kind: outcomeUnsupported, class: string(st.name) + " exited " + strconv.Itoa(res.ExitStatus), stderr: portsprobe.StderrExcerpt(res.Stderr)}
 	}
 	listeners, ok := st.parse(body)
 	if !ok {
-		return probeResult{kind: outcomeUnsupported, class: "unrecognized " + string(st.name) + " output", stderr: stderrExcerpt(res.Stderr)}
+		return probeResult{kind: outcomeUnsupported, class: "unrecognized " + string(st.name) + " output", stderr: portsprobe.StderrExcerpt(res.Stderr)}
 	}
-	return probeResult{kind: outcomeValid, listeners: listeners, stderr: stderrExcerpt(res.Stderr)}
+	return probeResult{kind: outcomeValid, listeners: listeners, stderr: portsprobe.StderrExcerpt(res.Stderr)}
 }

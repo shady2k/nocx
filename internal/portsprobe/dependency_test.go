@@ -81,6 +81,58 @@ func TestPortsProbeDependencyGraphReachesNoConnectionStack(t *testing.T) {
 	}
 }
 
+// hostsvcForbiddenPackages are the rules for the far helper's own `ports`
+// service — the package that answers the wire (nocx-oalo1.13.2).
+//
+// It differs from the list above in ONE way, and the difference is the design:
+// this package may reach `internal/helper/host` and `internal/helper/proto`,
+// because that is what a helper service IS registered through. What it may not
+// reach is anything that makes a service decide a connection: the client half
+// of the helper tree (`client`), the machinery that INSTALLS a helper on a host
+// (`deploy`), the coordinator's connection registry and far-helper decider
+// (`hostconn`, `farhelper`), and the whole ssh stack. A ports service that
+// named one of them would put the coordinator's side of the boundary inside the
+// artifact that runs on somebody else's machine (C30).
+var hostsvcForbiddenPackages = []string{
+	"github.com/shady2k/nocx/internal/ssh",
+	"golang.org/x/crypto/ssh",
+	"github.com/pkg/sftp",
+	"github.com/shady2k/nocx/internal/hostconn",
+	"github.com/shady2k/nocx/internal/farhelper",
+	"github.com/shady2k/nocx/internal/helper/client",
+	"github.com/shady2k/nocx/internal/helper/deploy",
+}
+
+// TestPortsHostServiceDependencyGraphReachesNoConnectionStack is the same rule
+// for the package that implements the wire's answer: the service is compiled
+// into the deployed helper, so the question `go list` is asked here is the
+// question the link would otherwise answer silently.
+func TestPortsHostServiceDependencyGraphReachesNoConnectionStack(t *testing.T) {
+	platforms := []struct{ name, goos string }{
+		{name: "linux", goos: "linux"},
+		{name: "darwin", goos: "darwin"},
+	}
+	tagsets := []struct {
+		name string
+		tags []string
+	}{
+		{name: "untagged"},
+		{name: "nocx_local_ssh", tags: []string{"nocx_local_ssh"}},
+	}
+	for _, platform := range platforms {
+		for _, tc := range tagsets {
+			t.Run(platform.name+"/"+tc.name, func(t *testing.T) {
+				deps := packageDependencies(t, "./internal/portsprobe/hostsvc", platform.goos, tc.tags...)
+				for _, forbidden := range hostsvcForbiddenPackages {
+					if deps[forbidden] {
+						t.Errorf("./internal/portsprobe/hostsvc on %s reaches %s: this package is linked into the deployed helper and must link no connection stack", platform.goos, forbidden)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestNativePortsDependencyGraphReachesNoDiscovery asserts the other half of
 // the same move: nativeports reads this machine's kernel and returns
 // portsprobe's types, so the local path and the far helper read one

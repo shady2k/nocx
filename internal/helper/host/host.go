@@ -246,9 +246,9 @@ func (h *Host) Serve(ctx context.Context) error {
 }
 
 // PanelWorked answers whether this connection has asked for panel work: a
-// request that named the git or fs service. The session service asks this when
-// the connection is released, so the connection's own errand decides whether
-// the connected-idle bound is armed again (nocx-oalo1.12.5).
+// request that named the git, fs or ports service. The session service asks
+// this when the connection is released, so the connection's own errand decides
+// whether the connected-idle bound is armed again (nocx-oalo1.12.5).
 func (h *Host) PanelWorked() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -261,8 +261,16 @@ func (h *Host) PanelWorked() bool {
 // fact is about the client's ERRAND and not about this build's composition: a
 // generation put together without `git` must not retire the panel client that
 // came to use it as though it had asked for nothing.
+//
+// `ports` is on the list beside `git` and `fs` (nocx-oalo1.13.2): a Ports panel
+// on an ssh tab asks it for the host the connection is already serving, which
+// is exactly the panel errand the bound exists to wait for — a client that
+// samples ports and then opens its panels would otherwise be retired between
+// the two. It is a member of the closed set of PANEL service names, not a
+// prefix rule: a service that is not a panel surface must not silently inherit
+// the exemption.
 func (h *Host) notePanelWork(service string) {
-	if service != proto.ServiceGit && service != proto.ServiceFS {
+	if service != proto.ServiceGit && service != proto.ServiceFS && service != proto.ServicePorts {
 		return
 	}
 	h.mu.Lock()

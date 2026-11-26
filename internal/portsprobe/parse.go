@@ -1,12 +1,13 @@
 package portsprobe
 
-// One parser per probe dialect: the five tables the ladder can read, plus
-// the local machine's lsof on darwin. Each answers two things at once — the
-// rows, and whether the text was that dialect at all — because "I read the
-// table and it was empty" and "this is not the table I asked for" are
-// different facts and a caller must be able to advance the ladder on the
-// second without losing the first. Every parser is exported: the far helper
-// keeps its own ladder (nocx-oalo1.13.2) beside this package's, and one
+// One parser per probe dialect: the five tables the ladder can read — ss,
+// net-tools netstat, busybox netstat, lsof and sockstat. Each answers two
+// things at once — the rows, and whether the text was that dialect at all —
+// because "I read the table and it was empty" and "this is not the table I
+// asked for" are different facts and a caller must be able to advance the
+// ladder on the second without losing the first. Every parser is exported
+// because the ladder that picks one (Detector, in this package) is not their
+// only reader: internal/nativeports reads lsof on darwin, and one
 // implementation with two callers is the whole point of the split.
 
 import (

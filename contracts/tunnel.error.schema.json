@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tunnel.error.schema.json",
+  "title": "TunnelError",
+  "description": "Data payload of the tunnel.open JSON-RPC error. A bind on a local port somebody else already holds carries the typed cause `address-in-use`, so the renderer opens the same forward again on an allocated port from that cause and never from the message — prose the backend may reword. Every other failure (an unresolvable profile, a refused connection, an invalid destination, a permission error) carries no data at all: a retry on another port cannot help it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason"],
+  "properties": {
+    "reason": {
+      "description": "Fixed cause vocabulary. `address-in-use` is the only value today: the requested local port is held, and port 0 is the remedy the renderer applies exactly once.",
+      "type": "string",
+      "enum": ["address-in-use"]
+    }
+  }
+}

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { clearToasts } from './ui/toast'
+import { RpcError } from './dispatcher'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { LOCAL_TARGET_ID } from './ports-client'
 import type { PortsStatusResult } from './generated/ports.status'
@@ -235,7 +236,11 @@ describe('PortsPanel — detected rows', () => {
   it('a busy local port falls back to an allocated loopback port', async () => {
     const openForward = vi
       .fn()
-      .mockRejectedValueOnce(new Error('listen tcp 127.0.0.1:6768: bind: address already in use'))
+      .mockRejectedValueOnce(
+        new RpcError('listen tcp 127.0.0.1:6768: bind: address already in use', -32603, {
+          reason: 'address-in-use',
+        }),
+      )
       .mockResolvedValueOnce(
         runningRecord({
           requestedBind: { host: '127.0.0.1', port: 0 },
@@ -263,6 +268,30 @@ describe('PortsPanel — detected rows', () => {
       (r.textContent ?? '').includes('6768'),
     )
     expect(rows).toHaveLength(1)
+  })
+
+  it('an "address already in use" MESSAGE alone is not a reason to retry', async () => {
+    // The old rule was a regex over this exact prose. A plain Error carries
+    // no typed cause (contracts/tunnel.error.schema.json), so the panel must
+    // report the failure rather than silently opening a second port.
+    const openForward = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('listen tcp 127.0.0.1:6768: bind: address already in use'))
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      openForward,
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId('ports-forward'))
+
+    // The failure reaching the person is the observable the retry would have
+    // pre-empted; assert on it, then on the single call.
+    await waitFor(() =>
+      expect(listingToasts.some((t) => /address already in use/.test(t.message))).toBe(true),
+    )
+    expect(openForward).toHaveBeenCalledTimes(1)
   })
 })
 

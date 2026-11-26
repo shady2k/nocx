@@ -57,6 +57,24 @@ export class RpcError extends Error {
   }
 }
 
+/** The typed cause a JSON-RPC refusal carried in its `data` — its schema's
+ *  `reason` — or null when it carried none. Shape first: a bare code is never
+ *  the answer, because one code is shared by every refusal of a shape.
+ *
+ *  The type parameter is the schema's own reason union, so a caller names the
+ *  vocabulary it is asking about (`contracts/git.error.schema.json`,
+ *  `contracts/tunnel.error.schema.json`). This is the ONE accessor for that
+ *  field: the Git store, the Ports panel and the palette's forward all read a
+ *  refusal through it, so "this failure carries a typed cause" is decided in
+ *  one place — never by matching a message. */
+export function rpcRefusalCause<T extends string>(e: unknown): T | null {
+  if (!(e instanceof RpcError)) return null
+  const data = e.data
+  if (typeof data !== 'object' || data === null) return null
+  const reason = (data as { reason?: unknown }).reason
+  return typeof reason === 'string' ? (reason as T) : null
+}
+
 /**
  * A call could not be made because no control socket was open, or was
  * settled without an answer because the socket closed under it.

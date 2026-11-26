@@ -9,7 +9,6 @@ package hashline
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -52,22 +51,45 @@ func TestApplySupportsAllOperationsAndPreservesLineEndings(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("edited bytes = %q, want %q", string(got), want)
 	}
-	// The result names the bytes that were produced, and it keeps the window
-	// the caller was SHOWN — the patch above replaced line 1, which was
-	// displayed, so a second edit of that line needs no re-read. A line the
-	// caller never saw still does.
+	// The result names the bytes that were produced and shows NOTHING: the
+	// window was a fact about the content before the patch, and this patch cut
+	// a line out of it. A second edit therefore has to start from a fresh
+	// files.read — under the result's revision not one line is displayed, not
+	// even the ones this patch addressed.
 	if result.Canonical != canonical {
 		t.Fatalf("result canonical = %q, want %q", result.Canonical, canonical)
 	}
 	if result.Revision == s.Revision {
 		t.Fatal("the result kept the old revision; it must name the produced bytes")
 	}
-	again, _, err := Apply(canonical, got, result.Revision, "PUT 1.=1:\n+zero")
-	if err != nil {
-		t.Fatalf("second edit under the result's revision: %v", err)
+	if _, _, err := Apply(canonical, got, result.Revision, "PUT 1.=1:\n+zero"); !errors.Is(err, ErrLineNotDisplayed) {
+		t.Fatalf("edit under the result's revision = %v, want ErrLineNotDisplayed", err)
 	}
-	if !strings.HasPrefix(string(again), "zero\r\n") {
-		t.Fatalf("second edit produced %q", string(again))
+}
+
+// TestApplyResultRevisionDoesNotAuthorizeALineTheCutHid: the read displayed
+// lines 1-3, the patch cut two of them, and line 3 of the RESULT is a line the
+// caller never saw. Carrying the read's window forward would have authorized
+// overwriting it by its old number (nocx-a62cl.11.1 review, ALX-1821).
+func TestApplyResultRevisionDoesNotAuthorizeALineTheCutHid(t *testing.T) {
+	data := "one\ntwo\nthree\nfour\nfive\n"
+	s := Read(canonical, []byte(data), int64(len("one\ntwo\nthree\n")))
+	if s.SeenStart != 1 || s.SeenEnd != 3 {
+		t.Fatalf("window = %d..%d, want 1..3", s.SeenStart, s.SeenEnd)
+	}
+	cut, result, err := Apply(canonical, []byte(data), s.Revision, "CUT 1.=2")
+	if err != nil {
+		t.Fatalf("CUT 1.=2: %v", err)
+	}
+	if want := "three\nfour\nfive\n"; string(cut) != want {
+		t.Fatalf("cut bytes = %q, want %q", string(cut), want)
+	}
+	// Line 3 of these bytes is "four" — never displayed — and it sits inside
+	// the window the read reported, which is exactly what the result must not
+	// pass on.
+	again, _, err := Apply(canonical, cut, result.Revision, "PUT 3.=3:\n+FOUR")
+	if !errors.Is(err, ErrLineNotDisplayed) {
+		t.Fatalf("edit of a hidden line = %v (bytes %q), want ErrLineNotDisplayed", err, string(again))
 	}
 }
 

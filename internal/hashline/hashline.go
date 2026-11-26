@@ -159,7 +159,14 @@ func Apply(canonical string, data []byte, revisionToken, patch string) ([]byte, 
 	}
 	updated := applyOperations(lines, ops)
 	newData := joinLines(updated)
-	return newData, Result{Canonical: canonical, Revision: encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, newData), SeenStart: r.SeenStart, SeenEnd: r.SeenEnd})}, nil
+	// The result names the bytes that were produced and NO displayed window.
+	// The read's window described the content BEFORE the patch, and a CUT moves
+	// every line after it: carrying the window forward would let a follow-up
+	// edit address, by its number in the old content, a line the caller was
+	// never shown — the write files.edit is defined to refuse
+	// (contracts/tools/files.edit.schema.json). So every edit starts from a
+	// fresh files.read, and this revision names the bytes and nothing else.
+	return newData, Result{Canonical: canonical, Revision: encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, newData)})}, nil
 }
 
 // ValidateText refuses content the line-addressed engine cannot address: a NUL

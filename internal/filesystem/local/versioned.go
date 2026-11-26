@@ -87,7 +87,17 @@ func (p *Provider) ReadVersion(ctx context.Context, path string, maxBytes int64)
 	if !before.Mode().IsRegular() {
 		return nil, filesystem.Version{}, &filesystem.ErrNotRegular{Path: path, Kind: filesystem.KindOf(before.Mode())}
 	}
-	buf := make([]byte, limit+1)
+	// The buffer is one byte past the file's OWN size — enough to see EOF and no
+	// more — rather than one byte past the bound, which allocated the whole
+	// 2 MiB default for every read of a small file. The file is larger than the
+	// bound exactly when the read could fill limit+1 bytes, so the two sizes
+	// agree about which case this is; a file that outgrew the smaller buffer is
+	// caught by the size comparison below, before its bytes are trusted.
+	bufSize := before.Size() + 1
+	if max := limit + 1; bufSize > max {
+		bufSize = max
+	}
+	buf := make([]byte, bufSize)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, filesystem.Version{}, wrapPathErr("read", path, err)
@@ -145,7 +155,7 @@ func (p *Provider) Commit(ctx context.Context, path string, data []byte, expect 
 		return filesystem.Version{}, &filesystem.ErrNotRegular{Path: path, Kind: filesystem.KindOf(info.Mode())}
 	}
 	if expect.Version != nil {
-		if reason, err := versionMismatch(canonical, *expect.Version); err != nil {
+		if reason, err := p.versionMismatch(ctx, canonical, info, *expect.Version); err != nil {
 			return filesystem.Version{}, err
 		} else if reason != "" {
 			return filesystem.Version{}, &filesystem.ErrChangedSinceRead{Path: path, Reason: reason}
@@ -161,27 +171,40 @@ func (p *Provider) Commit(ctx context.Context, path string, data []byte, expect 
 }
 
 // versionMismatch answers why the file no longer matches the version the caller
-// read, or "" when it does. The size and mtime are compared first because they
-// are free; the digest is what catches a rewrite of the same length inside one
-// filesystem timestamp granule.
-func versionMismatch(canonical string, want filesystem.Version) (string, error) {
-	// #nosec G304 -- canonical is the resolved identity of a caller-supplied
-	// absolute path, and reading it is exactly what the version check is.
-	data, err := os.ReadFile(canonical) //nolint:gosec // see above
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(canonical)
-	if err != nil {
-		return "", err
-	}
-	switch {
-	case want.Size != int64(len(data)) || want.MtimeNs != info.ModTime().UnixNano():
+// read, or "" when it does.
+//
+// The stat the commit already performed is compared FIRST, so a file whose size
+// or timestamp moved is refused without being read at all. What remains is the
+// rewrite of the same length inside one filesystem timestamp granule, and that
+// is answered by the digest — read through ReadVersion, the same bounded,
+// change-detecting read this package already has, with the caller's own size as
+// the bound. It used to be an unbounded os.ReadFile of whatever was at the path,
+// under the path lock, which is a read nothing bounded and nobody expected.
+func (p *Provider) versionMismatch(ctx context.Context, canonical string, info fs.FileInfo, want filesystem.Version) (string, error) {
+	if want.Size != info.Size() || want.MtimeNs != info.ModTime().UnixNano() {
 		return "size or modification time differs", nil
-	case want.SHA256 != filesystem.ContentDigest(data):
+	}
+	// A file that grew past the expected size is refused as too large by this
+	// read instead of being read to the end, and one that was being rewritten
+	// while it was read is refused as changed: both answer the same question the
+	// commit is asking, which is whether these are still the bytes that were
+	// read.
+	_, version, err := p.ReadVersion(ctx, canonical, want.Size)
+	var limit *filesystem.ErrByteLimit
+	var changed *filesystem.ErrChangedDuringRead
+	switch {
+	case errors.As(err, &limit):
+		return "the file is larger than the version it was read with", nil
+	case errors.As(err, &changed):
+		return "the file changed while it was being checked", nil
+	case err != nil:
+		return "", err
+	case version == want:
+		return "", nil
+	case version.SHA256 != want.SHA256:
 		return "sha256 differs", nil
 	}
-	return "", nil
+	return "size or modification time differs", nil
 }
 
 // create writes a new file and refuses an occupied name with ErrExists. The

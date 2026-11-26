@@ -17,6 +17,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // countedProvider is the local provider plus a close counter. It embeds the
@@ -147,9 +149,9 @@ func TestAssistantFiles_CancelledCallLeavesNothing(t *testing.T) {
 }
 
 // TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider: the pane's
-// session closes while the call holds its handle. CloseSession waits for the
-// use-guard, the call releases it, and the provider is closed exactly once —
-// whichever of the two paths closes the binding.
+// session closes while the call holds its handle. CloseSession marks the binding
+// closed, waits for the use-guard, the call releases it, and the provider is
+// closed exactly once — whichever of the two paths closes the binding.
 func TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider(t *testing.T) {
 	f := newAssistantFilesFixture(t)
 	handle, release, err := f.files.Acquire(context.Background())
@@ -162,6 +164,16 @@ func TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider(t *testing.T) {
 	}
 	closed := make(chan error, 1)
 	go func() { closed <- f.reg.CloseSession(f.sessionID) }()
+	// CloseSession marks the binding closed BEFORE it drains the guard, so a call
+	// on this handle that refuses with ErrHandleReleased IS that marking having
+	// happened — the handle itself was never released, so only the binding's own
+	// state can produce it. Waiting for it is what puts the release under a
+	// closing binding instead of racing the close for which comes first.
+	waittest.WaitFor(t, "CloseSession to mark the binding closed", func() bool {
+		_, err := handle.Stat(context.Background(), "/")
+		var released *filesystem.ErrHandleReleased
+		return errors.As(err, &released)
+	})
 	// The pane has closed; the call finishes and releases its guard.
 	release()
 	select {
@@ -175,6 +187,40 @@ func TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider(t *testing.T) {
 	_, providers := f.counts()
 	if providers != 1 {
 		t.Fatalf("providers closed = %d, want exactly 1", providers)
+	}
+}
+
+// TestAssistantFiles_CancelledWhileTheProviderIsBeingBuiltLeavesNothing: building
+// the provider is the expensive half — dialing a host — and a call abandoned
+// during it must not leave the binding it already registered for a call that
+// will never use it. The factory cancels the turn's own context, so the check
+// that follows registration is the one that answers.
+func TestAssistantFiles_CancelledWhileTheProviderIsBeingBuiltLeavesNothing(t *testing.T) {
+	f := newAssistantFilesFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	files := f.files
+	files.factory = func(got session.Session, rootPath string) (filesystem.Provider, error) {
+		f.mu.Lock()
+		f.factoryCalls++
+		f.rootPaths = append(f.rootPaths, rootPath)
+		f.mu.Unlock()
+		cancel() // the call was abandoned while this provider was being built
+		return countedProvider{Provider: local.New(), mu: &f.mu, closed: &f.closed}, nil
+	}
+	if _, release, err := files.Acquire(ctx); err == nil {
+		release()
+		t.Fatal("Acquire succeeded on a context its own factory cancelled")
+	}
+	if factory, closed := f.counts(); factory != 1 || closed != 1 {
+		t.Fatalf("factory calls = %d, closed = %d; the abandoned provider must be closed exactly once", factory, closed)
+	}
+	// And the registry holds nothing for the run: closing the session closes no
+	// provider, so the counter stays where the call left it.
+	if err := f.reg.CloseSession(f.sessionID); err != nil {
+		t.Fatalf("CloseSession after the abandoned call: %v", err)
+	}
+	if factory, closed := f.counts(); factory != 1 || closed != 1 {
+		t.Fatalf("after closing the session: factory calls = %d, closed = %d; a binding was left in the registry", factory, closed)
 	}
 }
 

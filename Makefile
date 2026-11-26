@@ -583,9 +583,15 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # (nocx-a62cl.14): a session watches its agent's exit and process group
 # through the kernel (lifecycle_linux.go waitid, lifecycle_darwin.go kqueue),
 # and the conformance suite reads process state the same per-platform way.
+# internal/filesystem/hostsvc joined with the fs service it serves through
+# internal/filesystem/local (nocx-oalo1.12.2): a read's identity is its
+# descriptor's dev:ino, which only a unix kernel numbers — identity_unix.go,
+# and identity_other.go answering emptiness rather than an identity. ci-os-split
+# noticed it, as it noticed internal/git above.
 OS_PKG_DIRS := cmd/e2e-sshd cmd/nocx-helper internal/apicoll internal/app internal/contentkey \
                internal/coordinator internal/desktopidentity \
-               internal/filesystem/local internal/git \
+               internal/filesystem/local internal/filesystem/hostsvc \
+               internal/git \
                internal/helper/endpoint internal/helper/fishchannel \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \

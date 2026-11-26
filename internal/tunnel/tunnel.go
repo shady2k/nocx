@@ -207,6 +207,26 @@ func New(spec Spec, conn Connector) (*Tunnel, error) {
 	}, nil
 }
 
+// localBindError marks the failure of the LOCAL listener — the net.Listen
+// this process performs, as opposed to the SSH connection acquired before it
+// or a listen the far end performs. It unwraps to the OS error underneath
+// (EADDRINUSE, EACCES, an invalid address), so errors.Is keeps answering
+// truthfully, while the marker is what lets a caller tell "the local port is
+// held" from a dial failure that carries the same syscall: an SSH connector
+// can fail with EADDRINUSE before the bind was even attempted, and only the
+// bind has the remedy of another port.
+type localBindError struct{ err error }
+
+func (e *localBindError) Error() string { return e.err.Error() }
+
+func (e *localBindError) Unwrap() error { return e.err }
+
+// IsLocalBind reports whether err is the local listener's own bind failure.
+func IsLocalBind(err error) bool {
+	var e *localBindError
+	return errors.As(err, &e)
+}
+
 // newID mints the tunnel's backend id (spec §7.3: every forward has its own
 // backend id). Same shape as session.NewID: crypto/rand failure is treated
 // as unreachable, and a deterministic fallback would mint colliding ids.

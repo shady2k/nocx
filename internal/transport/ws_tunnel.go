@@ -46,13 +46,16 @@ const tunnelReasonAddressInUse = "address-in-use"
 // tunnelOpenError maps a tunnel.open failure onto the wire. ONLY a bind on a
 // held local port is typed: every other failure — an unresolvable profile, a
 // refused connection, an invalid destination — carries no reason, so the
-// renderer never retries where another port cannot help.
+// renderer never retries where another port cannot help. The EADDRINUSE check
+// alone is not enough: a failed SSH dial can carry that syscall too, while the
+// local listener was never attempted, so the refusal must be the local bind's
+// own (tunnel.IsLocalBind).
 func tunnelOpenError(err error) RPCError {
 	// fmt.Sprint is the error's text, and not a logging call: the
 	// log-context ratchet reads the method name alone and would refuse the
 	// usual getter here.
 	e := RPCError{Code: -32603, Message: fmt.Sprint(err)}
-	if errors.Is(err, syscall.EADDRINUSE) {
+	if tunnel.IsLocalBind(err) && errors.Is(err, syscall.EADDRINUSE) {
 		e.Data = tunnelErrorData{Reason: tunnelReasonAddressInUse}
 	}
 	return e

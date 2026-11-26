@@ -24,9 +24,11 @@ function record(port: number): TunnelOpenResult {
   }
 }
 
-/** The backend's typed refusal: the local port is held. */
+/** The backend's typed refusal: the local port is held. The message is
+ *  deliberately neutral — it names no syscall and no phrase the old regex
+ *  matched — so a retry seen here can only have come from the typed cause. */
 function addressInUse(): RpcError {
-  return new RpcError('listen tcp 127.0.0.1:6768: bind: address already in use', -32603, {
+  return new RpcError('the local port is unavailable', -32603, {
     reason: 'address-in-use',
   })
 }
@@ -52,7 +54,7 @@ describe('openForwardWithFallback', () => {
   it('a second typed refusal is the answer, not another attempt', async () => {
     const open = vi.fn().mockRejectedValueOnce(addressInUse()).mockRejectedValueOnce(addressInUse())
 
-    await expect(openForwardWithFallback(open, 6768)).rejects.toThrow(/address already in use/)
+    await expect(openForwardWithFallback(open, 6768)).rejects.toThrow(/port is unavailable/)
     expect(open).toHaveBeenCalledTimes(2)
   })
 
@@ -75,7 +77,7 @@ describe('openForwardWithFallback', () => {
   it('a caller already asking for port 0 has nothing to fall back to', async () => {
     const open = vi.fn().mockRejectedValue(addressInUse())
 
-    await expect(openForwardWithFallback(open, 0)).rejects.toThrow(/address already in use/)
+    await expect(openForwardWithFallback(open, 0)).rejects.toThrow(/port is unavailable/)
     expect(open).toHaveBeenCalledTimes(1)
   })
 })

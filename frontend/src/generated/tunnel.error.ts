@@ -10,11 +10,11 @@
  */
 
 /**
- * Data payload of the tunnel.open JSON-RPC error. A bind on a local port somebody else already holds carries the typed cause `address-in-use`, so the renderer opens the same forward again on an allocated port from that cause and never from the message — prose the backend may reword. Every other failure (an unresolvable profile, a refused connection, an invalid destination, a permission error) carries no data at all: a retry on another port cannot help it.
+ * The cause tunnel.open adds itself. A bind on a local port somebody else already holds carries `address-in-use`, so the renderer opens the same forward again on an allocated port from that cause and never from the message — prose the backend may reword. No other tunnel.open failure is typed here: an unresolvable profile, a refused connection, an invalid destination and a permission error add no cause, because a retry on another port cannot help them. A failure that was already owned elsewhere keeps that owner's cause — a sealed vault refuses the profile resolve with `vault-sealed`, for instance — so `data` is not simply absent on every other error.
  */
 export interface TunnelError {
   /**
-   * Fixed cause vocabulary. `address-in-use` is the only value today: the requested local port is held, and port 0 is the remedy the renderer applies exactly once.
+   * Fixed cause vocabulary of this surface. `address-in-use` is the only value tunnel.open adds: the requested local port is held, and port 0 is the remedy the renderer applies exactly once.
    */
   reason: 'address-in-use'
 }

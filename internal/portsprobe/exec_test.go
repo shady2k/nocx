@@ -100,7 +100,7 @@ func TestExecRunnerAbandonsADescendantThatHoldsTheCapture(t *testing.T) {
 
 	bound := 500 * time.Millisecond
 	start := time.Now()
-	s := NewDetector(NewExecRunner(), WithSampleTimeout(bound)).Sample(context.Background())
+	s := newTestDetector(NewExecRunner(), withSampleTimeout(bound)).Sample(context.Background())
 	elapsed := time.Since(start)
 
 	if elapsed > 3*time.Second {

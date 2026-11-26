@@ -74,6 +74,32 @@ func equalStrings(got, want []string) bool {
 	return true
 }
 
+// newTestDetector builds a Detector over runner and applies the knobs a test
+// owns: the one-pass bound and the clock. Both are fields of the production
+// struct whose production values are the defaults (DefaultSampleTimeout,
+// time.Now) and which nothing outside a test ever sets, so they are set here
+// by an unexported helper instead of by an option this package exports.
+func newTestDetector(runner Runner, tweaks ...func(*Detector)) *Detector {
+	d := NewDetector(runner)
+	for _, tweak := range tweaks {
+		tweak(d)
+	}
+	return d
+}
+
+// withSampleTimeout replaces the one-pass bound, so a test sees a timeout at
+// its own scale rather than after the production ten seconds.
+func withSampleTimeout(timeout time.Duration) func(*Detector) {
+	return func(d *Detector) { d.timeout = timeout }
+}
+
+// withNow replaces the clock the backoff window is measured against. The
+// window is a rule about time, and a test that waits ten real minutes to see
+// the last level is a test nobody runs.
+func withNow(now func() time.Time) func(*Detector) {
+	return func(d *Detector) { d.now = now }
+}
+
 func TestTheLadderFallsFromSSToNetstatAndThenRunsOnlyTheSelectedRung(t *testing.T) {
 	runner := &fakeRunner{run: func(_ context.Context, c Command) (*Result, error) {
 		if c.Argv[0] == "netstat" {
@@ -222,7 +248,7 @@ func TestAPassPastItsBoundTimesOutAndIsNeverConnectionLoss(t *testing.T) {
 		return nil, ctx.Err()
 	}}
 
-	s := NewDetector(runner, WithSampleTimeout(20*time.Millisecond)).Sample(context.Background())
+	s := newTestDetector(runner, withSampleTimeout(20*time.Millisecond)).Sample(context.Background())
 	if s.State != StateFailedTransiently {
 		t.Fatalf("state = %q, want failed-transiently", s.State)
 	}
@@ -288,7 +314,7 @@ func TestTransientFailureBacksOffFourLevelsAndResetsOnSuccess(t *testing.T) {
 			return &Result{Truncated: true}, nil
 		}
 	}}
-	d := NewDetector(runner, WithNow(clock.now))
+	d := newTestDetector(runner, withNow(clock.now))
 
 	if s := d.Sample(context.Background()); s.State != StateFailedTransiently {
 		t.Fatalf("first sample state = %q, want failed-transiently", s.State)

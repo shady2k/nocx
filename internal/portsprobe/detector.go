@@ -140,32 +140,17 @@ type Detector struct {
 	last       Sample
 }
 
-// DetectorOption configures a Detector.
-type DetectorOption func(*Detector)
-
-// WithSampleTimeout sets the hard per-pass timeout. Default
-// DefaultSampleTimeout.
-func WithSampleTimeout(d time.Duration) DetectorOption {
-	return func(dd *Detector) { dd.timeout = d }
-}
-
-// WithBackoffLevels overrides the transient-failure backoff levels. Tests use
-// tiny levels to exercise the backing-off window without waiting for it.
-func WithBackoffLevels(levels []time.Duration) DetectorOption {
-	return func(dd *Detector) { dd.backoff.levels = levels }
-}
-
-// WithNow overrides the clock the backoff window is measured against. The
-// window is a rule about time, and a test that waits for ten real minutes to
-// see the last level is a test nobody runs.
-func WithNow(now func() time.Time) DetectorOption {
-	return func(dd *Detector) { dd.now = now }
-}
-
 // NewDetector creates a detector over the given runner. There is nothing to
 // release: a pass's process is bounded by the pass's context, which the caller
 // of Sample owns.
-func NewDetector(runner Runner, opts ...DetectorOption) *Detector {
+//
+// The pass bound and the clock have no setter: a caller outside this package
+// takes the defaults (DefaultSampleTimeout, time.Now) because there is nothing
+// for it to choose — a shorter bound would lose a slow host's answer and a
+// different clock only moves a window the production code reads from the real
+// one. A test that needs either sets the field directly through
+// newTestDetector, which keeps this package's exported surface honest.
+func NewDetector(runner Runner) *Detector {
 	d := &Detector{
 		runner:  runner,
 		timeout: DefaultSampleTimeout,
@@ -174,9 +159,6 @@ func NewDetector(runner Runner, opts ...DetectorOption) *Detector {
 		ladder:  ladderState{absent: map[string]bool{}, failed: map[string]bool{}},
 		backoff: backoff{levels: defaultBackoffLevels},
 		last:    Sample{State: StatePending},
-	}
-	for _, o := range opts {
-		o(d)
 	}
 	return d
 }

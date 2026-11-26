@@ -90,6 +90,10 @@ type Provider struct {
 	afterReadDir func() // runs after the readdir, before entry processing
 	beforeEntry  func() // runs before each entry's metadata is read
 	beforeOpen   func() // runs after path resolution, before the open
+	// rename installs a temporary over its target. It is os.Rename except in a
+	// test that makes the rename fail, so "the original bytes survive a failed
+	// install" is asserted by failing one rather than argued from the shape.
+	rename func(oldpath, newpath string) error
 }
 
 // New creates a local provider. Without WithRoot the root is the user's home

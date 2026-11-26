@@ -123,6 +123,11 @@ type toolSeams struct {
 	// that never wired one, which leaves every sessionId naming a
 	// descendant refused rather than guessed at.
 	paneAccessBinder PaneAccessBinder
+	// files is the pane's own file binding, handed through to the capability
+	// constructors so the file tools act on the pane's host rather than on this
+	// machine (stage 10, ADR-anntnxdj §5). Nil is a run with no binding, which
+	// builds no file capability at all.
+	files filesystem.HandleSource
 	// paneEnvironment is where the pane this run was asked in is, derived
 	// from the session's own facts by the adapter that admitted the caller
 	// (the transport's environmentForSession) — never from a call's

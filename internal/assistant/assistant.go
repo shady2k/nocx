@@ -11,6 +11,7 @@ import (
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -112,6 +113,12 @@ type AskParams struct {
 	// The zero value names no pane, which those tools refuse rather than
 	// assume this machine.
 	Environment content.Environment
+	// Files is the pane's own file binding, as a source the file tools acquire
+	// one short-lived Handle from per operation (stage 10, ADR-anntnxdj §5).
+	// The transport mints it per run over the same factory and registry the
+	// Files panel uses, and it is the ONLY route the tools have to a disk: no
+	// provider reaches them, and nil builds no file capability at all.
+	Files filesystem.HandleSource
 	// WorkerEnvironment names the environment a spawn would reach. The
 	// composition root owns it, for the reason the tool's resolver is a
 	// constant: the spawner opens a local session, so a value the model

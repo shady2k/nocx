@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
-	"github.com/shady2k/nocx/internal/filesystem/local"
 )
 
 func scopeDir(t *testing.T) string {
@@ -44,23 +43,20 @@ func TestScopedReader_CannotReachOutsideScope(t *testing.T) {
 	dir := scopeDir(t)
 	ctx := context.Background()
 
-	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(),
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t),
 		[]string{filepath.Join(dir, "a")}, []string{filepath.Join(dir, "a", "in.txt")})
-	if err != nil {
-		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
-	}
 
 	// In scope: the read returns the file.
-	c, err := s.Read(ctx, filepath.Join(dir, "a", "in.txt"), 1<<20)
+	c, err := s.ReadSnapshot(ctx, filepath.Join(dir, "a", "in.txt"), 1<<20)
 	if err != nil {
 		t.Fatalf("in-scope read: %v", err)
 	}
-	if c.Text != "inside" || c.Total != 6 {
-		t.Fatalf("in-scope content = %+v, want the file", c)
+	if c.Text != "1:inside" || c.Total != 6 {
+		t.Fatalf("in-scope snapshot = %+v, want the file", c)
 	}
 
 	// Outside the scope: refused with ErrOutOfScope.
-	_, err = s.Read(ctx, filepath.Join(dir, "b", "out.txt"), 1<<20)
+	_, err = s.ReadSnapshot(ctx, filepath.Join(dir, "b", "out.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
 		t.Fatalf("out-of-scope read error = %v, want ErrOutOfScope", err)
 	}
@@ -72,7 +68,7 @@ func TestScopedReader_CannotReachOutsideScope(t *testing.T) {
 	if writeErr := os.WriteFile(filepath.Join(dir, "a-other", "x.txt"), []byte("x"), 0o600); writeErr != nil {
 		t.Fatalf("write x.txt: %v", writeErr)
 	}
-	_, err = s.Read(ctx, filepath.Join(dir, "a-other", "x.txt"), 1<<20)
+	_, err = s.ReadSnapshot(ctx, filepath.Join(dir, "a-other", "x.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
 		t.Fatalf("prefix-sibling read error = %v, want ErrOutOfScope (the scope is a separator boundary)", err)
 	}
@@ -88,12 +84,9 @@ func TestScopedReader_SymlinkEscapeIsRefused(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(),
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t),
 		[]string{filepath.Join(dir, "a")}, []string{filepath.Join(dir, "a", "escape.txt")})
-	if err != nil {
-		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
-	}
-	_, err = s.Read(ctx, filepath.Join(dir, "a", "escape.txt"), 1<<20)
+	_, err := s.ReadSnapshot(ctx, filepath.Join(dir, "a", "escape.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
 		t.Fatalf("symlink-escape read error = %v, want ErrOutOfScope", err)
 	}
@@ -103,23 +96,29 @@ func TestScopedReader_SymlinkEscapeIsRefused(t *testing.T) {
 // capability with no scope cannot express any call.
 func TestScopedReader_ZeroRootsRefuseEverything(t *testing.T) {
 	dir := scopeDir(t)
-	s, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(), nil, nil)
-	if err != nil {
-		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
-	}
-	_, err = s.Read(context.Background(), filepath.Join(dir, "a", "in.txt"), 1<<20)
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t), nil, nil)
+	_, err := s.ReadSnapshot(context.Background(), filepath.Join(dir, "a", "in.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
 		t.Fatalf("zero-root read error = %v, want ErrOutOfScope", err)
 	}
 }
 
-// TestScopedReader_UnknowableRootFailsConstruction is the other end of the
-// construction interval: a scope whose identity cannot be resolved must not
-// silently become a wider or narrower scope — the constructor refuses.
-func TestScopedReader_UnknowableRootFailsConstruction(t *testing.T) {
-	if _, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(),
-		[]string{filepath.Join(t.TempDir(), "does-not-exist")}, nil); err == nil {
-		t.Fatal("NewScopedReaderWithExactFiles accepted an unknowable root")
+// TestScopedReader_UnknowableRootFailsTheRead is the other end of the scope
+// interval: a root whose identity cannot be resolved must not silently become a
+// wider or narrower scope. Construction performs no I/O (a capability is built
+// before anybody opens the Files panel, and on a host that may not be reachable
+// yet), so the refusal lands on the operation — and it is NOT ErrOutOfScope,
+// because the scope was never established.
+func TestScopedReader_UnknowableRootFailsTheRead(t *testing.T) {
+	dir := scopeDir(t)
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t),
+		[]string{filepath.Join(t.TempDir(), "does-not-exist")}, nil)
+	_, err := s.ReadSnapshot(context.Background(), filepath.Join(dir, "a", "in.txt"), 1<<20)
+	if err == nil {
+		t.Fatal("a read under an unknowable root succeeded")
+	}
+	if errors.Is(err, filesystem.ErrOutOfScope) {
+		t.Fatalf("unknowable root reported as a scope refusal: %v", err)
 	}
 }
 
@@ -134,15 +133,12 @@ func TestScopedReader_ExactFileScopesRefuseUnrequestedPaths(t *testing.T) {
 		t.Fatalf("write sibling: %v", err)
 	}
 	in := filepath.Join(dir, "a", "in.txt")
-	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(), []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}, []string{in})
-	if err != nil {
-		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
-	}
-	if _, err := s.Read(ctx, in, 1<<20); err != nil {
+	s := filesystem.NewScopedReaderWithExactFiles(newLocalSource(t), []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}, []string{in})
+	if _, err := s.ReadSnapshot(ctx, in, 1<<20); err != nil {
 		t.Fatalf("resolved file read: %v", err)
 	}
 	for _, path := range []string{sibling, filepath.Join(dir, "b", "out.txt")} {
-		if _, err := s.Read(ctx, path, 1<<20); !errors.Is(err, filesystem.ErrOutOfScope) {
+		if _, err := s.ReadSnapshot(ctx, path, 1<<20); !errors.Is(err, filesystem.ErrOutOfScope) {
 			t.Fatalf("unrequested path %q error = %v, want ErrOutOfScope", path, err)
 		}
 	}

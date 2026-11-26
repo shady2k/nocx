@@ -1,6 +1,14 @@
 // Package hashline provides strict, line-addressed edits against byte-exact
 // file snapshots. A revision is tied to the canonical file identity and the
 // complete bytes observed by Read; Apply refuses any intervening change.
+//
+// The package is PURE BY BYTES: it neither reads nor writes a file, and it
+// names no path of its own beyond the canonical identity it is handed. Reading
+// the whole file, deciding whether it is too large, and installing the bytes
+// back are the provider's job (filesystem.VersionedFiles), because those three
+// questions have different answers on this machine and on a host behind the
+// far helper — and they are the host's to answer at the rename, not ours at the
+// patch.
 package hashline
 
 import (
@@ -9,14 +17,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -72,42 +76,18 @@ var (
 	cutHeader       = regexp.MustCompile(`^CUT (\d+)\.=(\d+)$`)
 )
 
-var pathMu sync.Mutex
-
-// Read reads the complete file for its byte-exact revision digest, while
-// returning only complete UTF-8 lines that fit in maxBytes. Line numbers are
-// one-based and returned text is numbered as "N:TEXT". Original line endings
-// are preserved in the returned text and on later edits.
-func Read(path string, maxBytes int64) (Snapshot, error) {
-	canonical, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	before, err := os.Stat(canonical)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if !before.Mode().IsRegular() {
-		return Snapshot{}, fmt.Errorf("hashline: %s is not a regular file", path)
-	}
-	data, err := os.ReadFile(canonical)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	after, err := os.Stat(canonical)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		return Snapshot{}, ErrStaleRevision
-	}
-
+// Read describes the bytes data — the COMPLETE content of the file whose
+// canonical identity is canonical — as a snapshot: the numbered window that
+// fits in maxBytes, and the revision that names these bytes and the lines the
+// window displayed. It performs no I/O, so the caller decides how the bytes
+// were obtained and whether they were too large to hold.
+func Read(canonical string, data []byte, maxBytes int64) Snapshot {
 	r := revision{Canonical: canonical, Digest: digestFor(canonical, data)}
-	s := Snapshot{Path: path, Canonical: canonical, Total: int64(len(data))}
-	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
+	s := Snapshot{Canonical: canonical, Total: int64(len(data))}
+	if ValidateText(data) != nil {
 		s.Binary = true
 		s.Revision = encodeRevision(r)
-		return s, nil
+		return s
 	}
 	lines := splitLines(data)
 	limit := maxBytes
@@ -134,100 +114,77 @@ func Read(path string, maxBytes int64) (Snapshot, error) {
 	s.SeenStart, s.SeenEnd = r.SeenStart, r.SeenEnd
 	s.Text = numbered.String()
 	s.Revision = encodeRevision(r)
-	return s, nil
+	return s
 }
 
-// Apply parses and applies one file's patch only if revision still names the
-// exact canonical path and bytes read earlier. It writes through a same-dir
-// temporary file and renames it, so a failed write leaves the original bytes.
-func Apply(path, revisionToken, patch string) (Result, error) {
+// Apply parses and applies one file's patch to data only if revisionToken still
+// names this canonical path and exactly these bytes. It returns the new content
+// for the caller to install; installing it is a conditional write
+// (filesystem.VersionedFiles.Commit), so the window between this check and the
+// rename is closed on the machine that owns the file.
+func Apply(canonical string, data []byte, revisionToken, patch string) ([]byte, Result, error) {
 	r, err := decodeRevision(revisionToken)
 	if err != nil {
-		return Result{}, err
-	}
-	canonical, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return Result{}, err
+		return nil, Result{}, err
 	}
 	identity := sha256.Sum256([]byte(canonical))
 	if hex.EncodeToString(identity[:]) != r.Identity {
-		return Result{}, ErrStaleRevision
-	}
-	pathMu.Lock()
-	defer pathMu.Unlock()
-	data, err := os.ReadFile(canonical)
-	if err != nil {
-		return Result{}, err
+		return nil, Result{}, ErrStaleRevision
 	}
 	if digestFor(canonical, data) != r.Digest {
-		return Result{}, ErrStaleRevision
+		return nil, Result{}, ErrStaleRevision
 	}
-	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
-		return Result{}, ErrBinaryFile
+	if invalid := ValidateText(data); invalid != nil {
+		return nil, Result{}, invalid
 	}
 	lines := splitLines(data)
 	ops, err := parsePatch(patch)
 	if err != nil {
-		return Result{}, err
+		return nil, Result{}, err
 	}
 	for _, op := range ops {
 		if op.kind == 'I' {
 			if op.before {
 				if op.position < 1 || op.position > len(lines)+1 || op.position < r.SeenStart || op.position > r.SeenEnd+1 {
-					return Result{}, ErrLineNotDisplayed
+					return nil, Result{}, ErrLineNotDisplayed
 				}
 			} else if op.position < 0 || op.position > len(lines) || op.position < r.SeenStart-1 || op.position > r.SeenEnd {
-				return Result{}, ErrLineNotDisplayed
+				return nil, Result{}, ErrLineNotDisplayed
 			}
 			continue
 		}
 		if op.start < 1 || op.end > len(lines) || op.start < r.SeenStart || op.end > r.SeenEnd {
-			return Result{}, ErrLineNotDisplayed
+			return nil, Result{}, ErrLineNotDisplayed
 		}
 	}
 	updated := applyOperations(lines, ops)
 	newData := joinLines(updated)
-	if err := atomicReplace(canonical, newData); err != nil {
-		return Result{}, err
-	}
-	return Result{Path: path, Canonical: canonical, Revision: encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, newData)})}, nil
+	return newData, Result{Canonical: canonical, Revision: encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, newData), SeenStart: r.SeenStart, SeenEnd: r.SeenEnd})}, nil
 }
 
-// Create creates a new regular UTF-8 file and refuses if the path already
-// exists. Content is written exactly as supplied; no line-ending conversion.
-func Create(path, content string) (Result, error) {
-	if !utf8.ValidString(content) || strings.IndexByte(content, 0) >= 0 {
-		return Result{}, ErrBinaryFile
+// ValidateText refuses content the line-addressed engine cannot address: a NUL
+// byte or invalid UTF-8. It is one answer for both directions — a snapshot that
+// may not be patched and content that may not be created — because the question
+// "is this a text file" has one answer, and two copies of the byte tests agree
+// until one of them forgets a case.
+func ValidateText(data []byte) error {
+	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
+		return ErrBinaryFile
 	}
-	canonical, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return Result{}, err
-	}
-	// #nosec G304 -- canonical is an absolute, cleaned path selected for this operation.
-	f, err := os.OpenFile(canonical, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return Result{}, err
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(canonical)
-		}
-	}()
-	if _, err := io.WriteString(f, content); err != nil {
-		_ = f.Close()
-		return Result{}, err
-	}
-	if err := f.Close(); err != nil {
-		return Result{}, err
-	}
-	ok = true
-	return Result{Path: path, Canonical: canonical, Revision: encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, []byte(content))})}, nil
+	return nil
+}
+
+// Revision names bytes a caller already holds, with no displayed window. It is
+// what a generator of new content answers — files.create, whose target was
+// never read — so the token still binds the canonical identity to the exact
+// bytes that were installed.
+func Revision(canonical string, data []byte) string {
+	return encodeRevision(revision{Canonical: canonical, Digest: digestFor(canonical, data)})
 }
 
 func digestFor(canonical string, data []byte) string {
 	h := sha256.New()
-	_, _ = io.WriteString(h, canonical)
+	_, _ = h.Write([]byte(canonical))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))
@@ -389,34 +346,4 @@ func operationAnchor(op operation) int {
 		return op.position
 	}
 	return op.start
-}
-
-func atomicReplace(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".nocx-edit-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	info, err := os.Stat(path)
-	if err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

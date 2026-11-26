@@ -511,6 +511,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			RunID:                 runID,
 			Session:               sessionID,
 			Environment:           runSeams.paneEnvironment,
+			Files:                 runSeams.files,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 			ControllerIdentity:    controllerIdentity,

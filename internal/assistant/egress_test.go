@@ -52,11 +52,11 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	refs, refErr := decl.ResolveResources(map[string]any{"path": path}, localRunContext())
+	refs, refErr := decl.ResolveResources(map[string]any{"path": path}, localRunContext(t))
 	if refErr != nil {
 		t.Fatalf("ResolveResources: %v", refErr)
 	}
-	cap, capErr := decl.Narrow(grant, refs, localRunContext())
+	cap, capErr := decl.Narrow(grant, refs, localRunContext(t))
 	if capErr != nil {
 		t.Fatalf("Narrow: %v", capErr)
 	}
@@ -171,4 +171,13 @@ func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
 
 func askParamsWith(_ string, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, requester RendererRequester) AskParams {
 	return AskParams{Grant: grant, AttemptLedger: ledger, Approvals: approvals, KnownMaterial: known, Requester: requester, SessionID: "session-a", RunID: "run-1", Attempt: 1, Environment: localPaneEnvironment()}
+}
+
+// askParamsWithFiles is askParamsWith for a test that then RUNS one of the file
+// tools: the run needs the pane's file binding, which the harness supplies.
+func askParamsWithFiles(t *testing.T, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, requester RendererRequester) AskParams {
+	t.Helper()
+	p := askParamsWith("", grant, ledger, approvals, known, requester)
+	p.Files = newLocalFileSource(t)
+	return p
 }

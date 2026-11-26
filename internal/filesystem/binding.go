@@ -84,6 +84,16 @@ type Handle interface {
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
 	Stat(ctx context.Context, path string) (Stat, error)
 	Watch(ctx context.Context, paths []string) (WatchMode, error)
+	// Canonical resolves a spelled path to the provider's canonical identity
+	// of the object it names — symlinks followed, the provider's own rules
+	// applied. It is the comparison a scope is enforced on, so a capability
+	// asks the HANDLE rather than an os call: on a host behind the helper the
+	// identity is the host's, and on this machine it is this one's, and the
+	// capability must not be able to tell which it holds.
+	//
+	// It takes the use-guard like every other method, so a resolution never
+	// reaches a provider under a closing binding.
+	Canonical(ctx context.Context, path string) (string, error)
 	// Uploader returns the binding's write half — the sink one transfer
 	// runs on — or *ErrUploadUnsupported when the binding has none, which
 	// is rule R1 expressed as a missing field rather than as a check
@@ -138,6 +148,24 @@ type Handle interface {
 	// and client, so a read racing a close fails and reports how far it
 	// got, and never reads through a torn-down lease.
 	Downloader() (transfer.Source, error)
+}
+
+// HandleSource hands out a short-lived Handle, and it is the ONLY route a
+// narrowed capability holds to a filesystem. A capability never holds a
+// Provider and never holds a Handle for longer than one operation: it asks for
+// one, does the work, and releases it, so a binding's lifetime is the call's
+// and not the run's.
+//
+// Acquire performs the authorisation (Registry.Acquire re-checks ownership),
+// and the returned release must run on every path — including every failure
+// after Acquire returned, which is why callers defer it immediately.
+//
+// It is declared here rather than in the composition layer because the
+// capabilities in this package (ScopedReader, ScopedEditor) are what hold it;
+// the transport implements it over the same factory and registry the Files
+// panel uses.
+type HandleSource interface {
+	Acquire(ctx context.Context) (Handle, func(), error)
 }
 
 // Caller is who is asking. filesystem declares it and transport satisfies it —
@@ -615,6 +643,15 @@ func (h *handle) Read(ctx context.Context, path string, maxBytes int64) (Content
 	}
 	defer drop()
 	return h.b.provider.Read(ctx, path, maxBytes)
+}
+
+func (h *handle) Canonical(ctx context.Context, path string) (string, error) {
+	drop, err := h.begin()
+	if err != nil {
+		return "", err
+	}
+	defer drop()
+	return h.b.provider.Canonical(ctx, path)
 }
 
 func (h *handle) Stat(ctx context.Context, path string) (Stat, error) {

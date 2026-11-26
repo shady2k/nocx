@@ -124,30 +124,37 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if err != nil {
 		return "", "", err
 	}
+	caps, endpointID := ProviderCapabilities(provider)
+	bid, err := s.reg.Register(provider, sess.ID(), endpointID, caps)
+	if err != nil {
+		return "", "", err
+	}
+	return bid, endpointID, nil
+}
+
+// ProviderCapabilities resolves every optional seam a provider contributed, and
+// the endpoint attestation beside them, at the LAST moment the concrete
+// provider is still in hand: Binding.provider is unexported and Acquire returns
+// a Handle, so nothing downstream can perform these assertions (upload design
+// D7).
+//
+// It is one function because two callers now ask the same question. The Files
+// panel asks at files.open; the assistant asks on every file-tool call, when it
+// registers a short-lived binding for the run's pane — and a second copy of
+// these assertions would agree with this one everywhere anyone looked and
+// disagree at the seam somebody added to only one of them (stage 10,
+// ADR-anntnxdj §5). A provider that does not implement a seam contributes
+// nothing for it, and the binding then refuses that direction rather than the
+// composition site remembering to check (rule R1).
+//
+// The axis is carried as the METHOD rather than as a status: a status sampled
+// now would be the axis's state at registration, and the panel has to draw the
+// connection as it stands (C28).
+func ProviderCapabilities(provider filesystem.Provider) (filesystem.Capabilities, string) {
 	endpointID := ""
 	if a, ok := provider.(filesystemEndpointAttester); ok {
 		endpointID = a.EndpointID()
 	}
-	// The write seam is resolved HERE, beside the attestation, because this
-	// is the last moment the provider is in hand: Binding.provider is
-	// unexported and Acquire returns a Handle, so nothing downstream can
-	// perform this assertion (upload design D7). A provider that does not
-	// implement it contributes no sink, and that nil is rule R1: the
-	// binding's Upload refuses because it has nothing to write through, not
-	// because somebody remembered to check where the tab is.
-	//
-	// Both shipped providers implement it, so the nil branch is the seam's
-	// shape rather than a case in production. It stayed an assertion rather
-	// than becoming a required Provider method because Provider is read-only
-	// by contract (§5.1) and because R1 must keep being expressible: the
-	// next provider that cannot write inherits the refusal here without
-	// anybody adding a check for it.
-	// The read-stream seam is resolved in the same breath and for the same
-	// reasons, one direction over: reading a file off the wrong host is as
-	// wrong as writing to it, so R1 is a nil Source here exactly as it is a
-	// nil Sink above. Both assertions are here rather than two lines apart
-	// in two files because they answer one question — what can this
-	// provider do — and a second site would be a second place to forget.
 	var caps filesystem.Capabilities
 	if u, ok := provider.(filesystem.Uploader); ok {
 		caps.Sink = u.Sink()
@@ -155,24 +162,18 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if d, ok := provider.(filesystem.Downloader); ok {
 		caps.Source = d.Source()
 	}
-	// The axis and the conditional write are resolved here beside them, and
-	// for the same reason: this is the last moment the concrete provider is in
-	// hand. The axis is carried as the METHOD rather than as a status — a status
-	// sampled now would be the axis's state at files.open, and the panel has to
-	// draw the connection as it stands (C28).
 	if a, ok := provider.(filesystem.AxisProvider); ok {
 		caps.Axis = a.HelperAxis
 	}
 	if v, ok := provider.(filesystem.VersionedProvider); ok {
 		caps.Versioned = v.Versioned()
 	}
-	// The failure domain is resolved here for the sink's reason: this is the
-	// last moment the provider is in hand. A provider that can name its own
-	// domains supplies the namer itself; a provider that cannot — the SFTP
-	// one, whose namespace is the far machine and not a mount table — takes
-	// the attested destination as its domain, because everything behind one
-	// resolved host fails together. A provider with neither leaves the
-	// binding a single domain of its own, which is the conservative answer.
+	// A provider that can name its own domains supplies the namer itself; a
+	// provider that cannot — the SFTP one, whose namespace is the far machine
+	// and not a mount table — takes the attested destination as its domain,
+	// because everything behind one resolved host fails together. A provider
+	// with neither leaves the binding a single domain of its own, which is the
+	// conservative answer.
 	if n, ok := provider.(filesystem.DomainNamer); ok {
 		caps.Domain = n.DomainKey
 	} else if endpointID != "" {
@@ -181,11 +182,7 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 			return filesystem.Domain{Kind: "host", ID: host}
 		}
 	}
-	bid, err := s.reg.Register(provider, sess.ID(), endpointID, caps)
-	if err != nil {
-		return "", "", err
-	}
-	return bid, endpointID, nil
+	return caps, endpointID
 }
 
 func (s *filesystemOpenService) Acquire(id string, caller filesystem.Caller) (filesystem.Handle, func(), error) {

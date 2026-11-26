@@ -8,7 +8,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/hashline"
 )
 
 func mustJSON(t *testing.T, value any) json.RawMessage {
@@ -39,7 +38,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not registered")
 	}
-	capRead, narrowErr := readDecl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext())
+	capRead, narrowErr := readDecl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext(t))
 	if narrowErr != nil {
 		t.Fatalf("Narrow read: %v", narrowErr)
 	}
@@ -53,7 +52,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(readOut), &readResult); decodeErr != nil {
 		t.Fatalf("decode read result: %v", decodeErr)
 	}
-	capEdit, editNarrowErr := decl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext())
+	capEdit, editNarrowErr := decl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext(t))
 	if editNarrowErr != nil {
 		t.Fatalf("Narrow edit: %v", editNarrowErr)
 	}
@@ -97,11 +96,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.create not registered")
 	}
-	refs, err := decl.ResolveResources(map[string]any{"path": path}, localRunContext())
+	refs, err := decl.ResolveResources(map[string]any{"path": path}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	capability, err := decl.Narrow(grant, refs, localRunContext())
+	capability, err := decl.Narrow(grant, refs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
@@ -144,11 +143,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not registered")
 	}
-	readRefs, err := readDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext())
+	readRefs, err := readDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources(read escape): %v", err)
 	}
-	readCapability, err := readDecl.Narrow(grant, readRefs, localRunContext())
+	readCapability, err := readDecl.Narrow(grant, readRefs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow(read escape): %v", err)
 	}
@@ -160,15 +159,12 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.edit not registered")
 	}
-	snapshot, err := hashline.Read(escapeTarget, testResultMaxBytes())
-	if err != nil {
-		t.Fatalf("hashline.Read(escape): %v", err)
-	}
-	editRefs, err := editDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext())
+	revision := revisionOf(t, escapeTarget, testResultMaxBytes())
+	editRefs, err := editDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources(edit escape): %v", err)
 	}
-	editCapability, err := editDecl.Narrow(grant, editRefs, localRunContext())
+	editCapability, err := editDecl.Narrow(grant, editRefs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow(edit escape): %v", err)
 	}
@@ -178,7 +174,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	// stringification here names the escaped path. What the tool must prove
 	// is that nothing was written and no result was produced.
 	editOut, err := executeFilesEdit(toolTestContext(), editCapability, mustJSON(t, map[string]string{
-		"path": escapeExistingPath, "revision": snapshot.Revision, "patch": "PUT 1.=1:\n+changed",
+		"path": escapeExistingPath, "revision": revision, "patch": "PUT 1.=1:\n+changed",
 	}), toolSeams{})
 	if !capabilityRefusal(err) {
 		t.Fatalf("executeFilesEdit(escape) = %q, %v — want the capability refusal the kernel seam classifies", editOut, err)
@@ -194,11 +190,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if string(outside) != "outside\n" {
 		t.Fatalf("escaped file = %q, want unchanged", outside)
 	}
-	escapeRefs, err := decl.ResolveResources(map[string]any{"path": escapePath}, localRunContext())
+	escapeRefs, err := decl.ResolveResources(map[string]any{"path": escapePath}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources(escape): %v", err)
 	}
-	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext())
+	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow(escape): %v", err)
 	}

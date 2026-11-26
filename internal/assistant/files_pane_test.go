@@ -24,6 +24,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 // localPaneEnvironment is where a pane on THIS machine is, as the transport
@@ -43,20 +44,29 @@ func remotePaneEnvironment() content.Environment {
 	}
 }
 
-// localRunContext is the run context of a caller whose pane is this machine —
-// what the file tools' capability tests below and elsewhere assume.
-func localRunContext() agenttools.RunContext {
-	return agenttools.RunContext{Environment: localPaneEnvironment()}
+// localRunContext is the run context of a caller whose pane is this machine and
+// whose run carries the pane's file binding — what the file tools' capability
+// tests below and elsewhere assume.
+func localRunContext(t *testing.T) agenttools.RunContext {
+	t.Helper()
+	return agenttools.RunContext{Environment: localPaneEnvironment(), Files: newLocalFileSource(t)}
 }
 
-// toolsOn binds the harness's tool entry for one pane.
+// toolsOn binds the harness's tool entry for one pane, with a real file binding.
 func toolsOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *RunTools {
+	t.Helper()
+	return toolsOnWithFiles(t, grant, pane, newLocalFileSource(t), ledger, watch)
+}
+
+// toolsOnWithFiles is toolsOn with the run's Files source supplied, so a test
+// can hand it a spy and assert what was never acquired.
+func toolsOnWithFiles(t *testing.T, grant content.Grant, pane content.Environment, files filesystem.HandleSource, ledger AttemptLedger, watch *watchedCalls) *RunTools {
 	t.Helper()
 	owner, _, err := NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := BindRunTools(context.Background(), owner, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, Environment: pane, AttemptLedger: ledger, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-1", SessionID: "session-1", Attempt: 1, TurnEntryID: "turn-entry"}, func(call ToolCall) error { watch.seen = append(watch.seen, call); return nil })
+	bound, err := BindRunTools(context.Background(), owner, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, Environment: pane, Files: files, AttemptLedger: ledger, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-1", SessionID: "session-1", Attempt: 1, TurnEntryID: "turn-entry"}, func(call ToolCall) error { watch.seen = append(watch.seen, call); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +98,8 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	ledger := &fakeLedger{}
 	watch := &watchedCalls{}
-	k := toolsOn(t, grant, remotePaneEnvironment(), ledger, watch)
+	files := &spyFileSource{inner: newLocalFileSource(t)}
+	k := toolsOnWithFiles(t, grant, remotePaneEnvironment(), files, ledger, watch)
 
 	calls := []struct{ method, params string }{
 		{"files.read", fmt.Sprintf(`{"path":%q}`, readPath)},
@@ -119,6 +130,11 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 	}
 	if got := ledger.calls(); len(got) != 0 {
 		t.Fatalf("ledger writes = %v, want none — no attempt was opened", got)
+	}
+	// And the pane's binding was never opened: the refusal happened before any
+	// route to a filesystem was taken, not after one was tried.
+	if got := files.acquisitions(); got != 0 {
+		t.Fatalf("file binding acquisitions = %d, want none on a pane that is not this machine", got)
 	}
 	// And the disk is as it was.
 	if got := readFileString(t, readPath); got != body {
@@ -207,7 +223,7 @@ func kernelOn(t *testing.T, grant content.Grant, pane content.Environment, ledge
 	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "session-1", 1, "turn-entry", nil, Attachments{}, func(call ToolCall) error {
 		watch.seen = append(watch.seen, call)
 		return nil
-	}, toolSeams{paneEnvironment: pane})
+	}, toolSeams{paneEnvironment: pane, files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}

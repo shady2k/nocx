@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -754,6 +755,15 @@ type agentHandlers struct {
 	// screenCapture and sessions are the assistant's backend-owned read seams.
 	screenCapture assistant.ScreenCaptureSource
 	sessions      assistant.SessionSource
+	// filesys, filesFactory and sessionRegistry are the assistant's route to
+	// the pane's own files (stage 10, ADR-anntnxdj §5): the SAME registry and
+	// factory the Files panel uses, asked per tool call for a short-lived
+	// binding of the run's own. Nil in any of the three builds no file
+	// capability at all, which is the honest refusal rather than a fallback to
+	// this machine's disk.
+	filesys         *filesystem.Registry
+	filesFactory    FilesystemProviderFactory
+	sessionRegistry session.Registry
 	// expansions is the authenticated-channel seam that answers "what does
 	// $HOME read as, in the shell that would run this" for an approval
 	// question (nocx-4h0m7.5, assistant.ExpansionSource). The server
@@ -1298,6 +1308,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// on another one instead of reading the local disk (ADR-anntnxdj §5,
 		// decision 3).
 		Environment: rc.promptFacts.Env,
+		// The pane's own files, bound per CALL rather than per run: every
+		// files.* invocation acquires one short-lived handle, so the registry
+		// holds nothing between calls and nothing after a cancelled one.
+		Files: assistantFiles{
+			reg:       h.filesys,
+			factory:   h.filesFactory,
+			sessions:  h.sessionRegistry,
+			sessionID: rc.sessionID,
+		},
 		// The one environment a spawn can reach in this slice: the machine
 		// nocx itself runs on. Derived through content's own id rule so the
 		// run fence and the tool's resolver name the same string without
@@ -2899,6 +2918,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 			harness: s.agentHarness, harnessID: s.agentHarnessID,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
+			filesys: s.filesys, filesFactory: s.filesProviderFor, sessionRegistry: s.registry,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

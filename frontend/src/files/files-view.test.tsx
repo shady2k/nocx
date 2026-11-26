@@ -150,6 +150,9 @@ const SSH_ORIGIN: ActiveOrigin = {
   cwdVerified: false,
   cwdFollow: true,
   host: 'srv-01',
+  // The panel asks its host only through a serving helper (design §5.10);
+  // the axis tests below hand it every other state.
+  connection: { paneId: 'pane-ssh', helper: { state: 'serving', action: 'none' } },
   // What terminal-content answers the activeOrigin capability with — the
   // machine-name.ts string, derived once in the composition root so no
   // surface builds a second spelling of one machine.
@@ -171,6 +174,11 @@ async function mountApp(
     /** "Are we inside the Wails webview" — jsdom is a browser, so the
      *  default is false and a desktop case must say so (nocx-9le.5.24). */
     native?: () => boolean
+    /** The shared helper card's two actions, when the test is about the axis
+     *  (design §5.10). Both are optional in production too. */
+    onRefreshHelper?: (paneId: string) => void
+    onHostSettings?: (profileId: string) => void
+    activeProfileId?: () => string | null
   },
 ) {
   const client = makeClient()
@@ -203,6 +211,9 @@ async function mountApp(
     download: uploadDeps?.download,
     pickSources: uploadDeps?.pickSources,
     native: uploadDeps?.native,
+    onRefreshHelper: uploadDeps?.onRefreshHelper,
+    onHostSettings: uploadDeps?.onHostSettings,
+    activeProfileId: uploadDeps?.activeProfileId,
     onStore: (store) => {
       filesStore = store
     },
@@ -814,6 +825,31 @@ describe('files sidebar view', () => {
     const slot = panel.querySelector<HTMLElement>('[data-testid="files-polling-badge-slot"]')
     expect(slot?.closest('.ui-sidebar-view__header')).not.toBeNull()
     expect(panel.querySelector('[data-testid="files-polling-badge"]')).toBeNull()
+  })
+
+  it('keeps an existing row mounted when a watched directory changes', async () => {
+    const unchanged = entryFixture({ name: 'keep.txt', path: '/keep.txt' })
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listFixture('/', [unchanged]))
+      .mockResolvedValue(
+        listFixture('/', [unchanged, entryFixture({ name: 'new.txt', path: '/new.txt' })], {
+          rev: 'r2',
+        }),
+      )
+    const subscribeFilesChanged = vi.fn<(handler: (change: FilesChanged) => void) => () => void>(
+      () => () => {},
+    )
+    const { panel } = await mountApp(fakeServices({ list, subscribeFilesChanged }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'keep.txt')).toBeDefined())
+    const row = rowNamed(panel, 'keep.txt')
+    const item = row.querySelector('[role="treeitem"]')
+
+    subscribeFilesChanged.mock.calls[0][0]({ bindingId: 'b1', path: '/', rev: 'r2' })
+
+    await vi.waitFor(() => expect(rowNamed(panel, 'new.txt')).toBeDefined())
+    expect(rowNamed(panel, 'keep.txt')).toBe(row)
+    expect(row.querySelector('[role="treeitem"]')).toBe(item)
   })
 
   // ── Row actions (fm-w13) ─────────────────────────────────────────────
@@ -2174,5 +2210,120 @@ describe('the visibility signal (nocx-8hdia.1)', () => {
     } finally {
       restore()
     }
+  })
+})
+
+// ── The far helper's axis in the panel (design §5.10, C25/C26) ────────────
+
+describe('the Files panel draws the connection’s helper reason', () => {
+  /** A new tab arrives with no panel open, so the rail is collapsed: a
+   *  person presses the Files icon, which is what makes the panel on screen
+   *  (ADR-x7cvh8e1). */
+  function showFiles(app: Awaited<ReturnType<typeof mountApp>>): void {
+    app.handle.revealView(FILES_VIEW_ID)
+  }
+
+  /** Every branch of the contract that is not a serving axis. */
+  const REFUSED: unknown[] = [
+    { state: 'starting', action: 'none' },
+    { state: 'paused', reason: 'connection', action: 'none' },
+    { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+    { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+    { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+    { state: 'unavailable', reason: 'helper-lost', action: 'none' },
+    { state: 'unavailable', reason: 'consent-pending', action: 'none' },
+    { state: 'unavailable', reason: 'consent-denied', action: 'none' },
+    { state: 'unavailable', reason: 'unsupported-platform', action: 'none' },
+    { state: 'unavailable', reason: 'install-failed', action: 'none' },
+    { state: 'unavailable', reason: 'exec-forbidden', action: 'none' },
+    { state: 'unavailable', reason: 'version-mismatch', action: 'none' },
+    { state: 'unavailable', reason: 'connection', action: 'none' },
+  ]
+  const TOKEN =
+    /mode-raw|mode-script|helper-lost|install-failed|consent-pending|consent-denied|unsupported-platform|exec-forbidden|version-mismatch/
+
+  const sshWith = (helper: unknown): ActiveOrigin => ({
+    ...SSH_ORIGIN,
+    connection: { paneId: 'pane-ssh', helper: helper as never },
+  })
+
+  it('draws every reason’s own sentence, with no wire token and no files.* call', async () => {
+    for (const helper of REFUSED) {
+      // The mocks are held as bare references: asserting through the
+      // services object is the detachment unbound-method exists to catch.
+      const open = vi.fn().mockResolvedValue(openFixture())
+      const list = vi.fn().mockResolvedValue(listFixture('C:/', []))
+      const services = fakeServices({ open, list })
+      const app = await mountApp(services, undefined, { activeProfileId: () => 'profile-1' })
+      // The mount follows the local tab; the SSH tab's connection is what
+      // carries this axis.
+      const ssh = app.manager.newSSHPane('p1', 'host.example', 'alice')
+      app.originFor.set(ssh.content, sshWith(helper))
+      app.setActiveOrigin(sshWith(helper))
+      showFiles(app)
+      // The mount opens the LOCAL tab it started on; that is not this test's
+      // question, so the record is cleared once the SSH tab is in front.
+      open.mockClear()
+      list.mockClear()
+
+      const card = await vi.waitFor(() => {
+        const el = app.panel.querySelector<HTMLElement>('[data-testid="files-helper-axis"]')
+        expect(el, JSON.stringify(helper)).not.toBeNull()
+        return el as HTMLElement
+      })
+      const state = (helper as { state: string }).state
+      expect(card.getAttribute('data-helper'), JSON.stringify(helper)).toBe(state)
+      const text = card.textContent ?? ''
+      expect(text, JSON.stringify(helper)).not.toMatch(TOKEN)
+      // The panel's own states are not drawn beside the card: no spinner, no
+      // "could not reach files" with its Retry, and no empty tree.
+      expect(app.panel.querySelector('[data-testid="files-loading"]'), String(state)).toBeNull()
+      expect(app.panel.querySelector('[data-testid="files-error"]'), String(state)).toBeNull()
+      expect(app.panel.querySelector('.files-tree'), String(state)).toBeNull()
+      // And nothing was asked of the host.
+      expect(open, String(state)).not.toHaveBeenCalled()
+      expect(list, String(state)).not.toHaveBeenCalled()
+    }
+  })
+
+  it('offers Host settings with a saved connection and Refresh only where the wire did', async () => {
+    const hostSettings = vi.fn()
+    const refresh = vi.fn()
+    const app = await mountApp(fakeServices(), undefined, {
+      activeProfileId: () => 'profile-7',
+      onHostSettings: hostSettings,
+      onRefreshHelper: refresh,
+    })
+    const ssh = app.manager.newSSHPane('p1', 'host.example', 'alice')
+
+    const raw = sshWith({ state: 'unavailable', reason: 'mode-raw', action: 'host-settings' })
+    app.originFor.set(ssh.content, raw)
+    app.setActiveOrigin(raw)
+    showFiles(app)
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-host-settings"]')).not.toBeNull(),
+    )
+    expect(app.panel.querySelector('[data-testid="files-helper-refresh"]')).toBeNull()
+    app.panel.querySelector<HTMLElement>('[data-testid="files-host-settings"]')?.click()
+    expect(hostSettings).toHaveBeenCalledWith('profile-7')
+
+    const lost = sshWith({ state: 'unavailable', reason: 'helper-lost', action: 'refresh' })
+    app.setActiveOrigin(lost)
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-helper-refresh"]')).not.toBeNull(),
+    )
+    expect(app.panel.querySelector('[data-testid="files-host-settings"]')).toBeNull()
+    app.panel.querySelector<HTMLElement>('[data-testid="files-helper-refresh"]')?.click()
+    expect(refresh).toHaveBeenCalledWith('pane-ssh')
+  })
+
+  it('draws no card while the helper serves', async () => {
+    const app = await mountApp(fakeServices())
+    const ssh = app.manager.newSSHPane('p1', 'host.example', 'alice')
+    app.originFor.set(ssh.content, SSH_ORIGIN)
+    app.setActiveOrigin(SSH_ORIGIN)
+    showFiles(app)
+    await vi.waitFor(() => expect(app.panel.querySelector('.files-tree')).not.toBeNull())
+    expect(app.panel.querySelector('[data-testid="files-helper-axis"]')).toBeNull()
   })
 })

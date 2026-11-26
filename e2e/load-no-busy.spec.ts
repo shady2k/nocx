@@ -5,15 +5,15 @@
  * far host at 50 ms RTT, tabs switched continually, and legitimate traffic
  * beyond the credit window — with no toast and no refusal, healthy actions
  * SUCCEEDING within their declared deadlines, the blocked domain's actions
- * expiring as declared, and diagnostics holding the matching records. "Passing
- * by promptly timing everything out fails this check", which is why every
- * assertion below is a success or a declared expiry and never "no answer".
+ * expiring as declared, and diagnostics holding the matching records.
+ * Under SSH design C25, the transport blackhole shows Files paused
+ * (`data-helper="paused"`) on the affected helper-backed tab.
  *
  * What is staged rather than real, said once here:
  *
  *   - The far host is `cmd/e2e-sshd` behind `e2e/fault-proxy.ts` on loopback,
- *     with 25 ms added each way (50 ms RTT). Its HOME — and therefore its SFTP
- *     root — is the 50,000-entry tree this spec creates.
+ *     with 25 ms added each way (50 ms RTT). Its HOME contains the 50,000-entry
+ *     tree this spec creates and is served by the far helper.
  *   - 50,000 entries are 25 directories of 2,000. ONE directory of 50,000 is
  *     deliberately not used: `DEFAULT_ENTRY_CAP` makes a listing over it
  *     `tooLarge` and stops polling it (internal/filesystem/local/local.go), so
@@ -27,7 +27,9 @@
  * `slow(25)` is the far host's RTT — an ingredient, not a timing assumption.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
@@ -306,7 +308,9 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
   // The suite ceiling is 30 s and this is a load scenario; every wait inside is
   // on a state, so the ceiling is the only wall clock.
   test.setTimeout(240_000)
-  const tree = testInfo.outputPath('far')
+  // The helper binds a Unix socket below the remote home. Keep the fixture
+  // out of Playwright's output path, which includes the test and project names.
+  const tree = mkdtempSync(path.join(tmpdir(), 'nocx-load-'))
   const churner = path.join(testInfo.outputPath(), 'churn.cjs')
   let fixture: SshdFixture | null = null
   let healthy: FaultProxy | null = null
@@ -324,25 +328,15 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
   const profileIDs: string[] = []
 
   try {
-    // ── the corpus: 50,000 entries in one place, churning ────────────────
-    for (let d = 0; d < TREE_DIRS; d++) {
-      const dir = path.join(tree, 'churn', `d${String(d).padStart(2, '0')}`)
-      mkdirSync(dir, { recursive: true })
-      for (let i = 0; i < TREE_ENTRIES; i++) {
-        writeFileSync(path.join(dir, `f${String(i).padStart(4, '0')}.txt`), 'x')
-      }
-    }
-    writeFileSync(churner, CHURNER)
-    churnerProc = spawn(process.execPath, [churner, tree, String(TREE_DIRS)], {
-      stdio: 'ignore',
-      detached: false,
-    })
-
     // ── one far host, two networks, two profiles ─────────────────────────
     fixture = await startSshd({ home: tree, cwd: tree })
     healthy = await startFaultProxy(fixture.host, fixture.port)
     blocked = await startFaultProxy(fixture.host, fixture.port)
-    trustHostKeys([knownHostsFor(fixture, healthy.port), knownHostsFor(fixture, blocked.port)])
+    trustHostKeys([
+      fixture.knownHosts,
+      knownHostsFor(fixture, healthy.port),
+      knownHostsFor(fixture, blocked.port),
+    ])
 
     await installWireInstrument(page)
     await page.goto('/')
@@ -355,12 +349,11 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
         options: {
           host: '127.0.0.1',
           port,
-          user: 'e2e',
+          user: fixture!.user,
           keyPath: fixture!.userKey,
         },
       })
       profileIDs.push(created.id)
-      await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture!.knownHosts), 'script')
       return created.id
     }
     const stamp = Date.now()
@@ -368,36 +361,67 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     blockedProfile = `e2e-load-blocked-${stamp}`
     await createProfile(healthyProfile, healthy.port)
     await createProfile(blockedProfile, blocked.port)
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'helper')
+
+    // Install the helper on the fixture through a direct connection. The
+    // relays below are for the Files traffic this scenario measures.
+    const prepareProfile = `e2e-load-prepare-${stamp}`
+    await createProfile(prepareProfile, fixture.port)
+    await openConnection(page, prepareProfile)
+    await expect(page.getByTestId('connection-head')).toHaveAttribute('data-helper', 'serving')
+    // Leave the setup connection idle until fixture teardown. Tab-close
+    // feedback would otherwise overlap the load scenario.
+    await expect(page.locator(TAB)).toHaveCount(2)
+    const healthyTabIndex = 2
 
     // ── the two far tabs, and the Files panel following the active one ───
     await openConnection(page, healthyProfile)
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.locator(TAB)).toHaveCount(3)
     // promptReady waits for the EDITOR to hold the keyboard, so it runs before
     // the panel is shown: showing it clicks the Files icon, and the click
     // leaves the keyboard on the activity-bar button (nocx-l5b5f).
     await promptReady(page)
+
+    // Create the corpus after the helper install. Yield on file writes so the
+    // SSH relays can still forward traffic while the fixture is prepared.
+    for (let d = 0; d < TREE_DIRS; d++) {
+      const dir = path.join(tree, 'churn', `d${String(d).padStart(2, '0')}`)
+      mkdirSync(dir, { recursive: true })
+      for (let i = 0; i < TREE_ENTRIES; i++) {
+        await writeFile(path.join(dir, `f${String(i).padStart(4, '0')}.txt`), 'x')
+      }
+    }
     await showSidebarView(page, 'files')
 
-    // Load the blocked tab's tree while its network still passes: the churn
-    // directory's 25 children cost one listing, and each unexpanded child is a
-    // listing the blocked phase can still ask for. The rows are addressed by
-    // the path they name, never by their text: "d01" is a name this tree has
-    // in every directory.
+    // Load the healthy tab's tree after the helper has been installed. Each
+    // unexpanded child is one listing the burst can still ask for.
     await expandAndSee(page, 'churn', 'd24')
 
     // ── the load: the far host is 50 ms away, and the burst exceeds the
     // ── credit window ───────────────────────────────────────────────────
+    // Start the churn after setup and observe its first write before the burst.
+    writeFileSync(churner, CHURNER)
+    churnerProc = spawn(process.execPath, [churner, tree, String(TREE_DIRS)], {
+      stdio: 'ignore',
+      detached: false,
+    })
+    await expect.poll(() => existsSync(path.join(tree, 'churn', 'd00', 'c0-0.txt'))).toBe(true)
     const before = await diagnosticCounts(page)
     healthy.slow(25)
 
-    // Ten expands with no await between them: more legitimate calls than the
-    // advertised window holds. The renderer queues the rest; the server never
-    // hears a frame past its window, which is the whole point of §7.
-    const burst = Array.from({ length: BURST }, (_, d) => `d${String(d).padStart(2, '0')}`)
+    // Click bottom to top without waiting for listings. Top to bottom, a
+    // previous listing can insert rows above the next click target between
+    // mousedown and mouseup. The burst still exceeds the advertised window.
+    const burst = Array.from(
+      { length: BURST },
+      (_, d) => `d${String(d).padStart(2, '0')}`,
+    ).reverse()
     for (const name of burst) {
       const row = page.locator(`[data-testid="files-row"][data-path$="/churn/${name}"]`)
       await expect(row).toBeVisible({ timeout: FILES_LIST.maxMs })
-      await expect(row).not.toHaveAttribute('data-busy', 'true', { timeout: FILES_LIST.maxMs })
+      await expect(row.getByRole('treeitem')).not.toHaveAttribute('data-busy', 'true', {
+        timeout: FILES_LIST.maxMs,
+      })
       await row.click({ noWaitAfter: true })
     }
     // Every one of them is expanded AND settled inside the declaration's own
@@ -426,17 +450,17 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
 
     // ── tabs switched continually, a person acting throughout ────────────
     for (let round = 0; round < 6; round++) {
-      await activateTab(page, round % 2)
+      await activateTab(page, round % 2 === 0 ? 0 : healthyTabIndex)
       await promptReady(page)
     }
 
-    // ── the blocked domain expires as declared ───────────────────────────
+    // ── the blocked connection pauses its Files panel ────────────────────
     // A second far tab, opened here rather than at the start: it is its own
     // failure domain, and opening it now means the panel scopes to it once —
     // no back-and-forth re-scoping of two far bindings while the network is
     // being taken away.
     await openConnection(page, blockedProfile)
-    await expect(page.locator(TAB)).toHaveCount(3)
+    await expect(page.locator(TAB)).toHaveCount(4)
     // Same order as above, for the same reason.
     await promptReady(page)
     await showSidebarView(page, 'files')
@@ -448,10 +472,15 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     await expect(pending).toBeVisible({ timeout: FILES_LIST.maxMs })
     blocked.blackhole()
     await pending.click({ noWaitAfter: true })
-    await expect(page.locator('[data-testid="files-state-timed-out"]')).toBeVisible({
+    // The blackhole stops the transport. Files shows the connection's pause
+    // across the panel as soon as the helper axis reports it (C25).
+    const axis = page
+      .getByTestId('files-helper-axis')
+      .filter({ hasText: 'The connection is paused' })
+    await expect(axis).toHaveAttribute('data-helper', 'paused', {
       timeout: FILES_LIST.maxMs + 10_000,
     })
-    await expect(page.locator('[data-testid="files-retry"]')).toBeVisible()
+    await expect(page.getByTestId('files-retry')).toHaveCount(0)
 
     // ── the healthy domain still answers beside it ───────────────────────
     //
@@ -460,7 +489,7 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     // asserted is the OUTCOME: a listing on the healthy far domain completes
     // inside the declaration's own bound while the other domain cannot answer
     // at all.
-    await activateTab(page, 1)
+    await activateTab(page, healthyTabIndex)
     await showSidebarView(page, 'files')
     await expandRow(page, 'churn')
     await expandRow(page, 'churn/d21')

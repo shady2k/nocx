@@ -21,7 +21,12 @@ import type { PaneConnection } from '../generated/pane.connection'
 import { t } from '../i18n/locale-model'
 
 type HelperAxisAction = 'refresh' | 'host-settings'
-type HelperAxisTone = 'muted' | 'warning'
+/** How loudly the axis speaks: `muted` is a state, `warning` a refusal worth
+ *  noticing, `danger` a refusal the person has to act on. The fold emits the
+ *  first two today — every closed-enum reason is a warning — and `danger`
+ *  exists so a surface maps the fold's tone onto the kit's instead of
+ *  hard-coding one: when a reason is promoted, no card has to be found. */
+type HelperAxisTone = 'muted' | 'warning' | 'danger'
 
 export interface HelperAxis {
   /** The contract's own state, so a surface can branch without re-reading
@@ -105,6 +110,56 @@ function sentenceFor(
     case 'connection':
       return t('helper.connection', 'The nocx helper is unavailable while the connection is down.')
   }
+}
+
+/** WHETHER A TAB MAY ASK ITS HOST AT ALL, and the one answer every surface
+ *  gats on (design §5.10, C25/C26). A local tab has no helper and is always
+ *  allowed; an SSH tab is allowed only while the observation says `serving`.
+ *
+ *  `starting` COVERS BOTH "not observed yet" AND "the backend said starting".
+ *  An SSH tab whose first observation has not arrived has no axis to draw and
+ *  nothing to ask: the two are the same answer here because both mean "hold",
+ *  and inventing a state for the missing one would be this layer deciding a
+ *  connection fact (ADR-ba6xet1b). `blocked` is every other state — paused or
+ *  unavailable, whatever the reason.
+ *
+ *  The gate is a PREDICATE and not a store: the Files panel, the terminal
+ *  drop, the link opener and the session's home all ask it, and asking it in
+ *  four spellings is how two surfaces come to disagree about one connection. */
+export type HelperGate = 'starting' | 'blocked' | null
+
+export interface HelperGatedTab {
+  readonly kind: 'local' | 'ssh'
+  readonly connection?: { readonly helper: PaneConnection['helper'] } | null
+}
+
+export function helperGate(tab: HelperGatedTab): HelperGate {
+  if (tab.kind !== 'ssh') return null
+  const helper = tab.connection?.helper
+  if (helper === undefined || helper.state === 'starting') return 'starting'
+  return helper.state === 'serving' ? null : 'blocked'
+}
+
+/** What a surface SAYS when its gesture meets a tab the gate holds.
+ *
+ *  ONE ANSWER FOR EVERY SURFACE OUTSIDE THE PANELS. The terminal drop, the
+ *  path/link opener and any other gesture that acts on a tab ask here instead
+ *  of writing its own fallback: the fold's own sentence where the observation
+ *  exists (`paused`, `mode-raw`, `helper-lost`, …), and the waiting sentence
+ *  where it does not. A surface that said "cannot reach its host" for an
+ *  observation that has not arrived would be naming a fault where the truth
+ *  is "not told yet" (ADR-ba6xet1b) — the same mistake as minting a state.
+ *
+ *  The sentences never speak the wire's tokens: they are the fold's, and the
+ *  fold's are a person's words. */
+export function helperHoldSentence(tab: HelperGatedTab): string {
+  return (
+    helperAxis(tab.connection?.helper ?? null)?.sentence ??
+    t(
+      'helper.waitingObservation',
+      'Waiting for nocx to learn how this connection reaches its host.',
+    )
+  )
 }
 
 /** The saved connection a tab was opened from, or null when it has none.

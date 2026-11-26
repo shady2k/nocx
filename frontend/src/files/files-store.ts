@@ -44,6 +44,7 @@ import type { FilesPanelServices } from './files-client'
 import type { CallOrigin } from '../dispatcher'
 import type { ActiveOrigin } from '../pane-content'
 import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
+import { helperGate, type HelperGate } from '../connection/helper-axis'
 
 /** The watch set for a tree: the successfully listed root plus every
  *  successfully listed EXPANDED directory — exactly the rows the panel can
@@ -212,6 +213,19 @@ interface FilesBinding {
 
 export interface FilesTreeStore {
   phase(): FilesPanelPhase
+  /** THE FAR HELPER'S GATE (design §5.10, C25/C26): `starting` until an
+   *  observation of this tab's connection arrives (or while it says
+   *  `starting`), `blocked` while the axis does not serve, and NULL when the
+   *  tab may ask its host — every local tab, and an SSH tab whose helper
+   *  serves. It is the ONE fold's answer (connection/helper-axis.ts), read
+   *  from the origin this store is scoped to.
+   *
+   *  While it is not null the store asks NOTHING: no files.open, no
+   *  files.list, no files.watch, no read. That is the panel's half of "a
+   *  panel is unavailable only with the connection's reason"; its binding is
+   *  released and the tree stays in memory, so the folders a person opened
+   *  come back with the axis instead of being re-opened by hand. */
+  axisGate(): HelperGate
   openError(): string | null
   binding(): FilesBinding | null
   origin(): ActiveOrigin | null
@@ -328,15 +342,35 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  sidebar first shows Files, which is the state in which this store does
    *  no work at all (ADR-8eej3e66 §9, setVisible). */
   let panelVisible = false
+  /** True when the axis STOPPED SERVING and then served again while the
+   *  panel was hidden (design §5.10, C25). Nothing is asked while nothing is
+   *  on screen, so the return is recorded here and the re-read happens when
+   *  the panel is shown — over the binding the pause kept, with the open
+   *  folders still in the tree. */
+  let treeNeedsResume = false
+  /** True while the resumed tree has not yet read its root: the one state in
+   *  which a failed read may mean the HELD binding is gone rather than the
+   *  host refusing the path (see reopenDeadScope). */
+  let resumeUnread = false
   /** The session the open binding belongs to, so the panel showing on a tab
    *  that moved while it was hidden can tell that the tree is the wrong one
    *  without keeping a second copy of the origin. */
   let openedSession: string | null = null
+  // A shell can exit before its replacement supplies an origin. Keep its
+  // tree out of the panel until the same pane and connection are identified.
+  let interruptedScope: { origin: ActiveOrigin; root: FilesRoot } | null = null
 
   const [phase, setPhase] = createSignal<FilesPanelPhase>('no-origin')
   const [openError, setOpenError] = createSignal<string | null>(null)
   const [binding, setBinding] = createSignal<FilesBinding | null>(null)
   const [origin, setOrigin] = createSignal<ActiveOrigin | null>(null)
+  /** The far helper's gate over the CURRENT origin (design §5.10). Derived,
+   *  never stored: the origin is the observation, and a copied state would be
+   *  a second answer that could lag the one the head draws. */
+  const axisGate = createMemo<HelperGate>(() => {
+    const o = origin()
+    return o === null ? null : helperGate(o)
+  })
   const [root, setRoot] = createSignal<FilesRoot | null>(null)
   const [treeVersion, setTreeVersion] = createSignal(0)
   const bumpTree = (): void => {
@@ -842,6 +876,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       bumpTree()
       return
     }
+    // THE HELD BINDING ANSWERED: whatever the answer is, the resume's question
+    // ("is this binding still known to the backend?") is settled, and a later
+    // failure in some subdirectory is about that subdirectory.
+    if (dir === untrack(root)) resumeUnread = false
     if (res.state === 'ok') {
       // Rule 3: the cycle check runs BEFORE the children are committed, so
       // a cyclic expansion never flashes a listing.
@@ -901,6 +939,22 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
 
   function applyListErrorState(dir: FilesRoot | FilesNode, ctx: ListCtx, e: unknown): void {
     if (!scopeCurrent(ctx)) return
+    // THE FIRST READ AFTER A HOLD FAILED: try one fresh binding before
+    // painting the failure (see reopenDeadScope). The question is asked as a
+    // state this store owns — was this the resumed tree's OWN ROOT, read for
+    // the first time since the axis came back? — and never by reading the
+    // refusal's words: `files.*` carries no typed reason for a dead binding
+    // (unlike `git.*`'s `unknown-binding`), and a sentence is not a fact
+    // (`nocx/no-error-text-match`). Asked once per resume: the reopened
+    // scope's answer is the answer.
+    if (resumeUnread && dir === untrack(root)) {
+      const o = untrack(origin)
+      if (o !== null) {
+        resumeUnread = false
+        reopenDeadScope(o)
+        return
+      }
+    }
     if (ctx.generation < dir.appliedGeneration) {
       dir.busy = false
       bumpTree()
@@ -1006,19 +1060,36 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (!panelVisible) return
     const o = untrack(origin)
     if (o === null) return
+    // NOTHING IS ASKED OF A TAB THE HELPER DOES NOT SERVE (design §5.10,
+    // C25). The card is the panel's whole answer there, and its action is the
+    // remedy; opening a binding behind it would spend an RPC on a host the
+    // contract has already said cannot be reached.
+    if (helperGate(o) !== null) return
     const b = untrack(binding)
     if (b === null) {
       if (phase() === 'opening') return
       // A fresh open, or the re-ask of one refused while hidden. Both are
       // the same call: nothing on screen had a tree, and now something does.
-      openScope(o)
+      // The tree is carried: a tab that opened straight into `starting`/`blocked`
+      // has none, and a hold that began before the binding existed may have kept
+      // whatever the person had before it (design §5.10, C25).
+      treeNeedsResume = false
+      openScope(o, untrack(root))
       return
     }
     if (openedSession !== o.sessionId) {
       // The tab moved to another machine while nobody was looking. The
       // binding cannot serve the tree now wanted, so it is swapped the same
       // way a visible rescope swaps it.
+      treeNeedsResume = false
       restartScope(o)
+      return
+    }
+    // THE AXIS CAME BACK WHILE NOBODY WAS LOOKING (M1). Nothing was asked then
+    // — a hidden panel does no work — so the re-read happens NOW, on the
+    // binding the pause kept, with the open folders still in the tree.
+    if (treeNeedsResume) {
+      resumeScope(o)
       return
     }
     publishVisibility(true)
@@ -1255,11 +1326,29 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setRefreshState(p.state)
   }
 
-  function openScope(o: ActiveOrigin): void {
+  /** Open the scope's binding and start its first listing.
+   *
+   *  `carried` is the TREE THE AXIS PAUSED, and it is not an optimisation:
+   *  a person who had four folders open on an SSH host and lost the
+   *  connection gets those four folders back, with the same rows, when the
+   *  helper returns (design §5.10, C25 — "expanded folders kept"). The open
+   *  still re-reads: the carried root keeps its `expanded` nodes, the reveal
+   *  target and the selection, and the refresh cycle below replaces their
+   *  listings with what the host holds now.
+   *
+   *  A carried tree whose root moved (a provider that answers a different
+   *  root) is discarded rather than merged: the open's own root is the truth,
+   *  and hanging one machine's rows under another's root is the defect this
+   *  branch must not have. */
+  function openScope(o: ActiveOrigin, carried: FilesRoot | null = null): void {
     generation++
+    treeNeedsResume = false
+    resumeUnread = false
     discardFilterProjection()
     if (filter().trim() !== '') setFilter(filter())
-    setPhase('opening')
+    // A replacement can open with a tree while the phase still says there is
+    // no origin. Record the open before another observation can restart it.
+    if (carried === null || untrack(phase) === 'no-origin') setPhase('opening')
     setRefreshState(null)
     setOpenError(null)
     // A fresh binding has no watch state yet: the badge and the sticky
@@ -1272,11 +1361,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // in flight from the previous scope: its responses must not paint,
     // and its pending marker must not suppress this scope's reveal of
     // the same path.
-    setRevealTarget(null)
-    pendingReveal = null
-    cancelReveal()
-    revealing = false
-    revealWalkId++
+    if (carried === null) {
+      setRevealTarget(null)
+      pendingReveal = null
+      cancelReveal()
+      revealing = false
+      revealWalkId++
+    }
     // The root is the FILESYSTEM ROOT, pinned here and never derived from
     // the cwd: a verified OSC 7 cwd must not re-root the tree (it REVEALS
     // instead), and the provider's fallback machinery is not reachable
@@ -1300,6 +1391,23 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
           endpointId: res.endpointId,
           revealAvailable: res.revealAvailable,
         })
+        // THE PAUSED TREE COMES BACK AS IT WAS. Every open folder keeps its
+        // node and its rows, and the refresh cycle below re-reads them from
+        // the host that has just answered again.
+        if (carried !== null && carried.path === res.root.path) {
+          carried.display = res.root.display
+          carried.inferred = res.root.inferred
+          carried.inferredReason = res.root.inferredReason
+          carried.busy = false
+          setRoot(carried)
+          setPhase('ready')
+          bumpTree()
+          // The one refresh cycle (root and every expanded directory, then
+          // the watch set) — the same code the header's action runs, so a
+          // resumed tree and a refreshed one cannot diverge.
+          refresh()
+          return
+        }
         setRoot({
           ...emptyListing(),
           path: res.root.path,
@@ -1375,17 +1483,93 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  "same scope" is how a hidden panel recorded a new origin without
    *  releasing the instance that answered for the old one. */
   function sameScope(prev: ActiveOrigin | null, next: ActiveOrigin | null): boolean {
+    // A hidden replacement can already own the carried tree. Its open is
+    // deferred until the panel is shown, so the phase still reads 'no-origin'.
     return (
       prev !== null &&
       next !== null &&
       prev.sessionId === next.sessionId &&
       prev.kind === next.kind &&
-      untrack(phase) !== 'no-origin'
+      (untrack(phase) !== 'no-origin' || untrack(root) !== null)
     )
   }
 
-  function rescope(next: ActiveOrigin | null): void {
+  // A FROZEN ORIGIN HAS NO OPINION ABOUT THE CONNECTION, AND MUST NOT CLEAR
+  // THE ONE THE TAB WAS OPENED ON (design §5.4/§5.10). A viewer or diff tab
+  // answers the origin it was opened from with `cwdFollow: false` and no
+  // `connection` — and `helperGate` reads a missing observation as
+  // `starting`. Taken at face value that turned activating the viewer into
+  // "the helper is starting": the held binding was released and the viewer's
+  // own liveness died on the spot. The pane manager attaches the LIVE
+  // connection of the terminal this tab belongs to; this is the second end of
+  // the same rule, for an answer that reached here without one (a caller that
+  // built the origin itself). The axis of the tab that HAS a connection is
+  // the authority; a frozen origin only carries it.
+  function carryConnection(prev: ActiveOrigin | null, next: ActiveOrigin): ActiveOrigin {
+    if (next.cwdFollow || next.connection !== undefined) return next
+    if (prev === null || prev.sessionId !== next.sessionId) return next
+    return { ...next, connection: prev.connection }
+  }
+
+  function sameSshPane(prev: ActiveOrigin, next: ActiveOrigin): boolean {
+    return (
+      prev.kind === 'ssh' &&
+      next.kind === 'ssh' &&
+      prev.cwdFollow &&
+      next.cwdFollow &&
+      prev.paneId === next.paneId
+    )
+  }
+
+  function carryTreeForReplacement(
+    prev: ActiveOrigin | null,
+    next: ActiveOrigin | null,
+  ): FilesRoot | null {
+    const tree = untrack(root)
+    if (
+      prev?.kind === 'ssh' &&
+      prev.cwdFollow &&
+      prev.connection?.connectionId &&
+      tree !== null &&
+      (next === null || (sameSshPane(prev, next) && prev.sessionId !== next.sessionId))
+    ) {
+      interruptedScope = { origin: prev, root: tree }
+    }
+    const held = interruptedScope
+    if (held === null || next === null) return null
+    // The replacement can announce its session before it has a connection
+    // observation. Its serving observation supplies the identity to compare.
+    if (sameSshPane(held.origin, next) && helperGate(next) !== null) return null
+    interruptedScope = null
+    return sameSshPane(held.origin, next) &&
+      held.origin.sessionId !== next.sessionId &&
+      held.origin.connection?.connectionId === next.connection?.connectionId
+      ? held.root
+      : null
+  }
+
+  function rescope(raw: ActiveOrigin | null): void {
     const prev = origin()
+    const next = raw === null ? null : carryConnection(prev, raw)
+    const carried = carryTreeForReplacement(prev, next)
+    // THE AXIS IS THE FIRST DISCRIMINATOR (design §5.10, C25/C26), and it is
+    // answered before the visibility switch because it is true of a hidden
+    // panel too: an SSH tab the helper does not serve has nothing to ask, so
+    // the live instance of the scope ends — while the TREE stays, which is
+    // what gives the person their open folders back when the axis returns.
+    if (next !== null && helperGate(next) !== null) {
+      if (sameScope(prev, next) && prev !== null) {
+        // A newer observation of a tab already held: enter the hold the first
+        // time it stops serving, and do nothing at all afterwards (a
+        // heartbeat must neither close a binding the pause keeps nor reset a
+        // tree that is waiting).
+        if (helperGate(prev) === null) holdScope()
+        setOrigin(next)
+        return
+      }
+      dropScope(next)
+      return
+    }
     // NOTHING ON SCREEN DOES NO WORK. The origin is recorded — it is where
     // the panel would open — and no binding, listing, watch or reveal is
     // started for it. `setVisible(true)` starts the scope from this record
@@ -1407,11 +1591,19 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // and the binding released by `releaseScope`, and `setVisible` starts
       // the recorded scope through `ensureScope`.
       if (sameScope(prev, next)) {
+        // THE AXIS CAME BACK WHILE NOBODY WAS LOOKING: record the debt, do
+        // not pay it. `setVisible(true)` re-reads the carried tree over the
+        // binding the pause kept, because a hidden panel that spent a
+        // `files.open` would be exactly the background work this flag exists
+        // to forbid.
+        if (prev !== null && helperGate(prev) !== null) treeNeedsResume = true
+        if (carried !== null) setRoot(carried)
         setOrigin(next)
         return
       }
       releaseScope()
       setOrigin(next)
+      if (carried !== null) setRoot(carried)
       return
     }
     // Rule 1: the same scope keeps its binding and its tree, whatever its
@@ -1430,6 +1622,15 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // re-open: openFile hands it to the viewer, and the reveal check
       // reads the live cwd. A stale cwd here would reach the viewer.
       setOrigin(next)
+      // THE AXIS CAME BACK. Nobody pressed anything: the binding is opened
+      // again and the paused tree re-read, its open folders kept (§5.10,
+      // C25). A newer serving observation after that is not a new permission
+      // to open — the gate above answers that case by leaving the tab alone.
+      if (helperGate(prev) !== null) {
+        if (carried !== null) setRoot(carried)
+        resumeScope(next)
+        return
+      }
       // Same scope: the tree does not move, but a VERIFIED cwd CHANGE on the
       // origin the panel follows REVEALS — the chain from the root down to
       // the new cwd is expanded and the target selected. This is the product
@@ -1450,15 +1651,131 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       }
       return
     }
-    restartScope(next)
+    restartScope(next, carried)
+  }
+
+  /** End the live INSTANCE of the current scope and KEEP THE TREE AND THE
+   *  BINDING: the axis stopped serving, and everything the person opened is
+   *  what it returns to.
+   *
+   *  THE BINDING STAYS, and that is the fix for a real defect (ALX-1793 round
+   *  1, M2). The preceding version released it here, on the theory that a
+   *  paused connection's binding is a handle onto a host that cannot be
+   *  reached. On the backend it is not: a `helperfs` binding is pinned to the
+   *  connection, and the connection survives a pause, a cut and a helper
+   *  redial — so the binding was never dead, and closing it killed every
+   *  viewer tab of that host for good (the close is what turns a binding
+   *  `liveness: false`, and a viewer tab cannot get it back).
+   *
+   *  What the hold does end is the live OUTPUT: the generation bump
+   *  supersedes answers already on the wire, the reveal walk is cancelled, and
+   *  the transient badges are cleared because their subject — a watch, a
+   *  freshness state — belonged to a connection that just went away.
+   *  `dropScope` still closes the binding, because there the tree belongs to
+   *  another machine. */
+  function holdScope(): void {
+    closed = true
+    generation++
+    resumeUnread = false
+    // The backend was told this binding is visible; the next visible edge must
+    // tell it again rather than trust a statement made across a break.
+    publishedVisible = null
+    if (phase() === 'opening') setPhase(untrack(root) === null ? 'no-origin' : 'ready')
+    setOpenError(null)
+    setWatchMode(null)
+    setWatchDegradedReason(null)
+    setWatchFailed(null)
+    setRefreshState(null)
+    publishedWatchPaths = null
+    pendingReveal = null
+    revealing = false
+    cancelReveal()
+    revealWalkId++
+    bumpTree()
+  }
+
+  /** Reset the binding and the visible tree while the new axis is blocked. */
+  function dropScope(next: ActiveOrigin | null): void {
+    holdScope()
+    const prevBinding = binding()
+    if (prevBinding !== null) {
+      void services.close(prevBinding.bindingId, 'background').catch(() => {})
+      publishedVisible = null
+    }
+    openedSession = null
+    setBinding(null)
+    discardFilterProjection()
+    setRoot(null)
+    setRevealTarget(null)
+    setOrigin(next)
+    setPhase(next === null ? 'no-origin' : 'ready')
+    bumpTree()
+  }
+
+  /** The axis serves again: re-read the held tree, its open folders kept, and
+   *  open a binding only where the hold has none (a tab that opened straight
+   *  into `starting`/`blocked` never had one).
+   *
+   *  A REFRESH, NOT AN OPEN, is the answer for a held binding (ALX-1793 round
+   *  1, M2): the backend never dropped it, so re-opening would mint a second
+   *  handle, orphan the first and hand every viewer tab of this host a
+   *  binding nobody uses. The whole tree is re-read through the same refresh
+   *  cycle the header's action runs, so a resumed tree and a refreshed one
+   *  cannot diverge — and a folder the person opened comes back with the rows
+   *  the host holds now (§5.10, C25). */
+  function resumeScope(o: ActiveOrigin): void {
+    treeNeedsResume = false
+    closed = false
+    setOrigin(o)
+    if (untrack(binding) === null) {
+      openScope(o, untrack(root))
+      return
+    }
+    // THE HOST IS TOLD THE PANEL IS ON SCREEN AGAIN (ALX-1793 round 2, M-r2).
+    // The hold dropped the last statement deliberately — it was made across a
+    // break — and `files.watch` over a watcher that already exists moves no
+    // visibility, so a resume that only re-read the tree left this binding's
+    // observer at `visible: false`: an hour-long timer, no poll, and a file
+    // arriving on the host invisible in a panel that looked healthy
+    // (`refreshState: ok`, so not even the delayed badge). The published
+    // visible edge is what restarts the poll.
+    //
+    // Published here and nowhere else: a binding opened by `openScope` starts
+    // visible on the backend, and this is the ONE path that returns to a
+    // binding the pause kept. The gate is checked once more because the panel
+    // may be shown while the axis is still down — the card is the whole
+    // answer then, and there is nothing to poll.
+    if (panelVisible && helperGate(o) === null) publishVisibility(true)
+    resumeUnread = true
+    refresh()
+  }
+
+  /** Replace a held binding with a fresh one, carrying the tree over. This is
+   *  the fallback, never the norm — a pause keeps the binding, because the
+   *  backend keeps it too. It exists for the case that binding is genuinely
+   *  gone (a newer helper session, a restarted coordinator): the resumed
+   *  tree's root then cannot be read, and one `files.open` answers where a
+   *  painted failure would leave the person looking at a machine they can
+   *  reach. */
+  function reopenDeadScope(o: ActiveOrigin): void {
+    const prevBinding = untrack(binding)
+    if (prevBinding !== null) {
+      void services.close(prevBinding.bindingId, 'background').catch(() => {})
+      publishedVisible = null
+    }
+    openedSession = null
+    setBinding(null)
+    openScope(o, untrack(root))
   }
 
   /** Drop whatever the store holds for the old scope and open the new one.
    *  Shared by a visible re-scope, a re-scope that happens while the panel
    *  is shown again after the tab moved, and the origin going away. */
-  function restartScope(next: ActiveOrigin | null): void {
+  function restartScope(next: ActiveOrigin | null, carried: FilesRoot | null = null): void {
     const prevBinding = binding()
     closed = false
+    treeNeedsResume = false
+    resumeUnread = false
     generation++
     if (next === null) discardFilterProjection()
     if (prevBinding !== null) {
@@ -1470,19 +1787,22 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     openedSession = null
     setOrigin(next)
     setBinding(null)
-    setRoot(null)
+    setRoot(carried)
+    setRevealTarget(null)
     if (next === null) {
       setPhase('no-origin')
       bumpTree()
       return
     }
-    openScope(next)
+    openScope(next, carried)
   }
 
   /** The origin went away (no tab in front). A binding nobody can read is
    *  released; nothing else is started. */
   function releaseScope(): void {
     const prevBinding = binding()
+    treeNeedsResume = false
+    resumeUnread = false
     if (prevBinding !== null) {
       void services.close(prevBinding.bindingId, 'background').catch(() => {})
       publishedVisible = null
@@ -1976,6 +2296,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function refresh(): void {
     const o = origin()
     if (o === null) return
+    // A paused or starting axis has nothing to re-read: the card is the
+    // panel's answer, and its own action is the remedy (§5.10).
+    if (helperGate(o) !== null) return
     if (phase() === 'no-origin') return
     if (binding() === null) {
       // The binding is gone (open failed, or disposed): re-establish the
@@ -2034,7 +2357,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   }
 
   function dispose(): void {
+    interruptedScope = null
     closed = true
+    treeNeedsResume = false
+    resumeUnread = false
     panelVisible = false
     openedSession = null
     publishedVisible = null
@@ -2082,6 +2408,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
 
   return {
     phase,
+    axisGate,
     openError,
     binding,
     origin,

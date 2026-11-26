@@ -82,6 +82,7 @@ import { t } from '../i18n/locale-model'
 import { isNotStartedAnswer, RpcError, TransportUnavailableError } from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
 import type { ActiveOrigin } from '../pane-content'
+import { helperGate } from '../connection/helper-axis'
 import type { GitPanelServices, GitDiffSide } from './git-client'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitLogResult } from '../generated/git.log'
@@ -335,9 +336,14 @@ function isUnknownBinding(e: unknown): boolean {
 
 /** Whether this origin's axis lets git.open be asked at all: a local tab
  *  has no helper and is always allowed, an SSH tab only while the helper
- *  serves (ADR-727g63tr decision 2). */
+ *  serves (ADR-727g63tr decision 2).
+ *
+ *  THE PREDICATE IS NOT THIS MODULE'S (connection/helper-axis.ts): the Files
+ *  panel, the terminal drop, the link opener and the session's home ask the
+ *  same question, and four spellings of one derivation is how two surfaces
+ *  come to disagree about one connection. */
 function axisAllowsOpen(o: ActiveOrigin): boolean {
-  return o.kind !== 'ssh' || o.connection?.helper?.state === 'serving'
+  return helperGate(o) === null
 }
 
 /** Whether this origin may open a repository at all: an axis that serves
@@ -513,12 +519,12 @@ export function createGitStore(
     // THE FAR HELPER GATES AN SSH TAB (ADR-727g63tr decision 2; task
     // .6.3c-1). An observation that has not arrived and a decision that has
     // not finished are the same answer here: nothing to ask yet. Only
-    // `serving` reaches git.open.
-    if (o.kind === 'ssh') {
-      const helper = o.connection?.helper
-      if (helper === undefined || helper.state === 'starting') return 'helperStarting'
-      if (helper.state !== 'serving') return 'helperBlocked'
-    }
+    // `serving` reaches git.open. The predicate is `helperGate`'s, the same
+    // one the Files panel, the drop and the opener ask — spelled once, in
+    // connection/helper-axis.ts.
+    const gate = helperGate(o)
+    if (gate === 'starting') return 'helperStarting'
+    if (gate === 'blocked') return 'helperBlocked'
     if (!o.cwdVerified || o.cwd === null) return 'noCwd'
     const os = openState()
     switch (os) {

@@ -2131,9 +2131,14 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     const reason = 'reason' in helper ? helper.reason : ''
-    const key = `${observation.instanceId}:${helper.state}:${reason}:${helper.action}`
+    const key = `${observation.instanceId}:${observation.connectionId}:${helper.state}:${reason}:${helper.action}`
     if (key === this._lastAxisKey) return
     this._lastAxisKey = key
+    // THE HELPER JUST STARTED SERVING: a home the source refused while the
+    // axis was starting is now readable, and nobody pressed anything to make
+    // that true. Ask again so the prompt line shortens to `~` without a `cd`
+    // (m3) — the ask is `_ensureHome`'s, so the two triggers cannot drift.
+    if (helper.state === 'serving') this._ensureHome()
     this.hooks.onActiveOriginChange?.()
   }
 
@@ -2551,6 +2556,7 @@ export class TerminalContent extends BasePaneContent {
         this.sshOpts !== undefined && observation !== null
           ? {
               paneId: observation.paneId,
+              connectionId: observation.connectionId,
               helper: observation.helper,
             }
           : null,
@@ -2991,21 +2997,8 @@ export class TerminalContent extends BasePaneContent {
         // origin): it exists so a `~` can be drawn, and nobody pressed
         // anything for it. So a refusal must not be remembered as done —
         // the next verified cwd asks again, which is the same rule every
-        // other background ask follows (ADR-8eej3e66 stage 1). The source
-        // keeps no rejected promise either; this flag only stops a burst of
-        // views from stacking calls while one is still unanswered.
-        if (homeSrc.home(sessionId) === undefined && this._homeEnsurePending !== sessionId) {
-          this._homeEnsurePending = sessionId
-          const settled = (): void => {
-            if (this._homeEnsurePending === sessionId) this._homeEnsurePending = null
-          }
-          // Both outcomes clear the claim: success because the source now
-          // answers `home()`, refusal because the next verified cwd must be
-          // free to ask again. Nothing is surfaced — the prompt line simply
-          // keeps the absolute path, which is what "home unknown" already
-          // renders.
-          void homeSrc.ensure(sessionId, cwd, cwdVerified).then(settled, settled)
-        }
+        // other background ask follows (ADR-8eej3e66 stage 1).
+        this._ensureHome()
       }
     }
     if (this.branchSource) {
@@ -3024,6 +3017,36 @@ export class TerminalContent extends BasePaneContent {
         this._branchRequestKey = ''
       }
     }
+  }
+
+  /** Ask the session's home source for the home once, on the pane's account.
+   *
+   *  THE ONE OWNER of that ask (m3): a verified cwd asks, and so does the
+   *  helper axis BECOMING serving (see _publishAxisChange). On an SSH tab the
+   *  first ask is spent while the helper is still starting — the source
+   *  refuses it with no `files.open` at all, which is the rule design §5.10
+   *  sets — so without the second trigger the prompt line would keep the
+   *  absolute path until the shell happened to report a new directory under
+   *  `~`. The person would see the full path in a host that is answering.
+   *
+   *  A refusal is not remembered: the source keeps no rejected promise, and
+   *  this flag only stops a burst of views from stacking calls while one is
+   *  still unanswered. Nothing is surfaced — the prompt line keeps the
+   *  absolute path, which is what "home unknown" already renders. The tab
+   *  rides along so a connection whose helper does not serve spends no
+   *  `files.open` on a home nobody could be told about. */
+  private _ensureHome(): void {
+    const sessionId = this.session?.sessionId
+    const homeSrc = this.hooks.sessionHome
+    if (!sessionId || !homeSrc) return
+    if (!this._cwdVerified || this._cwd === '') return
+    if (homeSrc.home(sessionId) !== undefined) return
+    if (this._homeEnsurePending === sessionId) return
+    this._homeEnsurePending = sessionId
+    const settled = (): void => {
+      if (this._homeEnsurePending === sessionId) this._homeEnsurePending = null
+    }
+    void homeSrc.ensure(sessionId, this._cwd, true, this.activeOrigin()).then(settled, settled)
   }
 
   /** A settled command block asks the branch source again (spec §3: "and
@@ -10955,6 +10978,10 @@ export class TerminalContent extends BasePaneContent {
           // Which machine the file lands on, recorded when the transfer
           // starts because the operations list has no tab to ask later.
           machine: o.machine ?? '',
+          // The axis, so a drop on a tab the helper does not serve answers
+          // with the same sentence the head draws and sends nothing
+          // (design §5.10, C25/C26).
+          connection: o.connection,
         }
       },
       services: surface.services,

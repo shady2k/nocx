@@ -851,6 +851,25 @@ function main(): void {
   const downloadSurface = downloadSurfaceFor(dispatcher)
   let revealFilesPath: ((path: string) => Promise<boolean>) | null = null
   let revealFilesView: () => void = () => {}
+  /** THE AXIS CARD'S TWO ACTIONS, owned ONCE for both panels
+   *  (connection/helper-axis-card.tsx draws the same card in Files and Git).
+   *  The press names the pane its button was drawn for; the ACTIVE tab must
+   *  still BE that pane, or the press is about a tab that is no longer in
+   *  front and goes no further (ALX-1019) — the epoch is read inside the pane,
+   *  at press time. Two copies of this check is two places to forget it. */
+  const pressHelperRefresh = (paneId: string): void => {
+    const content = tm.activeTerminalContent()
+    if (content === null || content.backendPaneId !== paneId) {
+      log.warn('nocx: a helper refresh press names a pane that is not in front', { paneId })
+      return
+    }
+    content.pressHelperRefresh()
+  }
+  /** The saved connection the tab in front was opened from, read live: a
+   *  saved profile has a host record whose mode can be edited, a hand-typed
+   *  tab does not. The pane normalizes Quick Connect's empty id to null, so
+   *  both surfaces draw the one answer (helper-axis.ts's savedProfileId). */
+  const activeProfileId = (): string | null => tm.activeTerminalContent()?.savedProfileId() ?? null
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
@@ -862,6 +881,14 @@ function main(): void {
       revealFilesPath = (path) => store.revealPath(path)
       rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
     },
+    // THE AXIS ACTIONS ARE THE SHARED CARD'S, and they are the same two the
+    // Git panel draws (connection/helper-axis-card.tsx): one answer about one
+    // connection, whichever panel is in front.
+    onRefreshHelper: pressHelperRefresh,
+    onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
+    // The tab's own opening option, read live — the same accessor the Git
+    // panel is handed.
+    activeProfileId,
   })
 
   // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
@@ -1138,26 +1165,12 @@ function main(): void {
     services: gitServicesTracked,
     store: gitStore,
     activeOrigin,
-    // The axis action is the active pane's press. The panel names the pane
-    // its button was drawn for; the ACTIVE tab must still BE that pane, or
-    // the press is about a tab that is no longer in front and goes no
-    // further (ALX-1019). The epoch is read inside the pane, at press time.
-    onRefreshHelper: (paneId) => {
-      const content = tm.activeTerminalContent()
-      if (content === null || content.backendPaneId !== paneId) {
-        log.warn('nocx: the Git panel helper refresh press names a pane that is not in front', {
-          paneId,
-        })
-        return
-      }
-      content.pressHelperRefresh()
-    },
+    // The axis action is the active pane's press — the same one the Files
+    // panel's card gets (see pressHelperRefresh, whose guard is the authority
+    // on whether the tab named is still in front).
+    onRefreshHelper: pressHelperRefresh,
     onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
-    // The tab's own opening option, read live: a saved profile has a host
-    // record whose mode can be edited, a hand-typed tab does not. The pane
-    // normalizes Quick Connect's empty id to null, so both surfaces draw the
-    // one answer (helper-axis.ts's savedProfileId).
-    activeProfileId: () => tm.activeTerminalContent()?.savedProfileId() ?? null,
+    activeProfileId,
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────

@@ -3194,7 +3194,42 @@ export class PaneManager {
   activeOrigin(): ActiveOrigin | null {
     const pane = this.activePane
     const origin = pane?.content.activeOrigin?.()
-    return pane && origin ? { paneId: pane.id, ...origin } : null
+    if (!pane || !origin) return null
+    return { paneId: pane.id, ...this.withLiveConnection(origin) }
+  }
+
+  /** The CONNECTION a frozen origin rides, read from the terminal tab it was
+   *  opened from (ALX-1793 round 1, B1).
+   *
+   *  A viewer tab (and a diff tab) answers with the origin it was opened from:
+   *  `cwdFollow: false`, and no `connection` at all — deliberately, because
+   *  this object is a snapshot and a copied connection would go stale. But
+   *  every consumer of an origin gates on `helperGate`, which reads a missing
+   *  observation as `starting` (ADR-ba6xet1b). Taken at face value that made
+   *  activating the viewer of a SERVING SSH file look like a connection whose
+   *  helper had not reported: the Files panel held its scope, released the
+   *  binding the viewer was reading through, and the viewer died with "Source
+   *  unavailable" — on a host that was answering.
+   *
+   *  The answer is the LIVE terminal of the same session, read at call time and
+   *  never copied into the snapshot: the pane that has the connection is the
+   *  authority on its axis, and reading it here is what keeps a pause that
+   *  happens while the person is looking at the file from being invisible. A
+   *  session whose terminal tab is gone has no connection to report, and the
+   *  frozen origin is returned as it came.
+   *
+   *  A PANE with an opinion is left alone: `connection !== undefined` means
+   *  the content answered for itself (a terminal always does, even with
+   *  null), and `cwdFollow` true means a live terminal, never a snapshot. */
+  private withLiveConnection(origin: Omit<ActiveOrigin, 'paneId'>): Omit<ActiveOrigin, 'paneId'> {
+    if (origin.cwdFollow || origin.connection !== undefined) return origin
+    const connection = this.terminalContentForSession(origin.sessionId)?.activeOrigin?.()
+      ?.connection
+    // Nothing to add where the live tab has no connection either: the frozen
+    // origin stays exactly as its content answered it, which is also what
+    // every test and the viewer's own identity compare against.
+    if (connection === undefined || connection === null) return origin
+    return { ...origin, connection }
   }
 
   /** The session id of SOME open local pane, or null.

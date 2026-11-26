@@ -6825,6 +6825,47 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     }
   })
 
+  it('asks for the home again when the helper starts serving, so the prompt line shortens without a `cd` (m3)', async () => {
+    // On an SSH tab the first home ask is spent while the helper is still
+    // starting, and the source answers "not known" without opening anything
+    // (design §5.10, C25). Nothing else would ask again until the shell
+    // reported a NEW directory, so a person sitting at their prompt kept
+    // reading the absolute path on a host that had been answering for
+    // minutes. The axis becoming `serving` is that trigger.
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    sessionHome.failNext = 1
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/home/nocx/project' } })
+      expect(sessionHome.ensureCalls).toHaveLength(1)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The helper starts serving: nobody pressed anything, and the home is
+      // now readable instead of refused.
+      publishConnection(client, content)
+      expect(sessionHome.ensureCalls).toHaveLength(2)
+      expect(sessionHome.ensureCalls[1]).toMatchObject({ cwd: '/home/nocx/project' })
+
+      // A later observation of the same axis is not a new reason to ask.
+      publishConnection(client, content)
+      expect(sessionHome.ensureCalls).toHaveLength(2)
+
+      // And once it lands, the `~` arrives on its own.
+      sessionHome.resolveHome(sessionOf(content).sessionId, '/home/nocx')
+      await Promise.resolve()
+      expect(partText(editorOf(content).root, 'path')).toBe('~/project')
+    } finally {
+      teardown()
+    }
+  })
+
   it('names the tab `~` at home once the home resolves — never before (nocx-1ebrs.45)', async () => {
     const client = makeClient()
     const sessionHome = makeFakeSessionHome()

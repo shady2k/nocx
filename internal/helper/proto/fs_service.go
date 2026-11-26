@@ -1,7 +1,7 @@
 package proto
 
-// The `fs` service: the READ half of how a coordinator reads files on a host
-// whose ssh connection the far helper holds (ADR-727g63tr, design §5.10).
+// The `fs` service: how a coordinator reads and writes files on a host whose
+// ssh connection the far helper holds (ADR-727g63tr, design §5.10).
 //
 // # Why a service and not SFTP
 //
@@ -12,15 +12,15 @@ package proto
 // BOUND: a path, an offset, a length — never a file descriptor, a command or a
 // byte the coordinator could have chosen to write.
 //
-// # Only the read ops exist in this generation
+// # The closed set, and why a direction is not a service
 //
-// `root`, `stat`, `list`, `canonical` and `read` are the whole closed set this
-// generation answers. The write half — a write session, its `commit` with an
-// expected version, `abort`, `inventory` — belongs to the leaves that add it,
-// and a service name per direction would be two names for one answer (AD-8).
-// An older helper answers `unknown_op` to an op it does not have, which is the
-// reading a coordinator needs: this machine's helper is older than this app,
-// not this host refusing files.
+// `root`, `stat`, `list`, `canonical` and `read` are the read half; a write
+// session is `write-open`, `write`, `write-commit` and `write-abort`; and
+// `inventory` reports the temporaries a previous generation could not remove.
+// One service name, not one per direction, because a service name per direction
+// would be two names for one answer (AD-8). An older helper answers `unknown_op`
+// to an op it does not have, which is the reading a coordinator needs: this
+// machine's helper is older than this app, not this host refusing files.
 //
 // # Why the shapes are here and not in the service package
 //
@@ -352,4 +352,50 @@ type FSWriteAbortParams struct {
 // temporary file of ours, which is what the caller asked for.
 type FSWriteAbortResult struct {
 	Outcome string `json:"outcome"`
+}
+
+// ── the inventory (nocx-oalo1.12.4) ────────────────────────────────────
+//
+// A helper that dies between `write-open` and the end of the session leaves a
+// temporary file beside a target nobody asked it to touch. The journal is what
+// makes that recoverable: the entry is written and synced BEFORE the temporary
+// exists, so a later generation knows the file's exact name and can remove it.
+// What it cannot remove — a directory that lost its write permission, a mount
+// that went read-only, a file owned by another account — has to be VISIBLE
+// instead of silently left, because the alternative is a person finding
+// `.nocx-write-…` files in their project with nothing that says where they came
+// from. `inventory` is that answer.
+const (
+	// OpInventory reports the temporaries an earlier generation could not
+	// remove. It takes nothing: the journal belongs to this account, not to a
+	// path, and asking about one directory would report only the leftovers a
+	// person already happened to be looking at.
+	OpInventory = "inventory"
+)
+
+// FSInventoryParams is fs.inventory's params, and it is deliberately empty.
+// The journal root is this daemon's own (`~/.nocx/fs-writes/{host}-{run}`), so
+// a caller naming a directory could only ask a narrower question than the one
+// worth answering — and an empty shape is what an older generation's params
+// schema accepts, so the refusal a coordinator receives for this op is
+// `unknown_op`, which is a fact about the helper.
+type FSInventoryParams struct{}
+
+// FSStrandedTemp is one temporary that outlived the session that created it and
+// that this helper could not remove. Path is absolute and is the temporary
+// itself, not the target it was written for; Reason is the refusal the removal
+// met, in the words the operating system gave, because the difference between
+// "read-only file system" and "operation not permitted" is the difference
+// between waiting for a mount and finding the account that owns the directory.
+type FSStrandedTemp struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// FSInventoryResult is fs.inventory's answer. Stranded is never nil: nothing
+// stranded is [], never null, because a decoder must not have to tell "no
+// leftovers" from "no answer" — and a panel that read null as "cannot say"
+// would report a clean host as an unknown one.
+type FSInventoryResult struct {
+	Stranded []FSStrandedTemp `json:"stranded"`
 }

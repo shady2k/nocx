@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.inventory.params.schema.json",
+  "title": "HelperFSInventoryParams",
+  "description": "Params of the helper fs service's inventory op, and they are deliberately empty. The journal is the daemon's own (`~/.nocx/fs-writes/{host}-{run}`), so a caller naming a directory could only ask a narrower question than the one worth answering. The empty shape is also the one an older generation accepts, which is what keeps the refusal for this op a fact about the helper (`unknown_op`) rather than a `bad_params` lie about the request.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

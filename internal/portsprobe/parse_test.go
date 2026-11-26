@@ -1,7 +1,6 @@
-package discovery
+package portsprobe
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -20,9 +19,9 @@ LISTEN 0      4096            [::]:5355     [::]:*
 LISTEN 0      128             [::]:22       [::]:*`
 
 func TestParseSS_MixedEvidence(t *testing.T) {
-	listeners, ok := parseSS([]byte(ssMixedFixture))
+	listeners, ok := ParseSS([]byte(ssMixedFixture))
 	if !ok {
-		t.Fatal("parseSS rejected the real ss fixture")
+		t.Fatal("ParseSS rejected the real ss fixture")
 	}
 	if len(listeners) != 9 {
 		t.Fatalf("listeners = %d, want 9", len(listeners))
@@ -74,9 +73,9 @@ func TestParseSS_MixedEvidence(t *testing.T) {
 func TestParseSS_ZoneQualifiedAddress(t *testing.T) {
 	// 127.0.0.53%lo:53 — the %lo interface zone must not break the port
 	// split.
-	listeners, ok := parseSS([]byte("LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*\n"))
+	listeners, ok := ParseSS([]byte("LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*\n"))
 	if !ok {
-		t.Fatal("parseSS rejected a zone-qualified row")
+		t.Fatal("ParseSS rejected a zone-qualified row")
 	}
 	if len(listeners) != 1 {
 		t.Fatalf("listeners = %d, want 1", len(listeners))
@@ -87,9 +86,9 @@ func TestParseSS_ZoneQualifiedAddress(t *testing.T) {
 }
 
 func TestParseSS_EmptyTable(t *testing.T) {
-	listeners, ok := parseSS([]byte(""))
+	listeners, ok := ParseSS([]byte(""))
 	if !ok {
-		t.Fatal("parseSS rejected an empty body")
+		t.Fatal("ParseSS rejected an empty body")
 	}
 	if len(listeners) != 0 {
 		t.Errorf("listeners = %d, want 0", len(listeners))
@@ -98,8 +97,8 @@ func TestParseSS_EmptyTable(t *testing.T) {
 
 func TestParseSS_NotSSShape(t *testing.T) {
 	// Arbitrary text must report unsupported, not parse to zero rows.
-	if _, ok := parseSS([]byte("Welcome to example.com\nls /etc/passwd\n")); ok {
-		t.Error("parseSS accepted arbitrary output")
+	if _, ok := ParseSS([]byte("Welcome to example.com\nls /etc/passwd\n")); ok {
+		t.Error("ParseSS accepted arbitrary output")
 	}
 }
 
@@ -112,9 +111,9 @@ tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      
 tcp6       0      0 [::]:22                 [::]:*                  LISTEN      -`
 
 func TestParseNetstat(t *testing.T) {
-	listeners, ok := parseNetstat([]byte(netstatFixture))
+	listeners, ok := ParseNetstat([]byte(netstatFixture))
 	if !ok {
-		t.Fatal("parseNetstat rejected the net-tools fixture")
+		t.Fatal("ParseNetstat rejected the net-tools fixture")
 	}
 	if len(listeners) != 4 {
 		t.Fatalf("listeners = %d, want 4", len(listeners))
@@ -138,8 +137,8 @@ func TestParseNetstat_BSDShapeIsUnsupported(t *testing.T) {
 	// be half-parsed as the Linux dialect.
 	bsd := `Name  Mtu   Network       Address            Ipkts Ierrs Idrop
 tcp4       0      0  *.22                 *.*                LISTEN`
-	if _, ok := parseNetstat([]byte(bsd)); ok {
-		t.Error("parseNetstat accepted a BSD-shaped table")
+	if _, ok := ParseNetstat([]byte(bsd)); ok {
+		t.Error("ParseNetstat accepted a BSD-shaped table")
 	}
 }
 
@@ -152,9 +151,9 @@ tcp        0      0 127.0.0.1:3000          0.0.0.0:*               LISTEN
 tcp6       0      0 [::]:22                 [::]:*                  LISTEN`
 
 func TestParseBusyboxNetstat_EvidenceUnsupported(t *testing.T) {
-	listeners, ok := parseBusyboxNetstat([]byte(busyboxFixture))
+	listeners, ok := ParseBusyboxNetstat([]byte(busyboxFixture))
 	if !ok {
-		t.Fatal("parseBusyboxNetstat rejected the busybox fixture")
+		t.Fatal("ParseBusyboxNetstat rejected the busybox fixture")
 	}
 	if len(listeners) != 3 {
 		t.Fatalf("listeners = %d, want 3", len(listeners))
@@ -201,9 +200,9 @@ root     sshd       1234  3   tcp4   0.0.0.0:22           *:*
 root     sshd       1235  4   tcp6   [::]:22              *:*`
 
 func TestParseSockstat(t *testing.T) {
-	listeners, ok := parseSockstat([]byte(sockstatFixture))
+	listeners, ok := ParseSockstat([]byte(sockstatFixture))
 	if !ok {
-		t.Fatal("parseSockstat rejected the fixture")
+		t.Fatal("ParseSockstat rejected the fixture")
 	}
 	if len(listeners) != 2 {
 		t.Fatalf("listeners = %d, want 2", len(listeners))
@@ -240,60 +239,5 @@ func TestSplitHostPort(t *testing.T) {
 			t.Errorf("splitHostPort(%q) = (%q, %d, %v), want (%q, %d, %v)",
 				c.in, host, port, ok, c.host, c.port, c.ok)
 		}
-	}
-}
-
-func TestSplitFrame(t *testing.T) {
-	body := "LISTEN 0 4096 127.0.0.1:53 0.0.0.0:*\n"
-	framed := "NOCX-PD/1\n" + body + "NOCX-PD/1\n"
-
-	got, leading, trailing := splitFrame([]byte(framed))
-	if !leading || !trailing {
-		t.Fatalf("valid frame: leading=%v trailing=%v, want both true", leading, trailing)
-	}
-	if string(got) != strings.TrimSuffix(body, "\n") {
-		t.Errorf("body = %q, want %q", got, strings.TrimSuffix(body, "\n"))
-	}
-
-	// Empty body (no listeners): sentinel-only output is a valid empty
-	// sample.
-	empty := "NOCX-PD/1\nNOCX-PD/1\n"
-	if _, leading, trailing := splitFrame([]byte(empty)); !leading || !trailing {
-		t.Errorf("empty frame: leading=%v trailing=%v, want both true", leading, trailing)
-	}
-
-	// Missing leading sentinel — the framing violation: rejected whole.
-	if _, leading, _ := splitFrame([]byte("Welcome to example.com\nNOCX-PD/1\n")); leading {
-		t.Error("unframed output passed the leading check")
-	}
-
-	// Missing trailing sentinel — truncated output: leading ok, trailing not.
-	truncated := "NOCX-PD/1\nLISTEN 0 4096 127.0.0.1:53 0.0.0.0:*\n"
-	if _, leading, trailing := splitFrame([]byte(truncated)); !leading || trailing {
-		t.Errorf("truncated frame: leading=%v trailing=%v, want true/false", leading, trailing)
-	}
-
-	// Empty output.
-	if _, leading, _ := splitFrame(nil); leading {
-		t.Error("empty output passed the leading check")
-	}
-}
-
-func TestSampleState(t *testing.T) {
-	known := Listener{Port: 1, Process: Process{Evidence: EvidenceKnown}}
-	denied := Listener{Port: 2, Process: Process{Evidence: EvidencePermissionDenied}}
-	unsupported := Listener{Port: 3, Process: Process{Evidence: EvidenceUnsupported}}
-
-	if got := SampleState(nil); got != StateAvailable {
-		t.Errorf("empty sample state = %v, want available (no listeners observed)", got)
-	}
-	if got := SampleState([]Listener{known, denied}); got != StateAvailable {
-		t.Errorf("mixed evidence state = %v, want available", got)
-	}
-	if got := SampleState([]Listener{denied, denied}); got != StateAvailableLimited {
-		t.Errorf("all-denied state = %v, want available-limited", got)
-	}
-	if got := SampleState([]Listener{unsupported}); got != StateAvailableLimited {
-		t.Errorf("unsupported evidence state = %v, want available-limited", got)
 	}
 }

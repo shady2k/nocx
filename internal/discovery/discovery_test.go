@@ -13,6 +13,25 @@ import (
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
+// The ladder's fixtures are small and purpose-built rather than copies of
+// the measured tables: the census of a real measurement (how many rows, how
+// many visible owners) is a PARSER fact and is pinned byte-for-byte in
+// internal/portsprobe's parse_test.go. What these tests ask is which parser
+// the ladder chose, what it cached, and how it projected the evidence.
+const (
+	// ladderSSFixture: one row with a visible owner, one owned by another
+	// user (permission-denied evidence).
+	ladderSSFixture = `LISTEN 0      511        127.0.0.1:8071 0.0.0.0:* users:(("nocx",pid=871,fd=81))
+LISTEN 0      128          0.0.0.0:22    0.0.0.0:*`
+
+	// ladderBusyboxFixture: the -ltn table on a host whose netstat rejected
+	// -p — no PID column at all, so evidence is unsupported for every row.
+	ladderBusyboxFixture = `Active Internet connections (only servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN
+tcp6       0      0 [::]:22                 [::]:*                  LISTEN`
+)
+
 // ---------------------------------------------------------------------------
 // Scripted fake exec seam — the ladder and detector are protocol-level
 // logic; only the lease/cancel semantics need a real connection (covered in
@@ -132,20 +151,20 @@ func newTestDetector(t *testing.T, f *fakeConn, opts ...DetectorOption) *Detecto
 // selected probe runs afterwards.
 func TestDetector_NormalHost_SelectsSSOnce(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{result: framed(ssMixedFixture)}, fakeResponse{result: framed(ssMixedFixture)})
+	f.queue(fakeResponse{result: framed(ladderSSFixture)}, fakeResponse{result: framed(ladderSSFixture)})
 	d := newTestDetector(t, f)
 
 	s1 := d.Sample(context.Background())
 	if s1.State != StateAvailable {
 		t.Fatalf("state = %v, want available", s1.State)
 	}
-	if len(s1.Listeners) != 9 {
-		t.Fatalf("listeners = %d, want 9", len(s1.Listeners))
+	if len(s1.Listeners) != 2 {
+		t.Fatalf("listeners = %d, want 2", len(s1.Listeners))
 	}
 	if s1.Probe != "ss" {
 		t.Errorf("probe = %q, want ss", s1.Probe)
 	}
-	// The real measured shape: mixed process evidence.
+	// Mixed process evidence, the shape the real tables have.
 	known, denied := 0, 0
 	for _, l := range s1.Listeners {
 		switch l.Process.Evidence {
@@ -155,8 +174,8 @@ func TestDetector_NormalHost_SelectsSSOnce(t *testing.T) {
 			denied++
 		}
 	}
-	if known != 3 || denied != 6 {
-		t.Errorf("known = %d, denied = %d, want 3/6", known, denied)
+	if known != 1 || denied != 1 {
+		t.Errorf("known = %d, denied = %d, want 1/1", known, denied)
 	}
 
 	// Second sample runs ONLY the selected probe — no ladder re-selection.
@@ -459,7 +478,7 @@ func TestDetector_Timeout_BacksOff(t *testing.T) {
 // no state change, no new exec.
 func TestDetector_CancelInFlight_NoStateChange(t *testing.T) {
 	f := newFakeConn()
-	f.queue(fakeResponse{result: framed(ssMixedFixture)})
+	f.queue(fakeResponse{result: framed(ladderSSFixture)})
 	d := newTestDetector(t, f)
 
 	first := d.Sample(context.Background())
@@ -482,8 +501,8 @@ func TestDetector_CancelInFlight_NoStateChange(t *testing.T) {
 	if s.State != StateAvailable {
 		t.Errorf("state = %v, want the previous available state", s.State)
 	}
-	if len(s.Listeners) != 9 {
-		t.Errorf("listeners = %d, want the previous 9", len(s.Listeners))
+	if len(s.Listeners) != 2 {
+		t.Errorf("listeners = %d, want the previous 2", len(s.Listeners))
 	}
 }
 
@@ -583,7 +602,7 @@ func TestDetector_AvailableLimited_Busybox(t *testing.T) {
 	f.queue(
 		absentTool(),
 		fakeResponse{result: &ExecResult{Stdout: []byte("NOCX-PD/1\nNOCX-PD/1\n"), Stderr: []byte("netstat: invalid option -- 'p'\n"), ExitStatus: 1}},
-		fakeResponse{result: framed(busyboxFixture)},
+		fakeResponse{result: framed(ladderBusyboxFixture)},
 	)
 	d := newTestDetector(t, f)
 

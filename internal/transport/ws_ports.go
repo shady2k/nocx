@@ -236,8 +236,8 @@ func (s *WSServer) discoveryUp(profileID, host string, cfg *ssh.ConnectConfig) {
 // discoveryUpLocal schedules discovery for the machine the app runs on,
 // keyed by the reserved discovery.LocalTargetID — the wire identity for a
 // local tab, which has no profile. The machine is its own consent (there is
-// no remote host to ask); the cadence — settle, prompt debounce, hidden-tab
-// pause, user Pause — governs it exactly like a profile target, and the
+// no remote host to ask); the cadence — settle, hidden-tab pause, user
+// Pause — governs it exactly like a profile target, and the
 // target is torn down when the last local tab closes. Host is the machine's
 // hostname, display material only.
 func (s *WSServer) discoveryUpLocal() {

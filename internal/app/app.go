@@ -1360,16 +1360,14 @@ func New(opts ...Option) (*App, error) {
 	// wired here at the composition root (AD-8) behind the same Provider
 	// seam the remote ladder implements. The cadence timers are named
 	// here, at the composition root (spec §4): one settle sample 1 s after
-	// the connection comes up, prompt hints debounced 1 s, periodic
-	// sampling every 10 s while the panel is visible and nothing is
-	// paused.
+	// the connection comes up, periodic sampling every 10 s while the panel
+	// is visible and nothing is paused.
 	discoverySched := discovery.NewScheduler(
 		probes, logger,
 		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
 			return nativeports.NewProvider(l)
 		}),
 		discovery.WithSettleDelay(1*time.Second),
-		discovery.WithPromptDebounce(time.Second),
 		discovery.WithSampleInterval(10*time.Second),
 	)
 	// The remote shell launcher, built here so its bootstrap-outcome sink
@@ -1567,8 +1565,8 @@ func New(opts ...Option) (*App, error) {
 		// (AGENTS.md check 5).
 		transport.WithTunnelConnector(tunnelChans),
 		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
-		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
-		// — spec §4) and acquires its OWN pooled discovery lease per
+		// (settle sample, hidden-tab pause, one-in-flight — spec §4) and
+		// acquires its OWN pooled discovery lease per
 		// profile. *ssh.RealClient satisfies discovery.Connector without
 		// an adapter, the same way it satisfies tunnel.Connector. Before
 		// this line the whole discovery package was reachable from its own

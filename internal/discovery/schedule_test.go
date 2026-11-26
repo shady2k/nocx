@@ -157,7 +157,6 @@ func testScheduler(t *testing.T, conn *fakeConnector, opts ...SchedulerOption) *
 	t.Helper()
 	base := []SchedulerOption{
 		WithSettleDelay(10 * time.Millisecond),
-		WithPromptDebounce(15 * time.Millisecond),
 		WithSampleInterval(25 * time.Millisecond),
 	}
 	conn.autoValid = true
@@ -187,56 +186,6 @@ func TestScheduler_SettleSampleAfterConnectionUp(t *testing.T) {
 	}
 	if st.Host != "host.example" {
 		t.Fatalf("status host = %q, want %q", st.Host, "host.example")
-	}
-}
-
-func TestScheduler_PromptDebounceCoalesces(t *testing.T) {
-	conn := &fakeConnector{}
-	s := testScheduler(t, conn)
-	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
-
-	// A user hammering Enter must not queue probes: five rapid hints
-	// produce exactly ONE debounced sample.
-	for range 5 {
-		s.PromptHint("ssh:p1:1")
-	}
-	waittest.WaitFor(t, "debounced sample", func() bool { return conn.execCount() >= 2 })
-	// No observable event represents the absence of another debounced sample;
-	// retain this short window to exercise the negative cadence assertion.
-	time.Sleep(60 * time.Millisecond)
-	if got := conn.execCount(); got != 2 {
-		t.Fatalf("exec count after 5 prompt hints = %d, want exactly 2 (settle + one debounced)", got)
-	}
-}
-
-func TestScheduler_PromptHintsWhileSamplingCoalesceToOne(t *testing.T) {
-	conn := &fakeConnector{}
-	s := testScheduler(t, conn)
-	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
-
-	f := conn.acquired()[0]
-	block := make(chan struct{})
-	f.block = block
-
-	// One hint starts a debounced sample that blocks on the remote exec.
-	s.PromptHint("ssh:p1:1")
-	waittest.WaitFor(t, "blocked sample to start", func() bool { return conn.execCount() >= 2 })
-
-	// More hints while the sample is in flight: at most one follow-up.
-	for range 5 {
-		s.PromptHint("ssh:p1:1")
-	}
-	close(block)
-
-	// settle + blocked sample + exactly one coalesced follow-up.
-	waittest.WaitFor(t, "coalesced follow-up sample", func() bool { return conn.execCount() >= 3 })
-	// No observable event represents the absence of another coalesced sample;
-	// retain this short window to exercise the negative cadence assertion.
-	time.Sleep(80 * time.Millisecond)
-	if got := conn.execCount(); got != 3 {
-		t.Fatalf("exec count = %d, want exactly 3 (settle + blocked + one coalesced)", got)
 	}
 }
 
@@ -280,8 +229,8 @@ func TestScheduler_PauseSuppressesAutomaticSamples(t *testing.T) {
 
 	s.SetPaused("ssh:p1:1", true)
 
-	// A prompt hint and a reconnect must both be suppressed while paused.
-	s.PromptHint("ssh:p1:1")
+	// A reconnect must not sample while paused: the settle timer is the
+	// automatic path, and Pause suppresses it.
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
 	// No observable event represents paused automatic work; retain this short
 	// window to exercise the negative cadence assertion.
@@ -341,7 +290,6 @@ func TestScheduler_ConnectionLossMarksLostAndReconnectResamples(t *testing.T) {
 	waittest.WaitFor(t, "conn lost", func() bool { return s.Status("ssh:p1:1").ConnLost })
 
 	// No further execs are attempted on the dead lease.
-	s.PromptHint("ssh:p1:1")
 	s.SetVisible("ssh:p1:1", true)
 	// No observable event represents the absence of probes after loss; retain
 	// this short window to exercise the negative cadence assertion.
@@ -386,7 +334,6 @@ func TestScheduler_ConnectionDownReleasesLease(t *testing.T) {
 		return f0.closed
 	})
 
-	s.PromptHint("ssh:p1:1")
 	s.SetVisible("ssh:p1:1", true)
 	// No observable event represents work after teardown; retain this short
 	// window to exercise the negative cadence assertion.
@@ -514,7 +461,6 @@ func TestScheduler_LocalTarget_PauseSuppressesLocalProbes(t *testing.T) {
 
 	before := s.Status(LocalTargetID).Sample
 	s.SetPaused(LocalTargetID, true)
-	s.PromptHint(LocalTargetID)
 	// No observable event represents the paused local target staying quiet;
 	// retain this short window to exercise the negative cadence assertion.
 	time.Sleep(80 * time.Millisecond)

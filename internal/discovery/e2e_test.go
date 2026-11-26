@@ -52,7 +52,7 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 		if cmd != want {
 			t.Errorf("exec command = %q, want the ss probe command %q", cmd, want)
 		}
-		return "NOCX-PD/1\n" + ssMixedFixture + "\nNOCX-PD/1\n", "", 0
+		return "NOCX-PD/1\n" + ladderSSFixture + "\nNOCX-PD/1\n", "", 0
 	})
 
 	lease := dialProbeLease(t, srv)
@@ -69,8 +69,8 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 	if s.Probe != string(remoteprobe.PortSS) {
 		t.Fatalf("probe = %q, want ss (ladder selected once)", s.Probe)
 	}
-	if len(s.Listeners) != 9 {
-		t.Fatalf("listeners = %d, want 9", len(s.Listeners))
+	if len(s.Listeners) != 2 {
+		t.Fatalf("listeners = %d, want 2", len(s.Listeners))
 	}
 	known, denied := 0, 0
 	for _, l := range s.Listeners {
@@ -81,8 +81,8 @@ func TestDetector_OverWire_NormalHost(t *testing.T) {
 			denied++
 		}
 	}
-	if known != 3 || denied != 6 {
-		t.Errorf("known = %d, denied = %d, want 3/6", known, denied)
+	if known != 1 || denied != 1 {
+		t.Errorf("known = %d, denied = %d, want 1/1", known, denied)
 	}
 
 	// A second sample reuses the selected probe — no re-selection execs.

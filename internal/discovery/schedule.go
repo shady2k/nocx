@@ -18,9 +18,6 @@ import (
 //   - Settle sample: one sample after a connection comes up, NOT on the
 //     first prompt's critical path. Services take a moment to bind; a panel
 //     that samples instantly shows an empty host.
-//   - Prompt debounce: a completed command is a HINT that the listener set
-//     most likely changed. Debounced (spec: 750–1500 ms) and coalesced per
-//     target, so a user hammering Enter never queues probes.
 //   - Hidden tab pause: periodic sampling runs only while a watcher (the
 //     ports panel) is visible AND the user has not paused it. A background
 //     tab running `ss` on a loop against a production host is a defect, not
@@ -52,7 +49,6 @@ type Scheduler struct {
 	logger        log.Logger
 
 	settleDelay    time.Duration
-	promptDebounce time.Duration
 	sampleInterval time.Duration
 	sampleTimeout  time.Duration
 
@@ -62,17 +58,12 @@ type Scheduler struct {
 }
 
 // SchedulerOption configures a Scheduler. Cadence defaults follow spec §4:
-// 1 s settle, 1 s prompt debounce, 10 s periodic.
+// 1 s settle, 10 s periodic.
 type SchedulerOption func(*Scheduler)
 
 // WithSettleDelay sets the delay between ConnectionUp and the first sample.
 func WithSettleDelay(d time.Duration) SchedulerOption {
 	return func(s *Scheduler) { s.settleDelay = d }
-}
-
-// WithPromptDebounce sets the debounce for prompt hints.
-func WithPromptDebounce(d time.Duration) SchedulerOption {
-	return func(s *Scheduler) { s.promptDebounce = d }
 }
 
 // WithSampleInterval sets the periodic sampling interval while a watcher is
@@ -93,7 +84,6 @@ func NewScheduler(conn Connector, logger log.Logger, opts ...SchedulerOption) *S
 		connector:      conn,
 		logger:         logger,
 		settleDelay:    1 * time.Second,
-		promptDebounce: time.Second,
 		sampleInterval: 10 * time.Second,
 		sampleTimeout:  10 * time.Second,
 		targets:        make(map[string]*schedTarget),
@@ -134,7 +124,6 @@ type schedTarget struct {
 	done    chan struct{} // closed on teardown; the loop exits
 
 	settleT *time.Timer
-	promptT *time.Timer
 	periodT *time.Timer
 }
 
@@ -213,19 +202,6 @@ func (s *Scheduler) ConnectionDown(profileID string) {
 	}
 }
 
-// PromptHint reports a completed command on the target — the listener set
-// most likely changed. Debounced, never queued.
-func (s *Scheduler) PromptHint(profileID string) {
-	s.mu.Lock()
-	t := s.targets[profileID]
-	paused := t != nil && t.paused
-	s.mu.Unlock()
-	if t == nil || paused {
-		return
-	}
-	t.armPrompt()
-}
-
 // SetVisible is the watcher (ports panel) visibility signal. Periodic
 // sampling runs only while visible; hiding the panel stops the background
 // poll. Becoming visible refreshes promptly.
@@ -248,7 +224,7 @@ func (s *Scheduler) SetVisible(profileID string, visible bool) {
 }
 
 // SetPaused is the user's Pause/Resume control. Paused suppresses every
-// automatic sample (settle, prompt, periodic); SampleNow still works — it is
+// automatic sample (settle, periodic); SampleNow still works — it is
 // the Retry path. Resuming refreshes promptly.
 func (s *Scheduler) SetPaused(profileID string, paused bool) {
 	s.mu.Lock()
@@ -547,7 +523,7 @@ func (s *Scheduler) watchConn(t *schedTarget, conn Lease) {
 // ---------------------------------------------------------------------------
 // Cadence timers. Each is a one-shot AfterFunc that nudges the loop; stale
 // fires are harmless (the trigger coalesces), so stop+reset races are safe.
-// armSettle and armPrompt mutate the timer fields, so they run under the
+// armSettle mutates the timer fields, so it runs under the
 // scheduler lock — a ConnectionUp racing stopTimersLocked must not leave a
 // live timer behind on a torn-down target.
 // ---------------------------------------------------------------------------
@@ -567,23 +543,6 @@ func (t *schedTarget) armSettle() {
 		t.settleT.Stop()
 	}
 	t.settleT = time.AfterFunc(s.settleDelay, t.nudge)
-}
-
-func (t *schedTarget) armPrompt() {
-	s := t.s
-	if s.promptDebounce <= 0 {
-		t.nudge()
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if t.torn || s.closed {
-		return
-	}
-	if t.promptT != nil {
-		t.promptT.Stop()
-	}
-	t.promptT = time.AfterFunc(s.promptDebounce, t.nudge)
 }
 
 // armPeriodicLocked starts the periodic timer. Callers hold s.mu. The timer
@@ -616,10 +575,6 @@ func (t *schedTarget) stopTimersLocked() {
 	if t.settleT != nil {
 		t.settleT.Stop()
 		t.settleT = nil
-	}
-	if t.promptT != nil {
-		t.promptT.Stop()
-		t.promptT = nil
 	}
 	t.stopPeriodicLocked()
 }

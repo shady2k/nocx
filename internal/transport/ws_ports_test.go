@@ -290,7 +290,6 @@ func TestPorts_OverTheWireConformsToContract(t *testing.T) {
 	sched := discovery.NewScheduler(
 		connector, log.NewSlogAdapter(nil),
 		discovery.WithSettleDelay(5*time.Millisecond),
-		discovery.WithPromptDebounce(5*time.Millisecond),
 		discovery.WithSampleInterval(0),
 	)
 	ws, stop := newPortsHarness(t, sched)
@@ -435,7 +434,6 @@ func TestPorts_LocalTarget_OverTheWire(t *testing.T) {
 			return nativeports.NewProvider(l)
 		}),
 		discovery.WithSettleDelay(5*time.Millisecond),
-		discovery.WithPromptDebounce(5*time.Millisecond),
 		discovery.WithSampleInterval(0),
 	)
 	ws, stop := newPortsHarness(t, sched)
@@ -540,7 +538,6 @@ func TestPortsStatus_AfterConnectionUpBeforeSettle_OverTheWireConformsToContract
 		// Long enough that the settle sample cannot land during the call:
 		// the point of the test is the state before it does.
 		discovery.WithSettleDelay(time.Hour),
-		discovery.WithPromptDebounce(time.Hour),
 		discovery.WithSampleInterval(0),
 	)
 	ws, stop := newPortsHarness(t, sched)

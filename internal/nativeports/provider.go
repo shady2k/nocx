@@ -1,7 +1,7 @@
 package nativeports
 
 // Provider samples the machine the app runs on and projects the result
-// into the discovery domain's five states: a successful read is available
+// into portsprobe's five states: a successful read is available
 // (or available-limited when every row's process evidence is degraded),
 // ErrUnsupported and ErrToolMissing are unavailable (terminal, known
 // degrades), and any other read failure is failed-transiently, paced by
@@ -17,13 +17,13 @@ import (
 	"context"
 	"errors"
 
-	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
-// Provider is the discovery.Provider implementation for LocalTargetID.
+// Provider is the portsprobe.Provider implementation for LocalTargetID.
 type Provider struct {
-	read func(ctx context.Context) ([]discovery.Listener, error)
+	read func(ctx context.Context) ([]portsprobe.Listener, error)
 }
 
 // NewProvider builds the local sampling provider. The logger is accepted
@@ -35,27 +35,27 @@ func NewProvider(_ log.Logger) *Provider {
 }
 
 // Sample runs one native read and maps it onto the domain's states.
-func (p *Provider) Sample(ctx context.Context) discovery.Sample {
+func (p *Provider) Sample(ctx context.Context) portsprobe.Sample {
 	listeners, err := p.read(ctx)
 	switch {
 	case errors.Is(err, ErrUnsupported):
-		return discovery.Sample{
-			State:          discovery.StateUnavailable,
+		return portsprobe.Sample{
+			State:          portsprobe.StateUnavailable,
 			Classification: "local port discovery not supported on this platform",
 		}
 	case errors.Is(err, ErrToolMissing):
-		return discovery.Sample{
-			State:          discovery.StateUnavailable,
+		return portsprobe.Sample{
+			State:          portsprobe.StateUnavailable,
 			Classification: err.Error(),
 		}
 	case err != nil:
-		return discovery.Sample{
-			State:          discovery.StateFailedTransiently,
+		return portsprobe.Sample{
+			State:          portsprobe.StateFailedTransiently,
 			Classification: "local port discovery failed: " + err.Error(),
 		}
 	default:
-		return discovery.Sample{
-			State:       discovery.SampleState(listeners),
+		return portsprobe.Sample{
+			State:       portsprobe.SampleState(listeners),
 			Listeners:   listeners,
 			Probe:       probeName,
 			ProbesTried: []string{probeName},

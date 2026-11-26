@@ -6,9 +6,9 @@ package nativeports
 // is libproc (proc_listpids/proc_pidfdinfo), which needs cgo; the decision
 // and its evidence are in .internal/reports/nocx-wzc4.8.md. lsof ships with
 // every macOS base system (/usr/sbin/lsof) and its -nP -iTCP -sTCP:LISTEN
-// dialect is stable across releases; the parse below mirrors the discovery
-// domain's address shapes so the wire renders identically to the remote
-// ladder's lsof rung. When lsof is absent the read reports ErrToolMissing —
+// dialect is stable across releases; it is parsed by internal/portsprobe's
+// ParseLsof — the remote ladder's own lsof rung, one implementation — so the
+// wire renders identically. When lsof is absent the read reports ErrToolMissing —
 // a terminal degrade to the unavailable state, never a convincing empty
 // list.
 //
@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 const probeName = "darwin-lsof"
@@ -36,7 +36,7 @@ const (
 	lsofTimeout   = 5 * time.Second
 )
 
-func listeners(ctx context.Context) ([]discovery.Listener, error) {
+func listeners(ctx context.Context) ([]portsprobe.Listener, error) {
 	ctx, cancel := context.WithTimeout(ctx, lsofTimeout)
 	defer cancel()
 
@@ -51,7 +51,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 	// then gives up on — only to stderr. Discarding it made those identical,
 	// and the module's contract is explicit that they must never be: an empty
 	// result means no listeners were observed, and everything else means
-	// could-not-determine, never "no ports" (discovery.State).
+	// could-not-determine, never "no ports" (portsprobe.State).
 	var stderr bytes.Buffer
 	proc.Stderr = &stderr
 	if err := proc.Start(); err != nil {
@@ -78,7 +78,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 			if msg := strings.TrimSpace(stderr.String()); msg != "" {
 				return nil, fmt.Errorf("lsof could not read the listener table: %s", firstLines(msg, 3))
 			}
-			return []discovery.Listener{}, nil
+			return []portsprobe.Listener{}, nil
 		}
 		return nil, waitErr
 	}
@@ -87,7 +87,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 		// degrades like a remote table cut short.
 		return nil, errors.New("lsof output exceeds the 1 MiB capture cap")
 	}
-	ls, ok := discovery.ParseLsof(data)
+	ls, ok := portsprobe.ParseLsof(data)
 	if !ok {
 		// The ladder's rung answers `false` with "advance"; here lsof is the
 		// only tool, so the honest answer is could-not-determine. Never an

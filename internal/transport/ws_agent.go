@@ -1311,12 +1311,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// The pane's own files, bound per CALL rather than per run: every
 		// files.* invocation acquires one short-lived handle, so the registry
 		// holds nothing between calls and nothing after a cancelled one.
-		Files: assistantFiles{
-			reg:       h.filesys,
-			factory:   h.filesFactory,
-			sessions:  h.sessionRegistry,
-			sessionID: rc.sessionID,
-		},
+		Files: h.filesFor(rc.sessionID),
 		// The one environment a spawn can reach in this slice: the machine
 		// nocx itself runs on. Derived through content's own id rule so the
 		// run fence and the tool's resolver name the same string without

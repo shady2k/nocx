@@ -49,6 +49,26 @@ type assistantFiles struct {
 
 var _ filesystem.HandleSource = assistantFiles{}
 
+// filesFor is the ONE place a run's route to the pane's own files is assembled
+// from the server's wiring: the registry, the factory and the session registry
+// the Files panel uses, plus the session the server fixed at ask time (AD-7).
+//
+// It is a function rather than a literal at each site because the run's
+// AskParams is built in more than one place — the ask path, and the transport
+// tests that drive the handler directly to observe delivery order — and a
+// hand-assembled second copy is how files.read lost its route: the harness had
+// a sender, the copy had the zero value, and every tool call answered
+// ErrNoAssistantFiles (nocx-a62cl.11.1). A caller that wants the tools to work
+// asks this; a caller that wants the honest refusal names no composition.
+func (h agentHandlers) filesFor(sessionID session.ID) assistantFiles {
+	return assistantFiles{
+		reg:       h.filesys,
+		factory:   h.filesFactory,
+		sessions:  h.sessionRegistry,
+		sessionID: sessionID,
+	}
+}
+
 // ErrNoAssistantFiles says the build wired no files composition for the agent,
 // so a file tool has nothing to act through. It is a refusal rather than a
 // fallback to this machine's disk, because a fallback is precisely the leak the

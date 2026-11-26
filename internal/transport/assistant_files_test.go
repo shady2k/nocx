@@ -23,10 +23,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -48,13 +50,15 @@ func (p countedProvider) Close() error {
 }
 
 // assistantFilesFixture is the real session registry (its PTY is the transport
-// tests' fake, so no shell is spawned) plus a real filesystem registry and a
-// factory that counts and reports what it was asked for.
+// tests' fake, so no shell is spawned), a real filesystem registry and a
+// factory that counts and reports what it was asked for. The route over them is
+// built the way the server builds it (s.filesOperations), so the fixture
+// exercises the operations a run really reaches.
 type assistantFilesFixture struct {
-	files     assistantFiles
 	sessions  session.Registry
 	sessionID session.ID
 	reg       *filesystem.Registry
+	factory   capability.ProviderFactory
 
 	mu           sync.Mutex
 	factoryCalls int
@@ -75,22 +79,29 @@ func newAssistantFilesFixture(t *testing.T) *assistantFilesFixture {
 		sessionID: sess.ID(),
 		reg:       filesystem.New(),
 	}
-	f.files = assistantFiles{
-		reg: f.reg,
-		factory: func(got session.Session, rootPath string) (filesystem.Provider, error) {
-			if got.ID() != sess.ID() {
-				t.Errorf("factory asked for session %q, want the run's %q", got.ID(), sess.ID())
-			}
-			f.mu.Lock()
-			f.factoryCalls++
-			f.rootPaths = append(f.rootPaths, rootPath)
-			f.mu.Unlock()
-			return countedProvider{Provider: local.New(), mu: &f.mu, closed: &f.closed}, nil
-		},
-		sessions:  sessions,
-		sessionID: sess.ID(),
+	f.factory = func(got session.Session, rootPath string) (filesystem.Provider, error) {
+		if got.ID() != sess.ID() {
+			t.Errorf("factory asked for session %q, want the run's %q", got.ID(), sess.ID())
+		}
+		f.mu.Lock()
+		f.factoryCalls++
+		f.rootPaths = append(f.rootPaths, rootPath)
+		f.mu.Unlock()
+		return countedProvider{Provider: local.New(), mu: &f.mu, closed: &f.closed}, nil
 	}
 	return f
+}
+
+// source builds the run's file route over the fixture's registry and factory,
+// with the same two operations s.filesOperations builds. The resolve phase is
+// never used here — a run only opens bindings — so its admission is
+// unrestricted.
+func (f *assistantFilesFixture) source() assistantFiles {
+	return assistantFiles{
+		open:      capability.NewFilesystemOpenOperation(control.Unrestricted(), f.sessions, f.factory, f.reg),
+		bind:      capability.NewFilesystemBindingOperation(f.reg),
+		sessionID: f.sessionID,
+	}
 }
 
 func (f *assistantFilesFixture) counts() (factory, closed int) {
@@ -107,7 +118,7 @@ func TestAssistantFiles_OneBindingPerCallAndNoneLeftBehind(t *testing.T) {
 	f := newAssistantFilesFixture(t)
 	const calls = 3
 	for i := 0; i < calls; i++ {
-		handle, release, err := f.files.Acquire(context.Background())
+		handle, release, err := f.source().Acquire(context.Background())
 		if err != nil {
 			t.Fatalf("call %d: Acquire: %v", i, err)
 		}
@@ -138,7 +149,7 @@ func TestAssistantFiles_CancelledCallLeavesNothing(t *testing.T) {
 	f := newAssistantFilesFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, release, err := f.files.Acquire(ctx); err == nil {
+	if _, release, err := f.source().Acquire(ctx); err == nil {
 		release()
 		t.Fatal("Acquire on a cancelled context succeeded")
 	}
@@ -154,7 +165,7 @@ func TestAssistantFiles_CancelledCallLeavesNothing(t *testing.T) {
 // closed exactly once — whichever of the two paths closes the binding.
 func TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider(t *testing.T) {
 	f := newAssistantFilesFixture(t)
-	handle, release, err := f.files.Acquire(context.Background())
+	handle, release, err := f.source().Acquire(context.Background())
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -198,8 +209,7 @@ func TestAssistantFiles_PaneClosingMidCallStillClosesTheProvider(t *testing.T) {
 func TestAssistantFiles_CancelledWhileTheProviderIsBeingBuiltLeavesNothing(t *testing.T) {
 	f := newAssistantFilesFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	files := f.files
-	files.factory = func(got session.Session, rootPath string) (filesystem.Provider, error) {
+	f.factory = func(_ session.Session, rootPath string) (filesystem.Provider, error) {
 		f.mu.Lock()
 		f.factoryCalls++
 		f.rootPaths = append(f.rootPaths, rootPath)
@@ -207,7 +217,7 @@ func TestAssistantFiles_CancelledWhileTheProviderIsBeingBuiltLeavesNothing(t *te
 		cancel() // the call was abandoned while this provider was being built
 		return countedProvider{Provider: local.New(), mu: &f.mu, closed: &f.closed}, nil
 	}
-	if _, release, err := files.Acquire(ctx); err == nil {
+	if _, release, err := f.source().Acquire(ctx); err == nil {
 		release()
 		t.Fatal("Acquire succeeded on a context its own factory cancelled")
 	}
@@ -235,7 +245,7 @@ func TestAssistantFiles_ACapabilityReadsThroughTheCallBinding(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello\n"), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	reader := filesystem.NewScopedReaderWithExactFiles(f.files, []string{"/"}, []string{path})
+	reader := filesystem.NewScopedReaderWithExactFiles(f.source(), []string{"/"}, []string{path})
 	snapshot, err := reader.ReadSnapshot(context.Background(), path, 64<<10)
 	if err != nil {
 		t.Fatalf("ReadSnapshot through the assistant's binding: %v", err)

@@ -8,20 +8,12 @@
     "reason": "in-memory lifecycle snapshot used to name where secrets live; no store or provider call"
   },
   {
-    "key": "internal/transport/ws_agent.go:assistant.Client.Ask#1",
-    "reason": "the model call is the agent run itself; internal.agent.run is open for the whole stream"
-  },
-  {
     "key": "internal/transport/ws_agent.go:assistant.Client.Discard#1",
     "reason": "terminalisation drops the run checkpoint inside the same agent run scope"
   },
   {
     "key": "internal/transport/ws_agent.go:content.ContentDB.Ledger#1",
     "reason": "store handle accessor used to construct the ask operation; no provider work here"
-  },
-  {
-    "key": "internal/transport/ws_assistant.go:assistant.Client.Probe#1",
-    "reason": "residual: the endpoint probe handler does not begin an operation scope yet; it is bounded by assistant probeTimeout and belongs to the assistant migration"
   },
   {
     "key": "internal/transport/ws_block_rows.go:content.ContentDB.Ledger#1",

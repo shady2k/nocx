@@ -37,7 +37,6 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/filesystem"
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -755,15 +754,13 @@ type agentHandlers struct {
 	// screenCapture and sessions are the assistant's backend-owned read seams.
 	screenCapture assistant.ScreenCaptureSource
 	sessions      assistant.SessionSource
-	// filesys, filesFactory and sessionRegistry are the assistant's route to
-	// the pane's own files (stage 10, ADR-anntnxdj §5): the SAME registry and
-	// factory the Files panel uses, asked per tool call for a short-lived
-	// binding of the run's own. Nil in any of the three builds no file
-	// capability at all, which is the honest refusal rather than a fallback to
-	// this machine's disk.
-	filesys         *filesystem.Registry
-	filesFactory    FilesystemProviderFactory
-	sessionRegistry session.Registry
+	// filesOpen and filesBind are the assistant's route to the pane's own
+	// files (stage 10, ADR-anntnxdj §5): the SAME operations the Files panel
+	// runs on, asked per tool call for a short-lived binding of the run's own.
+	// Nil in either builds no file capability at all, which is the honest
+	// refusal rather than a fallback to this machine's disk.
+	filesOpen capability.FilesystemOpenOperation
+	filesBind capability.FilesystemBindingOperation
 	// expansions is the authenticated-channel seam that answers "what does
 	// $HOME read as, in the shell that would run this" for an approval
 	// question (nocx-4h0m7.5, assistant.ExpansionSource). The server
@@ -2888,7 +2885,7 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, agentTools agenttools.Registry, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, agentTools agenttools.Registry, client assistant.Client, askSub control.Submission, files filesRoute) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, s.contentDB)
@@ -2913,7 +2910,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 			harness: s.agentHarness, harnessID: s.agentHarnessID,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
-			filesys: s.filesys, filesFactory: s.filesProviderFor, sessionRegistry: s.registry,
+			filesOpen: files.open, filesBind: files.binding,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

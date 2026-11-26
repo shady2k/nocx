@@ -38,20 +38,30 @@ import (
 )
 
 // assistantFiles is the filesystem.HandleSource a run's file-tool capabilities
-// hold. It carries the pane's identity and the two things needed to reach it —
-// the session registry and the provider factory — and no provider of its own.
+// hold. It carries the pane's identity and the two OPERATIONS that reach it —
+// files.open's (resolve the session, register a provider, take a use-guard) and
+// the filesystem-binding's (close the binding this call minted) — and no
+// provider, no registry and no factory of its own.
+//
+// The operations rather than the raw registry are what keep this file inside
+// ADR-8eej3e66 §4: a provider call is only legitimate inside an operation's
+// scope, and the static check in internal/operation/scopes reads a direct
+// `reg.Register(...)` here as exactly what it is — a provider touched with no
+// scope open. Reaching the same registration through the service the operation
+// hands its callback is not a formality; it is the guard that makes the call
+// belong to a scoped request rather than to whatever goroutine holds the
+// registry.
 type assistantFiles struct {
-	reg       *filesystem.Registry
-	factory   FilesystemProviderFactory
-	sessions  session.Registry
+	open      capability.FilesystemOpenOperation
+	bind      capability.FilesystemBindingOperation
 	sessionID session.ID
 }
 
 var _ filesystem.HandleSource = assistantFiles{}
 
 // filesFor is the ONE place a run's route to the pane's own files is assembled
-// from the server's wiring: the registry, the factory and the session registry
-// the Files panel uses, plus the session the server fixed at ask time (AD-7).
+// from the server's wiring: the files operations the Files panel uses, plus the
+// session the server fixed at ask time (AD-7).
 //
 // It is a function rather than a literal at each site because the run's
 // AskParams is built in more than one place — the ask path, and the transport
@@ -62,9 +72,8 @@ var _ filesystem.HandleSource = assistantFiles{}
 // asks this; a caller that wants the honest refusal names no composition.
 func (h agentHandlers) filesFor(sessionID session.ID) assistantFiles {
 	return assistantFiles{
-		reg:       h.filesys,
-		factory:   h.filesFactory,
-		sessions:  h.sessionRegistry,
+		open:      h.filesOpen,
+		bind:      h.filesBind,
 		sessionID: sessionID,
 	}
 }
@@ -83,29 +92,44 @@ var ErrNoAssistantFiles = errors.New("transport: no file binding is available to
 // panel's binding is not reused because it may not exist, because its root and
 // watches are the panel's, and because a cached binding would need an owner to
 // close it on a path nobody owns.
+//
+// The whole creation runs INSIDE files.open's operation: the session lookup,
+// the registration and the use-guard are that operation's service methods, so
+// the provider is only ever touched while a scope is open (ADR-8eej3e66 §4).
+// The handle outlives it, which is what the operation is for — the service is
+// the reach, not the lifetime — and the binding is closed through the
+// filesystem-binding operation for the same reason.
 func (a assistantFiles) Acquire(ctx context.Context) (filesystem.Handle, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	if a.reg == nil || a.factory == nil || a.sessions == nil || a.sessionID == "" {
+	if a.open == nil || a.bind == nil || a.sessionID == "" {
 		return nil, nil, ErrNoAssistantFiles
 	}
-	sess, err := a.sessions.Get(a.sessionID)
+	var (
+		handle    filesystem.Handle
+		release   func()
+		bindingID string
+	)
+	err := a.open.Open(ctx, func(ctx context.Context, svc capability.FilesystemOpenService) error {
+		sess, gerr := svc.Get(a.sessionID)
+		if gerr != nil {
+			return gerr
+		}
+		id, _, oerr := svc.OpenBinding(ctx, sess, "")
+		if oerr != nil {
+			return oerr
+		}
+		bindingID = id
+		h, rel, aerr := svc.Acquire(id, runCaller{sessionID: a.sessionID})
+		if aerr != nil {
+			return aerr
+		}
+		handle, release = h, rel
+		return nil
+	})
 	if err != nil {
-		return nil, nil, err
-	}
-	provider, err := a.factory(sess, "")
-	if err != nil {
-		return nil, nil, err
-	}
-	caps, endpointID := capability.ProviderCapabilities(provider)
-	id, err := a.reg.Register(provider, sess.ID(), endpointID, caps)
-	if err != nil {
-		return nil, nil, err
-	}
-	handle, release, err := a.reg.Acquire(id, runCaller{sessionID: a.sessionID})
-	if err != nil {
-		_ = a.reg.Close(id)
+		a.abandon(ctx, bindingID)
 		return nil, nil, err
 	}
 	// The call may have been cancelled while the provider was being built —
@@ -114,16 +138,31 @@ func (a assistantFiles) Acquire(ctx context.Context) (filesystem.Handle, func(),
 	// acts, made at the one point where an abandoned binding could survive.
 	if err := ctx.Err(); err != nil {
 		release()
-		_ = a.reg.Close(id)
+		a.abandon(ctx, bindingID)
 		return nil, nil, err
 	}
 	var once sync.Once
 	return handle, func() {
 		once.Do(func() {
 			release()
-			_ = a.reg.Close(id)
+			a.abandon(ctx, bindingID)
 		})
 	}, nil
+}
+
+// abandon closes a binding this call minted and will not use. It runs after the
+// call's own operation has ended, so it opens the filesystem-binding operation
+// for itself. The call's own context is what it passes, cancelled or not: that
+// operation holds no admission and close reads no deadline, so the close does
+// not depend on the context being live — and a detached context would both drop
+// the invocation's own values and be refused by the operation-scope ratchet.
+func (a assistantFiles) abandon(ctx context.Context, bindingID string) {
+	if bindingID == "" {
+		return
+	}
+	_ = a.bind.Run(ctx, func(_ context.Context, svc capability.FilesystemBindingService) error {
+		return svc.Close(bindingID)
+	})
 }
 
 // runCaller owns exactly one session: the run's. It is filesystem.Caller's whole

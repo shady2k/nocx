@@ -433,6 +433,50 @@ func TestConnectionCloseAbortsAnOpenSessionAndSparesACommittingOne(t *testing.T)
 	}
 }
 
+// TestConnectionCloseDiscardsABrokenSessionsTemporary is the other half of the
+// observer's policy: a session whose fsync reported a writeback failure can no
+// longer be written or committed, so only an abort can end it — and its
+// connection going away IS that abort. Left alone, its temporary and its open
+// descriptor outlive every caller the daemon will ever have.
+func TestConnectionCloseDiscardsABrokenSessionsTemporary(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "note.txt")
+	mustWrite(t, file, []byte("old\n"))
+	svc := newWriteService(t, dir)
+	conn := host.New(strings.NewReader(""), io.Discard, "hash", "instance", discardLog())
+	ctx := host.WithConnection(context.Background(), conn)
+
+	id := writeID(t.Name())
+	if _, err := svc.Call(ctx, proto.OpWriteOpen, callParams(t, proto.FSWriteOpenParams{ID: id, Path: file})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Call(ctx, proto.OpWrite, callParams(t, proto.FSWriteParams{ID: id, Offset: 0, Data: []byte("new\n")})); err != nil {
+		t.Fatal(err)
+	}
+	svc.seams.syncTemp = func(*os.File) error { return syscall.EIO }
+	t.Cleanup(func() { svc.seams.syncTemp = nil })
+	_, err := commitTry(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: int64(len("new\n"))})
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("commit = %v, want the injected fsync failure", err)
+	}
+	if left := temps(t, dir); len(left) != 1 {
+		t.Fatalf("a failed fsync left %d temporaries, want the session's one", len(left))
+	}
+
+	svc.ConnectionClosed(conn)
+
+	if left := temps(t, dir); len(left) != 0 {
+		t.Fatalf("the closed connection left the broken session's temporary %v", left)
+	}
+	if got := mustRead(t, file); got != "old\n" {
+		t.Fatalf("target holds %q, want the bytes it had before the write", got)
+	}
+	result := commitOK(t, svc, proto.FSWriteCommitParams{ID: id, Path: file, Size: int64(len("new\n"))})
+	if result.Outcome != proto.FSOutcomeAborted {
+		t.Fatalf("a commit after the connection closed answered %q, want %q", result.Outcome, proto.FSOutcomeAborted)
+	}
+}
+
 // TestCancelPolicyRefusesTheTwoEndsOfASession: a half-applied commit or abort
 // is worse than a caller waiting, so both refuse cancellation while the reads
 // and the bytes stay cancellable.

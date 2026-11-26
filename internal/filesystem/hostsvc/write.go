@@ -539,11 +539,18 @@ func (s *Service) writeAbort(ctx context.Context, raw json.RawMessage) (any, err
 	return proto.FSWriteAbortResult{Outcome: proto.FSOutcomeAborted}, nil
 }
 
-// ConnectionClosed aborts every session still OPEN on the connection that just
-// ended, and leaves a committing one alone: the rename is the point of no
-// return, and its answer belongs to whoever asks next. It is the
+// ConnectionClosed aborts every session still open or broken on the connection
+// that just ended, and leaves a committing one alone: the rename is the point of
+// no return, and its answer belongs to whoever asks next. It is the
 // host.ConnectionObserver capability — the host calls it once, after Serve, and
 // a temporary nobody will finish must not outlive the caller that started it.
+//
+// The state is read twice, and the second read is the one that decides. The
+// first is a filter that keeps a settled session off the lock, and a session can
+// move between the two — a temporary that became ready a moment ago is a
+// session that must still be aborted. Deciding on the unlocked read would skip
+// it and leak its temporary for the daemon's lifetime, so the switch runs inside
+// the session's lock against the state it will act on.
 func (s *Service) ConnectionClosed(h *host.Host) {
 	if h == nil {
 		return
@@ -552,26 +559,26 @@ func (s *Service) ConnectionClosed(h *host.Host) {
 		if sess.conn != any(h) {
 			continue
 		}
+		if st := writeState(sess.state.Load()); st != writeOpening && st != writeOpen && st != writeBroken {
+			continue
+		}
+		sess.mu.Lock()
 		switch writeState(sess.state.Load()) {
 		case writeOpening:
 			// The temporary is still being created. Marking the session over
 			// is all this can do — the write-open that owns the file's name
 			// removes it on its way out, and the mark is the only evidence it
 			// needs.
-			sess.mu.Lock()
-			if writeState(sess.state.Load()) == writeOpening {
+			sess.state.Store(int32(writeAborted))
+		case writeOpen, writeBroken:
+			// A broken session is aborted here for the same reason an open one
+			// is: its fsync already failed, so no commit will ever end it, and
+			// only this removes its temporary and closes its descriptor.
+			if err := s.discard(sess); err == nil {
 				sess.state.Store(int32(writeAborted))
 			}
-			sess.mu.Unlock()
-		case writeOpen:
-			sess.mu.Lock()
-			if writeState(sess.state.Load()) == writeOpen {
-				if err := s.discard(sess); err == nil {
-					sess.state.Store(int32(writeAborted))
-				}
-			}
-			sess.mu.Unlock()
 		}
+		sess.mu.Unlock()
 	}
 }
 

@@ -1,67 +1,34 @@
 package assistant
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"errors"
 	"fmt"
-	"os"
-	"reflect"
+
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
-// FileVersionStrategy records which evidence binds an approved path. Stat is
-// cheap and catches accidental replacement; the content hash also catches an
-// intentional rewrite. In one sentence: stat catches accidents, hash catches intent.
-type FileVersionStrategy string
-
-const (
-	FileVersionStat FileVersionStrategy = "stat"
-	FileVersionHash FileVersionStrategy = "sha256"
-)
-
-// FileVersionPolicy chooses when a path gets content evidence in addition to
-// its device, inode, size and ctime. Executables are always hashed, and small
-// files are cheap to hash; larger ordinary files use the stat identity only.
-type FileVersionPolicy struct {
-	HashExecutable bool
-	HashFilesUpTo  int64
-}
-
-const defaultHashFilesUpTo int64 = 64 * 1024
-
-func DefaultFileVersionPolicy() FileVersionPolicy {
-	return FileVersionPolicy{HashExecutable: true, HashFilesUpTo: defaultHashFilesUpTo}
-}
-
-// FileVersionSource is the narrow filesystem seam used by the version check.
-// ReadFile is needed only for hash-bound versions; stat-bound versions never
-// read file contents.
-type FileVersionSource interface {
-	Stat(string) (os.FileInfo, error)
-	ReadFile(string) ([]byte, error)
-}
-
-type osFileVersionSource struct{}
-
-func (osFileVersionSource) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
-
-func (osFileVersionSource) ReadFile(path string) ([]byte, error) {
-	// #nosec G304 -- the path is the approved file selected by the caller.
-	return os.ReadFile(path)
-}
-
-// FileVersion is the path identity recorded with an approval. Device, Inode,
-// Size and ctime are always present. SHA256 is present only for hash-bound
-// versions and is computed over the exact bytes read or supplied by a writer.
+// FileVersion is the identity of the bytes a person was shown, recorded with an
+// approval and re-read when the answer comes back.
+//
+// It is the PANE's own vocabulary — filesystem.Version, the size, modification
+// time and sha256 the pane's provider reports for exactly those bytes — and it
+// is read through the pane's Handle (RunContext.Files). Before stage 10 the
+// evidence was an os.Stat and an os.ReadFile of the named path, which on an SSH
+// pane described this machine's same-named file: the question read a local file
+// that had nothing to do with the call, and an approval could bind bytes the
+// person was never shown (nocx-a62cl.11.2, found while planning the stage).
 type FileVersion struct {
-	Path      string
-	Device    uint64
-	Inode     uint64
-	Size      int64
-	CTimeSec  int64
-	CTimeNsec int64
-	Strategy  FileVersionStrategy
-	SHA256    string
+	// Path is the path the model named, kept so a refusal names the file the
+	// person has to reconsider.
+	Path string
+	// Canonical is the pane's own identity for Path at capture time — symlinks
+	// followed, the provider's rules applied. Verification resolves the path
+	// again and compares, so a path that now names another object is a
+	// different file and is refused as one.
+	Canonical string
+	// Version is what the pane reported for the bytes at Canonical.
+	Version filesystem.Version
 }
 
 // FileVersionMismatchError means the approved path no longer names the same
@@ -76,239 +43,107 @@ func (e *FileVersionMismatchError) Error() string {
 	return fmt.Sprintf("file %q changed since approval: %s", e.Path, e.Reason)
 }
 
-// CaptureFileVersion captures the default path binding used for approvals.
-func CaptureFileVersion(path string) (FileVersion, error) {
-	return CaptureFileVersionFrom(path, osFileVersionSource{}, DefaultFileVersionPolicy())
-}
-
-// CaptureFileVersionFrom captures one path through source. Hash captures are
-// bounded by a stat-before/read/stat-after fence: a replacement or concurrent
-// mutation during the read is refused rather than binding torn bytes.
-func CaptureFileVersionFrom(path string, source FileVersionSource, policy FileVersionPolicy) (FileVersion, error) {
-	if source == nil {
-		return FileVersion{}, fmt.Errorf("file version %q: nil source", path)
-	}
-	before, err := source.Stat(path)
-	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: stat: %w", path, err)
-	}
-	version, err := versionFromInfo(path, before)
-	if err != nil {
-		return FileVersion{}, err
-	}
-	if !shouldHash(before, policy) {
-		version.Strategy = FileVersionStat
-		return version, nil
-	}
-
-	data, err := source.ReadFile(path)
-	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: read for hash: %w", path, err)
-	}
-	after, err := source.Stat(path)
-	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: stat after hash: %w", path, err)
-	}
-	if !sameInfo(before, after) || int64(len(data)) != before.Size() {
-		return FileVersion{}, &FileVersionMismatchError{Path: path, Reason: "changed while its content was being hashed"}
-	}
-	version.Strategy = FileVersionHash
-	version.SHA256 = hashBytes(data)
-	return version, nil
-}
-
-// VerifyFileVersion checks the path immediately before dispatch. For a
-// hash-bound version, the evidence interval begins at the first stat and ends
-// at the second stat after the content read; a stat-bound version is one
-// metadata sample. This proves only that those observations matched, not that
-// a later consumer open or execution uses the same version.
+// CaptureFileVersion records the version an approval is about to bind: the
+// canonical identity of path and the exact bytes the pane holds there.
 //
-// Narrow in-process tools could use the stronger alternative: open an *os.File
-// and keep that descriptor through the operation. This shared path-based API
-// does not choose it because current file capabilities pass paths, while
-// session.run gives a command string to a shell that opens the path itself.
-func VerifyFileVersion(version FileVersion) error {
-	return VerifyFileVersionFrom(version, osFileVersionSource{})
+// Every failure is the caller's to treat as "nothing was captured" — a nil
+// source, a source that cannot be acquired, a path that does not exist, a file
+// that is not regular, a file over filesystem.MaxReadBytes — because an
+// approval that cannot say WHAT it covers must not be able to authorise it.
+// The only caller that reads a failure as an ordinary answer is files.create,
+// whose success precondition is a path that does not exist yet.
+//
+// The handle lives for this one read and is released on every path, so a tool
+// never holds a binding between calls.
+func CaptureFileVersion(ctx context.Context, source filesystem.HandleSource, path string) (FileVersion, error) {
+	if source == nil {
+		return FileVersion{}, fmt.Errorf("file version %q: no file binding", path)
+	}
+	handle, release, err := source.Acquire(ctx)
+	if err != nil {
+		return FileVersion{}, fmt.Errorf("file version %q: acquire: %w", path, err)
+	}
+	defer release()
+	canonical, err := handle.Canonical(ctx, path)
+	if err != nil {
+		return FileVersion{}, fmt.Errorf("file version %q: canonical: %w", path, err)
+	}
+	versioned, err := handle.Versioned()
+	if err != nil {
+		return FileVersion{}, fmt.Errorf("file version %q: versioned: %w", path, err)
+	}
+	_, version, err := versioned.ReadVersion(ctx, canonical, filesystem.MaxReadBytes)
+	if err != nil {
+		return FileVersion{}, fmt.Errorf("file version %q: read version: %w", path, err)
+	}
+	return FileVersion{Path: path, Canonical: canonical, Version: version}, nil
 }
 
-func VerifyFileVersionFrom(version FileVersion, source FileVersionSource) error {
+// VerifyFileVersion checks the approved path again, immediately before
+// dispatch and through the same pane binding the capture used. It answers nil
+// only when the path still resolves to the object the person was shown and that
+// object still has the same size, modification time and sha256.
+//
+// The interval this proves is between the capture and this read. A change that
+// lands after it is caught by the conditional write itself (filesystem.Expect
+// at the host's rename), which is the last and strongest check; what this one
+// buys is the honest answer — "changed since the question" — before a
+// capability is even constructed.
+func VerifyFileVersion(ctx context.Context, source filesystem.HandleSource, version FileVersion) error {
 	if source == nil {
-		return fmt.Errorf("file version %q: nil source", version.Path)
+		return fmt.Errorf("file version %q: no file binding", version.Path)
 	}
-	before, err := source.Stat(version.Path)
+	handle, release, err := source.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("file version %q: stat before execution: %w", version.Path, err)
+		return fmt.Errorf("file version %q: acquire for verification: %w", version.Path, err)
 	}
-	compareErr := compareInfo(version, before)
-	if compareErr != nil {
-		return compareErr
+	defer release()
+	canonical, err := handle.Canonical(ctx, version.Path)
+	if err != nil {
+		return fmt.Errorf("file version %q: canonical for verification: %w", version.Path, err)
 	}
-	if version.Strategy != FileVersionHash {
-		return nil
+	if canonical != version.Canonical {
+		return &FileVersionMismatchError{Path: version.Path, Reason: "the path now names a different object"}
 	}
-	data, err := source.ReadFile(version.Path)
+	versioned, err := handle.Versioned()
+	if err != nil {
+		return fmt.Errorf("file version %q: versioned for verification: %w", version.Path, err)
+	}
+	_, current, err := versioned.ReadVersion(ctx, canonical, filesystem.MaxReadBytes)
 	if err != nil {
 		return fmt.Errorf("file version %q: read for verification: %w", version.Path, err)
 	}
-	after, err := source.Stat(version.Path)
-	if err != nil {
-		return fmt.Errorf("file version %q: stat after verification: %w", version.Path, err)
-	}
-	if !sameInfo(before, after) || int64(len(data)) != before.Size() {
-		return &FileVersionMismatchError{Path: version.Path, Reason: "changed while its content was being verified"}
-	}
-	if hashBytes(data) != version.SHA256 {
-		return &FileVersionMismatchError{Path: version.Path, Reason: "content hash differs"}
+	if reason := versionDifference(version.Version, current); reason != "" {
+		return &FileVersionMismatchError{Path: version.Path, Reason: reason}
 	}
 	return nil
 }
 
-func versionFromInfo(path string, info os.FileInfo) (FileVersion, error) {
-	if info == nil {
-		return FileVersion{}, fmt.Errorf("file version %q: stat returned no file info", path)
-	}
-	if !info.Mode().IsRegular() {
-		return FileVersion{}, fmt.Errorf("file version %q: not a regular file", path)
-	}
-	device, inode, ctimeSec, ctimeNsec, err := statIdentity(info)
-	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: stat identity: %w", path, err)
-	}
-	return FileVersion{Path: path, Device: device, Inode: inode, Size: info.Size(), CTimeSec: ctimeSec, CTimeNsec: ctimeNsec}, nil
-}
-
-func shouldHash(info os.FileInfo, policy FileVersionPolicy) bool {
-	return (policy.HashExecutable && info.Mode()&0o111 != 0) || (policy.HashFilesUpTo >= 0 && info.Size() <= policy.HashFilesUpTo)
-}
-
-func compareInfo(version FileVersion, info os.FileInfo) error {
-	current, err := versionFromInfo(version.Path, info)
-	if err != nil {
-		return err
-	}
-	if !sameVersionMetadata(version, current) {
-		return &FileVersionMismatchError{Path: version.Path, Reason: "device, inode, size or ctime differs"}
-	}
-	return nil
-}
-
-func sameInfo(a, b os.FileInfo) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	av, errA := versionFromInfo("", a)
-	bv, errB := versionFromInfo("", b)
-	return errA == nil && errB == nil && sameVersionMetadata(av, bv)
-}
-
-func sameVersionMetadata(a, b FileVersion) bool {
-	return a.Device == b.Device && a.Inode == b.Inode && a.Size == b.Size && a.CTimeSec == b.CTimeSec && a.CTimeNsec == b.CTimeNsec
-}
-
-func hashBytes(data []byte) string {
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:])
-}
-
-func statIdentity(info os.FileInfo) (uint64, uint64, int64, int64, error) {
-	if info == nil || info.Sys() == nil {
-		return 0, 0, 0, 0, errors.New("missing platform stat data")
-	}
-	value := reflect.ValueOf(info.Sys())
-	for value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return 0, 0, 0, 0, errors.New("missing platform stat data")
-		}
-		value = value.Elem()
-	}
-	if value.Kind() != reflect.Struct {
-		return 0, 0, 0, 0, errors.New("invalid platform stat data")
-	}
-	device, ok := integerField(value, "Dev", "Device")
-	if !ok {
-		return 0, 0, 0, 0, errors.New("device is unavailable")
-	}
-	inode, ok := integerField(value, "Ino", "Inode", "FileIndex")
-	if !ok {
-		return 0, 0, 0, 0, errors.New("inode is unavailable")
-	}
-	ctime, ok := timeField(value, "Ctim", "Ctimespec", "Ctime", "ChangeTime")
-	if !ok {
-		return 0, 0, 0, 0, errors.New("ctime is unavailable")
-	}
-	return device, inode, ctime.sec, ctime.nsec, nil
-}
-
-type statTime struct {
-	sec  int64
-	nsec int64
-}
-
-func timeField(value reflect.Value, names ...string) (statTime, bool) {
-	for _, name := range names {
-		field := value.FieldByName(name)
-		if !field.IsValid() {
-			continue
-		}
-		if sec, ok := signedTimeField(field, "Sec", "TV_sec", "Seconds"); ok {
-			nsec, _ := signedTimeField(field, "Nsec", "TV_nsec", "Nanoseconds")
-			return statTime{sec: sec, nsec: nsec}, true
-		}
-		if sec, ok := signedField(field); ok {
-			return statTime{sec: sec}, true
-		}
-	}
-	return statTime{}, false
-}
-
-func signedTimeField(value reflect.Value, names ...string) (int64, bool) {
-	for _, name := range names {
-		field := value.FieldByName(name)
-		if !field.IsValid() {
-			continue
-		}
-		if result, ok := signedField(field); ok {
-			return result, true
-		}
-		if result, ok := unsignedField(field); ok && result <= uint64(1<<63-1) {
-			return int64(result), true
-		}
-	}
-	return 0, false
-}
-
-func integerField(value reflect.Value, names ...string) (uint64, bool) {
-	for _, name := range names {
-		field := value.FieldByName(name)
-		if !field.IsValid() {
-			continue
-		}
-		if result, ok := unsignedField(field); ok {
-			return result, true
-		}
-		if result, ok := signedField(field); ok && result >= 0 {
-			return uint64(result), true
-		}
-	}
-	return 0, false
-}
-
-func unsignedField(value reflect.Value) (uint64, bool) {
-	switch value.Kind() {
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return value.Uint(), true
+// versionDifference names the field that moved, or "" when the two versions
+// describe the same bytes. The order is the one a reader would check them in:
+// a different length is not the same file, a different mtime means it was
+// written, and the digest is what catches a rewrite of the same length inside
+// one timestamp granule.
+func versionDifference(want, got filesystem.Version) string {
+	switch {
+	case got.Size != want.Size:
+		return "size differs"
+	case got.MtimeNs != want.MtimeNs:
+		return "modification time differs"
+	case got.SHA256 != want.SHA256:
+		return "content hash differs"
 	default:
-		return 0, false
+		return ""
 	}
 }
 
-func signedField(value reflect.Value) (int64, bool) {
-	switch value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return value.Int(), true
-	default:
-		return 0, false
-	}
+// isNotFound reports whether err is the pane saying the path does not exist.
+// A file tool's own answer depends on it — files.create's success precondition
+// is a missing path — and it is asked here so the one spelling of "missing" the
+// filesystem seam defines is spelled once.
+func isNotFound(err error) bool {
+	var notFound *filesystem.ErrNotFound
+	return errors.As(err, &notFound)
 }
 
 func cloneFileVersions(versions []FileVersion) []FileVersion {

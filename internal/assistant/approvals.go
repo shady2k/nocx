@@ -14,10 +14,12 @@ package assistant
 // is no suspension for the decision to cross.
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 // FileVersionBindingState says whether a proposal names files whose versions
@@ -57,8 +59,9 @@ type Approval struct {
 	// FileVersionState distinguishes an explicit no-file proposal from a
 	// file-bearing proposal whose identities were never captured.
 	FileVersionState FileVersionBindingState
-	// FileVersions are the exact path versions the proposal is allowed to
-	// read or execute. They are carriers, not part of the proposal key.
+	// FileVersions are the PANE's versions of the paths the proposal may read
+	// or execute — the evidence the question binds, read through the run's
+	// own file binding. They are carriers, not part of the proposal key.
 	FileVersions []FileVersion
 	// ExpansionValues are the expression→value pairs the person was SHOWN
 	// beside the verbatim command (nocx-4h0m7.5). They are a carrier, never
@@ -383,9 +386,14 @@ func (s *ApprovalStore) ApprovedFileVersions(ap Approval) ([]FileVersion, bool) 
 }
 
 // VerifyApprovedFileVersions checks all approved paths immediately before
-// dispatch. The first failure names the file whose approval is no longer
-// valid; no caller should execute the tool after a non-nil error.
-func (s *ApprovalStore) VerifyApprovedFileVersions(ap Approval) error {
+// dispatch, through the run's own pane binding. The first failure names the
+// file whose approval is no longer valid; no caller should execute the tool
+// after a non-nil error.
+//
+// A missing binding is a failure, not a skip: a captured approval with no
+// source to re-read it through cannot prove the bytes are the ones the person
+// saw, and "could not check" must never read as "unchanged".
+func (s *ApprovalStore) VerifyApprovedFileVersions(ctx context.Context, source filesystem.HandleSource, ap Approval) error {
 	s.mu.Lock()
 	entry, ok := s.approved[keyOf(ap)]
 	state := entry.fileVersionState
@@ -405,7 +413,7 @@ func (s *ApprovalStore) VerifyApprovedFileVersions(ap Approval) error {
 		return fmt.Errorf("approval: file version binding is missing")
 	}
 	for _, version := range versions {
-		if err := VerifyFileVersion(version); err != nil {
+		if err := VerifyFileVersion(ctx, source, version); err != nil {
 			return err
 		}
 	}

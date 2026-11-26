@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/portsprobe"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
@@ -39,11 +40,11 @@ type step struct {
 // netstat (detected explicitly; -p may be unavailable, so process evidence
 // is unsupported) → lsof → sockstat → unavailable.
 var probeLadder = []*step{
-	{name: ProbeSS, parse: parseSS},
-	{name: ProbeNetstat, parse: parseNetstat},
-	{name: ProbeBusyboxNetstat, parse: parseBusyboxNetstat},
-	{name: ProbeLsof, parse: ParseLsof, noMatchExit: 1},
-	{name: ProbeSockstat, parse: parseSockstat},
+	{name: ProbeSS, parse: portsprobe.ParseSS},
+	{name: ProbeNetstat, parse: portsprobe.ParseNetstat},
+	{name: ProbeBusyboxNetstat, parse: portsprobe.ParseBusyboxNetstat},
+	{name: ProbeLsof, parse: portsprobe.ParseLsof, noMatchExit: 1},
+	{name: ProbeSockstat, parse: portsprobe.ParseSockstat},
 }
 
 // ladderIndex returns the ladder position of the named probe, or 0 when

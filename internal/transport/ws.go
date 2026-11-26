@@ -1080,7 +1080,7 @@ type WSServer struct {
 	tunnelConnector tunnel.Connector
 
 	// discoverySched owns the port-discovery cadence (spec §4, nocx-wzc4.2):
-	// settle sample, prompt debounce, hidden-tab pause, one-in-flight. When
+	// settle sample, hidden-tab pause, one-in-flight. When
 	// nil, the ports.* methods return a JSON-RPC error and the cadence hooks
 	// are no-ops.
 	discoverySched *discovery.Scheduler

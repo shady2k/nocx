@@ -37,71 +37,48 @@ import (
 	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/portsprobe"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// State is the overall outcome of a discovery sample (spec §5). The five
-// result states are exact: a successful empty result means "no listeners
-// observed", and every other state means could-not-determine — never "no
-// ports". StatePending is not a result: it is the state before the first
-// sample has completed.
-type State string
-
-const (
-	StateAvailable                 State = "available"
-	StateAvailableLimited          State = "available-limited"
-	StateUnavailable               State = "unavailable"
-	StateFailedTransiently         State = "failed-transiently"
-	StatePermissionOrPolicyRefused State = "permission-or-policy-refused"
-	StatePending                   State = "pending"
+// The result vocabulary — State, AddressFamily, ProcessEvidence, Process,
+// Listener, Sample — is internal/portsprobe's, and these names are aliases
+// for exactly that reason: the parse that produces a listener and the domain
+// that judges it must be ONE declaration, or the far helper's copy and this
+// package's drift on the day a field is added (design §5.10, C30). The
+// parsers and the types they return have to be linkable into the artifact
+// deployed to somebody else's host, which no package on this side of the
+// connection stack may be; the domain keeps the vocabulary by name and the
+// split is literal.
+//
+// The same shape already carries the probe vocabulary from internal/remoteprobe
+// in probes.go, for the same reason.
+type (
+	State           = portsprobe.State
+	AddressFamily   = portsprobe.AddressFamily
+	ProcessEvidence = portsprobe.ProcessEvidence
+	Process         = portsprobe.Process
+	Listener        = portsprobe.Listener
+	Sample          = portsprobe.Sample
 )
 
-// AddressFamily is the IP family of a listener's bind address.
-type AddressFamily string
-
+// The states, families and evidence values, spelled here where the domain
+// reads them.
 const (
-	FamilyIPv4 AddressFamily = "ipv4"
-	FamilyIPv6 AddressFamily = "ipv6"
+	StateAvailable                 = portsprobe.StateAvailable
+	StateAvailableLimited          = portsprobe.StateAvailableLimited
+	StateUnavailable               = portsprobe.StateUnavailable
+	StateFailedTransiently         = portsprobe.StateFailedTransiently
+	StatePermissionOrPolicyRefused = portsprobe.StatePermissionOrPolicyRefused
+	StatePending                   = portsprobe.StatePending
+
+	FamilyIPv4 = portsprobe.FamilyIPv4
+	FamilyIPv6 = portsprobe.FamilyIPv6
+
+	EvidenceKnown            = portsprobe.EvidenceKnown
+	EvidencePermissionDenied = portsprobe.EvidencePermissionDenied
+	EvidenceUnsupported      = portsprobe.EvidenceUnsupported
 )
-
-// ProcessEvidence is three-valued — known | permission-denied | unsupported
-// — never an empty string (spec §5): "nobody owns it" and "I was not allowed
-// to see" are different facts and must render differently.
-type ProcessEvidence string
-
-const (
-	EvidenceKnown            ProcessEvidence = "known"
-	EvidencePermissionDenied ProcessEvidence = "permission-denied"
-	EvidenceUnsupported      ProcessEvidence = "unsupported"
-)
-
-// Process is the process evidence for one listener. Name and PID are valid
-// when Evidence is EvidenceKnown.
-type Process struct {
-	Evidence ProcessEvidence
-	Name     string
-	PID      int
-}
-
-// Listener is one remote listening TCP port.
-type Listener struct {
-	Family  AddressFamily
-	Address string // bind address as the probe reported it (may be a wildcard)
-	Port    int
-	Process Process
-}
-
-// Sample is one discovery result.
-type Sample struct {
-	State          State
-	Listeners      []Listener
-	Probe          string        // dialect that produced the sample; "" when none did
-	ProbesTried    []string      // probes attempted for this pass, in order
-	Duration       time.Duration // wall time of the sampling pass
-	Classification string        // human-readable why: refusal detail, truncation, ...
-	Stderr         string        // bounded excerpt of the probe's stderr, for diagnostics
-	Canceled       bool          // ctx canceled, or the lease closed (Detector.Close), while sampling; State/Listeners are the previous result
-}
 
 // Connector acquires an owned lease for discovery (spec §3) — the SSH-shaped
 // half of the seam's acquisition, kept at the composition boundary. The
@@ -337,7 +314,7 @@ func (r probeResult) finish(dur time.Duration) Sample {
 func (r probeResult) state() State {
 	switch r.kind {
 	case outcomeValid:
-		return SampleState(r.listeners)
+		return portsprobe.SampleState(r.listeners)
 	case outcomeUnavailable:
 		return StateUnavailable
 	case outcomeRefused:
@@ -347,25 +324,6 @@ func (r probeResult) state() State {
 	default:
 		return StatePending
 	}
-}
-
-// SampleState projects the listeners of a valid sample into a state: a
-// successful empty result means "no listeners observed" (available); when
-// every row's process evidence is degraded — the probe cannot provide it
-// (busybox netstat) or none was visible (ss as non-root on a fully owned
-// table, or a local read whose owners were not visible) — the sample is
-// available-limited. The native local provider projects through this same
-// function, so both transports agree on what the evidence means.
-func SampleState(listeners []Listener) State {
-	if len(listeners) == 0 {
-		return StateAvailable
-	}
-	for _, l := range listeners {
-		if l.Process.Evidence == EvidenceKnown {
-			return StateAvailable
-		}
-	}
-	return StateAvailableLimited
 }
 
 // sampleOnce runs one sampling pass: the selected probe, or selection from

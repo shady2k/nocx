@@ -31,7 +31,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 // ErrUnsupported is the typed "not implemented on this platform" fallback.
@@ -54,13 +54,13 @@ var ErrToolMissing = errors.New("nativeports: no listener tool available on this
 // visible set never depends on /proc or API enumeration order — the remote
 // ladder's ss output is sorted the same way, and both panels show the same
 // shape.
-func Listeners(ctx context.Context) ([]discovery.Listener, error) {
+func Listeners(ctx context.Context) ([]portsprobe.Listener, error) {
 	ls, err := listeners(ctx)
 	sortListeners(ls)
 	return ls, err
 }
 
-func sortListeners(ls []discovery.Listener) {
+func sortListeners(ls []portsprobe.Listener) {
 	sort.SliceStable(ls, func(i, j int) bool {
 		if ls[i].Port != ls[j].Port {
 			return ls[i].Port < ls[j].Port

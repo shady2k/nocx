@@ -1,4 +1,13 @@
-package discovery
+package portsprobe
+
+// One parser per probe dialect: the five tables the ladder can read, plus
+// the local machine's lsof on darwin. Each answers two things at once — the
+// rows, and whether the text was that dialect at all — because "I read the
+// table and it was empty" and "this is not the table I asked for" are
+// different facts and a caller must be able to advance the ladder on the
+// second without losing the first. Every parser is exported: the far helper
+// keeps its own ladder (nocx-oalo1.13.2) beside this package's, and one
+// implementation with two callers is the whole point of the split.
 
 import (
 	"regexp"
@@ -58,11 +67,11 @@ func splitLines(b []byte) []string {
 // users:(("systemd-resolve",pid=714,fd=18)).
 var ssUsersRe = regexp.MustCompile(`users:\(\(\"([^\"]*)\",pid=(\d+)`)
 
-// parseSS parses `LC_ALL=C ss -H -lntp` output: whitespace-separated columns
+// ParseSS parses `LC_ALL=C ss -H -lntp` output: whitespace-separated columns
 // State Recv-Q Send-Q Local Peer [Process]. A row without a users: column is
 // a socket whose owner the probe was not allowed to see — permission-denied
 // evidence, never "unowned" (spec §5).
-func parseSS(body []byte) ([]Listener, bool) {
+func ParseSS(body []byte) ([]Listener, bool) {
 	var out []Listener
 	for _, line := range splitLines(body) {
 		fields := strings.Fields(line)
@@ -92,12 +101,12 @@ func parseSS(body []byte) ([]Listener, bool) {
 	return out, true
 }
 
-// parseNetstat parses net-tools `netstat -lntp` output. Rows are tcp/tcp6
+// ParseNetstat parses net-tools `netstat -lntp` output. Rows are tcp/tcp6
 // lines with State LISTEN and a PID/Program name column; a bare "-" in that
 // column is a socket whose owner was not visible — permission-denied
 // evidence. Anything else (BSD netstat, usage text) is not this dialect and
 // reports unsupported, so the ladder advances.
-func parseNetstat(body []byte) ([]Listener, bool) {
+func ParseNetstat(body []byte) ([]Listener, bool) {
 	var out []Listener
 	for _, line := range splitLines(body) {
 		fields := strings.Fields(line)
@@ -130,11 +139,11 @@ func parseNetstat(body []byte) ([]Listener, bool) {
 	return out, true
 }
 
-// parseBusyboxNetstat parses `netstat -ltn` output on a host whose netstat
+// ParseBusyboxNetstat parses `netstat -ltn` output on a host whose netstat
 // rejected -p (busybox, detected explicitly): the same table without the PID
 // column, so process evidence is unsupported for every row (spec §5:
 // three-valued, never an empty string).
-func parseBusyboxNetstat(body []byte) ([]Listener, bool) {
+func ParseBusyboxNetstat(body []byte) ([]Listener, bool) {
 	var out []Listener
 	for _, line := range splitLines(body) {
 		fields := strings.Fields(line)
@@ -176,9 +185,9 @@ func parseBusyboxNetstat(body []byte) ([]Listener, bool) {
 // is lsof it means the table could not be read, which is never the same
 // answer as an empty one.
 //
-// Exported because it has two callers and must only ever have one
-// implementation: the ladder's lsof rung here, and internal/nativeports on
-// darwin, where lsof IS the local read. That package briefly kept a second
+// It has two callers and must only ever have one implementation: the
+// ladder's lsof rung, and internal/nativeports on darwin, where lsof IS the
+// local read. That package briefly kept a second
 // copy, which read the bind address out of the last whitespace-separated
 // field — lsof's last field is the state, so it rejected every row and every
 // Mac reported "no listening ports" (nocx-ou3e).
@@ -220,10 +229,10 @@ func ParseLsof(body []byte) ([]Listener, bool) {
 	return out, true
 }
 
-// parseSockstat parses FreeBSD `sockstat -4 -l` output: columns USER COMMAND
+// ParseSockstat parses FreeBSD `sockstat -4 -l` output: columns USER COMMAND
 // PID FD PROTO LOCAL ADDRESS FOREIGN ADDRESS. LOCAL ADDRESS is host:port;
 // wildcards print as "*.22". Rows carry process evidence.
-func parseSockstat(body []byte) ([]Listener, bool) {
+func ParseSockstat(body []byte) ([]Listener, bool) {
 	var out []Listener
 	for _, line := range splitLines(body) {
 		fields := strings.Fields(line)

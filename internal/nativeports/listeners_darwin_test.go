@@ -19,7 +19,7 @@ package nativeports
 import (
 	"testing"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 // Real output, including the header line and the trailing state column.
@@ -34,7 +34,7 @@ node      12345 shady   23u  IPv6 0x9f1a2b3c4d5e6f70      0t0  TCP [::1]:5173 (L
 // table needed: every row here ends in "(LISTEN)", and every row must still
 // yield its address, port and process.
 func TestDarwinLsofDialect_EveryRowYieldsItsAddress(t *testing.T) {
-	got, ok := discovery.ParseLsof([]byte(lsofFixture))
+	got, ok := portsprobe.ParseLsof([]byte(lsofFixture))
 	if !ok {
 		t.Fatal("ParseLsof rejected real macOS lsof output")
 	}
@@ -61,8 +61,8 @@ func TestDarwinLsofDialect_EveryRowYieldsItsAddress(t *testing.T) {
 		if g.Process.Name != w.name || g.Process.PID != w.pid {
 			t.Errorf("row %d process = %s/%d, want %s/%d", i, g.Process.Name, g.Process.PID, w.name, w.pid)
 		}
-		if g.Process.Evidence != discovery.EvidenceKnown {
-			t.Errorf("row %d evidence = %q, want %q — an lsof row always names its process", i, g.Process.Evidence, discovery.EvidenceKnown)
+		if g.Process.Evidence != portsprobe.EvidenceKnown {
+			t.Errorf("row %d evidence = %q, want %q — an lsof row always names its process", i, g.Process.Evidence, portsprobe.EvidenceKnown)
 		}
 	}
 }
@@ -77,22 +77,22 @@ func TestDarwinLsofDialect_EveryRowYieldsItsAddress(t *testing.T) {
 // and are otherwise identical.
 //
 // Pinned rather than fixed here: the classification is the remote ladder's
-// too (internal/discovery/parse.go familyOf), a fix belongs in that one owner,
+// too (internal/portsprobe/parse.go familyOf), a fix belongs in that one owner,
 // and it is cosmetic — the panel shows a family badge and a duplicate row, not
 // a wrong port. Fixing it in this package alone would re-fork the parse that
 // this file exists because someone forked.
 func TestDarwinLsofDialect_FamilyComesFromTheAddress(t *testing.T) {
-	got, ok := discovery.ParseLsof([]byte(lsofFixture))
+	got, ok := portsprobe.ParseLsof([]byte(lsofFixture))
 	if !ok {
 		t.Fatal("ParseLsof rejected real macOS lsof output")
 	}
-	if got[2].Family != discovery.FamilyIPv4 {
+	if got[2].Family != portsprobe.FamilyIPv4 {
 		t.Errorf("127.0.0.1 classified %q, want ipv4", got[2].Family)
 	}
-	if got[3].Family != discovery.FamilyIPv6 {
+	if got[3].Family != portsprobe.FamilyIPv6 {
 		t.Errorf("::1 classified %q, want ipv6", got[3].Family)
 	}
-	if got[0].Family != discovery.FamilyIPv4 || got[1].Family != discovery.FamilyIPv4 {
+	if got[0].Family != portsprobe.FamilyIPv4 || got[1].Family != portsprobe.FamilyIPv4 {
 		t.Errorf("wildcard rows classified %q/%q; today both read ipv4 because the address is bare \"*\" — if this now fails, the family fix landed and this test should assert it instead", got[0].Family, got[1].Family)
 	}
 }
@@ -107,7 +107,7 @@ func TestDarwinLsofDialect_RejectsWhatItCannotRead(t *testing.T) {
 		"missing pid": "COMMAND     PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\nnotapid     abc shady    8u  IPv4 0xe7cc      0t0  TCP *:7000 (LISTEN)\n",
 		"no address":  "COMMAND     PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\nnoport      602 shady    9u  IPv4 0x2ac9      0t0  TCP 127.0.0.1 (LISTEN)\n",
 	} {
-		if _, ok := discovery.ParseLsof([]byte(body)); ok {
+		if _, ok := portsprobe.ParseLsof([]byte(body)); ok {
 			t.Errorf("%s: accepted, want rejection — a guessed table is worse than an admitted failure", name)
 		}
 	}

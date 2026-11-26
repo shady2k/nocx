@@ -54,6 +54,8 @@ func toolBound(ctx context.Context) (agenttools.ResultBound, error) {
 var executors = map[string]func(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error){
 	"fetch.url":              executeFetchURL,
 	"files.read":             executeFilesRead,
+	"files.list":             executeFilesList,
+	"files.search":           executeFilesSearch,
 	"files.edit":             executeFilesEdit,
 	"files.create":           executeFilesCreate,
 	"session.list":           executeSessionListTool,
@@ -734,6 +736,226 @@ type filesMutationResult struct {
 	Status   string `json:"status"`
 	Revision string `json:"revision,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// filesListEntry is one row of a files.list answer. The fields mirror the
+// provider's Entry rather than the whole of it: a model needs the name, the
+// kind, the size and where a symlink points, and `mode` is a number it cannot
+// act on. modTime is the same RFC3339 form the Files panel puts on the wire,
+// because a second time format is a second thing to get wrong.
+type filesListEntry struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Kind       string `json:"kind"`
+	Size       int64  `json:"size"`
+	ModTime    string `json:"modTime,omitempty"`
+	LinkTarget string `json:"linkTarget,omitempty"`
+}
+
+// filesQuerySkipped is what a traversal refused to enter or search, shared by
+// both tools: the counts mean the same thing in each and a listing that hid
+// something must say so (design: a soft omission is visible in the product,
+// not only in a log).
+type filesQuerySkipped struct {
+	GitDirs     int `json:"gitDirs"`
+	Symlinks    int `json:"symlinks"`
+	BinaryFiles int `json:"binaryFiles,omitempty"`
+}
+
+type filesListResult struct {
+	Path      string            `json:"path"`
+	Recursive bool              `json:"recursive"`
+	Entries   []filesListEntry  `json:"entries"`
+	Truncated bool              `json:"truncated"`
+	Skipped   filesQuerySkipped `json:"skipped"`
+}
+
+type filesSearchMatchRow struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type filesSearchResult struct {
+	Path      string                `json:"path"`
+	Pattern   string                `json:"pattern"`
+	Matches   []filesSearchMatchRow `json:"matches"`
+	Files     int                   `json:"files"`
+	Truncated bool                  `json:"truncated"`
+	Skipped   filesQuerySkipped     `json:"skipped"`
+}
+
+// executeFilesList runs files.list: walk the named directory through the
+// scoped capability and answer as many entries as the declared bound holds.
+//
+// The bound is applied WHILE WALKING rather than after: a tree larger than
+// 64 KiB would otherwise be read in full — one List RPC per directory, and on
+// a host behind the helper that is round trips nobody gets back — only to be
+// thrown away at the end. The visitor returns ErrStopWalk when the next row
+// would not fit, which the walk answers as a clean end, and the answer says
+// truncated. A trailing trim then guarantees the marshalled document fits,
+// because the envelope (path, skipped counts) is not known until the walk is
+// over.
+func executeFilesList(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	scoped, ok := cap.(*filesystem.ScopedReader)
+	if !ok {
+		return "", fmt.Errorf("files.list: capability is %T, not *filesystem.ScopedReader", cap)
+	}
+	var p struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.list: args: %w", err)
+	}
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	entries := make([]filesListEntry, 0, 64)
+	var spent int64
+	truncated := false
+	stats, walkErr := scoped.Walk(ctx, p.Path, p.Recursive, func(entry filesystem.Entry) error {
+		row := filesListEntryOf(entry)
+		cost, costErr := recordCost(row)
+		if costErr != nil {
+			return costErr
+		}
+		if spent+cost > bound.MaxBytes {
+			truncated = true
+			return filesystem.ErrStopWalk
+		}
+		spent += cost
+		entries = append(entries, row)
+		return nil
+	})
+	if walkErr != nil {
+		return "", walkErr
+	}
+	result := filesListResult{
+		Path:      p.Path,
+		Recursive: p.Recursive,
+		Truncated: truncated,
+		Skipped:   filesQuerySkippedOf(stats, 0),
+	}
+	return marshalFilesListWithin(result, entries, truncated, bound.MaxBytes)
+}
+
+// executeFilesSearch runs files.search: walk the named directory, read every
+// regular file, and answer the matching lines the declared bound holds. The
+// same early stop applies, and for a stronger reason than in the listing:
+// every file costs one Read RPC, so continuing to count what will be thrown
+// away is the most expensive way to produce the same answer.
+func executeFilesSearch(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	scoped, ok := cap.(*filesystem.ScopedReader)
+	if !ok {
+		return "", fmt.Errorf("files.search: capability is %T, not *filesystem.ScopedReader", cap)
+	}
+	var p struct {
+		Path    string `json:"path"`
+		Pattern string `json:"pattern"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.search: args: %w", err)
+	}
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	matches := make([]filesSearchMatchRow, 0, 32)
+	var spent int64
+	truncated := false
+	stats, searchErr := scoped.Search(ctx, p.Path, p.Pattern, func(m filesystem.Match) error {
+		row := filesSearchMatchRow{Path: m.Path, Line: m.Line, Text: m.Text}
+		cost, costErr := recordCost(row)
+		if costErr != nil {
+			return costErr
+		}
+		if spent+cost > bound.MaxBytes {
+			truncated = true
+			return filesystem.ErrStopWalk
+		}
+		spent += cost
+		matches = append(matches, row)
+		return nil
+	})
+	if searchErr != nil {
+		return "", searchErr
+	}
+	result := filesSearchResult{
+		Path:      p.Path,
+		Pattern:   p.Pattern,
+		Files:     stats.Files,
+		Truncated: truncated,
+		Skipped:   filesQuerySkippedOf(stats.WalkStats, stats.BinaryFiles),
+	}
+	return marshalFilesSearchWithin(result, matches, truncated, bound.MaxBytes)
+}
+
+func filesListEntryOf(entry filesystem.Entry) filesListEntry {
+	row := filesListEntry{
+		Name: entry.Name,
+		Path: entry.Path,
+		Kind: string(entry.Kind),
+		Size: entry.Size,
+	}
+	if !entry.ModTime.IsZero() {
+		row.ModTime = entry.ModTime.UTC().Format(time.RFC3339Nano)
+	}
+	if entry.Kind == filesystem.KindSymlink {
+		row.LinkTarget = entry.LinkTarget
+	}
+	return row
+}
+
+func filesQuerySkippedOf(stats filesystem.WalkStats, binaryFiles int) filesQuerySkipped {
+	return filesQuerySkipped{GitDirs: stats.GitDirs, Symlinks: stats.Symlinks, BinaryFiles: binaryFiles}
+}
+
+// recordCost is the row's own JSON cost plus the separator that follows it,
+// which is what makes the running total an upper bound on the array rather
+// than an estimate that can be wrong in the dangerous direction.
+func recordCost(row any) (int64, error) {
+	b, err := json.Marshal(row)
+	if err != nil {
+		return 0, fmt.Errorf("agent tool: marshal a result row: %w", err)
+	}
+	return int64(len(b)) + 1, nil
+}
+
+// marshalFilesListWithin completes a listing and enforces the bound exactly:
+// the running total bounded the ARRAY, and this bounds the DOCUMENT by
+// dropping rows from the tail until it fits. Dropping is drop-tail, the only
+// truncation policy a declaration may name, and every drop sets truncated so
+// the result never looks complete.
+func marshalFilesListWithin(result filesListResult, entries []filesListEntry, truncated bool, max int64) (string, error) {
+	for count := len(entries); count >= 0; count-- {
+		result.Entries = entries[:count]
+		result.Truncated = truncated || count != len(entries)
+		b, err := json.Marshal(result)
+		if err != nil {
+			return "", fmt.Errorf("files.list: marshal result: %w", err)
+		}
+		if int64(len(b)) <= max {
+			return string(b), nil
+		}
+	}
+	return "", errors.New("files.list: result bound is too small for its contract")
+}
+
+func marshalFilesSearchWithin(result filesSearchResult, matches []filesSearchMatchRow, truncated bool, max int64) (string, error) {
+	for count := len(matches); count >= 0; count-- {
+		result.Matches = matches[:count]
+		result.Truncated = truncated || count != len(matches)
+		b, err := json.Marshal(result)
+		if err != nil {
+			return "", fmt.Errorf("files.search: marshal result: %w", err)
+		}
+		if int64(len(b)) <= max {
+			return string(b), nil
+		}
+	}
+	return "", errors.New("files.search: result bound is too small for its contract")
 }
 
 func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {

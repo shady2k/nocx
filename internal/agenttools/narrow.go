@@ -51,15 +51,15 @@ var errNoFileBinding = errors.New("no file binding is bound to this run")
 var ErrRemoteFileTools = errors.New("nocx's file tools reach this machine's disk only; the remote file tools are coming")
 
 // ReachesLocalDisk reports whether the declaration's capability is the pane's
-// filesystem: files.read, files.edit and files.create, which reach whatever disk
-// the pane is on. It is the one answer to "does this tool need the pane to be
-// local", read by the guard that turns a refusal into a sentence — so the two
-// cannot disagree about which tools the fact is about. It goes with
-// localPaneOnly when the last leaf of the stage removes the stub
-// (ADR-anntnxdj stage 8, nocx-a62cl.11.4).
+// filesystem: files.read, files.list, files.search, files.edit and
+// files.create, which reach whatever disk the pane is on. It is the one answer
+// to "does this tool need the pane to be local", read by the guard that turns
+// a refusal into a sentence — so the two cannot disagree about which tools the
+// fact is about. It goes with localPaneOnly when the last leaf of the stage
+// removes the stub (ADR-anntnxdj stage 8, nocx-a62cl.11.4).
 func ReachesLocalDisk(name string) bool {
 	switch name {
-	case "files.read", "files.edit", "files.create":
+	case "files.read", "files.list", "files.search", "files.edit", "files.create":
 		return true
 	}
 	return false
@@ -87,11 +87,29 @@ func localPaneOnly(tool string, runCtx RunContext) error {
 // that are also in the grant; other grant paths are not authority for this
 // call.
 func narrowFilesRead(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
-	if err := localPaneOnly("files.read", runCtx); err != nil {
+	return narrowFilesQuery("files.read", grant, resources, runCtx)
+}
+
+// narrowFilesList and narrowFilesSearch are files.list's and files.search's
+// constructors, and they are files.read's: listing a directory and searching
+// its files are reads within the grant's paths, with the same exact-path
+// narrowing and the same refusal on a pane that is not this machine. One
+// constructor, so the three cannot drift into three answers about what a file
+// capability may reach.
+func narrowFilesList(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	return narrowFilesQuery("files.list", grant, resources, runCtx)
+}
+
+func narrowFilesSearch(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	return narrowFilesQuery("files.search", grant, resources, runCtx)
+}
+
+func narrowFilesQuery(tool string, grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if err := localPaneOnly(tool, runCtx); err != nil {
 		return nil, err
 	}
 	if runCtx.Files == nil {
-		return nil, fmt.Errorf("narrow files.read: %w", errNoFileBinding)
+		return nil, fmt.Errorf("narrow %s: %w", tool, errNoFileBinding)
 	}
 	paths := resourceIDs(grant, resources, content.ResourcePath)
 	return filesystem.NewScopedReaderWithExactFiles(runCtx.Files, filesystemRoots(grant, filesReadRowEffect), paths), nil

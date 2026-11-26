@@ -74,6 +74,35 @@ const filesReadSchema = `{
   }}
 }`
 
+// filesListSchema and filesSearchSchema are the in-memory shapes for the two
+// read-side file tools: enough for Assemble to lift a params object and a
+// $defs/result out of, which is all these tests ask of a contract.
+const filesListSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["entries", "truncated"],
+    "properties": {"entries": {"type": "array"}, "truncated": {"type": "boolean"}}
+  }}
+}`
+
+const filesSearchSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "pattern"],
+  "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["matches", "truncated"],
+    "properties": {"matches": {"type": "array"}, "truncated": {"type": "boolean"}}
+  }}
+}`
+
 const fetchURLSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -454,6 +483,8 @@ func TestFamilyCoveredIgnoresNonContentScopes(t *testing.T) {
 
 func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 	want := map[string][]content.Effect{
+		"files.list":   {content.EffectObserve},
+		"files.search": {content.EffectObserve},
 		"files.read":   {content.EffectObserve},
 		"fetch.url":    {content.EffectCrossBoundary},
 		"session.list": {content.EffectObserve},
@@ -531,8 +562,8 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// or anything that is not one of nocx's own checkouts.
 		"workers.removeCheckout": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 27 {
-		t.Fatalf("declaration count = %d, want 27", len(declarations))
+	if len(declarations) != 29 {
+		t.Fatalf("declaration count = %d, want 29", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -599,6 +630,8 @@ func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":             filesReadSchema,
+		"files.list.schema.json":             filesListSchema,
+		"files.search.schema.json":           filesSearchSchema,
 		"fetch.url.schema.json":              fetchURLSchema,
 		"git.status.schema.json":             gitStatusSchema,
 		"session.list.schema.json":           sessionListSchema,
@@ -632,7 +665,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 
 	observePath := grant([]content.Effect{content.EffectObserve}, content.ResourcePath)
 	got := toolNames(reg.ForGrant(observePath))
-	want := []string{"files.read"}
+	// Every observe+path tool and nothing else: the three file reads, with
+	// git.status declared but not executable and session/mutating tools out.
+	want := []string{"files.list", "files.search", "files.read"}
 	if len(got) != len(want) {
 		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v (git.status is declared but not executable)", got, want)
 	}
@@ -766,6 +801,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"fetch.url.schema.json":              fetchURLSchema,
 		"files.read.schema.json":             filesReadSchema,
+		"files.list.schema.json":             filesListSchema,
+		"files.search.schema.json":           filesSearchSchema,
 		"git.status.schema.json":             gitStatusSchema,
 		"session.list.schema.json":           sessionListSchema,
 		"session.read.schema.json":           sessionReadSchema,
@@ -797,8 +834,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	}
 
 	set := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath))
-	if len(set) != 1 {
-		t.Fatalf("ForGrant = %d tools, want 1 (git.status is declared but not executable)", len(set))
+	if len(set) != 3 {
+		t.Fatalf("ForGrant = %d tools, want 3 (files.list, files.search, files.read; git.status is declared but not executable)", len(set))
 	}
 	for _, tool := range set {
 		if len(tool.ParamsSchema) == 0 {

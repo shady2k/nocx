@@ -93,6 +93,10 @@ type Service struct {
 	// the real call (see writeSeams).
 	seams writeSeams
 
+	// admissions is the daemon's reservation, held for the life of every open
+	// write session.
+	admissions Admission
+
 	// mu guards sessions and closed. locks serialises installs that land on one
 	// resolved path, so the conditional check and the rename are one critical
 	// section for everybody in this process.
@@ -113,6 +117,28 @@ type Service struct {
 	strandedPaths map[string]bool
 }
 
+// Admission is the daemon's reservation that keeps it serving while a write
+// session is open. It is the same reservation a spawn takes from the session
+// service's lifecycle: the last hosted session closing drains this daemon, and
+// an open write session is work that drain waits for (nocx-oalo1.12.5).
+type Admission interface {
+	// Admit reserves the daemon until release is called, or refuses because it
+	// is already draining.
+	Admit() (release func(), err error)
+}
+
+// Option configures the service at construction. The admission is the only one
+// a caller supplies: everything else is the real thing or a default.
+type Option func(*Service)
+
+// WithAdmission gives the service the daemon reservation an open write session
+// holds. A service built without one holds nothing, which is what a test's
+// service is — and what a service with no daemon behind it has to be, rather
+// than one that invented a reservation nothing is waiting on.
+func WithAdmission(a Admission) Option {
+	return func(s *Service) { s.admissions = a }
+}
+
 // New builds the fs service over a local provider and opens its write-session
 // journal. The provider is the caller's — the composition root constructs it,
 // and a test injects one with local.WithRoot, WithEntryCap or WithListTimeout —
@@ -124,7 +150,7 @@ type Service struct {
 // be opened fails the construction, because a helper that silently served
 // writes with no crash recovery would be a helper whose product promise is a
 // log line nobody reads.
-func New(provider *local.Provider, journal JournalConfig) (*Service, error) {
+func New(provider *local.Provider, journal JournalConfig, opts ...Option) (*Service, error) {
 	j, stranded, err := openJournal(journal)
 	if err != nil {
 		return nil, err
@@ -135,6 +161,9 @@ func New(provider *local.Provider, journal JournalConfig) (*Service, error) {
 		sessions:      map[string]*writeSession{},
 		locks:         newPathLocks(),
 		strandedPaths: map[string]bool{},
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	for _, temp := range stranded {
 		s.recordStranded(temp.Path, temp.Reason)

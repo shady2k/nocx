@@ -598,6 +598,10 @@ func (s *Service) Close() error {
 			}
 		}
 		sess.mu.Unlock()
+		// This process is shutting down: no session can be committed after
+		// this call, so the reservation a session still held must be given
+		// back whether or not its temporary could be removed (nocx-oalo1.12.5).
+		sess.releaseAdmission()
 	}
 	if err := s.journal.close(); err != nil && firstErr == nil {
 		firstErr = err

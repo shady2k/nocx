@@ -191,6 +191,14 @@ func serve(ctx context.Context, log *slog.Logger, dir, home string, generation p
 		return 0
 	}
 
+	// The fs service's write sessions hold the SESSION service's daemon
+	// admission (nocx-oalo1.12.5) — the last hosted session closing drains this
+	// daemon, and an open write session is work that drain waits for. The
+	// session service does not exist yet and cannot: its startup grace must not
+	// begin before the endpoint does, and the journal must be opened before the
+	// endpoint exists. admission is that binding, made between the two.
+	admission := &daemonAdmission{}
+
 	// The fs service is a property of the DAEMON, like the sessions: a write
 	// session's temporary and the outcome a lost reply is answered with must
 	// outlive the connection that started them, so one service serves every
@@ -217,7 +225,7 @@ func serve(ctx context.Context, log *slog.Logger, dir, home string, generation p
 		Root:       filepath.Join(home, ".nocx", "fs-writes"),
 		Hostname:   hostname,
 		InstanceID: instanceID,
-	})
+	}, fshostsvc.WithAdmission(admission))
 	if err != nil {
 		nocxlog.From(ctx).Error("fs write journal", "err", err)
 		return 1
@@ -321,6 +329,9 @@ func serve(ctx context.Context, log *slog.Logger, dir, home string, generation p
 		Limits:         session.DefaultLimits(),
 	})
 	defer sessions.Close()
+	// The daemon's admission is the session service's lifecycle; the fs service
+	// was built with this binding before the endpoint existed.
+	admission.sessions = sessions
 
 	if err := endpoint.Serve(daemonCtx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)

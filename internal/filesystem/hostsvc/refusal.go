@@ -28,6 +28,11 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 		return proto.FSCodeTimedOut, nil, true
 	}
 
+	var draining *DrainingRefusal
+	if errors.As(err, &draining) {
+		return proto.ErrCodeDraining, nil, true
+	}
+
 	var page *invalidPage
 	if errors.As(err, &page) {
 		return proto.FSCodeInvalidPage, nil, true
@@ -127,6 +132,27 @@ func refusalOf(err error) (string, json.RawMessage, bool) {
 	}
 	return "", nil, false
 }
+
+// DrainingRefusal wraps a refusal that is the daemon's own retirement rather
+// than a failure: the admission a write session needs has been closed because
+// the last hosted session ended. It exists because this package may not import
+// internal/helper/session — that package owns the daemon, its PTYs and its
+// composition, and none of it belongs in the artifact hosts run (C30) — so the
+// composition root wraps the session service's own error in this type and the
+// wire keeps the code the session service has always used (review m1).
+//
+// Unwrap keeps errors.Is against the wrapped sentinel true, which is what lets
+// the daemon's own callers go on recognising the refusal they made.
+type DrainingRefusal struct{ Err error }
+
+func (e *DrainingRefusal) Error() string {
+	if e.Err == nil {
+		return "hostsvc: the helper generation is draining"
+	}
+	return e.Err.Error()
+}
+
+func (e *DrainingRefusal) Unwrap() error { return e.Err }
 
 // invalidPage is a page this op cannot express: a non-positive length, a
 // negative offset, a whole-file read not at 0, or a length over the ceiling. It

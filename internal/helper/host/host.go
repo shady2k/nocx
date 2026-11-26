@@ -65,6 +65,12 @@ type Host struct {
 	reverse    map[uint64]chan proto.Response
 	reverseSeq uint64
 
+	// panelWorked records that this connection has asked for work no spawn
+	// explains — a `git` or `fs` request, which is what a pane's panel does on
+	// the connection its tab holds. It is the connection's own answer to the
+	// daemon's connected-idle bound (nocx-oalo1.12.5), read at its release.
+	panelWorked bool
+
 	// streamSeq mints the stream ids chunked responses are keyed by (D14):
 	// the sentinel and its chunks may interleave with other responses, and
 	// the stream id is what routes them.
@@ -236,6 +242,43 @@ func (h *Host) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+// PanelWorked answers whether this connection has asked for panel work: a
+// request that named the git or fs service. The session service asks this when
+// the connection is released, so the connection's own errand decides whether
+// the connected-idle bound is armed again (nocx-oalo1.12.5).
+func (h *Host) PanelWorked() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.panelWorked
+}
+
+// notePanelWork records the first panel request on this connection and tells
+// every registered service that asked to hear it. It is called from the read
+// loop's per-request goroutine, before the service is resolved, because the
+// fact is about the client's ERRAND and not about this build's composition: a
+// generation put together without `git` must not retire the panel client that
+// came to use it as though it had asked for nothing.
+func (h *Host) notePanelWork(service string) {
+	if service != proto.ServiceGit && service != proto.ServiceFS {
+		return
+	}
+	h.mu.Lock()
+	first := !h.panelWorked
+	h.panelWorked = true
+	var observers []PanelWork
+	if first {
+		for _, s := range h.services {
+			if observer, ok := s.(PanelWork); ok {
+				observers = append(observers, observer)
+			}
+		}
+	}
+	h.mu.Unlock()
+	for _, observer := range observers {
+		observer.ConnectionPanelWork(h)
 	}
 }
 
@@ -589,6 +632,13 @@ func (h *Host) SendNotification(n proto.Notification) error {
 // per-request context the read loop already stored by id, so a TypeCancel
 // can reach it; stop releases it when the request is done.
 func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.Request) {
+	// A panel's work on this connection, recorded before anything else: the
+	// client's errand is not a spawn, and the question the daemon's
+	// connected-idle bound asks has been answered for it (nocx-oalo1.12.5).
+	// Done here rather than inside the services because the dispatcher is the
+	// one place that knows which service a request named — `git` and `fs` are
+	// registered by different packages, and neither owns the other's name.
+	h.notePanelWork(req.Service)
 	defer func() {
 		h.mu.Lock()
 		delete(h.requests, req.ID)
@@ -631,8 +681,7 @@ func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.
 		lg.Warn("helper refused the request", "code", code, "message", message)
 		resp.Error = &proto.Error{Code: code, Message: message, Details: details}
 		end(errors.New(code))
-		// A refusal is an answer: from here a withdrawal is too late, and
-		// there is nothing it could otherwise release.
+		// A refusal is an answer: from here a withdrawal is too late.
 		entry.answerWriting()
 		_ = h.respond(resp)
 	}
@@ -655,6 +704,9 @@ func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.
 	if err != nil {
 		code, details := refusal(svc, err)
 		fail(code, err.Error(), details)
+		if observer, ok := svc.(RefusalObserver); ok {
+			observer.RefusalWritten(reqCtx, req.Op, err)
+		}
 		return
 	}
 	raw, err := json.Marshal(result)

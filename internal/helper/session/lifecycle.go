@@ -79,7 +79,12 @@ type daemonLifecycle struct {
 	// reached records that one has ever been bound. Together they are the
 	// event this daemon's retirement is built on: a helper a coordinator has
 	// reached is in use, whatever its network is doing.
-	clients           int
+	clients int
+	// working counts the bound connections that have asked for panel work — a
+	// `git` or `fs` request — and have not been released. It is not a second
+	// clients count: a connection is in both while it is working, and this is
+	// what the connected-idle bound is disarmed by (nocx-oalo1.12.5).
+	working           int
 	reached           bool
 	everOwned         bool
 	deadlineExpired   bool
@@ -89,6 +94,15 @@ type daemonLifecycle struct {
 	onDrained         func()
 	once              sync.Once
 	timer             lifecycleTimer
+	// timerGen names the deadline currently entitled to act. A timer's
+	// callback runs on its own goroutine, so Stop is not a happens-before
+	// edge: a callback that started before the disarm may reach the lock
+	// after a fresh deadline was armed, and without this it would decide on
+	// state it no longer owns — retiring a daemon a panel client is working
+	// on, or poisoning the startup answer a bound client already gave
+	// (review M1). Every arm and every disarm moves the generation, and a
+	// callback whose generation is no longer current returns untouched.
+	timerGen uint64
 }
 
 func newDaemonLifecycle(grace, connectedGrace time.Duration, onDrained func()) *daemonLifecycle {
@@ -108,8 +122,12 @@ func newDaemonLifecycleWithTimer(grace, connectedGrace time.Duration, onDrained 
 		onDrained:      onDrained,
 	}
 	if grace > 0 {
+		l.mu.Lock()
 		l.deadline = time.Now().Add(grace)
-		l.timer = afterFunc(grace, l.expire)
+		l.timerGen++
+		gen := l.timerGen
+		l.timer = afterFunc(grace, func() { l.expire(gen) })
+		l.mu.Unlock()
 	}
 	return l
 }
@@ -194,39 +212,98 @@ func (l *daemonLifecycle) clientBound() {
 	l.armConnectedDeadlineLocked()
 }
 
+// panelWorking records that a bound connection has asked for panel work: a
+// `git` or `fs` request, which is a pane's panel working on the connection its
+// tab holds. ConnectedIdleGrace asks whether a client is still on its way to a
+// spawn, and this client has answered for itself — so the deadline is stopped,
+// and the first working client is the one that stops it. Further requests of
+// the same client change nothing: the connection is already counted, and the
+// panel's next call is not a new errand.
+func (l *daemonLifecycle) panelWorking() {
+	if !l.enabled {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.draining {
+		// Too late: the daemon is on its way out, and an answer that arrived
+		// after that cannot un-retire it — every caller has been told it is
+		// gone (the same reason clientBound keeps the count and stops).
+		return
+	}
+	l.working++
+	if l.working != 1 || l.everOwned {
+		return
+	}
+	// The deadline fired while this request was in flight is not evidence any
+	// more: it asked a question this connection has just answered.
+	l.connectedExpired = false
+	l.stopTimerLocked()
+}
+
 // clientReleased records one connection ending. A helper a client reached and
 // left without ever spawning a session is bounded by ConnectedIdleGrace from
 // the release, not retired at once: the release is not evidence that nobody is
 // arriving. A liveness probe connects and leaves as an ordinary part of asking
 // "is this generation served", and retiring the daemon it asked would make the
 // answer remove the thing it reported.
-func (l *daemonLifecycle) clientReleased() {
+// worked is the connection's own answer to "did you ask for panel work": the
+// bound is armed again by a client that asked nothing (nocx-398ca's abandoned
+// coordinator) and by the last panel client to leave, and this is what tells
+// the two apart.
+func (l *daemonLifecycle) clientReleased(worked bool) {
 	if !l.enabled {
 		return
 	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.clients > 0 {
 		l.clients--
 	}
-	if l.clients == 0 {
-		l.stopTimerLocked()
-		if !l.everOwned && !l.draining {
-			l.connectedExpired = false
-			l.armConnectedDeadlineLocked()
-		}
+	if worked && l.working > 0 {
+		l.working--
 	}
-	l.mu.Unlock()
+	// THE BOUND IS ARMED BY THE LAST WORKING CLIENT LEAVING, NOT BY THE
+	// connection count reaching zero (review B1). A silent client may be
+	// sitting behind the panel client that just left, and it is exactly the
+	// abandoned coordinator the bound exists for: waiting for `clients == 0`
+	// meant nothing armed the deadline again, and the daemon was held for ever
+	// by a connection that never asked for anything. A silent client leaving
+	// while another silent client remains changes nothing — the deadline
+	// already in flight is that one's own answer.
+	lastWorker := worked && l.working == 0
+	if l.clients != 0 && !lastWorker {
+		return
+	}
+	if l.everOwned || l.draining || l.working != 0 {
+		return
+	}
+	l.stopTimerLocked()
+	l.connectedExpired = false
+	l.armConnectedDeadlineLocked()
 }
 
 // connectedExpire is ConnectedIdleGrace arriving: a client is bound and has
 // not spawned a session in the whole bound. It retires even with clients
 // bound — that is the bound's purpose — and a request already admitted is
 // still allowed to finish, exactly as the startup deadline allows one.
-func (l *daemonLifecycle) connectedExpire() {
+func (l *daemonLifecycle) connectedExpire(gen uint64) {
 	l.mu.Lock()
+	if gen != l.timerGen {
+		// A deadline this daemon has already replaced or disarmed: it has no
+		// answer to give about the state in front of it (review M1).
+		l.mu.Unlock()
+		return
+	}
+	l.timer = nil
 	l.connectedExpired = true
 	shouldFire := false
-	if !l.draining && !l.everOwned && l.sessions == 0 && l.admissions == 0 {
+	// A panel client is working: the deadline that just fired asked whether
+	// this daemon's client was still on its way to a spawn, and it is not
+	// (nocx-oalo1.12.5). The race is real — the timer runs on its own
+	// goroutine, so a `git` call can land after it started — which is why the
+	// answer is decided here, under the lock, and not by whether Stop won.
+	if !l.draining && !l.everOwned && l.sessions == 0 && l.admissions == 0 && l.working == 0 {
 		l.draining = true
 		shouldFire = true
 	}
@@ -236,8 +313,16 @@ func (l *daemonLifecycle) connectedExpire() {
 	}
 }
 
-func (l *daemonLifecycle) expire() {
+func (l *daemonLifecycle) expire(gen uint64) {
 	l.mu.Lock()
+	if gen != l.timerGen {
+		// The startup deadline was stopped, or replaced by the connected-idle
+		// bound, before this callback reached the lock. Deciding now would
+		// answer a question the daemon has moved past (review M1).
+		l.mu.Unlock()
+		return
+	}
+	l.timer = nil
 	l.deadlineExpired = true
 	shouldFire := false
 	if !l.reached && !l.everOwned && l.admissions == 0 {
@@ -303,8 +388,11 @@ func (l *daemonLifecycle) maybeDrainLocked() bool {
 	// NEVER OWNED. The startup deadline covers a daemon no client reached;
 	// the connected deadline covers one whose client came and left (or never
 	// spawned) — and it may have fired while an admission was in flight, in
-	// which case this is where the daemon actually ends.
-	if l.deadlineExpired || (l.connectedExpired && l.clients == 0 && l.sessions == 0) {
+	// which case this is where the daemon actually ends. The startup half is
+	// asked only while nobody has reached the daemon: the deadline it names
+	// was the question "was this helper ever dialed", and a bound client has
+	// answered it even if a stale callback once said otherwise (review M1).
+	if (!l.reached && l.deadlineExpired) || (l.connectedExpired && l.clients == 0 && l.sessions == 0) {
 		l.draining = true
 		return true
 	}
@@ -317,15 +405,22 @@ func (l *daemonLifecycle) maybeDrainLocked() bool {
 // that did may take to spawn.
 func (l *daemonLifecycle) armConnectedDeadlineLocked() {
 	if l.connectedGrace > 0 {
-		l.timer = l.afterFunc(l.connectedGrace, l.connectedExpire)
+		l.timerGen++
+		gen := l.timerGen
+		l.timer = l.afterFunc(l.connectedGrace, func() { l.connectedExpire(gen) })
 	}
 }
 
+// stopTimerLocked disarms the deadline in flight and invalidates every
+// callback already on its way to the lock. The generation moves even when no
+// timer is held: a callback that started before an earlier disarm can still be
+// waiting for the mutex, and this is the moment its answer stops being current.
 func (l *daemonLifecycle) stopTimerLocked() {
 	if l.timer != nil {
 		l.timer.Stop()
 		l.timer = nil
 	}
+	l.timerGen++
 }
 
 func (l *daemonLifecycle) stop() {

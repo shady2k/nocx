@@ -344,10 +344,20 @@ export function PortsPanel(props: PortsPanelProps) {
     setError(next)
   }
 
+  // A PANEL THAT HAS GONE AWAY IS NOT A PLACE TO PAINT AN ANSWER (ALX-1865
+  // r4). `paneId()` still answers after unmount — the props belong to the
+  // shell — so the tab-identity check lets a request that left while the
+  // panel was mounted resume on a component that no longer exists, which
+  // also re-arms the scheduler its cleanup just retired. This flag is the
+  // only fact that tells "this tab" from "this panel", and it is set at
+  // cleanup BEFORE the retirement is sent, so no continuation can arm again
+  // what cleanup gives back.
+  let disposed = false
+
   const refreshForwards = async (pid: string): Promise<void> => {
     try {
       const { forwards: records } = await props.services.listForwards()
-      if (paneId() !== pid || isLocal()) return
+      if (disposed || paneId() !== pid || isLocal()) return
       setForwards((prev) => {
         const next = new Map(prev)
         for (const record of records) next.set(record.id, record)
@@ -366,7 +376,7 @@ export function PortsPanel(props: PortsPanelProps) {
   const refreshDiscovery = async (pid: string): Promise<void> => {
     try {
       const st = await props.services.status(pid)
-      if (paneId() !== pid) return
+      if (disposed || paneId() !== pid) return
       applyStatus(st)
       // The first visibility call may have reached the backend before
       // the pane or its far helper was ready.
@@ -377,11 +387,16 @@ export function PortsPanel(props: PortsPanelProps) {
       // while it was in flight, and sending `visible` now would arm a
       // scheduler on a host this panel has just been told it may not ask.
       // The tab identity alone is not enough — it still matches.
-      if (props.visible() && !st.discovery.visible && gate() === null) {
+      //
+      // ARMING HERE IS THE PANEL'S OWN (ALX-1865 r4): if this `true` is what
+      // turns the backend's flag on, this panel is what owes the `false` back,
+      // and the retirement reads that debt off `armedTarget` alone.
+      if (!disposed && props.visible() && !st.discovery.visible && gate() === null) {
+        armedTarget = pid
         void props.services.visible(pid, true).catch(() => {})
       }
     } catch (e) {
-      if (paneId() !== pid) return
+      if (disposed || paneId() !== pid) return
       applyDiscoveryFailure(e)
     }
   }
@@ -502,7 +517,10 @@ export function PortsPanel(props: PortsPanelProps) {
   // it: the sidebar can be switched away from Ports or collapsed while this tab
   // is the visible one, and a flag left armed keeps the scheduler sampling a
   // host nobody is watching.
-  onCleanup(retireVisible)
+  onCleanup(() => {
+    disposed = true
+    retireVisible()
+  })
 
   createEffect(
     on([paneId, () => props.visible(), gateClosed], ([pid, vis, closed]) => {

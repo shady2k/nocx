@@ -1620,6 +1620,41 @@ describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
     expect(visible).toHaveBeenCalledTimes(1)
   })
 
+  it('a status that lands after the panel is gone does not re-arm the scheduler', async () => {
+    // Switching from Ports to Git on the same tab leaves the sidebar mounted
+    // elsewhere, but the observation still says this panel is visible —
+    // `props.visible()` cannot tell "the sidebar is open" from "this panel is
+    // on screen". A status that left before the switch therefore resumes on a
+    // disposed component and, with `discovery.visible: false`, used to send
+    // `visible(pid, true)` straight after cleanup retired the same flag
+    // (ALX-1865 r4).
+    let resolveStatus!: (st: PortsStatusResult) => void
+    const status = vi.fn(
+      () =>
+        new Promise<PortsStatusResult>((res) => {
+          resolveStatus = res
+        }),
+    )
+    const visible = vi.fn().mockResolvedValue({})
+    const panel = renderPanel(fakeServices({ status, visible }), {
+      activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }),
+    })
+    await waitFor(() => expect(status).toHaveBeenCalled())
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+
+    panel.unmount()
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+    visible.mockClear()
+
+    // The answer the disposed panel asked for, carrying the flag it would arm
+    // from. Nothing of this panel may leave after cleanup.
+    resolveStatus(statusFixture({ visible: false }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(visible).not.toHaveBeenCalled()
+  })
+
   it('a status that lands after the gate closed does not arm the scheduler it answers', async () => {
     vi.useFakeTimers()
     try {

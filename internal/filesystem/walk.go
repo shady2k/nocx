@@ -74,8 +74,11 @@ type SearchStats struct {
 // page), so every returned row stays under the prefix the caller typed — the
 // spelling a later files.read of one of them is checked against.
 //
-// visit returning ErrStopWalk ends the walk with no error. Any other error it
-// returns, and any provider error, ends it with that error.
+// visit returning ErrStopWalk ends the walk with no error, unless the context
+// is already done: a bound reached at the deadline is not a finished answer,
+// and the deadline is the tool's own (a child context the dispatcher's check
+// cannot see). Any other error it returns, and any provider error, ends it
+// with that error.
 func (s *ScopedReader) Walk(ctx context.Context, path string, recursive bool, visit func(Entry) error) (WalkStats, error) {
 	h, release, roots, files, err := s.acquire(ctx)
 	if err != nil {
@@ -159,6 +162,14 @@ func (s *ScopedReader) walk(ctx context.Context, h Handle, start, path string, r
 				}
 				if err := visit(entry); err != nil {
 					if errors.Is(err, ErrStopWalk) {
+						// The visitor filled the result bound, but the
+						// deadline can fire in the same instant: this exit
+						// skips the check at the end of the walk, so it
+						// makes its own. Answering success here would hand
+						// back a truncated result as a complete one.
+						if cerr := ctx.Err(); cerr != nil {
+							return stats, cerr
+						}
 						return stats, nil
 					}
 					return stats, err
@@ -191,7 +202,8 @@ func (s *ScopedReader) walk(ctx context.Context, h Handle, start, path string, r
 // past that byte is not reported. The returned paths keep the caller's own
 // spelling (the walk's queue is lexical), so a files.read of one of them
 // passes the grant's lexical scope check. visit returning ErrStopWalk ends
-// the search with no error.
+// the search with no error, unless the context is already done — the same
+// rule Walk follows, checked once more before the result is handed back.
 func (s *ScopedReader) Search(ctx context.Context, path, pattern string, visit func(Match) error) (SearchStats, error) {
 	// RE2, compiled once per call: the pattern comes from the model, and a
 	// pattern the engine cannot express is the model's error to read, not a

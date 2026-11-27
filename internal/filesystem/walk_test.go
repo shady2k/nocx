@@ -27,8 +27,8 @@ package filesystem_test
 //     refused before a row of it is visited, a read before a line of it is
 //     matched.
 //   - a cancelled context is never reported as a finished walk/search: the
-//     check runs before every page, every read, every matched line, and
-//     before the final result is handed back.
+//     check runs before every page, every read, every matched line, on the
+//     ErrStopWalk exit and before the final result is handed back.
 
 import (
 	"context"
@@ -524,6 +524,54 @@ func TestSearchRefusesSuccessOnACancel(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Search cancelled on the first match = %v, want context.Canceled (a cancelled search must not report success)", err)
+	}
+}
+
+// TestWalkReportsACancelWhenTheBoundStopsIt pins the walk's one exit that
+// does not reach its final context check: a visitor that stops because the
+// result bound is full returns ErrStopWalk, and the tool's deadline — a child
+// context the dispatcher's own check cannot see — can fire in the same
+// instant. The walk must hand back the cancellation; reporting a truncated
+// success would let files.list answer as if the listing were complete.
+func TestWalkReportsACancelWhenTheBoundStopsIt(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := readerOver(t, localWalkSource(t), fx.root, fx.root)
+
+	visited := 0
+	_, err := reader.Walk(ctx, fx.root, true, func(filesystem.Entry) error {
+		visited++
+		cancel()
+		return filesystem.ErrStopWalk
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Walk stopped for the bound on a cancelled context = %v, want context.Canceled (ErrStopWalk must not hide the deadline)", err)
+	}
+	if visited != 1 {
+		t.Fatalf("visited = %d, want 1 — the visitor ended the walk itself", visited)
+	}
+}
+
+// TestSearchReportsACancelWhenTheBoundStopsIt is the search half of the same
+// rule: the match that fills the bound cancels the context and stops the
+// search, and the answer is the cancellation rather than a finished-looking
+// result.
+func TestSearchReportsACancelWhenTheBoundStopsIt(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := readerOver(t, localWalkSource(t), fx.root, fx.root)
+
+	matches := 0
+	_, err := reader.Search(ctx, fx.root, "needle", func(filesystem.Match) error {
+		matches++
+		cancel()
+		return filesystem.ErrStopWalk
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Search stopped for the bound on a cancelled context = %v, want context.Canceled (ErrStopWalk must not hide the deadline)", err)
+	}
+	if matches != 1 {
+		t.Fatalf("matches = %d, want 1 — the visitor stopped the search itself", matches)
 	}
 }
 

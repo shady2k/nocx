@@ -402,3 +402,74 @@ export async function rpc<T>(
     { port: endpoint.port, token: endpoint.token, method, params },
   )
 }
+
+/**
+ * Remember the app's OWN socket, so a call can be made on it.
+ *
+ * WHY THE APP'S SOCKET AND NOT `rpc`. A session belongs to the connection that
+ * opened it: `agent.ask` answers "unknown sessionId" for a session the calling
+ * connection does not own (internal/transport/ws_agent.go). `rpc` deliberately
+ * opens a socket of its own, which is what makes it safe for seeding state and
+ * useless for a question about a pane already on screen. Wrapping `send`
+ * records the instance rather than reading a transcript, exactly as
+ * notification-osc.spec.ts records notify.raise, and it changes nothing about
+ * the socket: the frame this spec adds is one more frame on the real wire.
+ *
+ * Installed as an init script, so the app's first send is not missed.
+ */
+export async function captureAppSocket(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const recorder = window as unknown as { __nocxAppSocket?: WebSocket }
+    const send = WebSocket.prototype.send
+    WebSocket.prototype.send = function (this: WebSocket, data: Parameters<typeof send>[0]) {
+      recorder.__nocxAppSocket = this
+      return send.call(this, data)
+    }
+  })
+}
+
+/**
+ * Call one JSON-RPC method on the socket the app opened (captureAppSocket).
+ *
+ * The frame carries an id far above anything the app's own counter reaches, so
+ * a reply is never mistaken for one of the app's; the app sees a reply to an id
+ * it does not know and drops it, as it drops any notification it did not ask
+ * for. The wait is on THIS request's id and nothing else, the same rule `rpc`
+ * states at length.
+ */
+export async function rpcOnAppSocket<T>(
+  page: Page,
+  method: string,
+  params: unknown,
+  timeoutMs = 30_000,
+): Promise<T> {
+  return page.evaluate(
+    ({ method, params, timeoutMs }) =>
+      new Promise<T>((resolve, reject) => {
+        const ws = (window as unknown as { __nocxAppSocket?: WebSocket }).__nocxAppSocket
+        if (ws === undefined) {
+          reject(new Error(`${method}: the app has sent nothing on a socket to answer on`))
+          return
+        }
+        const id = 987_654_321
+        const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), timeoutMs)
+        const onMessage = (ev: MessageEvent) => {
+          if (typeof ev.data !== 'string') return
+          let msg: { id?: number; result?: T; error?: { message?: string } }
+          try {
+            msg = JSON.parse(ev.data) as typeof msg
+          } catch {
+            return
+          }
+          if (msg.id !== id) return
+          clearTimeout(timer)
+          ws.removeEventListener('message', onMessage)
+          if (msg.error) reject(new Error(`${method}: ${msg.error.message ?? 'rpc error'}`))
+          else resolve(msg.result as T)
+        }
+        ws.addEventListener('message', onMessage)
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      }),
+    { method, params, timeoutMs },
+  )
+}

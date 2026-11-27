@@ -57,7 +57,15 @@ import {
 } from './harness'
 import { FakeOpenAI } from './fake-openai'
 import { configurePiHome } from './pi-home'
-import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
+import {
+  captureAppSocket,
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  rpcOnAppSocket,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
 import { readStand } from './stand'
 import { askFromPrompt, toolResults } from './ask-gesture'
 
@@ -66,7 +74,6 @@ const test = base
 const TAB = '.nocx-tab'
 const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
-const METHOD_ASK = 'Choose how nocx connects'
 const APPROVAL_TITLE = 'This action needs your approval'
 const ANSWER_BODY = '.cmd-output[data-answer-body]'
 
@@ -177,9 +184,17 @@ async function permitReadsAndOneWrite(page: Page): Promise<void> {
   expect(res.applied).toBe(true)
 }
 
-/** Open a pane to the fixture host in Helper mode, through the product's own
- *  quick-connect and connect-time ask. */
-async function openHelperPane(page: Page, profileName: string): Promise<void> {
+/** Open the profile's saved connection through the product's own quick-connect.
+ *
+ *  HOW THE HOST CONNECTS IS WRITTEN FIRST, and never answered in a dialog. The
+ *  connect-time ask is shown once per host key and remembered afterwards, so a
+ *  suite that relied on it would find it in the first test and nowhere else —
+ *  and the backend is shared by every test in this file (beforeAll).
+ *  `connections.setIntegrationMethod` is the same write the dialog performs,
+ *  including the helper grant, which is how ssh-panels.spec.ts opens its
+ *  panes (e2e/ssh-panels.spec.ts:259). */
+async function openPane(page: Page, profileName: string, method: 'raw' | 'helper'): Promise<void> {
+  await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), method)
   await page.keyboard.press('Control+Shift+P')
   const search = page.locator(QUICK_CONNECT_SEARCH)
   await expect(search).toBeVisible({ timeout: 30_000 })
@@ -188,11 +203,12 @@ async function openHelperPane(page: Page, profileName: string): Promise<void> {
     timeout: 30_000,
   })
   await page.keyboard.press('Enter')
-  const methodAsk = page.getByRole('dialog').filter({ hasText: METHOD_ASK })
-  await expect(methodAsk).toBeVisible({ timeout: 30_000 })
-  await methodAsk.getByRole('radio', { name: 'Helper' }).click()
-  await methodAsk.getByRole('button', { name: 'Continue' }).click()
   await expect(page.locator(TAB)).toHaveCount(2, { timeout: 120_000 })
+}
+
+/** Open a pane to the fixture host in Helper mode and wait for its editor. */
+async function openHelperPane(page: Page, profileName: string): Promise<void> {
+  await openPane(page, profileName, 'helper')
   await promptReady(page)
 }
 
@@ -448,6 +464,9 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
 
   test('a host whose helper is not serving refuses files.* with its reason', async ({ page }) => {
     test.setTimeout(600_000)
+    // The question about this pane travels the CONTROL channel (below), so the
+    // page's own socket has to be the one it travels on.
+    await captureAppSocket(page)
     await openApp(page)
     // A raw host runs no helper at all, and the reason the panel shows for
     // such a connection is `mode-raw`. Reads are permitted outright here so
@@ -467,19 +486,11 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
     })
     expect(applied.applied).toBe(true)
     const name = await createProfile(page, `e2e-ssh-files-raw-${Date.now()}`)
-    await page.keyboard.press('Control+Shift+P')
-    const search = page.locator(QUICK_CONNECT_SEARCH)
-    await expect(search).toBeVisible({ timeout: 30_000 })
-    await search.fill(name)
-    await expect(page.locator(QUICK_CONNECT_ITEM, { hasText: name })).toBeVisible({
-      timeout: 30_000,
-    })
-    await page.keyboard.press('Enter')
-    const methodAsk = page.getByRole('dialog').filter({ hasText: METHOD_ASK })
-    await expect(methodAsk).toBeVisible({ timeout: 30_000 })
-    await methodAsk.getByRole('radio', { name: 'Raw' }).click()
-    await methodAsk.getByRole('button', { name: 'Continue' }).click()
-    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 120_000 })
+    await openPane(page, name, 'raw')
+    const sessionId = await page.locator('.pane.active').getAttribute('data-session-id')
+    if (sessionId === null) {
+      throw new Error('the raw pane published no session for the question to name')
+    }
 
     fake.setScript({
       chunks: [],
@@ -495,21 +506,39 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
 
     const QUESTION = 'Read permit.conf on this host, then read the screen.'
     const before = fake.requests().length
-    await askFromRawPane(page, QUESTION)
-    await answerFinished(page, QUESTION)
+    await askOnThePanesOwnSession(page, sessionId, QUESTION)
 
-    const results = fake
-      .requests()
-      .slice(before)
-      .flatMap((request) => toolResults(request.body))
-    const refused = results.find((result) => result.startsWith('REFUSED')) ?? ''
+    // No DOM block is the observable here, and that is the product's own
+    // reason: a raw pane has no block for OSC 133 to close, so the composer
+    // refuses the chord with `no-running-command` (frontend/src/
+    // terminal-content.ts, canSummonEditor). What the model was SENT is the
+    // proof: the two calls ran, in order, in the pane's own session.
+    const results = (): string[] =>
+      fake
+        .requests()
+        .slice(before)
+        .flatMap((request) => toolResults(request.body))
+    await expect
+      .poll(
+        () =>
+          results().filter((result) => result.startsWith('REFUSED') || result.includes('"screen"'))
+            .length,
+        {
+          message: 'the turn never reported both a refusal and a screen read',
+          timeout: 120_000,
+        },
+      )
+      .toBe(2)
+
+    const refused = results().find((result) => result.startsWith('REFUSED')) ?? ''
     expect(refused).toContain('files.read')
     expect(refused).toContain('mode-raw')
-    // And the run went on: the screen read ran in the same turn, so both calls
-    // are blocks under the answer and only one of them was refused.
-    const turn = answerBlock(page, QUESTION)
-    await expect(turn.locator('.cmd-block[data-tool="files.read"]')).toHaveCount(1)
-    await expect(turn.locator('.cmd-block[data-tool="session.read"]')).toHaveCount(1)
+    // And the run went on: the screen read answered about THIS pane, so one
+    // call was refused for the axis and the other was served by the pane.
+    const screen = results().find((result) => result.includes('"screen"')) ?? ''
+    expect(screen).toContain('"state":"screen"')
+    expect(screen).toContain(sessionId)
+    expect(screen.startsWith('REFUSED')).toBe(false)
 
     expectLocalUntouched()
   })
@@ -533,15 +562,31 @@ function answerFrom(body: string): string[] {
   return ['Here is what I found: ', results.join(' ')]
 }
 
-/** Ask from a pane whose shell owns the keys — a raw ssh pane — where the
- *  composer is the reserved box the terminal mode leaves in place. The chord
- *  is the product's own target switch, and what follows waits for the editor
- *  the switch makes live. */
-async function askFromRawPane(page: Page, question: string): Promise<void> {
-  await page.locator('.pane.active .terminal-live-container').click()
-  await page.keyboard.press('ControlOrMeta+Enter')
-  const input = page.locator('.pane.active .nocx-editor-input')
-  await expect(input).toBeVisible({ timeout: 15_000 })
-  await input.fill(question)
-  await page.keyboard.press('Enter')
+/** Ask the assistant a question about ONE pane, over the control channel, in
+ *  that pane's own session.
+ *
+ *  Why not the composer. A question asked with ⌘/Ctrl+Enter carries the block
+ *  the person is looking at, and a raw ssh pane has none: no OSC 133, so no
+ *  running item, so `canSummonEditor` answers `no-running-command` and the
+ *  chord is consumed silently (frontend/src/terminal-content.ts). The product
+ *  therefore offers no gesture on that pane, and a spec that waited for one
+ *  would be waiting for a surface the mode deliberately does not have. The
+ *  call still has to name the pane's session, which is owned by the socket
+ *  that opened it — hence the app's own socket, not `rpc`'s fresh one.
+ *
+ *  The run outlives the response (`agent.ask` answers as soon as the turn is
+ *  recorded), so the caller waits on what the turn produced, never on this.
+ */
+async function askOnThePanesOwnSession(
+  page: Page,
+  sessionId: string,
+  question: string,
+): Promise<void> {
+  await rpcOnAppSocket(page, 'agent.ask', {
+    askId: `e2e-ssh-files-raw-${Date.now()}`,
+    sessionId,
+    question,
+    attachedContent: [],
+    cwd: remoteHome,
+  })
 }

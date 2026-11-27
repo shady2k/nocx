@@ -195,23 +195,23 @@ means the handler keeps its injected seams and touches no domain store.
 
 ### The rest
 
-| Method                                                            | Why                                                                                                               |
-| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `sessions.status`                                                 | **SessionOperation** (session) via `NewSessionOperation` (whole-domain instance; `List` + `LastUsedForProfiles`). |
-| `connections.test`                                                | Resolver + prober seams; no direct store access.                                                                  |
-| `connections.trustHostKey`                                        | hostKeyTruster seam.                                                                                              |
-| `connections.passwordResolved`                                    | Ask machinery.                                                                                                    |
-| `sshConfig.aliases` / `sshConfig.path`                            | sshConfigResolver seam.                                                                                           |
-| `tunnel.open` / `tunnel.stop`                                     | Resolver + connector seams; the tunnel ledger is transport-owned.                                                 |
-| `ports.status` / `ports.sample` / `ports.pause` / `ports.visible` | Discovery scheduler seam.                                                                                         |
-| `shell.complete`                                                  | Uses `session.Registry.Get` → **SessionOperation** via `ForSession(id)` (session).                                |
-| `shell.integrate`                                                 | Uses `session.Registry.Get` → **SessionOperation** via `ForSession(id)` (session).                                |
-| `shell.launcherCommand`                                           | launcherStager seam.                                                                                              |
-| `shell.environmentObserved`                                       | Passport seam.                                                                                                    |
-| `shell.footprint.status` / `shell.footprint.uninstall`            | installedFacts / remoteUninstaller seams.                                                                         |
-| `shell.openUrl`                                                   | urlOpener seam.                                                                                                   |
-| `dialog.openFile` / `dialog.openDirectory`                        | dialogService seam (one capability, one admission slot).                                                          |
-| `fs.complete`                                                     | Pure local path completion.                                                                                       |
+| Method                                                            | Why                                                                                                                 |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `sessions.status`                                                 | **SessionOperation** (session) via `NewSessionOperation` (whole-domain instance; `List` + `LastUsedForProfiles`).   |
+| `connections.test`                                                | Resolver + prober seams; no direct store access.                                                                    |
+| `connections.trustHostKey`                                        | hostKeyTruster seam.                                                                                                |
+| `connections.passwordResolved`                                    | Ask machinery.                                                                                                      |
+| `sshConfig.aliases` / `sshConfig.path`                            | sshConfigResolver seam.                                                                                             |
+| `tunnel.open` / `tunnel.stop` / `tunnel.list`                     | Resolver + connector seams; the tunnel ledger is transport-owned, and `tunnel.list` reads it without asking a host. |
+| `ports.status` / `ports.sample` / `ports.pause` / `ports.visible` | Discovery scheduler seam.                                                                                           |
+| `shell.complete`                                                  | Uses `session.Registry.Get` → **SessionOperation** via `ForSession(id)` (session).                                  |
+| `shell.integrate`                                                 | Uses `session.Registry.Get` → **SessionOperation** via `ForSession(id)` (session).                                  |
+| `shell.launcherCommand`                                           | launcherStager seam.                                                                                                |
+| `shell.environmentObserved`                                       | Passport seam.                                                                                                      |
+| `shell.footprint.status` / `shell.footprint.uninstall`            | installedFacts / remoteUninstaller seams.                                                                           |
+| `shell.openUrl`                                                   | urlOpener seam.                                                                                                     |
+| `dialog.openFile` / `dialog.openDirectory`                        | dialogService seam (one capability, one admission slot).                                                            |
+| `fs.complete`                                                     | Pure local path completion.                                                                                         |
 
 ## Code the migration worker must delete from the transport
 

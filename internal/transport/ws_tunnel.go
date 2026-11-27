@@ -20,8 +20,11 @@ import (
 // WithTunnelConnector attaches the connector that acquires an owned pooled
 // SSH connection lease for a forward (spec §7.3). The single implementation
 // is *ssh.RealClient, which satisfies tunnel.Connector without an adapter —
-// the signatures are identical. When not wired, tunnel.open returns
-// a JSON-RPC error; the transport never constructs an SSH client itself.
+// the signatures are identical. When not wired, tunnel.open AND tunnel.stop
+// answer a JSON-RPC error (-32603): opening has nowhere to acquire a lease
+// from, and stopping resolves the forward's lease through the same seam — so
+// a server without a connector can neither start a forward nor end one. The
+// transport never constructs an SSH client itself.
 func WithTunnelConnector(c tunnel.Connector) WSServerOption {
 	return func(s *WSServer) { s.tunnelConnector = c }
 }

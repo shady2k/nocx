@@ -4271,7 +4271,7 @@ func integrationModeForAck(remote *ssh.ConnectConfig) string {
 // Every result with a tunnel record is registered in the transport ledger
 // WITHOUT a pane owner (spec §7.3): stored forwards are connection-owned
 // and must survive pane close. A row that failed to start is still
-// registered so ports.status shows it — the panel must not contradict a
+// registered so tunnel.list shows it — the panel must not contradict a
 // forward the backend knows failed (AGENTS.md: a soft degrade must be
 // visible in the product, not only in a log). One row's failure never
 // stops another's; that contract lives in connectfwd.Replay, and this
@@ -4331,7 +4331,9 @@ func (s *WSServer) replayStoredForwards(profileID, host string, cfg *ssh.Connect
 // trackTunnelConnectionOwned registers a tunnel in the ledger WITHOUT a tab
 // owner (spec §7.3): a stored forward is the connection's, not the opening
 // tab's, so closing the tab must not stop it. It stays stoppable through
-// tunnel.stop and visible in ports.status for the life of the connection.
+// tunnel.stop and visible in tunnel.list for the life of the connection —
+// the ledger is read by the method that writes it, whatever the connection's
+// helper axis says (ALX-1852).
 func (s *WSServer) trackTunnelConnectionOwned(t *tunnel.Tunnel) {
 	s.tunnelMu.Lock()
 	s.tunnels[t.ID] = t

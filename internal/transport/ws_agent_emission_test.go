@@ -56,6 +56,7 @@ func (h *emissionHarness) Run(ctx context.Context, spec agentharness.TurnSpec) (
 		}
 		invocation.Context = toolCtx
 		invocation.Method = "fetch.url"
+		invocation.AgentCallKey = "1:fetch-call"
 		invocation.RawParams = json.RawMessage(`{"url":"https://example.test/page"}`)
 		_, _ = tools.Dispatch(invocation)
 	}()

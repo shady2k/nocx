@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"maps"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/assistant"
@@ -23,6 +25,45 @@ func (a assistantTurnAuthorizer) Admit(_ toolendpoint.Peer, publish func(string,
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
 	}
 	return inv, func() {}, nil
+}
+
+type agentCallCapture struct {
+	heldDispatcher
+	calls chan assistant.ToolInvocation
+}
+
+func (d *agentCallCapture) Dispatch(invocation assistant.ToolInvocation) (string, error) {
+	d.calls <- invocation
+	return `{}`, nil
+}
+
+type turnSlotAuthorizer struct{ slotAuthorizer }
+
+func (*turnSlotAuthorizer) AdmitsTurnBearer() bool { return true }
+
+func TestAssistantBridgeForwardsCallIDOutsideToolArguments(t *testing.T) {
+	dispatch := &agentCallCapture{calls: make(chan assistant.ToolInvocation, 1)}
+	endpoint := startRealEndpoint(t, &turnSlotAuthorizer{}, dispatch)
+	server, err := New(Config{Socket: endpoint.SocketPath(), TurnToken: testBearer, Logger: discardLogger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := startStdioServing(t, func(input io.Reader, output io.WriteCloser) error {
+		return server.Serve(context.Background(), input, output)
+	})
+	initialization(driver)
+	driver.send(2, "tools/call", `{"name":"alpha.screen","arguments":{"value":7,"__nocx_tool_call_key":"2:model-call"}}`)
+	if got := toolText(t, driver.nextID(2)); got != "{}" {
+		t.Fatalf("call result = %q", got)
+	}
+	call := <-dispatch.calls
+	if call.AgentCallKey != "2:model-call" {
+		t.Fatalf("endpoint call key = %q", call.AgentCallKey)
+	}
+	var args map[string]int
+	if err := json.Unmarshal(call.RawParams, &args); err != nil || !maps.Equal(args, map[string]int{"value": 7}) {
+		t.Fatalf("endpoint arguments = %s, decode error = %v", call.RawParams, err)
+	}
 }
 
 type noKnownMaterial struct{}

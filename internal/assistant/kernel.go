@@ -702,13 +702,14 @@ func (k *effectKernel) announce(call Call, state *kernelCall) error {
 	decl := call.Declaration()
 	resources, _ := call.Resources()
 	return k.onCall(ToolCall{
-		Tool:       decl.Name,
-		CallID:     call.CallID(),
-		Args:       call.Arguments(),
-		EntryID:    state.entryID,
-		Effect:     decl.Effect,
-		Resource:   matchedResource(resources),
-		OpensBlock: decl.OpensBlock,
+		Tool:         decl.Name,
+		CallID:       call.CallID(),
+		AgentCallKey: call.agentCallKey,
+		Args:         call.Arguments(),
+		EntryID:      state.entryID,
+		Effect:       decl.Effect,
+		Resource:     matchedResource(resources),
+		OpensBlock:   decl.OpensBlock,
 	})
 }
 

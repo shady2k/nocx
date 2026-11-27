@@ -25,6 +25,8 @@ type ToolCall struct {
 	// CallID is the model's own id for this call. The renderer keys on it,
 	// so a call that is announced twice renders once.
 	CallID string
+	// AgentCallKey lets the transport match details to a published start.
+	AgentCallKey string
 	// Args is what the model asked for, AS VALIDATED against the tool's own
 	// schema — the object the call actually ran on, never the raw string the
 	// model emitted. It is what NAMES the call on screen, and it is the same

@@ -809,7 +809,7 @@ func TestACallCancelledWhileItWaitsForTheTurnSendsNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := conn.send(ctx, 1, "alpha.second", json.RawMessage(`{}`))
+		_, err := conn.send(ctx, 1, "alpha.second", json.RawMessage(`{}`), "")
 		done <- err
 	}()
 	cancel() // called off while it waits for the turn

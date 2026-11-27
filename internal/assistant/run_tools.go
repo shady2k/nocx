@@ -142,8 +142,8 @@ func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	} else {
 		select {
 		case <-started:
-			if err := invocation.Context.Err(); err != nil {
-				return "", err
+			if contextErr := invocation.Context.Err(); contextErr != nil {
+				return "", contextErr
 			}
 			callID = invocation.AgentCallID
 		case <-invocation.Context.Done():

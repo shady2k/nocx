@@ -27,7 +27,7 @@
 // inheritance means uploading into the checkout. The caller states it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import path from 'node:path'
 
@@ -121,6 +121,11 @@ export interface StartSshdOptions {
 /**
  * Every invocation of the port-probe fixtures, one per line, or [] when none
  * ran — which is the statement a raw-host case asserts ("no ports exec").
+ *
+ * An empty answer is only evidence when the directory is not: a case that
+ * asserts "the ladder never ran" must first require a NON-empty
+ * `fixture.portsTools`, or a run where the switch never reached the server
+ * would satisfy it with nothing raised to run the ladder.
  */
 export function portsExecs(fixture: SshdFixture): string[] {
   if (fixture.portsTools === '') return []
@@ -130,6 +135,32 @@ export function portsExecs(fixture: SshdFixture): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
+}
+
+/**
+ * End a fixture, and remove what it made.
+ *
+ * THE PORT-TOOL DIRECTORY IS REMOVED HERE, not only by the server's own
+ * `defer`. Specifications end this fixture with a signal — SIGKILL in most of
+ * them — and a process killed by a signal runs no deferred function, so the
+ * directory `-ports-tools` created lived on under TMPDIR forever, one per run
+ * since the switch was added (nocx-oalo1.13.4 review, ALX-1865 item 7). The
+ * server's defer still covers an orderly exit; this covers the teardown a spec
+ * actually performs, and both are idempotent.
+ *
+ * The kill is awaited on the process's own `exit` event, so a caller that
+ * removes the fixture's home afterwards is not racing a live helper.
+ */
+export async function stopSshd(fixture: SshdFixture): Promise<void> {
+  const { proc } = fixture
+  if (proc.exitCode === null && proc.signalCode === null) {
+    const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()))
+    proc.kill('SIGKILL')
+    await exited
+  }
+  if (fixture.portsTools !== '') {
+    rmSync(fixture.portsTools, { recursive: true, force: true })
+  }
 }
 
 /**

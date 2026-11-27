@@ -341,7 +341,9 @@ func run() error {
 	// it, and armed only once READY has been said.
 	// The port-probe fixtures, if this run asked for a host whose port tool is
 	// a chosen fact. Installed before READY so a spec never has to guess the
-	// directory, and removed when this process stops serving.
+	// directory. The removal below is the ORDERLY exit's and no spec performs
+	// one — a fixture ended with a signal runs no defer — so the caller's
+	// teardown removes it too (portstools.go, e2e/sshd-fixture.ts stopSshd).
 	if *portsTools != "" {
 		dir, err := installPortsTools(*portsTools)
 		if err != nil {

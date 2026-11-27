@@ -263,7 +263,7 @@ func (h tunnelHandlers) handleTunnelStop(req jsonrpcRequest) {
 // tunnelLedger is the transport-owned forward ledger, as a narrow seam: the
 // mutex and the two maps it guards. It points at the WSServer's own ledger
 // state — constructed once per server in seamSpecs — so tunnel.open,
-// tunnel.stop and ports.status share the exact maps that tab teardown and
+// tunnel.stop and tunnel.list share the exact maps that tab teardown and
 // stored-forward replay use: one ledger, several narrow holders.
 type tunnelLedger struct {
 	mu      *sync.Mutex

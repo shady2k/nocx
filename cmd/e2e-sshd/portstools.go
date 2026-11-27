@@ -23,9 +23,13 @@ package main
 // a raw host must leave it absent, and "no ports exec" is otherwise an
 // assertion about the absence of something this side cannot observe.
 //
-// The directory is the fixture's own, created at startup and removed when the
-// server stops serving — a caller reads `calls` while the run is live, which is
-// the only time it means anything.
+// The directory is the fixture's own, created at startup and announced as
+// PORTSTOOLS= before READY — a caller reads `calls` while the run is live, which
+// is the only time it means anything. IT IS THE CALLER THAT REMOVES IT
+// (e2e/sshd-fixture.ts's stopSshd): every spec ends this fixture with a signal,
+// and a process killed by one runs no deferred function, so a directory only
+// this side could remove outlived every run. The defer below is the orderly
+// exit's half, which is why it stays.
 
 import (
 	"fmt"

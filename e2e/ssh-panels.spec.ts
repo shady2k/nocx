@@ -92,6 +92,7 @@ import {
   recordHostMethod,
   rpc,
   startSshd,
+  stopSshd,
   type SshdFixture,
 } from './sshd-fixture'
 
@@ -177,12 +178,10 @@ async function startHost(
 }
 
 async function stopHost(host: Host): Promise<void> {
-  const proc = host.fixture.proc
-  if (proc.exitCode === null && proc.signalCode === null) {
-    const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()))
-    proc.kill('SIGKILL')
-    await exited
-  }
+  // The kill AND the port-tool directory it created: a killed fixture runs no
+  // deferred function, so the teardown a spec performs is the one that removes
+  // what the fixture made (sshd-fixture.ts stopSshd).
+  await stopSshd(host.fixture)
   // The far helper is this machine's process too: between the daemon's death
   // and the fixture's, one can still be writing its `.nocx` tree under the
   // home, which is the checkout. Retries are the difference between a cleanup
@@ -205,6 +204,18 @@ async function openSavedProfile(page: Page, name: string): Promise<void> {
   await expect(row).toBeVisible({ timeout: 10_000 })
   await expect(row).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Enter')
+}
+
+/** Answer the connection-password ask the fixture poses: the one password it
+ *  accepts, typed in, and the prompt gone before the caller asserts anything
+ *  about the tab. A saved profile with no stored secret and a hand-typed host
+ *  meet the SAME ask, which is what lets one fixture serve both. */
+async function answerPasswordAsk(page: Page, password: string): Promise<void> {
+  const prompt = page.locator('.ui-prompt')
+  await expect(prompt).toBeVisible({ timeout: 60_000 })
+  await prompt.locator('#connection-password').fill(password)
+  await prompt.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(prompt).not.toBeVisible({ timeout: 60_000 })
 }
 
 /** The shell's prompt, for a raw connection: the grid takes the keys and no
@@ -466,44 +477,27 @@ test('a raw host draws the same reason and Host settings on the head and in Git,
 
 // ── Ports: the same axis, the same card (nocx-oalo1.13.4) ─────────────────
 
-test('a serving host lists the ports its own tool reports, on a saved connection', async ({
+test('one port tool on one host: the saved tab and the hand-typed tab both list it, and the panel follows the tab in front', async ({
   page,
 }) => {
-  test.setTimeout(180_000)
-  const wired = await wire(page, { mode: 'helper', portsTools: 'fake' })
-  try {
-    await openSavedProfile(page, wired.profileName)
-    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
-    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
-
-    await showSidebarView(page, 'ports')
-    // The fixture's own listener, named by the port a person reads. Nothing in
-    // this assertion knows how the sample travelled: the panel is the surface,
-    // and the row is the host's fact.
-    const row = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
-    await expect(row).toBeVisible({ timeout: 60_000 })
-    await expect(row).toContainText('node')
-    // No card: a serving axis has nothing to explain.
-    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
-  } finally {
-    await unwire(page, wired)
-  }
-})
-
-test('a hand-typed host lists the same ports, and offers no Forward', async ({ page }) => {
-  test.setTimeout(240_000)
-  // A password host, because an ad-hoc connection has no stored credential of
-  // its own: this is the shape a person meets when they type a host into Quick
-  // Connect, and the ask is answered the way connection-password.spec.ts
-  // answers it.
-  const remoteHome = mkdtempSync(path.join(tmpdir(), 'nocx-ssh-panels-adhoc-'))
-  const password = 'e2e-adhoc-42'
+  test.setTimeout(300_000)
+  // ONE fixture for both tabs, deliberately: the epic's DONE WHEN is that the
+  // same host's ports are the same panel whichever way a person reached it, and
+  // two fixtures would make that two claims about two hosts. A PASSWORD host,
+  // because a hand-typed tab carries no stored credential of its own — the
+  // saved profile below is seeded the same way (no stored secret), so both tabs
+  // meet the same ask against the same listener.
+  const repo = createRepo()
+  writeFileSync(path.join(repo.root, '.git', 'info', 'exclude'), '.nocx/\n', { flag: 'a' })
+  const password = 'e2e-ports-parity-42'
   const fixture = await startSshd({
-    home: remoteHome,
-    cwd: remoteHome,
+    home: repo.root,
+    cwd: repo.root,
     portsTools: 'fake',
     args: ['-password', password],
   })
+  const profileName = `e2e-ssh-panels-parity-${Date.now()}`
+  let profileId: string | null = null
   try {
     trustHostKey(fixture.knownHosts)
     await page.goto('/')
@@ -515,39 +509,79 @@ test('a hand-typed host lists the same ports, and offers no Forward', async ({ p
     // about the ports panel, not the ask.
     await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'helper')
 
-    const target = `e2euser@127.0.0.1:${fixture.port}`
+    // ── The saved tab ────────────────────────────────────────────────────
+    const created = await rpc<{ id: string }>(page, endpoint, 'profiles.create', {
+      type: 'ssh',
+      name: profileName,
+      options: { host: fixture.host, port: fixture.port, user: fixture.user, auth: 'password' },
+    })
+    profileId = created.id
+    await openSavedProfile(page, profileName)
+    await answerPasswordAsk(page, password)
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
+    // The tab in front is the SAVED one, and what follows is what it shows.
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+
+    await showSidebarView(page, 'ports')
+    // The fixture's own listener, named by the port a person reads. Nothing in
+    // this assertion knows how the sample travelled: the panel is the surface,
+    // and the row is the host's fact.
+    const savedRow = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(savedRow).toBeVisible({ timeout: 60_000 })
+    await expect(savedRow).toContainText('node')
+    // No card: a serving axis has nothing to explain.
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+    // A saved host can forward: `tunnel.open` is addressed by its record.
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
+
+    // ── The hand-typed tab, to the SAME listener ─────────────────────────
+    const target = `${fixture.user}@127.0.0.1:${fixture.port}`
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible({ timeout: 30_000 })
     await search.fill(target)
     // The free-form row: nothing is saved, and the label says so.
-    const adHoc = page.locator('.quick-connect__item', { hasText: 'Connect to e2euser@127.0.0.1' })
+    const adHoc = page.locator('.quick-connect__item', {
+      hasText: `Connect to ${fixture.user}@127.0.0.1`,
+    })
     await expect(adHoc).toBeVisible({ timeout: 30_000 })
     await page.keyboard.press('Enter')
+    await answerPasswordAsk(page, password)
+    await expect(page.locator(TAB)).toHaveCount(3, { timeout: 60_000 })
+    // The tab in front is now the HAND-TYPED one — the same host reached the
+    // other way — so the panel has to be scoped to it.
+    await expect(page.locator(TAB).nth(2)).toHaveAttribute('aria-selected', 'true')
 
-    // The password ask names the challenge the fixture poses, and the fixture
-    // accepts only this password.
-    const prompt = page.locator('.ui-prompt')
-    await expect(prompt).toBeVisible({ timeout: 60_000 })
-    await prompt.locator('#connection-password').fill(password)
-    await prompt.getByRole('button', { name: 'Connect', exact: true }).click()
-    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
-
-    await showSidebarView(page, 'ports')
-    const row = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
-    await expect(row).toBeVisible({ timeout: 90_000 })
-    await expect(row).toContainText('node')
+    await expect(page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })).toBeVisible({
+      timeout: 90_000,
+    })
     await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
-
-    // Forward is `tunnel.open`, which is addressed by a SAVED profile: a
-    // hand-typed tab has no host record to forward from, so the control is
-    // absent rather than dead (D14).
+    // The re-scope shows in the one action that needs a host record: Forward
+    // is absent on the hand-typed tab (D14) …
     await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(0)
-    // Copy-address still works — the row is this machine's own listener view.
+    // … while Copy-address stays, because the row is a listener either way.
     await expect(page.locator('[data-testid="ports-copy"]')).toHaveCount(1)
+
+    // ── And back: the saved tab in front brings its Forward with it ─────
+    await page.locator(TAB).nth(1).click()
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
   } finally {
-    fixture.proc.kill('SIGKILL')
-    rmSync(remoteHome, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    if (profileId !== null) {
+      try {
+        const endpoint = await resolveBackend(page)
+        await rpc(page, endpoint, 'profiles.delete', { id: profileId })
+      } catch {
+        // A cleanup that throws would replace the real failure with its own.
+      }
+    }
+    await stopSshd(fixture)
+    rmSync(repo.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }
 })
 
@@ -579,6 +613,15 @@ test('a raw host draws the Ports card and never runs the port tool', async ({ pa
     // THE HOST'S OWN ACCOUNT: the fixture's `ss` records every invocation, and
     // a gated panel asks nothing — so the file is absent, which is the only
     // way this side can prove "no ports exec" rather than assume it.
+    //
+    // THE DIRECTORY IS THE PREMISE, and it is asserted first: `portsExecs`
+    // answers [] both for "nothing ran" and for "nothing was raised to run",
+    // so an empty log only means something once the fixture's own PORTSTOOLS=
+    // line named a directory (ALX-1865 item 7).
+    expect(
+      wired.host.fixture.portsTools,
+      'the fixture never announced a port-tool directory, so an empty log proves nothing',
+    ).not.toBe('')
     expect(
       portsExecs(wired.host.fixture),
       'the port tool ran on a host whose helper does not serve',
@@ -614,9 +657,15 @@ test('a host with no port tool says so, while Git and Files keep working', async
     await showSidebarView(page, 'git')
     await expect(page.locator(GIT_BRANCH)).toBeVisible({ timeout: 60_000 })
     await expect(page.locator(GIT_BRANCH)).toHaveText('main')
-    // … and Files lists the far host with the axis still serving.
+    // … and Files lists the far host with the axis still serving. The panel's
+    // own root draws `data-testid` and `data-root` and no helper attribute
+    // (files-view.tsx), so the axis is read where it IS drawn — the tab head —
+    // and the listing is what proves the far side answered: openFilesOnTab has
+    // already required the revealed cwd, and the repository's own file is the
+    // entry under it.
     await openFilesOnTab(page, wired.host.repo.root)
-    await expect(page.locator(FILES_PANEL)).toHaveAttribute('data-helper', 'serving')
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving')
+    await expect(page.locator(FILES_PANEL)).toContainText('base.txt')
   } finally {
     await unwire(page, wired)
   }

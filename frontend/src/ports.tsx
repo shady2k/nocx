@@ -300,11 +300,15 @@ export function PortsPanel(props: PortsPanelProps) {
   const savedProfileId = () => props.savedProfileId?.() ?? null
 
   /** The gate, folded once: the panel asks its host nothing while it is
-   *  closed (ALX-1852). */
+   *  closed (ALX-1852). It decides what may LEAVE, and the observation is the
+   *  authority on that — a typed `helper-unavailable` is one answer to one
+   *  question, not a gate of its own. */
   const gate = (): HelperGate => portsHelperGate(paneId(), props.activeOrigin())
-  /** Closed, including the moment a ports.* answer told us the helper is gone
-   *  before the connection's own observation caught up (the race ALX-1852
-   *  closes). Both draw the SAME card and neither raises a toast. */
+  /** Closed FOR DRAWING, including the moment a ports.* answer told us the
+   *  helper is gone before the connection's own observation caught up (the
+   *  race ALX-1852 closes). Both draw the SAME card and neither raises a
+   *  toast. Asking is a different question, decided by `gate()` above: the
+   *  stale refusal must not silence the retry that could clear it. */
   const gateClosed = (): boolean => gate() !== null || helperUnavailable()
 
   const applyStatus = (st: PortsStatusResult): void => {
@@ -382,7 +386,13 @@ export function PortsPanel(props: PortsPanelProps) {
       // The host is asked only while the axis serves (ALX-1852). The ledger
       // is the backend's own record and is read either way, so a forward
       // stays visible and stoppable on a host whose helper is not running.
-      readDiscovery && !gateClosed() ? refreshDiscovery(pid) : undefined,
+      //
+      // `gate()`, not `gateClosed()`: once a typed refusal has put the panel
+      // in its card state, the tick is what carries it back out — asking
+      // again is the only way `applyStatus` can clear the refusal, and a gate
+      // that closed on the ANSWER would leave the panel waiting forever on a
+      // connection whose helper had come back.
+      readDiscovery && gate() === null ? refreshDiscovery(pid) : undefined,
       !isLocal() && props.visible() ? refreshForwards(pid) : undefined,
     ])
   }
@@ -481,9 +491,18 @@ export function PortsPanel(props: PortsPanelProps) {
   )
 
   // A read AS SOON AS ONE IS POSSIBLE, with nobody pressing anything: a
-  // re-scope, a tab coming back into view and an axis that returns to
-  // `serving` all end in a fresh read (ALX-1852). `refresh()` itself decides
-  // what may be asked — while the gate is closed that is the ledger only.
+  // re-scope, a tab coming back into view, an axis that returns to `serving`
+  // and a typed refusal that put the panel in its card state all end in a
+  // fresh read (ALX-1852). `refresh()` itself decides what may be asked —
+  // while the gate is closed that is the ledger only.
+  //
+  // A REFUSAL COSTS EXACTLY ONE EXTRA READ, and that bound is not an accident
+  // of the wiring: entering the card changes a value this effect watches, so
+  // it is read once more at the moment of the refusal — the answer that can
+  // clear a stale one — and `applyDiscoveryFailure` then refuses to re-state
+  // the same account, so the value stops changing and the loop stops. A
+  // panel that re-asked on every identical refusal would be one request per
+  // tick per tab, which is the cost this gate exists to remove.
   createEffect(
     on([paneId, gateClosed], ([pid]) => {
       if (pid !== null) void refresh()

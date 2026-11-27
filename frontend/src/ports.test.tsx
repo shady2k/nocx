@@ -1492,6 +1492,46 @@ describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
     }
   })
 
+  it('a refusal the observation has not caught up with is retried, and clears itself', async () => {
+    // The race ALX-1852 closes has TWO endings, and the second is the one a
+    // card that silenced the poll would lose: the backend said the helper was
+    // gone, the observation still says it serves, and the next tick must be
+    // allowed to ask again — otherwise a helper that came back is invisible
+    // until the person switches tabs.
+    vi.useFakeTimers()
+    try {
+      const refusal = (): RpcError =>
+        new RpcError('helper unavailable', -32602, { reason: 'helper-unavailable' })
+      // Two refusals, then an answer: the observation lags long enough for the
+      // card to be a state a person sees, and then catches up.
+      const status = vi
+        .fn()
+        .mockRejectedValueOnce(refusal())
+        .mockRejectedValueOnce(refusal())
+        .mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] }))
+      renderPanel(fakeServices({ status }), {
+        activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }),
+      })
+
+      // Under fake timers nothing waits: each advance flushes the microtasks
+      // an answered call resolves in, which is the whole observable here.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(screen.getByTestId('ports-helper-axis')).toBeTruthy()
+      // ONE retry per refusal, and no more: the card state is also a gate the
+      // effect watches, so a refusal that keeps arriving cannot spin.
+      expect(status.mock.calls.length).toBeLessThanOrEqual(2)
+
+      // The tick asks again — the gate that decides what may LEAVE is the
+      // observation's, and it says serving — so the answer clears the card
+      // with nobody pressing anything.
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS)
+      expect(screen.getByText('0.0.0.0:6768')).toBeTruthy()
+      expect(screen.queryByTestId('ports-helper-axis')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a probe-less host names the state in a fixed sentence, not the backend’s classification', async () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(

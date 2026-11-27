@@ -22,12 +22,13 @@ type ToolInvocation struct {
 	// Terminal is shared by cancellation, attempt recording and delivery.
 	Terminal         *CallTerminal
 	orderReservation *turnReservation
-	agentCallID      <-chan string
-	Context          context.Context
-	Method           string
-	RunContext       agenttools.RunContext
-	Grant            content.Grant
-	RawParams        json.RawMessage
+	// AgentCallID is the harness call ID carried by the endpoint envelope.
+	AgentCallID string
+	Context     context.Context
+	Method      string
+	RunContext  agenttools.RunContext
+	Grant       content.Grant
+	RawParams   json.RawMessage
 }
 
 // ToolDispatcher is the common operation used by the in-process assistant and

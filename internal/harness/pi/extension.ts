@@ -16,6 +16,13 @@ export default function (pi) {
       env: session.env,
       exposure: 'direct',
     })
+    pi.on('tool_call', (event) => {
+      if (event.toolName.startsWith('mcp__nocx__')) {
+        // Pi passes the validated, per-call copy to MCP but drops the call ID.
+        // The assistant bridge unwraps this field before forwarding arguments.
+        event.input.__nocx_tool_call_id = event.toolCallId
+      }
+    })
   }
   pi.on('before_agent_start', (event) => ({
     systemPrompt: event.systemPrompt + '\n\n' + readFileSync(session.promptFile, 'utf8'),

@@ -10,25 +10,36 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-func TestRunToolsAgentCallIDsPreserveReservedOrder(t *testing.T) {
+func TestRunToolsAgentCallStartsAreMatchedByID(t *testing.T) {
 	tools := &RunTools{kernel: &effectKernel{order: newTurnOrder()}}
 	tools.UseAgentCallIDs()
-	first, releaseFirst := tools.ReserveInvocation(ToolInvocation{Method: "files.read"})
-	defer releaseFirst()
-	discovery, releaseDiscovery := tools.ReserveInvocation(ToolInvocation{Method: "tools.catalogue"})
-	defer releaseDiscovery()
-	second, releaseSecond := tools.ReserveInvocation(ToolInvocation{Method: "files.read"})
-	defer releaseSecond()
 	tools.StartToolCall("agent-first")
+	second, err := tools.claimAgentStart("agent-second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-second:
+		t.Fatal("the first start unblocked the second call")
+	default:
+	}
 	tools.StartToolCall("agent-second")
-	if discovery.agentCallID != nil {
-		t.Fatal("discovery reserved an identity")
+	select {
+	case <-second:
+	default:
+		t.Fatal("the second start did not unblock its call")
 	}
-	if got := <-second.agentCallID; got != "agent-second" {
-		t.Fatalf("second identity = %q", got)
+	first, err := tools.claimAgentStart("agent-first")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := <-first.agentCallID; got != "agent-first" {
-		t.Fatalf("first identity = %q", got)
+	select {
+	case <-first:
+	default:
+		t.Fatal("the first start was lost")
+	}
+	if _, err := tools.claimAgentStart("agent-first"); err == nil {
+		t.Fatal("a second request claimed the same start")
 	}
 }
 
@@ -36,18 +47,27 @@ func TestRunToolsAgentCallIDCancellationDoesNotShiftLaterCall(t *testing.T) {
 	tools := &RunTools{kernel: &effectKernel{order: newTurnOrder()}}
 	tools.UseAgentCallIDs()
 	ctx, cancel := context.WithCancel(context.Background())
-	first, releaseFirst := tools.ReserveInvocation(ToolInvocation{Context: ctx, Method: "files.read"})
-	defer releaseFirst()
+	first, releaseFirst := tools.ReserveInvocation(ToolInvocation{Context: ctx, Method: "files.read", AgentCallID: "cancelled"})
 	cancel()
 	if _, err := tools.Dispatch(first); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error = %v", err)
 	}
-	second, releaseSecond := tools.ReserveInvocation(ToolInvocation{Method: "files.read"})
-	defer releaseSecond()
+	releaseFirst()
+	second, err := tools.claimAgentStart("next")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tools.StartToolCall("cancelled")
+	select {
+	case <-second:
+		t.Fatal("the cancelled call's start reached the next call")
+	default:
+	}
 	tools.StartToolCall("next")
-	if got := <-second.agentCallID; got != "next" {
-		t.Fatalf("next identity = %q", got)
+	select {
+	case <-second:
+	default:
+		t.Fatal("the next call did not receive its start")
 	}
 }
 
@@ -68,6 +88,7 @@ func TestRunToolsAgentCallIDRefusalDoesNotShiftLaterCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.Method = "files.read"
+	first.AgentCallID = "refused"
 	first.RawParams = []byte(`{"path":"/outside-run-fence"}`)
 	tools.StartToolCall("refused")
 	if _, dispatchErr := tools.Dispatch(first); dispatchErr == nil {
@@ -80,6 +101,7 @@ func TestRunToolsAgentCallIDRefusalDoesNotShiftLaterCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.Method = "files.read"
+	second.AgentCallID = "accepted"
 	second.RawParams = []byte(fmt.Sprintf(`{"path":%q}`, path))
 	tools.StartToolCall("accepted")
 	if _, dispatchErr := tools.Dispatch(second); dispatchErr != nil {

@@ -22,13 +22,16 @@ type TurnTools interface {
 // RunTools exposes the existing assistant kernel to the tool endpoint.
 // Its state, ordering, approvals and screens belong to one run.
 type RunTools struct {
-	kernel          *effectKernel
-	turnContext     context.Context
-	fatal           chan error
-	identityMu      sync.Mutex
-	agentCallIDs    bool
-	startedIDs      []string
-	identityWaiters []chan string
+	kernel      *effectKernel
+	turnContext context.Context
+	fatal       chan error
+	identityMu  sync.Mutex
+	agentStarts map[string]*agentToolStart
+}
+
+type agentToolStart struct {
+	published chan struct{}
+	claimed   bool
 }
 
 // BindRunTools binds the same run inputs the in-process assistant uses.
@@ -52,7 +55,7 @@ func BindRunTools(ctx context.Context, c Client, p AskParams, onCall func(ToolCa
 // Call it before admitting requests.
 func (r *RunTools) UseAgentCallIDs() {
 	r.identityMu.Lock()
-	r.agentCallIDs = true
+	r.agentStarts = make(map[string]*agentToolStart)
 	r.identityMu.Unlock()
 }
 
@@ -61,34 +64,43 @@ func (r *RunTools) UseAgentCallIDs() {
 // (ADR-anntnxdj §2).
 func (r *RunTools) TurnArrivalCutoff() uint64 { return r.kernel.order.ArrivalCutoff() }
 
-// StartToolCall binds the next endpoint invocation to an agent's tool-start event.
-// It never waits for endpoint admission or execution.
+// StartToolCall publishes a start after the ordered stream has delivered it.
+// Endpoint arrival order can differ from the order of these starts.
 func (r *RunTools) StartToolCall(id string) {
 	r.identityMu.Lock()
 	defer r.identityMu.Unlock()
-	if len(r.identityWaiters) != 0 {
-		waiter := r.identityWaiters[0]
-		r.identityWaiters = r.identityWaiters[1:]
-		waiter <- id
-		return
+	start := r.agentStart(id)
+	select {
+	case <-start.published:
+	default:
+		close(start.published)
 	}
-	r.startedIDs = append(r.startedIDs, id)
 }
 
-func (r *RunTools) reserveCallIdentity() <-chan string {
+func (r *RunTools) agentStart(id string) *agentToolStart {
+	start := r.agentStarts[id]
+	if start == nil {
+		start = &agentToolStart{published: make(chan struct{})}
+		r.agentStarts[id] = start
+	}
+	return start
+}
+
+func (r *RunTools) claimAgentStart(id string) (<-chan struct{}, error) {
 	r.identityMu.Lock()
 	defer r.identityMu.Unlock()
-	if !r.agentCallIDs {
-		return nil
+	if r.agentStarts == nil {
+		return nil, nil
 	}
-	waiter := make(chan string, 1)
-	if len(r.startedIDs) != 0 {
-		waiter <- r.startedIDs[0]
-		r.startedIDs = r.startedIDs[1:]
-	} else {
-		r.identityWaiters = append(r.identityWaiters, waiter)
+	if id == "" {
+		return nil, errors.New("assistant tools: missing agent call ID")
 	}
-	return waiter
+	start := r.agentStart(id)
+	if start.claimed {
+		return nil, errors.New("assistant tools: agent call ID already claimed")
+	}
+	start.claimed = true
+	return start.published, nil
 }
 
 // ReserveInvocation fixes this call's position while the endpoint still reads
@@ -96,11 +108,6 @@ func (r *RunTools) reserveCallIdentity() <-chan string {
 func (r *RunTools) ReserveInvocation(invocation ToolInvocation) (ToolInvocation, func()) {
 	reservation, release := r.kernel.order.reserve()
 	invocation.orderReservation = reservation
-	// Discovery requests have no agent tool-start event. The endpoint sets Method
-	// before reserving so they cannot consume a call identity.
-	if invocation.Method != "tools.instructions" && invocation.Method != "tools.catalogue" {
-		invocation.agentCallID = r.reserveCallIdentity()
-	}
 	return invocation, release
 }
 
@@ -125,13 +132,20 @@ func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
 // Dispatch uses the kernel's own per-turn order and complete authority chain.
 func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	invocation.RunContext = r.RunContext()
-	callID := uuid.NewString()
-	if invocation.agentCallID == nil {
-		invocation.agentCallID = r.reserveCallIdentity()
+	started, err := r.claimAgentStart(invocation.AgentCallID)
+	if err != nil {
+		return "", &DispatchRefusalError{Method: invocation.Method, Reason: err.Error(), Cause: err}
 	}
-	if invocation.agentCallID != nil {
+	var callID string
+	if started == nil {
+		callID = uuid.NewString()
+	} else {
 		select {
-		case callID = <-invocation.agentCallID:
+		case <-started:
+			if err := invocation.Context.Err(); err != nil {
+				return "", err
+			}
+			callID = invocation.AgentCallID
 		case <-invocation.Context.Done():
 			return "", invocation.Context.Err()
 		}

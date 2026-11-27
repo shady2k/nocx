@@ -200,7 +200,7 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	// THE CALLER'S REQUEST, through the same send path the server uses, so what
 	// is asserted is the order the bridge actually produces and not a frame this
 	// test wrote itself.
-	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
+	if _, err := conn.send(context.Background(), 1, "tools/list", nil, ""); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	got := dialer.awaitBytes(t, panebind.TokenLen+1)
@@ -274,7 +274,7 @@ func TestBridgeTurnBearerUsesDistinctFrame(t *testing.T) {
 	if got := dialer.awaitBytes(t, len(want)); got != want {
 		t.Fatalf("turn frame = %q, want %q", got, want)
 	}
-	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
+	if _, err := conn.send(context.Background(), 1, "tools/list", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	got := dialer.awaitBytes(t, len(want)+1)

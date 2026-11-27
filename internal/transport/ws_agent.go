@@ -1727,6 +1727,8 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	}
 	var fatalErr error
 	var emissionErr error
+	// A published start is available until its details are delivered. A
+	// harness finish can arrive while an accepted endpoint call is unwinding.
 	started := make(map[string]struct{})
 stream:
 	for {
@@ -1739,6 +1741,7 @@ stream:
 			if _, ok := started[detail.call.CallID]; !ok {
 				detailErr = errors.New("tool details have no ordered start")
 			} else {
+				delete(started, detail.call.CallID)
 				detailErr = emit(agentAskEvent{Kind: agentAskToolCall, Call: &detail.call})
 			}
 			detail.done <- detailErr
@@ -1765,11 +1768,6 @@ stream:
 			}
 			started[event.Tool.ID] = struct{}{}
 			ev = agentAskEvent{Kind: agentAskToolStarted, Call: &assistant.ToolCall{CallID: event.Tool.ID}}
-		case agentharness.EventToolFinished:
-			if event.Tool != nil {
-				delete(started, event.Tool.ID)
-			}
-			continue
 		case agentharness.EventAnswerDelta:
 			ev = agentAskEvent{Kind: agentAskAnswer, Text: event.Text}
 		case agentharness.EventReasoningDelta:

@@ -854,6 +854,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 		}
 		releaseOrder := func() {}
 		requestInvocation.Method = request.Method
+		requestInvocation.AgentCallID = request.AgentCallID
 		if reserver, ok := dispatch.(assistant.ToolRequestReserver); ok {
 			requestInvocation, releaseOrder = reserver.ReserveInvocation(requestInvocation)
 			requestCtx = requestInvocation.Context
@@ -992,6 +993,9 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+	// AgentCallID correlates an assistant MCP call with its ordered start.
+	// It carries no authority and is outside the tool's arguments.
+	AgentCallID string `json:"agentCallId,omitempty"`
 	// Traceparent is the caller's W3C Trace Context header, and it is the one
 	// member here that is not JSON-RPC's. It carries the exchange across the
 	// process boundary: a coordinator's MCP call is served by nocx-helper,

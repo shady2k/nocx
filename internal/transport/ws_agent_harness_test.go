@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,12 +324,14 @@ func (h *concurrentDeliveryHarness) Run(ctx context.Context, spec agentharness.T
 			if !ok {
 				return
 			}
-			for range 100 {
-				events <- agentharness.Event{Kind: agentharness.EventToolStarted, Tool: &agentharness.ToolCall{ID: "sequential-call"}}
+			for n := range 100 {
+				id := "sequential-call-" + strconv.Itoa(n)
+				events <- agentharness.Event{Kind: agentharness.EventToolStarted, Tool: &agentharness.ToolCall{ID: id}}
 				invocation, err := tools.Admit(ctx)
 				if err == nil {
 					invocation.Context = ctx
 					invocation.Method = "snippets.list"
+					invocation.AgentCallID = id
 					invocation.RawParams = json.RawMessage(`{}`)
 					_, _ = tools.Dispatch(invocation)
 				}

@@ -714,6 +714,21 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 	if err := json.Unmarshal(call.Arguments, &arguments); err != nil || arguments == nil {
 		return writer.errorResponse(id, -32602, "invalid params", "tools/call arguments must be an object")
 	}
+	var agentCallID string
+	// The assistant connector attaches this to Pi's validated argument copy.
+	// Lift it into the endpoint envelope before the kernel sees the arguments.
+	const agentCallIDArg = "__nocx_tool_call_id"
+	if raw, ok := arguments[agentCallIDArg]; ok && link.bearer.kind == turnBearer {
+		if err := json.Unmarshal(raw, &agentCallID); err != nil || agentCallID == "" {
+			return writer.errorResponse(id, -32602, "invalid params", "invalid assistant tool call ID")
+		}
+		delete(arguments, agentCallIDArg)
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return err
+		}
+		call.Arguments = encoded
+	}
 	if !state.hasTool(call.Name) {
 		token := state.catalogueToken()
 		data, upstream, err := s.loadCatalogue(ctx, link)
@@ -736,7 +751,7 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 	// — and this only reports while it runs; stop is called before any answer
 	// is written, so a frame can never follow the result it was reporting on.
 	progress := s.startProgress(ctx, writer, call.Meta.ProgressToken)
-	result, upstream, err := link.call(ctx, call.Name, call.Arguments)
+	result, upstream, err := link.callWithAgentID(ctx, call.Name, call.Arguments, agentCallID)
 	progress.stop()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -978,6 +993,10 @@ func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error)
 // for its own answer and leaves the connection, and every other call on it,
 // exactly as they were.
 func (l *endpointLink) call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *upstreamError, error) {
+	return l.callWithAgentID(ctx, method, params, "")
+}
+
+func (l *endpointLink) callWithAgentID(ctx context.Context, method string, params json.RawMessage, agentCallID string) (json.RawMessage, *upstreamError, error) {
 	for round := 0; ; round++ {
 		// A REQUEST THE CALLER ALREADY CANCELLED IS NOT SENT. On the parent a
 		// fresh DialContext(ctx) refused this before anything left the
@@ -998,7 +1017,7 @@ func (l *endpointLink) call(ctx context.Context, method string, params json.RawM
 		if flight := callFlightFrom(ctx); flight != nil {
 			flight.bind(conn, id)
 		}
-		arrived, writeErr := conn.send(ctx, id, method, params)
+		arrived, writeErr := conn.send(ctx, id, method, params, agentCallID)
 		if writeErr != nil {
 			conn.forget(id)
 			if err := ctx.Err(); err != nil {
@@ -1384,12 +1403,15 @@ func idless(raw json.RawMessage) bool {
 // descriptor — which is why the interrupted-caller case cannot be answered by
 // the select that follows the write. A context cannot reach a write already in
 // progress; a deadline can.
-func (c *endpointConn) send(ctx context.Context, id int64, method string, params json.RawMessage) (bool, error) {
+func (c *endpointConn) send(ctx context.Context, id int64, method string, params json.RawMessage, agentCallID string) (bool, error) {
 	envelope := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  method,
 		"params":  params,
+	}
+	if agentCallID != "" {
+		envelope["agentCallId"] = agentCallID
 	}
 	// The far side opens a CHILD of this frame, which is what makes the hop
 	// visible in the tree rather than collapsing two processes into one span.

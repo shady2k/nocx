@@ -752,14 +752,25 @@ type filesListEntry struct {
 	LinkTarget string `json:"linkTarget,omitempty"`
 }
 
-// filesQuerySkipped is what a traversal refused to enter or search, shared by
-// both tools: the counts mean the same thing in each and a listing that hid
+// filesQuerySkipped is what a files.list traversal refused to enter or
+// search: the counts mean the same thing in each tool and a listing that hid
 // something must say so (design: a soft omission is visible in the product,
-// not only in a log).
+// not only in a log). The count names the list answer omits, and the list
+// contract's `skipped` requires only the two it always has.
 type filesQuerySkipped struct {
 	GitDirs     int `json:"gitDirs"`
 	Symlinks    int `json:"symlinks"`
 	BinaryFiles int `json:"binaryFiles,omitempty"`
+}
+
+// filesSearchSkipped is what a files.search traversal refused to enter or
+// read. BinaryFiles ALWAYS serializes — a search in a tree with no binary
+// file answers "binaryFiles": 0, not a missing field — because the files.search
+// contract requires the name (blocker #2, nocx-a62cl.11.3).
+type filesSearchSkipped struct {
+	GitDirs     int `json:"gitDirs"`
+	Symlinks    int `json:"symlinks"`
+	BinaryFiles int `json:"binaryFiles"`
 }
 
 type filesListResult struct {
@@ -782,7 +793,7 @@ type filesSearchResult struct {
 	Matches   []filesSearchMatchRow `json:"matches"`
 	Files     int                   `json:"files"`
 	Truncated bool                  `json:"truncated"`
-	Skipped   filesQuerySkipped     `json:"skipped"`
+	Skipped   filesSearchSkipped    `json:"skipped"`
 }
 
 // executeFilesList runs files.list: walk the named directory through the
@@ -887,7 +898,7 @@ func executeFilesSearch(ctx context.Context, cap agenttools.Capability, args jso
 		Pattern:   p.Pattern,
 		Files:     stats.Files,
 		Truncated: truncated,
-		Skipped:   filesQuerySkippedOf(stats.WalkStats, stats.BinaryFiles),
+		Skipped:   filesSearchSkippedOf(stats.WalkStats, stats.BinaryFiles),
 	}
 	return marshalFilesSearchWithin(result, matches, truncated, bound.MaxBytes)
 }
@@ -910,6 +921,10 @@ func filesListEntryOf(entry filesystem.Entry) filesListEntry {
 
 func filesQuerySkippedOf(stats filesystem.WalkStats, binaryFiles int) filesQuerySkipped {
 	return filesQuerySkipped{GitDirs: stats.GitDirs, Symlinks: stats.Symlinks, BinaryFiles: binaryFiles}
+}
+
+func filesSearchSkippedOf(stats filesystem.WalkStats, binaryFiles int) filesSearchSkipped {
+	return filesSearchSkipped{GitDirs: stats.GitDirs, Symlinks: stats.Symlinks, BinaryFiles: binaryFiles}
 }
 
 // recordCost is the row's own JSON cost plus the separator that follows it,

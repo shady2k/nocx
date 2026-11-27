@@ -21,12 +21,22 @@ package filesystem_test
 //     shallow names a person recognises before it shows depth.
 //   - every external call has a failure test (List fails mid-walk, Read
 //     fails) paired with the success path that proves the fixture is real.
+//   - a scope escape armed AFTER the start check — a symlink retargeted
+//     between the check and the call — is refused per operation, on the
+//     canonical identity of the object the handle actually read: a page is
+//     refused before a row of it is visited, a read before a line of it is
+//     matched.
+//   - a cancelled context is never reported as a finished walk/search: the
+//     check runs before every page, every read, every matched line, and
+//     before the final result is handed back.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
@@ -323,6 +333,290 @@ func TestSearchReportsCRLFLinesWithoutTheCarriageReturn(t *testing.T) {
 	}
 	if matches[0].Line != 2 || matches[0].Text != "needle two" {
 		t.Fatalf("match = %+v, want line 2 with no trailing carriage return", matches[0])
+	}
+}
+
+// scopeEscapeHandle wraps a real handle and retargets one path inside the
+// granted tree to a symlink outside it in the instant before the real call
+// runs — the window the per-operation canonical check exists to close: the
+// start directory was checked once, and a symlink armed between that check
+// and the call must not read as a row. The wrapper is the TOCTOU, the check
+// under test is the one walk.go makes on Listing.Canonical / Content.Canonical.
+type scopeEscapeHandle struct {
+	filesystem.Handle
+	root, outside string
+	t             *testing.T
+}
+
+func (h *scopeEscapeHandle) retarget(path, target string) {
+	h.t.Helper()
+	if err := os.RemoveAll(path); err != nil {
+		h.t.Fatalf("retarget: remove %s: %v", path, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		h.t.Fatalf("retarget: symlink %s -> %s: %v", path, target, err)
+	}
+}
+
+func (h *scopeEscapeHandle) List(ctx context.Context, path string, page filesystem.Page) (filesystem.Listing, error) {
+	if path == filepath.Join(h.root, "sub") {
+		// The granted sub directory is replaced by a link out of the grant in
+		// the instant before the provider lists it.
+		h.retarget(path, h.outside)
+	}
+	return h.Handle.List(ctx, path, page)
+}
+
+func (h *scopeEscapeHandle) Read(ctx context.Context, path string, maxBytes int64) (filesystem.Content, error) {
+	if path == filepath.Join(h.root, "a.txt") {
+		// The granted file is replaced by a link to a file outside the grant in
+		// the instant before the provider reads it.
+		h.retarget(path, filepath.Join(h.outside, "secret.txt"))
+	}
+	return h.Handle.Read(ctx, path, maxBytes)
+}
+
+// scopeEscapeSource acquires the real handle and hands back the wrapper, so
+// the walk under test holds exactly the handle whose List/Read can be
+// retargeted mid-call.
+type scopeEscapeSource struct {
+	inner         filesystem.HandleSource
+	root, outside string
+	t             *testing.T
+}
+
+func (s *scopeEscapeSource) Acquire(ctx context.Context) (filesystem.Handle, func(), error) {
+	h, release, err := s.inner.Acquire(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &scopeEscapeHandle{Handle: h, root: s.root, outside: s.outside, t: s.t}, release, nil
+}
+
+// TestWalkRefusesAnEscapedDirectoryBeforeItsPage is blocker #1's walk half:
+// the provider answers the escaped directory's page, and the walk must refuse
+// the whole call with ErrOutOfScope before a single row of that page reaches
+// the visitor — in particular before the outside file name can.
+func TestWalkRefusesAnEscapedDirectoryBeforeItsPage(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx := context.Background()
+	reader := readerOver(t, &scopeEscapeSource{inner: localWalkSource(t), root: fx.root, outside: fx.outside, t: t}, fx.root, fx.root)
+
+	var paths []string
+	visited := 0
+	_, err := reader.Walk(ctx, fx.root, true, func(e filesystem.Entry) error {
+		visited++
+		paths = append(paths, e.Path)
+		return nil
+	})
+	if !errors.Is(err, filesystem.ErrOutOfScope) {
+		t.Fatalf("Walk after the sub directory was retargeted = %v, want ErrOutOfScope (the escaped page must refuse the call, not feed its rows)", err)
+	}
+	for _, path := range paths {
+		if filepath.Base(path) == "secret.txt" {
+			t.Errorf("visit saw %q: the escaped directory's page reached the visitor", path)
+		}
+	}
+	if visited == 0 {
+		t.Fatal("the walk refused before visiting anything: the fixture no longer walks a tree")
+	}
+}
+
+// TestSearchRefusesAnEscapedFileBeforeItsLines is blocker #1's search half:
+// the handle reads the escaped file (its Canonical is the outside file) and
+// the search must refuse the call before a line of it is matched — neither
+// the escaped file's name nor its line may reach the visitor.
+func TestSearchRefusesAnEscapedFileBeforeItsLines(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx := context.Background()
+	reader := readerOver(t, &scopeEscapeSource{inner: localWalkSource(t), root: fx.root, outside: fx.outside, t: t}, fx.root, fx.root)
+
+	var matches []filesystem.Match
+	_, err := reader.Search(ctx, fx.root, "needle", func(m filesystem.Match) error {
+		matches = append(matches, m)
+		return nil
+	})
+	if !errors.Is(err, filesystem.ErrOutOfScope) {
+		t.Fatalf("Search after a.txt was retargeted = %v, want ErrOutOfScope (the escaped read must refuse the call, not feed its line)", err)
+	}
+	for _, m := range matches {
+		if m.Text == "needle secret" || filepath.Base(m.Path) == "secret.txt" {
+			t.Errorf("match %+v: the escaped file's line reached the visitor", m)
+		}
+	}
+}
+
+// TestWalkRefusesSuccessOnACancelMidPage keeps a directory larger than one
+// page (512 rows) and cancels inside the first page: the next page must not
+// be read and the walk must hand back the cancellation, never a success —
+// and the remaining rows of the page the cancel fired in must not be
+// visited either: the check at the top of the entries loop refuses them
+// before the visitor sees them.
+func TestWalkRefusesSuccessOnACancelMidPage(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 600; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%03d.txt", i)), []byte("needle\n"), 0o600); err != nil {
+			t.Fatalf("write f%03d: %v", i, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := readerOver(t, localWalkSource(t), root, root)
+
+	visited := 0
+	_, err := reader.Walk(ctx, root, false, func(filesystem.Entry) error {
+		visited++
+		if visited == 5 {
+			cancel()
+		}
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Walk cancelled mid-page = %v, want context.Canceled (a cancelled walk must not report success)", err)
+	}
+	// The cancel fired on the fifth entry; the entries loop's own check
+	// refuses the remaining 507 rows of the same page before visiting them.
+	if visited != 5 {
+		t.Fatalf("visited = %d, want 5 — the entries after the cancel must not be visited", visited)
+	}
+}
+
+// TestWalkRefusesSuccessOnACancelInTheLastDirectory cancels on the last entry
+// of the last directory's last page: the page loop ends, the queue empties,
+// and the walk must still hand back the cancellation rather than success.
+func TestWalkRefusesSuccessOnACancelInTheLastDirectory(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := readerOver(t, localWalkSource(t), fx.root, fx.root)
+
+	visited := 0
+	_, err := reader.Walk(ctx, fx.root, true, func(filesystem.Entry) error {
+		visited++
+		// The fixture's walk visits four rows in the root page, three in the
+		// links page and one in the sub page: eight is the last entry of the
+		// last directory.
+		if visited == 8 {
+			cancel()
+		}
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Walk cancelled in the last directory = %v, want context.Canceled (a cancelled walk must not report success)", err)
+	}
+}
+
+// TestSearchRefusesSuccessOnACancel cancels on the first match: the search
+// must return the cancellation, never a finished-looking result. The check
+// that fires is the one inside the line-matching loop (the visitor returns
+// nil), and the final-result check covers a search whose last file was read
+// before the cancel fired.
+func TestSearchRefusesSuccessOnACancel(t *testing.T) {
+	fx := newWalkFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := readerOver(t, localWalkSource(t), fx.root, fx.root)
+
+	_, err := reader.Search(ctx, fx.root, "needle", func(filesystem.Match) error {
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Search cancelled on the first match = %v, want context.Canceled (a cancelled search must not report success)", err)
+	}
+}
+
+// TestSearchReportsNoFictitiousLine pins the split's two inventions: the
+// empty string a trailing terminator adds ("a\nb\n" splits into
+// ["a","b",""]) and the one empty element of an empty file. A "^$" pattern
+// matches neither — and a real empty line in the middle of a file still
+// does (TestSearchReportsARealEmptyLine).
+func TestSearchReportsNoFictitiousLine(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		name, body string
+	}{
+		{"trailing.txt", "alpha\nbeta\n"},
+		{"empty.txt", ""},
+		{"notrailing.txt", "alpha\nbeta"},
+	} {
+		if err := os.WriteFile(filepath.Join(root, f.name), []byte(f.body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", f.name, err)
+		}
+	}
+	reader := readerOver(t, localWalkSource(t), root, root)
+
+	matches := 0
+	if _, err := reader.Search(context.Background(), root, "^$", func(filesystem.Match) error {
+		matches++
+		return nil
+	}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if matches != 0 {
+		t.Fatalf("matches = %d: a fictitious line after a terminator (or in an empty file) was reported", matches)
+	}
+}
+
+// TestSearchReportsARealEmptyLine keeps the split honest: an empty line in
+// the middle of a file IS a line and must match, or the fix above dropped
+// real lines instead of the invented ones.
+func TestSearchReportsARealEmptyLine(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mid.txt"), []byte("alpha\n\nbeta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := readerOver(t, localWalkSource(t), root, root)
+
+	var matches []filesystem.Match
+	if _, err := reader.Search(context.Background(), root, "^$", func(m filesystem.Match) error {
+		matches = append(matches, m)
+		return nil
+	}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Line != 2 || matches[0].Text != "" {
+		t.Fatalf("matches = %+v, want exactly line 2, the real empty line between two lines", matches)
+	}
+}
+
+// TestSearchDoesNotReportATruncatedTailAsALine keeps a file larger than
+// MaxReadBytes whose bytes after the last newline are one unterminated tail:
+// the tail the read cut in two is not a whole line, so a pattern that would
+// match it must find nothing — and the file was still read (Files == 1).
+func TestSearchDoesNotReportATruncatedTailAsALine(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(strings.Repeat("z", filesystem.MaxReadBytes*2)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := readerOver(t, localWalkSource(t), root, root)
+
+	matches := 0
+	stats, err := reader.Search(context.Background(), root, "^z+$", func(filesystem.Match) error {
+		matches++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if matches != 0 {
+		t.Fatalf("matches = %d: the truncated unterminated tail was reported as a line", matches)
+	}
+	if stats.Files != 1 {
+		t.Errorf("files read = %d, want 1 (big.txt was read; only its tail was not a line)", stats.Files)
 	}
 }
 

@@ -380,3 +380,161 @@ func capabilityOver(t *testing.T, provider filesystem.Provider, fx queryFixture,
 	}
 	return capability
 }
+
+// TestExecuteFilesListKeepsThePathsTheCallSpelled is major #4's tool half,
+// run through the real dispatcher (k.Invoke) rather than direct executor
+// calls: the grant and the call name the tree through a symlink (link ->
+// root). Every path the listing returns must stay under the "link/" prefix
+// the caller typed, or a later files.read of one of them with the same grant
+// fails the grant's own lexical scope check and a second confirmation is
+// asked for an answer the listing just handed back — and the files.read must
+// succeed with no confirmation request at all.
+func TestExecuteFilesListKeepsThePathsTheCallSpelled(t *testing.T) {
+	fx := newQueryFixture(t)
+	link := filepath.Join(filepath.Dir(fx.root), "link")
+	if err := os.Symlink(fx.root, link); err != nil {
+		t.Fatalf("symlink link -> root: %v", err)
+	}
+	// The grant names the tree as the caller does: through the link. The
+	// narrowed capability's ref is the same link, so the granted scope and
+	// the spelled path agree on the spelling the caller typed.
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: link}})
+	k, q := kernelForQuery(t, grant)
+
+	out, err := k.Invoke(context.Background(), "files.list", "call-1", string(mustJSON(t, map[string]any{"path": link, "recursive": true})))
+	if err != nil {
+		t.Fatalf("files.list through the link via the kernel: %v", err)
+	}
+	validateAgainstContract(t, "files.list", out)
+
+	var res filesListResultDoc
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	prefix := link + string(filepath.Separator)
+	for _, entry := range res.Entries {
+		if !strings.HasPrefix(entry.Path, prefix) {
+			t.Errorf("entry path %q is not under the spelled link prefix %q", entry.Path, prefix)
+		}
+	}
+	if len(res.Entries) == 0 {
+		t.Fatal("the listing through the link returned no entries: the fixture no longer lists")
+	}
+
+	// A later files.read of a returned path that stayed inside the tree, with
+	// the same grant, passes without a refusal and without a confirmation
+	// request: the read of a row the listing just handed back. (A listed
+	// symlink out of the tree is refused by files.read — that is the scope
+	// check working, not this bug; the row to read is the first non-symlink
+	// entry.)
+	var inside string
+	for _, entry := range res.Entries {
+		if entry.Kind == "regular" {
+			inside = entry.Path
+			break
+		}
+	}
+	if inside == "" {
+		t.Fatal("the listing through the link returned no regular-file entry: the fixture no longer lists the tree")
+	}
+	if _, readErr := k.Invoke(context.Background(), "files.read", "call-2", string(mustJSON(t, map[string]any{"path": inside}))); readErr != nil {
+		t.Fatalf("files.read of a listed path with the same grant = %v, want no refusal and no confirmation request", readErr)
+	}
+	if len(q.asked) != 0 {
+		t.Errorf("confirmation requests = %d, want none — the grant covers the path the listing spelled", len(q.asked))
+	}
+
+	// files.search keeps the same spelling for its matches.
+	sout, serr := k.Invoke(context.Background(), "files.search", "call-3", string(mustJSON(t, map[string]any{"path": link, "pattern": "needle"})))
+	if serr != nil {
+		t.Fatalf("files.search through the link via the kernel: %v", serr)
+	}
+	validateAgainstContract(t, "files.search", sout)
+	var sres filesSearchResultDoc
+	if err := json.Unmarshal([]byte(sout), &sres); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, m := range sres.Matches {
+		if !strings.HasPrefix(m.Path, prefix) {
+			t.Errorf("match path %q is not under the spelled link prefix %q", m.Path, prefix)
+		}
+	}
+}
+
+// kernelForQuery builds the effect kernel over the real registry and a
+// recording questioner, so a files.* scenario runs through the same
+// dispatcher the model's call reaches — validation, the matrix policy, the
+// attempt, the narrowed capability and the execution — and the questions
+// actually asked are on record rather than inferred. The grant auto-approves
+// observe on a path inside its scope, so a questioner that records an ask is
+// how "no confirmation was requested" becomes an assertion.
+func kernelForQuery(t *testing.T, grant content.Grant) (*effectKernel, *recordingQuestioner) {
+	t.Helper()
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	k := kernelForQuestioner(t, grant, &fakeLedger{}, q)
+	return k, q
+}
+
+// TestExecuteFilesSearchReportsZeroBinaryFiles is blocker #2's product check,
+// run through the real dispatcher (k.Invoke) rather than a direct executor
+// call: a files.search in a directory with not a single binary file still
+// answers "binaryFiles": 0 — the files.search contract requires the name —
+// and the answer validates against the contract (no ErrInvalidResult), and no
+// confirmation is requested for an observe call the grant already covers.
+func TestExecuteFilesSearchReportsZeroBinaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct {
+		name, body string
+	}{
+		{"a.txt", "alpha\nneedle here\n"},
+		{"sub", ""},
+	} {
+		if f.name == "sub" {
+			if err := os.MkdirAll(filepath.Join(root, "sub"), 0o700); err != nil {
+				t.Fatalf("mkdir sub: %v", err)
+			}
+		} else if err := os.WriteFile(filepath.Join(root, f.name), []byte(f.body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", f.name, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "b.txt"), []byte("beta\nneedle sub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("needle in git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
+	k, q := kernelForQuery(t, grant)
+	out, err := k.Invoke(context.Background(), "files.search", "call-1", string(mustJSON(t, map[string]any{"path": root, "pattern": "needle"})))
+	if err != nil {
+		t.Fatalf("files.search through the kernel in a tree with no binary file: %v", err)
+	}
+	validateAgainstContract(t, "files.search", out)
+	if len(q.asked) != 0 {
+		t.Errorf("confirmation requests = %d, want none for an observe call the grant covers", len(q.asked))
+	}
+	if !strings.Contains(out, `"binaryFiles":0`) {
+		t.Errorf("result does not serialize binaryFiles: 0: %s", out)
+	}
+	var res filesSearchResultDoc
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Skipped.BinaryFiles != 0 {
+		t.Errorf("skipped.binaryFiles = %d, want 0 in a tree with no binary file", res.Skipped.BinaryFiles)
+	}
+	if res.Files != 2 {
+		t.Errorf("files read = %d, want 2 (a.txt, sub/b.txt; .git is skipped)", res.Files)
+	}
+	if len(res.Matches) != 2 {
+		t.Errorf("matches = %d, want 2", len(res.Matches))
+	}
+}

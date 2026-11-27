@@ -848,3 +848,48 @@ that identity, including the first, so an append does not extend the promised
 length and a replacement does not supply bytes for the wrong file. The field
 is required on the frozen stat response: helpers that disagree about the shape
 refuse at hello.
+
+## What landed with `nocx-oalo1.12.10`, and why `Version` moved from 36 to 37
+
+The **watch**: `fs.watch` and `fs.unwatch` on the `fs` service, and the
+`changed` notification they exist for. A panel that follows a directory used to
+ask its coordinator to re-list that directory over the wire on a ladder — one
+round trip per rung, forever, for every folder it had open. The host is already
+there and already knows how to compare a directory's digest, so the coordinator
+subscribes and the helper announces. Its own poll runs at the ladder the
+transport owns (`filesystem.WatchPollWait`: 1, 2, 5, 10 seconds quiet; 10, 20,
+40, 60 on failure), declared once so the two cadences cannot drift apart.
+
+Four decisions in these shapes are worth naming rather than leaving to a
+reader:
+
+- **The id is the caller's, and it is the only handle.** The caller mints it
+  because the caller is the party that must recognise its own notification on a
+  replaced connection; `unwatch` takes nothing else, because unwatching by path
+  would let one panel's release end another's subscription to the same
+  directory.
+- **`fs.watch` answers a digest, not a boolean.** It is the digest the host
+  observed at install time, computed by the same `filesystem.ComputeRev` a
+  list answers. A caller that re-subscribes after a cut compares it with the
+  digest it last listed, which is how a change made DURING the cut is still
+  announced — the helper's own baseline is now and will never announce it.
+- **`fs.unwatch` answers an empty object, and an unknown id is success.** The
+  answer IS the watch's absence; there is no `found` flag because a caller has
+  nothing to do differently. An id the helper no longer holds is the state the
+  caller asked for.
+- **A quiet directory sends nothing at all, and that is the point.** The
+  notification exists only for a digest that moved. What a caller must NOT read
+  into silence is a healthy subscription: a subscription ends with the
+  connection that owns it, so silence after a reconnect means "re-subscribe",
+  never "nothing happened".
+
+The number moved because the wire grew two ops a 36-helper answers `unknown_op`
+to AND a notification it will never send. The ops degrade — a coordinator
+falls back to its own transport-side polling, which still works — but the
+silence does not: a caller that ignored `unknown_op` would wait for changes
+that generation cannot announce, and a panel sitting on a directory that never
+refreshes is indistinguishable from a quiet folder. That is why the generations
+are fenced at hello, and why each installs beside the other (D7).
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.

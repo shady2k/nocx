@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.changed.schema.json",
+  "title": "HelperFSChanged",
+  "description": "Params of the helper fs service's `changed` notification: a watched directory's digest moved, announced by the host that can see it instead of being re-listed over the wire on a ladder. It rides as a Notification on the same frame type every other unsolicited helper fact uses, so it is ordered with the frames around it. The notification carries the digest the host observed, which is the same value `fs.list` answers — a caller may act on it or re-list and compare. A watch that stops sending is not a quiet directory: the subscription ends with the connection that owns it, and a caller that loses its connection re-subscribes on the next one and compares the digest it was answered there.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "rev"],
+  "properties": {
+    "id": {
+      "description": "Which watch fired: the id the caller minted in fs.watch.params.",
+      "type": "string",
+      "minLength": 1
+    },
+    "rev": {
+      "description": "The digest of the whole, ordered directory after the change, in the same form fs.list answers.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

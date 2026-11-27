@@ -762,6 +762,11 @@ func (s *Service) ResponseWritten(_ context.Context, _ string, result any, _ hos
 // host.ConnectionObserver capability — the host calls it once, after Serve, and
 // a temporary nobody will finish must not outlive the caller that started it.
 //
+// The watches this connection installed end here too, before anything else:
+// they are the other thing the connection owns, they poll on its behalf, and
+// their notifications have nowhere to go once Serve has returned
+// (watch.go, stopConnectionWatches).
+//
 // The state is read twice, and the second read is the one that decides. The
 // first is a filter that keeps a settled session off the lock, and a session can
 // move between the two — a temporary that became ready a moment ago is a
@@ -772,6 +777,7 @@ func (s *Service) ConnectionClosed(h *host.Host) {
 	if h == nil {
 		return
 	}
+	s.stopConnectionWatches(h)
 	for _, sess := range s.allSessions() {
 		if sess.conn.Load() != h {
 			continue

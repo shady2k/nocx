@@ -49,6 +49,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -269,6 +270,8 @@ type filesBinding struct {
 	sessionID  session.ID
 	endpointID string
 	watcher    *filesWatcher // nil until files.watch
+	// watchMu orders watch set replacements with visibility-driven installs.
+	watchMu sync.Mutex
 	// visible is the last visibility the client stated for this panel, kept
 	// so a watcher created afterwards starts in the state the client already
 	// reported instead of a guess made at creation. visibleSet distinguishes
@@ -278,21 +281,22 @@ type filesBinding struct {
 }
 
 // defaultFilesPollInterval is the base unit for the transport-side
-// digest-poll cadence while provider-side watchers are absent. It is 500 ms
-// because the panel's responsive end is 2x (1 s), matching Ports' 1 s
-// settle/debounce while staying below Git's 5 s poll; the ladder backs off to
-// 10 s like Ports' periodic 10 s sample rather than adding a third cadence.
+// digest-poll cadence while provider-side watchers are absent. It is the
+// shared ladder's own base (filesystem.WatchPollBase) so this cadence and the
+// far helper's host-side watch cannot drift apart: 500 ms because the panel's
+// responsive end is 2x (1 s), matching Ports' 1 s settle/debounce while
+// staying below Git's 5 s poll; the ladder backs off to 10 s like Ports'
+// periodic 10 s sample rather than adding a third cadence.
 //
 // A completed terminal command is a legitimate supplementary HINT, as it is
 // for Ports, but D5 rejects command-end as the sole refresh source. The
 // existing files.changed seam can consume that hint; terminal command-end
 // wiring remains intentionally absent.
-const defaultFilesPollInterval = 500 * time.Millisecond
+const defaultFilesPollInterval = filesystem.WatchPollBase
 
 const (
-	filesPollResponsiveMultiplier = 2
-	filesPollMaxIdleStep          = 4
-	filesPollMaxFailureStep       = 4
+	filesPollMaxIdleStep    = filesystem.WatchPollMaxIdleStep
+	filesPollMaxFailureStep = filesystem.WatchPollMaxFailureStep
 )
 
 // The delayed edge is derived from the scheduler's production envelope:
@@ -319,6 +323,7 @@ type filesPollEntry struct {
 	failureStep               int
 	dueAt                     time.Time
 	generation                uint64
+	requested                 bool
 }
 
 type filesPollPathResult uint8
@@ -337,38 +342,14 @@ const (
 	filesRefreshStateDelayed filesRefreshState = "delayed"
 )
 
-// filesPollWait chooses a path's next delay. The idle and failure ladders are
-// deliberately independent: one unreachable directory must not slow healthy
-// paths, and one noisy directory must not reset quiet ones.
+// filesPollWait chooses a path's next delay: the shared ladder
+// (filesystem.WatchPollWait, which the far helper's own host-side watch asks
+// too) plus the jitter that spreads many remote panels' polls. The idle and
+// failure ladders are deliberately independent: one unreachable directory
+// must not slow healthy paths, and one noisy directory must not reset quiet
+// ones.
 func filesPollWait(base time.Duration, idleStep, failureStep int, jitter *rand.Rand) time.Duration {
-	if idleStep > filesPollMaxIdleStep {
-		idleStep = filesPollMaxIdleStep
-	}
-	if failureStep > filesPollMaxFailureStep {
-		failureStep = filesPollMaxFailureStep
-	}
-	multiplier := filesPollResponsiveMultiplier
-	if failureStep > 0 {
-		multiplier = 20
-		switch failureStep {
-		case 2:
-			multiplier = 40
-		case 3:
-			multiplier = 80
-		case 4:
-			multiplier = 120
-		}
-	} else {
-		switch idleStep {
-		case 2:
-			multiplier = 4
-		case 3:
-			multiplier = 10
-		case 4:
-			multiplier = 20
-		}
-	}
-	wait := time.Duration(multiplier) * base
+	wait := filesystem.WatchPollWait(base, idleStep, failureStep)
 	if jitter != nil {
 		span := wait / 10
 		if span > 0 {
@@ -389,9 +370,10 @@ func newFilesPollEntry(rev string, generation uint64, base time.Duration, jitter
 }
 
 type filesPollSelection struct {
-	path       string
-	entry      *filesPollEntry
-	generation uint64
+	path          string
+	entry         *filesPollEntry
+	generation    uint64
+	signalTakenAt time.Time
 }
 
 // filesWatcher is the transport-side watch state of one binding: the paths
@@ -405,6 +387,10 @@ type filesPollSelection struct {
 type filesWatcher struct {
 	bindingID string
 	sessionID session.ID
+	binding   *filesBinding
+	// pollingFallback is guarded by binding.watchMu. The transport owns
+	// polling until an explicit retry installs the provider watch again.
+	pollingFallback bool
 
 	mu             sync.Mutex
 	paths          map[string]*filesPollEntry
@@ -425,6 +411,20 @@ type filesWatcher struct {
 	// jitter is non-nil only for remote bindings. Local tests leave jitter nil,
 	// making the ladder deterministic; remote waits vary by up to ±10%.
 	jitter *rand.Rand
+
+	// signals is the binding's change stream. The stream lives as long as
+	// the binding, including across watch set replacements.
+	signals <-chan string
+	// tryProvider is set at creation. A watcher created while hidden learns
+	// whether the provider supports watches when the panel becomes visible.
+	tryProvider bool
+	// providerInstalled says the provider watches are currently established on
+	// the far side. It tracks visibility: a hidden panel's watches are
+	// released, so the host stops polling a tree nobody is showing, and the
+	// visible edge installs them again before the catch-up listing.
+	providerInstalled bool
+	// retryProvider is a one-shot install request guarded by mu.
+	retryProvider bool
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -466,14 +466,20 @@ func (w *filesWatcher) setVisible(visible bool) {
 	w.visible = visible
 	if visible && !was {
 		w.markVisibleCatchUpLocked(time.Now())
+		w.retryProvider = w.tryProvider
 	}
 	w.mu.Unlock()
-	if !visible || was {
+	if visible == was {
+		// Re-sending the value the panel already stated must not turn the
+		// panel into a second cadence, and must not make a provider sync run.
 		return
 	}
+	// BOTH edges wake the loop. The visible one owes a catch-up listing; the
+	// hidden one owes the release of the provider watches, which is what stops
+	// the far host polling a tree nobody is showing (nocx-oalo1.12.10).
 	select {
 	case w.wake <- struct{}{}:
-	default: // a catch-up dispatch is already owed; one is enough
+	default: // a dispatch is already owed; one is enough
 	}
 }
 
@@ -497,6 +503,7 @@ func (w *filesWatcher) observeSuccessful(
 		return
 	}
 	delete(w.catchUp, path)
+	entry.requested = false
 	now := time.Now()
 	entry.rev = rev
 	entry.lastSuccessfulObservation = now
@@ -518,6 +525,7 @@ func (w *filesWatcher) requestPollNow(path string) {
 	entry := w.paths[path]
 	if entry != nil {
 		entry.dueAt = time.Now()
+		entry.requested = true
 	}
 	w.mu.Unlock()
 	if entry == nil {
@@ -546,29 +554,8 @@ func (w *filesWatcher) nextDueAt() time.Time {
 func (w *filesWatcher) takeDue(now time.Time) *filesPollSelection {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.pathOrder) == 0 {
-		return nil
-	}
-	if w.cursor >= len(w.pathOrder) {
-		w.cursor = 0
-	}
-	if len(w.catchUp) > 0 {
-		for i := range w.pathOrder {
-			index := (w.cursor + i) % len(w.pathOrder)
-			path := w.pathOrder[index]
-			entry, ok := w.paths[path]
-			if !ok || w.catchUp[path] != entry {
-				continue
-			}
-			delete(w.catchUp, path)
-			w.cursor = (index + 1) % len(w.pathOrder)
-			return &filesPollSelection{path: path, entry: entry, generation: entry.generation}
-		}
-		for path, entry := range w.catchUp {
-			if w.paths[path] != entry {
-				delete(w.catchUp, path)
-			}
-		}
+	if selection := w.takeCatchUpLocked(); selection != nil {
+		return selection
 	}
 	var earliest time.Time
 	for _, path := range w.pathOrder {
@@ -589,10 +576,79 @@ func (w *filesWatcher) takeDue(now time.Time) *filesPollSelection {
 		entry := w.paths[path]
 		if entry != nil && entry.dueAt.Equal(earliest) {
 			w.cursor = (index + 1) % len(w.pathOrder)
+			entry.requested = false
 			return &filesPollSelection{path: path, entry: entry, generation: entry.generation}
 		}
 	}
 	return nil
+}
+
+func (w *filesWatcher) takeCatchUpLocked() *filesPollSelection {
+	if w.cursor >= len(w.pathOrder) {
+		w.cursor = 0
+	}
+	if len(w.catchUp) == 0 {
+		return nil
+	}
+	for i := range w.pathOrder {
+		index := (w.cursor + i) % len(w.pathOrder)
+		path := w.pathOrder[index]
+		entry := w.paths[path]
+		if entry == nil || w.catchUp[path] != entry {
+			continue
+		}
+		delete(w.catchUp, path)
+		w.cursor = (index + 1) % len(w.pathOrder)
+		entry.requested = false
+		return &filesPollSelection{path: path, entry: entry, generation: entry.generation}
+	}
+	for path, entry := range w.catchUp {
+		if w.paths[path] != entry {
+			delete(w.catchUp, path)
+		}
+	}
+	return nil
+}
+
+// takeRequested selects visibility catch-up work and explicit refresh hints.
+func (w *filesWatcher) takeRequested(now time.Time) *filesPollSelection {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.visible {
+		return nil
+	}
+	if selection := w.takeCatchUpLocked(); selection != nil {
+		selection.signalTakenAt = now
+		return selection
+	}
+	for _, path := range w.pathOrder {
+		if entry := w.paths[path]; entry != nil && entry.requested && !entry.dueAt.After(now) {
+			entry.requested = false
+			return &filesPollSelection{path: path, entry: entry, generation: entry.generation, signalTakenAt: now}
+		}
+	}
+	return nil
+}
+
+func (w *filesWatcher) nextRequestedDue() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.visible {
+		return time.Time{}
+	}
+	var due time.Time
+	for _, entry := range w.paths {
+		if entry.requested && (due.IsZero() || entry.dueAt.Before(due)) {
+			due = entry.dueAt
+		}
+	}
+	return due
+}
+
+func (w *filesWatcher) hasProviderRetry() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.visible && w.retryProvider
 }
 
 func (w *filesWatcher) isVisible() bool {
@@ -1239,6 +1295,8 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 		return
 	}
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		b.watchMu.Lock()
+		defer b.watchMu.Unlock()
 		// Authorisation: Acquire re-checks that THIS connection owns the
 		// binding's session (D15) — one map lookup, and it is what holds if
 		// an id ever reaches a log, a screenshot or a crash report.
@@ -1247,39 +1305,53 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
-		var mode filesystem.WatchMode
+		mode := filesystem.WatchMode{Kind: filesystem.WatchPolling}
+		// A HIDDEN PANEL INSTALLS NOTHING. The client states visibility before
+		// it asks for the set (its effects run in whatever order they run), and
+		// a host-side watch is a poll of the far disk: installing one for a
+		// panel nobody shows is exactly the polling this leaf removes. The set
+		// is recorded either way — the entries below are what the visible edge
+		// establishes — and the install is skipped only on the far side.
+		hidden := false
+		pollingFallback := false
+		h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
+			hidden = b.visibleSet && !b.visible
+			pollingFallback = b.watcher != nil && b.watcher.pollingFallback
+		})
+		install := params.Paths
+		if hidden {
+			install = nil
+		}
 		// A watch set normally lives on one mount; the first path names the
 		// domain, and an empty set (which only stops watching) names none.
 		watchDomainPath := ""
 		if len(params.Paths) > 0 {
 			watchDomainPath = params.Paths[0]
 		}
-		err = h.machine.filesDomainDo(ctx, handle, watchDomainPath, func(callCtx context.Context) error {
-			var werr error
-			mode, werr = handle.Watch(callCtx, params.Paths)
-			return werr
-		})
-		if err != nil {
-			var unavail *filesystem.ErrWatchUnavailable
-			if !errors.As(err, &unavail) {
-				release()
-				if answerFilesExpiry(ctx, h.r, req, err) {
+		providerWatch := false
+		if !pollingFallback {
+			var installedMode filesystem.WatchMode
+			err = h.machine.filesDomainDo(ctx, handle, watchDomainPath, func(callCtx context.Context) error {
+				var watchErr error
+				installedMode, watchErr = handle.Watch(callCtx, install)
+				return watchErr
+			})
+			if err != nil {
+				var unavailable *filesystem.ErrWatchUnavailable
+				if !errors.As(err, &unavailable) {
+					release()
+					if answerFilesExpiry(ctx, h.r, req, err) {
+						return nil
+					}
+					_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 					return nil
 				}
-				_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
-				return nil
+			} else {
+				providerWatch = true
+				if !hidden {
+					mode = installedMode
+				}
 			}
-			// No reason: ErrWatchUnavailable says the watching worker (nocx-rkk9)
-			// has not landed, which is a build-time fact and not a degrade.
-			// Polling is the designed and only mode today, it delivers the
-			// change signal the user asked for, and the mechanism under it is
-			// not their business. A reason here lights the §5.5 badge for every
-			// user on every local binding forever — a warning that is always on
-			// warns about nothing and teaches the user to ignore the next one.
-			// When Live watching exists, a host that cannot have it will carry a
-			// reason from the provider and the badge lights for the first time
-			// meaningfully.
-			mode = filesystem.WatchMode{Kind: filesystem.WatchPolling}
 		}
 		if len(params.Paths) == 0 {
 			// The client wants no watches: the provider set is already empty
@@ -1318,7 +1390,28 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 			}
 			b.watcher.mu.Unlock()
 		})
-		added := h.machine.filesBaseline(handle, params.Paths, known)
+		// A hidden panel takes no baseline: the listing is a wire round trip
+		// for a tree nobody is showing, and a path left unbaselined ("") is
+		// announced by the first listing the visible edge owes rather than
+		// folded into a baseline nobody saw — the safe direction
+		// filesBaseline itself documents.
+		var added map[string]string
+		if hidden {
+			// No listing, but the paths must be IN the set: the entries are
+			// what the visible edge lists, and a set without them is a watcher
+			// with nothing to catch up on. Unbaselined ("") is the value
+			// filesBaseline documents for a path nobody has listed yet — the
+			// first listing announces rather than folding the change into a
+			// baseline nobody saw.
+			added = make(map[string]string, len(params.Paths))
+			for _, path := range params.Paths {
+				if _, already := known[path]; !already {
+					added[path] = ""
+				}
+			}
+		} else {
+			added = h.machine.filesBaseline(handle, params.Paths, known)
+		}
 
 		installed := h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
 			if b.watcher == nil {
@@ -1331,20 +1424,32 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 				// A visibility stated before files.watch is the state
 				// this watcher must start in; never stated means visible.
 				w := &filesWatcher{
-					bindingID:      params.BindingID,
-					sessionID:      b.sessionID,
-					paths:          paths,
-					pathOrder:      append([]string(nil), params.Paths...),
-					catchUp:        make(map[string]*filesPollEntry),
-					dirty:          make(map[string]string),
-					visible:        !b.visibleSet || b.visible,
-					pollBase:       base,
-					refreshState:   filesRefreshStateOK,
-					nextGeneration: 1,
-					stop:           make(chan struct{}),
-					done:           make(chan struct{}),
-					wake:           make(chan struct{}, 1),
-					jitter:         jitter,
+					bindingID:         params.BindingID,
+					sessionID:         b.sessionID,
+					binding:           b,
+					paths:             paths,
+					pathOrder:         append([]string(nil), params.Paths...),
+					catchUp:           make(map[string]*filesPollEntry),
+					dirty:             make(map[string]string),
+					visible:           !b.visibleSet || b.visible,
+					pollBase:          base,
+					refreshState:      filesRefreshStateOK,
+					nextGeneration:    1,
+					stop:              make(chan struct{}),
+					done:              make(chan struct{}),
+					wake:              make(chan struct{}, 1),
+					jitter:            jitter,
+					tryProvider:       providerWatch,
+					providerInstalled: providerWatch && !hidden,
+				}
+				if w.tryProvider {
+					w.signals = handle.WatchSignals()
+					if w.visible != w.providerInstalled {
+						if w.visible {
+							w.markVisibleCatchUpLocked(time.Now())
+						}
+						w.wake <- struct{}{}
+					}
 				}
 				w.handle = handle
 				w.release = release
@@ -1375,6 +1480,10 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 			b.watcher.nextGeneration = nextGeneration
 			b.watcher.paths = next
 			b.watcher.pathOrder = append(b.watcher.pathOrder[:0], params.Paths...)
+			b.watcher.providerInstalled = providerWatch && !hidden
+			if !hidden && b.watcher.tryProvider && pollingFallback {
+				b.watcher.retryProvider = true
+			}
 			for p, entry := range b.watcher.catchUp {
 				if next[p] != entry {
 					delete(b.watcher.catchUp, p)
@@ -1778,8 +1887,230 @@ func (s *WSServer) filesPollBaseInterval() time.Duration {
 	return interval
 }
 
+// filesSignalLoop is the transport-side change detector of a binding whose
+// provider watches for it (nocx-oalo1.12.10).
+//
+// # There is no ladder here
+//
+// The provider re-lists the directory itself — on the far host, at the shared
+// ladder — and announces when its digest moves. This loop has no periodic
+// listing: a quiet folder sends NOTHING, and one change costs one
+// listing of one directory, taken only to learn the digest the announcement
+// did not carry (filesystem.Watch's events are hints, not diffs).
+//
+// `wake` is the visibility edge and the upload hint. A hidden panel releases
+// the provider watches (the far side stops polling) and a visible one installs
+// them again BEFORE the catch-up listing, so a change landing in the window is
+// announced rather than missed. The upload hint lists its destination at once
+// instead of waiting for the next announcement.
+//
+// `signals` is the announcement: the path whose watch fired. A hidden watcher
+// drops it, because its watches are released and any announcement still in
+// flight is about a subscription that no longer exists.
+// Two timers retry failed releases and failed listings independently.
+// The result reports whether the transport should take over polling.
+func (s *WSServer) filesSignalLoop(w *filesWatcher) bool {
+	var releaseRetry *time.Timer
+	var releaseRetryC <-chan time.Time
+	var listingRetry *time.Timer
+	releaseFailures := 0
+	defer func() {
+		if releaseRetry != nil {
+			releaseRetry.Stop()
+		}
+		if listingRetry != nil {
+			listingRetry.Stop()
+		}
+	}()
+	for {
+		var listingRetryC <-chan time.Time
+		if listingRetry != nil {
+			stopFilesWatchTimer(listingRetry)
+		}
+		if due := w.nextRequestedDue(); !due.IsZero() {
+			wait := time.Until(due)
+			if listingRetry == nil {
+				listingRetry = time.NewTimer(wait)
+			} else {
+				listingRetry.Reset(wait)
+			}
+			listingRetryC = listingRetry.C
+		}
+		syncProvider := false
+		select {
+		case <-w.stop:
+			return false
+		case <-w.wake:
+			syncProvider = true
+		case <-releaseRetryC:
+			syncProvider = true
+		case <-listingRetryC:
+		case path, ok := <-w.signals:
+			if !ok || !s.filesSignalPath(w, path) {
+				return false
+			}
+			continue
+		}
+		if syncProvider {
+			switch s.filesProviderSync(w) {
+			case filesProviderFallback:
+				return true
+			case filesProviderRetryRelease:
+				// The domain may refuse a release before it starts.
+				// Retry cleanup while hidden without listing any paths.
+				releaseFailures = min(releaseFailures+1, filesPollMaxFailureStep)
+				delay := filesystem.WatchPollWait(s.filesPollBaseInterval(), 0, releaseFailures)
+				if releaseRetry == nil {
+					releaseRetry = time.NewTimer(delay)
+				} else {
+					stopFilesWatchTimer(releaseRetry)
+					releaseRetry.Reset(delay)
+				}
+				releaseRetryC = releaseRetry.C
+			default:
+				if releaseRetry != nil {
+					stopFilesWatchTimer(releaseRetry)
+					releaseFailures = 0
+					releaseRetryC = nil
+				}
+			}
+		}
+		if !s.filesDrainSignal(w) {
+			return false
+		}
+	}
+}
+
+func stopFilesWatchTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+type filesProviderSyncResult uint8
+
+const (
+	filesProviderUnchanged filesProviderSyncResult = iota
+	filesProviderInstalled
+	filesProviderFallback
+	filesProviderRetryRelease
+)
+
+// filesProviderSync installs or releases watches to match panel visibility.
+// A failed install hands polling to the transport until an explicit retry. A failed
+// release keeps the cleanup pending.
+func (s *WSServer) filesProviderSync(w *filesWatcher) filesProviderSyncResult {
+	w.binding.watchMu.Lock()
+	defer w.binding.watchMu.Unlock()
+	select {
+	case <-w.stop:
+		return filesProviderUnchanged
+	default:
+	}
+	w.mu.Lock()
+	visible, installed := w.visible, w.providerInstalled
+	if visible {
+		w.retryProvider = false
+	}
+	handle := w.handle
+	paths := append([]string(nil), w.pathOrder...)
+	w.mu.Unlock()
+	if handle == nil || visible == installed {
+		return filesProviderUnchanged
+	}
+	want := paths
+	if !visible {
+		want = nil
+	}
+	var path string
+	if len(want) > 0 {
+		path = want[0]
+	}
+	ctx := log.WithLogger(s.lifetimeCtx, s.log)
+	scope := s.beginInternal(ctx, catalog.OpInternalFilesWatchSync)
+	defer scope.Complete()
+	ctx = catalog.WithScope(ctx, scope)
+	err := s.filesDomainDo(ctx, handle, path, func(callCtx context.Context) error {
+		_, watchErr := handle.Watch(callCtx, want)
+		return watchErr
+	})
+	if err != nil {
+		var unavailable *filesystem.ErrWatchUnavailable
+		if !errors.As(err, &unavailable) {
+			log.From(ctx).Warn("files provider watch sync failed", "binding_id", w.bindingID, "visible", visible, "error", err)
+		}
+		if visible {
+			w.pollingFallback = true
+			return filesProviderFallback
+		}
+		return filesProviderRetryRelease
+	}
+	w.mu.Lock()
+	w.providerInstalled = visible
+	if visible && w.visible && w.pollingFallback {
+		// The provider just took its own baseline. Compare it with what
+		// the transport last saw so the handover covers intervening edits.
+		w.markVisibleCatchUpLocked(time.Now())
+	}
+	w.mu.Unlock()
+	if visible {
+		w.pollingFallback = false
+		return filesProviderInstalled
+	}
+	return filesProviderUnchanged
+}
+
+// filesDrainSignal lists every path owed a listing — the visible edge's
+// catch-up, an upload's destination, or a retry due now — one at a time, and
+// answers false when the binding has gone.
+func (s *WSServer) filesDrainSignal(w *filesWatcher) bool {
+	for {
+		select {
+		case <-w.stop:
+			return false
+		default:
+		}
+		selection := w.takeRequested(time.Now())
+		if selection == nil {
+			return true
+		}
+		if s.filesPollDispatch(w, selection) == filesPollPathStopped {
+			return false
+		}
+	}
+}
+
+// filesSignalPath lists the one directory whose provider watch fired, and
+// answers false when the binding has gone.
+func (s *WSServer) filesSignalPath(w *filesWatcher, path string) bool {
+	w.mu.Lock()
+	entry := w.paths[path]
+	if entry == nil || !w.visible {
+		w.mu.Unlock()
+		return true
+	}
+	delete(w.catchUp, path)
+	entry.requested = false
+	selection := &filesPollSelection{path: path, entry: entry, generation: entry.generation, signalTakenAt: time.Now()}
+	w.mu.Unlock()
+	return s.filesPollDispatch(w, selection) != filesPollPathStopped
+}
+
 func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	defer close(w.done)
+	if !w.tryProvider {
+		s.filesTransportPollLoop(w)
+		return
+	}
+	for s.filesSignalLoop(w) && s.filesTransportPollLoop(w) {
+	}
+}
+
+// filesTransportPollLoop reports whether the provider took over polling.
+func (s *WSServer) filesTransportPollLoop(w *filesWatcher) bool {
 	base := s.filesPollBaseInterval()
 	threshold := s.filesRefreshStateThreshold
 	if threshold <= 0 {
@@ -1791,12 +2122,7 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	timer := time.NewTimer(base)
 	defer timer.Stop()
 	resetTimer := func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		stopFilesWatchTimer(timer)
 		wait := time.Hour
 		if w.isVisible() {
 			wait = base
@@ -1825,16 +2151,7 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 		}
 	}
 	runPoll := func() bool {
-		// Owner: the binding's poll loop, released by w.stop when files.close
-		// runs. Closing event: the iteration returning and this scope settling.
-		// The scope carries the iteration's bounds to the provider call below:
-		// one listing, bounded by internal.files.watchPoll's max, in the
-		// binding's failure domain (ADR-8eej3e66 §4, §6).
-		pollCtx := context.Background()
-		opScope := s.beginInternal(pollCtx, catalog.OpInternalFilesWatchPoll)
-		defer opScope.Complete()
-		result := s.filesPollTick(catalog.WithScope(pollCtx, opScope), w)
-		if result == filesPollPathStopped {
+		if s.filesPollDispatch(w, nil) == filesPollPathStopped {
 			return false
 		}
 		updateState()
@@ -1845,10 +2162,19 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	for {
 		select {
 		case <-w.stop:
-			return
+			return false
 		case <-w.wake:
+			if w.tryProvider && w.hasProviderRetry() && s.filesProviderSync(w) == filesProviderInstalled {
+				updateState()
+				// Carry the handover catch-up into the signal loop.
+				select {
+				case w.wake <- struct{}{}:
+				default:
+				}
+				return true
+			}
 			if w.isVisible() && !runPoll() {
-				return
+				return false
 			}
 		case <-timer.C:
 			if !w.isVisible() {
@@ -1856,7 +2182,7 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 				continue
 			}
 			if !runPoll() {
-				return
+				return false
 			}
 		}
 	}
@@ -1943,6 +2269,37 @@ func (s *WSServer) filesBaseline(
 	return base
 }
 
+// filesPollDispatch performs ONE bounded provider listing of the binding's
+// watch machinery — the poll loop's dispatch and the provider-watch loop's
+// catch-up alike — inside the internal operation scope that bounds it.
+//
+// Owner: the binding's watcher, released by w.stop when files.close runs.
+// Closing event: the iteration returning and this scope settling. The scope
+// carries the iteration's bounds to the provider call: one listing, bounded by
+// internal.files.watchPoll's max, in the binding's failure domain
+// (ADR-8eej3e66 §4, §6). It is one function because there is one dispatch:
+// a second copy of this scope, in the provider-watch branch, would be a second
+// place for an operation to run unbounded.
+//
+// selection nil means "whatever is due next" (the poll loop); a selection names
+// the one path a provider announcement is about.
+func (s *WSServer) filesPollDispatch(w *filesWatcher, selection *filesPollSelection) filesPollPathResult {
+	pollCtx := context.Background()
+	opScope := s.beginInternal(pollCtx, catalog.OpInternalFilesWatchPoll)
+	defer opScope.Complete()
+	ctx := catalog.WithScope(pollCtx, opScope)
+	if selection == nil {
+		return s.filesPollTick(ctx, w)
+	}
+	w.mu.Lock()
+	handle := w.handle
+	w.mu.Unlock()
+	if handle == nil {
+		return filesPollPathOK
+	}
+	return s.filesPollPath(ctx, w, handle, selection)
+}
+
 // filesPollTick performs exactly one bounded dispatch: one selected path,
 // never the entire watch set. It returns the path outcome so the loop can
 // stop when the binding has gone away.
@@ -2017,13 +2374,16 @@ func (s *WSServer) filesPollPath(
 			w.mu.Lock()
 			if current := w.paths[path]; current == selection.entry &&
 				current.generation == selection.generation {
-				current.failureStep++
-				if current.failureStep > filesPollMaxFailureStep {
-					current.failureStep = filesPollMaxFailureStep
+				signal := !selection.signalTakenAt.IsZero()
+				// A fresh request or foreground observation supersedes
+				// a failed listing that was already in flight.
+				if !signal || (!current.requested && !current.lastSuccessfulObservation.After(selection.signalTakenAt)) {
+					current.failureStep = min(current.failureStep+1, filesPollMaxFailureStep)
+					current.dueAt = time.Now().Add(filesPollWait(
+						w.pollBase, current.idleStep, current.failureStep, w.jitter,
+					))
+					current.requested = current.requested || signal
 				}
-				current.dueAt = time.Now().Add(filesPollWait(
-					w.pollBase, current.idleStep, current.failureStep, w.jitter,
-				))
 			}
 			w.mu.Unlock()
 			if !errors.Is(err, domains.ErrDomainSuspect) {

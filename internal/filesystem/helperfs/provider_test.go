@@ -74,8 +74,23 @@ func TestHelperFilesystemRoundTrip(t *testing.T) {
 			t.Fatalf("Read lost canonical/lexical separation: %+v", content)
 		}
 	}
-	if _, err := p.Watch(ctx, link); !errors.As(err, new(*filesystem.ErrWatchUnavailable)) {
-		t.Fatalf("Watch: %v, want ErrWatchUnavailable", err)
+	// Watch is a subscription on the HOST (nocx-oalo1.12.10), not a refusal:
+	// the provider can follow a directory, which is what stops the transport
+	// running a ladder of its own over the wire.
+	before = len(svc.observed())
+	watch, watchErr := p.Watch(ctx, link)
+	if watchErr != nil {
+		t.Fatalf("Watch: %v", watchErr)
+	}
+	calls = svc.observed()[before:]
+	if len(calls) != 1 || calls[0].op != proto.OpWatch {
+		t.Fatalf("Watch sent %v, want exactly one %s RPC", calls, proto.OpWatch)
+	}
+	if got := watch.Mode(); got.Kind != filesystem.WatchPolling || got.DegradedReason != "" {
+		t.Fatalf("Watch mode = %+v, want designed host-side polling", got)
+	}
+	if closeErr := watch.Close(); closeErr != nil {
+		t.Fatalf("closing the watch: %v", closeErr)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatal(err)

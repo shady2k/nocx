@@ -479,4 +479,10 @@ package proto
 //
 // "36" removes the named SSH port probe. The coordinator now samples TCP
 // listeners through the ports service on the connection's far helper.
-const Version = "36"
+//
+// Version 37 adds fs.watch, fs.unwatch and fs.changed (nocx-oalo1.12.10).
+// A version 36 helper would reject the watch request as an unknown operation.
+// It also cannot send fs.changed. The hello handshake fences that generation
+// before a coordinator can subscribe and treat the missing change events as
+// a quiet directory.
+const Version = "37"

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.watch.params.schema.json",
+  "title": "HelperFSWatchParams",
+  "description": "Params of the helper fs service's watch op: one caller-minted id and one directory to follow. The id is the caller's because the caller is the party that must recognise its own notification after a connection is replaced, and it is the only handle unwatch takes — a path would have to be re-resolved against a host that may have moved, and two panels watching one directory would then share a fate neither asked for. No interval is carried: the host polls its own disk at the ladder the transport already owns (filesystem.WatchPollWait), and a caller-chosen rate would be a second owner of it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "path"],
+  "properties": {
+    "id": {
+      "description": "The caller's identity for this watch, echoed on every `changed` notification it causes. Opaque to the helper: it is stored, compared and returned, never parsed.",
+      "type": "string",
+      "minLength": 1
+    },
+    "path": {
+      "description": "The directory to follow, in the provider's path syntax. It must be a directory: a watch on a file or on a path that does not exist is the same refusal a list would answer (`not-dir`, `not-found`), decided before anything is installed.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

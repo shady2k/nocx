@@ -464,3 +464,79 @@ type FSStrandedTemp struct {
 type FSInventoryResult struct {
 	Stranded []FSStrandedTemp `json:"stranded"`
 }
+
+// ── the watch (nocx-oalo1.12.10) ───────────────────────────────────────
+//
+// A panel that follows a directory used to ask its coordinator to re-list that
+// directory on a ladder — one round trip per rung, forever, for every open
+// folder. The host is already there, it already knows how to compare a
+// directory's digest (fs.list's `rev` is the same computation), and a local
+// re-listing costs it a readdir rather than a network round trip. So the
+// coordinator SUBSCRIBES and the helper announces: `watch` installs the
+// interest, `unwatch` ends it, and `changed` is the announcement.
+//
+// # Why the id is the caller's
+//
+// The helper holds one watch per id, and the caller mints it, because the
+// caller is the party that has to recognise its own notification after a
+// connection is replaced. `unwatch` names nothing else: a path would have to be
+// re-resolved, and two panels watching one directory would then share a fate
+// neither asked for.
+//
+// # Why the cadence is not on the wire
+//
+// A watch polls the host's own disk at the ladder the transport already owns
+// (filesystem.WatchPollWait), and nothing about that cadence crosses this
+// boundary: a caller that asked for an interval would be a second owner of the
+// rate, and an older helper would have to ignore the field anyway.
+const (
+	// OpWatch installs one directory watch and answers the digest it starts
+	// from: the caller compares that with what it last listed, so a change
+	// that landed while no subscription existed is still announced once the
+	// subscription returns.
+	OpWatch = "watch"
+	// OpUnwatch ends one watch by id. Unwatching a watch this helper does not
+	// hold answers success: the caller asked that no watch of that id remain,
+	// which is a fact and not an error.
+	OpUnwatch = "unwatch"
+)
+
+// EventFSChanged is the fs service's one notification: a watched directory's
+// digest moved. Its params are an FSChanged.
+const EventFSChanged = "changed"
+
+// FSWatchParams installs one watch. ID is the caller's identity for it — an
+// opaque token this service echoes and never interprets — and Path is the
+// directory to follow.
+type FSWatchParams struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// FSWatchResult answers a watch with the digest the host observed when it
+// installed it. A caller that holds the digest it last listed compares the two:
+// different means something changed while it was not subscribed, and the
+// helper will not announce that change a second time because its baseline is
+// now.
+type FSWatchResult struct {
+	Rev string `json:"rev"`
+}
+
+// FSUnwatchParams ends one watch by id.
+type FSUnwatchParams struct {
+	ID string `json:"id"`
+}
+
+// FSUnwatchResult is empty: the answer IS the watch's absence. Naming it as a
+// struct rather than answering nil keeps the shape frozen the way every other
+// op's result is, and an empty object is what a schema with
+// `additionalProperties: false` accepts.
+type FSUnwatchResult struct{}
+
+// FSChanged is the params of the `changed` notification: which watch fired and
+// the digest it observed. A caller may re-list on the strength of Rev alone —
+// it is the same digest fs.list answers — or ignore it and list anyway.
+type FSChanged struct {
+	ID  string `json:"id"`
+	Rev string `json:"rev"`
+}

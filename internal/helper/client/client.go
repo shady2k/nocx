@@ -114,8 +114,15 @@ type Client struct {
 	// three name different things, are ended by different ops, and one entry
 	// keyed by another's identity is how a `close` becomes an `unlease`.
 	probeLeases map[proto.LeaseID]*ProbeLease
-	nextID      uint64
-	lost        bool
+	// fsWatches holds the handlers this coordinator registered for the fs
+	// service's `changed` notifications, keyed by the watch id it minted
+	// (watch.go). A fourth map rather than a reuse of any above for the reason
+	// the others are separate: an fs watch id and a probe lease id are
+	// different identities on the same wire, and one map would make one a
+	// possible key for the other.
+	fsWatches map[string]fsHandler
+	nextID    uint64
+	lost      bool
 
 	done      chan struct{}
 	hsCh      chan error
@@ -431,6 +438,10 @@ func (c *Client) lose(reason error) {
 		// The parked ends go with them, for the same reason: nothing can claim
 		// a stream on a wire that is gone.
 		c.parkedEnds = make(map[proto.ChannelID]parkedEnd)
+		// Watch handlers do not outlive the connection either: the watches they
+		// belong to are re-subscribed on the next one, and a handler left here
+		// would be a subscription to a wire that no longer exists.
+		c.fsWatches = make(map[string]fsHandler)
 		c.mu.Unlock()
 		close(c.done)
 		for _, s := range channels {
@@ -519,6 +530,12 @@ func (c *Client) sessionNotify(payload []byte) {
 		return
 	}
 	switch n.Service {
+	case proto.ServiceFS:
+		// The fs service's one event: a watched directory's digest moved
+		// (watch.go). Routed by id, because the id is what the caller minted
+		// and the only thing that says which subscription this belongs to.
+		c.fsChanged(raw)
+		return
 	case proto.ServiceSSH:
 		// The ssh service's events: a proxied channel's remote end is gone, a
 		// connection arrived on a listener this coordinator asked for, and a

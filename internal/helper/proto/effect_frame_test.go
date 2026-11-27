@@ -157,11 +157,14 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 	}
 }
 
-// The protocol handshake must reject older peers after the SSH port probe
-// is removed from the set of operations.
-func TestHelperProtocolVersionBumpedForPortsCutover(t *testing.T) {
-	if Version != "36" {
-		t.Fatalf("helper protocol version = %q, want 36", Version)
+// The version is PINNED LITERALLY, and that is the whole of what this test is
+// for: the fence's job is to refuse a peer that does not agree about this
+// number. The last change grew the `fs` service with the watch:
+// `watch`/`unwatch` and the `changed` notification it announces through
+// (nocx-oalo1.12.10).
+func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
+	if Version != "37" {
+		t.Fatalf("helper protocol version = %q, want 37", Version)
 	}
 }
 

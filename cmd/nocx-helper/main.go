@@ -227,7 +227,14 @@ func serve(ctx context.Context, log *slog.Logger, dir, home string, generation p
 		Root:       filepath.Join(home, ".nocx", "fs-writes"),
 		Hostname:   hostname,
 		InstanceID: instanceID,
-	}, fshostsvc.WithAdmission(admission))
+	}, fshostsvc.WithAdmission(admission),
+		// The watch ladder's clock is stated here rather than defaulted, for
+		// the reason the keystore stance is: a process's own timers are a
+		// decision the composition root makes once and every seam below it can
+		// be told about, and a shipped helper that silently took whichever
+		// clock a package happened to default to is one a test can never
+		// substitute for.
+		fshostsvc.WithWatchClock(fshostsvc.RealClock{}))
 	if err != nil {
 		nocxlog.From(ctx).Error("fs write journal", "err", err)
 		return 1

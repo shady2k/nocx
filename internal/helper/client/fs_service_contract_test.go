@@ -32,7 +32,7 @@ import (
 
 // hostedFS builds a helper peer whose fs service is the shipped one, rooted at
 // a temporary directory so every answer is about a tree this test owns.
-func hostedFS(t *testing.T, root string) *client.Client {
+func hostedFS(t *testing.T, root string, opts ...hostsvc.Option) *client.Client {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc, svcErr := hostsvc.New(filesystemlocal.New(filesystemlocal.WithRoot(root)),
@@ -40,7 +40,7 @@ func hostedFS(t *testing.T, root string) *client.Client {
 			Root:       t.TempDir(),
 			Hostname:   "contract-host",
 			InstanceID: strings.Repeat("a", 32),
-		})
+		}, opts...)
 	if svcErr != nil {
 		t.Fatalf("new fs service: %v", svcErr)
 	}

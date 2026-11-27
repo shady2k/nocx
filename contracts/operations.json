@@ -7061,6 +7061,73 @@
       "preempts": []
     },
     {
+      "id": "internal.files.watchSync",
+      "kind": "internal",
+      "owner": "binding",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "filesystem",
+            "ssh",
+            "helper"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "a visibility edge waits for the watched folder's failure domain"
+      },
+      "max": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "a visibility edge installs or releases one watch set within the files.watch work bound"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Updating folder subscriptions",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "filesystem",
+        "ssh",
+        "helper"
+      ],
+      "preempts": []
+    },
+    {
       "id": "internal.git.process",
       "kind": "internal",
       "owner": "checkout",

@@ -112,6 +112,7 @@ var (
 	OpInternalFilesDownload           = methodHandle("internal.files.download")
 	OpInternalFilesUpload             = methodHandle("internal.files.upload")
 	OpInternalFilesWatchPoll          = methodHandle("internal.files.watchPoll")
+	OpInternalFilesWatchSync          = methodHandle("internal.files.watchSync")
 	OpInternalGitProcess              = methodHandle("internal.git.process")
 	OpInternalHelperGitOpen           = methodHandle("internal.helper.gitOpen")
 	OpInternalHelperInstall           = methodHandle("internal.helper.install")

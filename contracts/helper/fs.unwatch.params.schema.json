@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.unwatch.params.schema.json",
+  "title": "HelperFSUnwatchParams",
+  "description": "Params of the helper fs service's unwatch op: the id of the watch to end, and nothing else. A path is deliberately not accepted — the id names exactly one installed watch, and unwatching by path would let one panel's release end another's subscription to the same directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "description": "The id the watch was installed with. An id this helper does not hold is answered as success: the caller asked that no watch of that id remain, which is a fact about the host rather than a failure of the request.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

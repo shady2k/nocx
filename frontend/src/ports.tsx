@@ -370,7 +370,14 @@ export function PortsPanel(props: PortsPanelProps) {
       applyStatus(st)
       // The first visibility call may have reached the backend before
       // the pane or its far helper was ready.
-      if (props.visible() && !st.discovery.visible) {
+      //
+      // AND THE GATE MAY HAVE CLOSED UNDER THIS ANSWER (ALX-1852 r2). This
+      // continuation is the FIRST place a tab switch and a closed axis meet:
+      // the status left while the panel was serving, the observation arrived
+      // while it was in flight, and sending `visible` now would arm a
+      // scheduler on a host this panel has just been told it may not ask.
+      // The tab identity alone is not enough — it still matches.
+      if (props.visible() && !st.discovery.visible && gate() === null) {
         void props.services.visible(pid, true).catch(() => {})
       }
     } catch (e) {
@@ -479,14 +486,17 @@ export function PortsPanel(props: PortsPanelProps) {
   // is made by the effect below the moment the gate opens again.
   createEffect(
     on([paneId, () => props.visible(), gateClosed], ([pid, vis, closed], prev) => {
-      if (closed) return
+      // RETIRING THE TARGET WE LEFT IS NOT AN ASK OF THE TARGET WE MAY NOT
+      // ASK (ALX-1852 r2). Leaving a serving tab for a blocked one used to
+      // return here before the retirement, so the previous pane's scheduler
+      // kept sampling a host nobody was watching for the rest of the run.
+      // Only the CURRENT target's request is what a closed gate withholds.
       const prevPid = prev?.[0] ?? null
       if (prevPid !== null && prevPid !== pid) {
         void props.services.visible(prevPid, false).catch(() => {})
       }
-      if (pid !== null) {
-        void props.services.visible(pid, vis).catch(() => {})
-      }
+      if (closed || pid === null) return
+      void props.services.visible(pid, vis).catch(() => {})
     }),
   )
 
@@ -721,6 +731,13 @@ export function PortsPanel(props: PortsPanelProps) {
       if (f.state !== 'running' && forwardForDestination(f.destination)?.state === 'running') {
         return false
       }
+      // A CLOSED GATE HIDES THE DETECTED SECTION, so no listener can own a
+      // row: every forward becomes an orphan, and a running one must keep its
+      // Stop (ALX-1852 r2). Filtering against listeners cached from the last
+      // serving sample was how a live forward lost its only action the moment
+      // the axis stopped — the row that owned it was no longer drawn, and
+      // this list insisted it was.
+      if (gateClosed()) return true
       return !listeners().some((l) => destinationFor(l) === f.destination)
     })
 
@@ -863,7 +880,16 @@ export function PortsPanel(props: PortsPanelProps) {
                    WAITING state — it never mints a reason the wire did not
                    send (ADR-ba6xet1b). */
                 helper={
-                  helperUnavailable() ? null : (props.activeOrigin()?.connection?.helper ?? null)
+                  // THE OBSERVATION WINS WHERE IT EXISTS (ALX-1852 r2). The
+                  // typed `helper-unavailable` is drawn as WAITING only until
+                  // the connection's own observation closes the gate; from
+                  // then on the observation IS the reason, and it carries the
+                  // backend's action. Substituting null for it left a card
+                  // waiting forever beside a poll already stopped — and the
+                  // reason the person needed to act on was in hand all along.
+                  helperUnavailable() && gate() === null
+                    ? null
+                    : (props.activeOrigin()?.connection?.helper ?? null)
                 }
                 paneId={props.activeOrigin()?.connection?.paneId ?? null}
                 livePaneId={() => props.activeOrigin()?.connection?.paneId ?? null}
@@ -1041,57 +1067,74 @@ export function PortsPanel(props: PortsPanelProps) {
                                 }}
                               </Show>
                             </div>
-                            <Show
-                              when={isLocal() || savedProfileId() === null}
-                              fallback={
-                                running ? (
-                                  <div class="ports-row__actions">
-                                    <IconButton
-                                      data-testid="ports-copy"
-                                      size="xs"
-                                      ariaLabel={
-                                        t('ports.copy.head', 'Copy') +
-                                        ' ' +
-                                        running.actualBind.host +
-                                        ':' +
-                                        running.actualBind.port
-                                      }
-                                      title={
-                                        t('ports.copy.head', 'Copy') +
-                                        ' ' +
-                                        running.actualBind.host +
-                                        ':' +
-                                        running.actualBind.port
-                                      }
-                                      onClick={() =>
-                                        copyAddress(
-                                          `${running.actualBind.host}:${running.actualBind.port}`,
-                                        )
-                                      }
-                                    >
-                                      <CopyIcon />
-                                    </IconButton>
+                            {/* THE ACTIONS ARE DECIDED BY WHAT EACH ONE
+                                  NEEDS, never by whether the tab has a saved
+                                  profile (ALX-1852 r2). Stop is addressed by
+                                  the forward's own id, so a running forward
+                                  stays stoppable on a hand-typed tab; Forward
+                                  and Retry are `tunnel.open`, addressed by a
+                                  saved host record, so those are the two a tab
+                                  without one does not get (D14). Gating the
+                                  whole action block on the profile hid Stop
+                                  exactly where a person could not re-open the
+                                  forward it would have to be replaced by. */}
+                            <div class="ports-row__actions">
+                              {/* A self-stopped row offers the retry and
+                                    nothing of the address it could not reach:
+                                    the card's one action is the forward, and
+                                    a copy of a destination that is down reads
+                                    as an address that works. */}
+                              <Show when={failed === undefined}>
+                                <IconButton
+                                  data-testid="ports-copy"
+                                  size="xs"
+                                  ariaLabel={
+                                    t('ports.copy.head', 'Copy') +
+                                    ' ' +
+                                    (running
+                                      ? `${running.actualBind.host}:${running.actualBind.port}`
+                                      : destinationFor(l))
+                                  }
+                                  title={
+                                    t('ports.copy.head', 'Copy') +
+                                    ' ' +
+                                    (running
+                                      ? `${running.actualBind.host}:${running.actualBind.port}`
+                                      : destinationFor(l))
+                                  }
+                                  onClick={() =>
+                                    copyAddress(
+                                      running
+                                        ? `${running.actualBind.host}:${running.actualBind.port}`
+                                        : destinationFor(l),
+                                    )
+                                  }
+                                >
+                                  <CopyIcon />
+                                </IconButton>
+                              </Show>
+                              <Show when={running}>
+                                {(r) => (
+                                  <>
                                     <IconButton
                                       data-testid="ports-open"
                                       size="xs"
                                       ariaLabel={
                                         t('ports.open.head', 'Open') +
                                         ' ' +
-                                        running.actualBind.host +
+                                        r().actualBind.host +
                                         ':' +
-                                        running.actualBind.port
+                                        r().actualBind.port
                                       }
                                       title={
                                         t('ports.open.head', 'Open') +
                                         ' ' +
-                                        running.actualBind.host +
+                                        r().actualBind.host +
                                         ':' +
-                                        running.actualBind.port
+                                        r().actualBind.port
                                       }
                                       onClick={() =>
-                                        openAddress(
-                                          `${running.actualBind.host}:${running.actualBind.port}`,
-                                        )
+                                        openAddress(`${r().actualBind.host}:${r().actualBind.port}`)
                                       }
                                     >
                                       <ExternalLinkIcon />
@@ -1102,56 +1145,48 @@ export function PortsPanel(props: PortsPanelProps) {
                                       ariaLabel={
                                         t('ports.stopForward', 'Stop forward') +
                                         ' ' +
-                                        running.destination
+                                        r().destination
                                       }
                                       title={
                                         t('ports.stopForward', 'Stop forward') +
                                         ' ' +
-                                        running.destination
+                                        r().destination
                                       }
-                                      onClick={() => void stop(running.id)}
+                                      onClick={() => void stop(r().id)}
                                     >
                                       <SquareIcon />
                                     </IconButton>
-                                  </div>
-                                ) : failed ? (
-                                  <Button
-                                    data-testid="ports-retry-forward"
-                                    onClick={() => retry(failed)}
-                                  >
-                                    {t('ports.retry', 'Retry')}
-                                  </Button>
-                                ) : (
-                                  <div class="ports-row__actions">
-                                    <IconButton
-                                      data-testid="ports-forward"
-                                      size="xs"
-                                      ariaLabel={
-                                        t('ports.forward', 'Forward') + ' ' + destinationFor(l)
-                                      }
-                                      title={
-                                        t('ports.forward', 'Forward') + ' ' + destinationFor(l)
-                                      }
-                                      onClick={() => void forward(destinationFor(l), l.port)}
+                                  </>
+                                )}
+                              </Show>
+                              <Show when={failed}>
+                                {(f) => (
+                                  <Show when={savedProfileId() !== null}>
+                                    <Button
+                                      data-testid="ports-retry-forward"
+                                      onClick={() => retry(f())}
                                     >
-                                      <ArrowRightIcon />
-                                    </IconButton>
-                                  </div>
-                                )
-                              }
-                            >
-                              <div class="ports-row__actions">
-                                <IconButton
-                                  data-testid="ports-copy"
-                                  size="xs"
-                                  ariaLabel={t('ports.copy.head', 'Copy') + ' ' + destinationFor(l)}
-                                  title={t('ports.copy.head', 'Copy') + ' ' + destinationFor(l)}
-                                  onClick={() => copyAddress(destinationFor(l))}
-                                >
-                                  <CopyIcon />
-                                </IconButton>
-                              </div>
-                            </Show>
+                                      {t('ports.retry', 'Retry')}
+                                    </Button>
+                                  </Show>
+                                )}
+                              </Show>
+                              <Show when={!running && failed === undefined}>
+                                <Show when={savedProfileId() !== null}>
+                                  <IconButton
+                                    data-testid="ports-forward"
+                                    size="xs"
+                                    ariaLabel={
+                                      t('ports.forward', 'Forward') + ' ' + destinationFor(l)
+                                    }
+                                    title={t('ports.forward', 'Forward') + ' ' + destinationFor(l)}
+                                    onClick={() => void forward(destinationFor(l), l.port)}
+                                  >
+                                    <ArrowRightIcon />
+                                  </IconButton>
+                                </Show>
+                              </Show>
+                            </div>
                           </div>
                           <Show when={caveat}>
                             <MarkerList items={[{ text: caveat, tone: 'note' }]} />

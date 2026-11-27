@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { batch, createSignal } from 'solid-js'
 import { clearToasts } from './ui/toast'
 import { RpcError, TransportUnavailableError } from './dispatcher'
 import type { PaneConnection } from './generated/pane.connection'
@@ -1456,6 +1456,154 @@ describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
     // absent from the DOM rather than dead (D14).
     expect(screen.queryByTestId('ports-forward')).toBeNull()
     expect(screen.getByTestId('ports-copy')).toBeTruthy()
+  })
+
+  it('a running forward on an ad-hoc tab keeps its Stop — only Forward and Retry need a profile', async () => {
+    const record = runningRecord({ id: 'fwd-adhoc', destination: 'host.example:6768' })
+    const stopForward = vi
+      .fn()
+      .mockResolvedValue({ ...record, state: 'stopped', stopReason: 'user', error: null })
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      listForwards: vi.fn().mockResolvedValue({ forwards: [record] }),
+      stopForward,
+    })
+    renderPanel(services, {
+      savedProfileId: () => null,
+      activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }),
+    })
+
+    await waitFor(() => expect(screen.getByText(/127.0.0.1:6768/)).toBeTruthy())
+    // Stop is addressed by the forward's own id, so it is a working action on
+    // a tab with no host record — and the only way out of a forward whose
+    // target the person can no longer re-open (ALX-1852 r2).
+    fireEvent.click(screen.getByTestId('ports-stop'))
+    await waitFor(() => expect(stopForward).toHaveBeenCalledWith('fwd-adhoc'))
+    expect(screen.queryByTestId('ports-forward')).toBeNull()
+  })
+
+  it('a forward the last serving sample owned keeps its Stop when the gate closes', async () => {
+    const [origin, setOrigin] = createSignal(sshOrigin({ state: 'serving', action: 'none' }))
+    const record = runningRecord({ id: 'fwd-live', destination: 'host.example:6768' })
+    const stopForward = vi
+      .fn()
+      .mockResolvedValue({ ...record, state: 'stopped', stopReason: 'user', error: null })
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      listForwards: vi.fn().mockResolvedValue({ forwards: [record] }),
+      stopForward,
+    })
+    renderPanel(services, { activeOrigin: origin })
+
+    // While the host serves, the forward lives on its detected row and the
+    // orphan section has no subject.
+    await waitFor(() => expect(screen.getByTestId('ports-stop')).toBeTruthy())
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
+
+    setOrigin(sshOrigin({ state: 'unavailable', reason: 'helper-lost', action: 'refresh' }))
+
+    // The Detected section is gone, and the row that owned the forward with
+    // it. The cached listener must not keep claiming the forward: an orphan
+    // is the only row left, and a running one is stoppable (ALX-1852 r2).
+    await waitFor(() => expect(screen.getByText('Orphaned forwards')).toBeTruthy())
+    expect(screen.getByTestId('ports-helper-axis')).toBeTruthy()
+    const orphans = screen.getAllByTestId('forwarded-row')
+    expect(orphans).toHaveLength(1)
+    expect(orphans[0].textContent).toContain('host.example:6768')
+
+    fireEvent.click(screen.getByTestId('ports-stop'))
+    await waitFor(() => expect(stopForward).toHaveBeenCalledWith('fwd-live'))
+  })
+
+  it('a typed refusal does not silence the reason and the action that arrive after it', async () => {
+    const [origin, setOrigin] = createSignal(sshOrigin({ state: 'serving', action: 'none' }))
+    const onRefreshHelper = vi.fn()
+    // The refusal reaches the panel before the connection's own observation
+    // does, which is the order ALX-1852 is about.
+    const status = vi
+      .fn()
+      .mockRejectedValue(
+        new RpcError('helper unavailable', -32602, { reason: 'helper-unavailable' }),
+      )
+    renderPanel(fakeServices({ status }), { activeOrigin: origin, onRefreshHelper })
+
+    // Nothing has named a reason yet, so the card WAITS — never a toast and
+    // never a spinner that would never end.
+    await waitFor(() =>
+      expect(screen.getByTestId('ports-helper-axis').getAttribute('data-helper')).toBe('starting'),
+    )
+    expect(listingToasts).toEqual([])
+
+    setOrigin(sshOrigin({ state: 'unavailable', reason: 'helper-lost', action: 'refresh' }))
+
+    // The observation is now the authority, and it carries the backend's
+    // action: a card that kept drawing the waiting state here left the person
+    // with no way back, on a poll that had already stopped.
+    await waitFor(() =>
+      expect(screen.getByTestId('ports-helper-axis').getAttribute('data-helper')).toBe(
+        'unavailable',
+      ),
+    )
+    expect(screen.getByTestId('ports-helper-axis').textContent).toContain(
+      'The nocx helper stopped on this connection.',
+    )
+    fireEvent.click(screen.getByTestId('ports-helper-refresh'))
+    expect(onRefreshHelper).toHaveBeenCalledWith(SSH_PANE)
+  })
+
+  it('leaving a serving tab for a blocked one still retires the tab it left', async () => {
+    const [pane, setPane] = createSignal<string | null>('ssh:p1:1')
+    const [origin, setOrigin] = createSignal(sshOrigin({ state: 'serving', action: 'none' }))
+    const visible = vi.fn().mockResolvedValue({})
+    renderPanel(fakeServices({ visible }), {
+      paneId: pane,
+      activeOrigin: origin,
+      savedProfileId: () => 'ssh:p1:1',
+    })
+
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    visible.mockClear()
+
+    // One tab switch, one batch: the new target's axis is already blocked
+    // when the panel re-scopes, which is the shape that used to skip the
+    // retirement of the tab it left.
+    batch(() => {
+      setPane('ssh:p2:2')
+      setOrigin(sshOrigin({ state: 'unavailable', reason: 'mode-raw', action: 'host-settings' }))
+    })
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+    // The target it cannot ask is asked nothing.
+    expect(visible).not.toHaveBeenCalledWith('ssh:p2:2', true)
+  })
+
+  it('a status that lands after the gate closed does not arm the scheduler it answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const [origin, setOrigin] = createSignal(sshOrigin({ state: 'serving', action: 'none' }))
+      let resolveStatus!: (st: PortsStatusResult) => void
+      const status = vi.fn(
+        () =>
+          new Promise<PortsStatusResult>((res) => {
+            resolveStatus = res
+          }),
+      )
+      const visible = vi.fn().mockResolvedValue({})
+      renderPanel(fakeServices({ status, visible }), { activeOrigin: origin })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(status).toHaveBeenCalled()
+      visible.mockClear()
+
+      // The answer left while the panel was serving and lands after the
+      // observation closed the gate. The tab is still the same tab, so an
+      // identity check alone passes — the gate is the second half.
+      setOrigin(sshOrigin({ state: 'unavailable', reason: 'helper-lost', action: 'refresh' }))
+      resolveStatus(statusFixture({ visible: false }))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(visible).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('chooses the sentence by the wire’s reason, never by the message’s prose', async () => {

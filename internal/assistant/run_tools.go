@@ -134,7 +134,7 @@ func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	invocation.RunContext = r.RunContext()
 	started, err := r.claimAgentStart(invocation.AgentCallID)
 	if err != nil {
-		return "", &DispatchRefusalError{Method: invocation.Method, Reason: err.Error(), Cause: err}
+		return "", &DispatchRefusalError{Method: invocation.Method, Reason: errText(err), Cause: err}
 	}
 	var callID string
 	if started == nil {

@@ -6,8 +6,8 @@ package app
 //
 // WHAT A USER CAN DO THAT THEY COULD NOT BEFORE: open a pane on a host whose
 // only credential is a password stored in the vault, and cost that host ONE
-// login for it — and keep it at one when the Files panel beside it reads the
-// same host.
+// login for it, including when the helper installer takes another channel
+// to the same host.
 //
 // # The defect this pins
 //
@@ -52,7 +52,6 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/panedriver"
@@ -148,7 +147,7 @@ func openPanes(t *testing.T, ctx context.Context, seam openSeam, cfg session.Con
 // ── the acceptance ────────────────────────────────────────────────────────
 
 // TestOnePaneCostsTheFarHostOneAuthentication is the criterion: one pane open
-// costs the far host one login, and the Files panel beside that pane rides it.
+// costs the far host one login, and an install lease shares the pane's connection.
 func TestOnePaneCostsTheFarHostOneAuthentication(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello from the far side"), 0o600); err != nil {
@@ -170,31 +169,24 @@ func TestOnePaneCostsTheFarHostOneAuthentication(t *testing.T) {
 		t.Fatalf("the far host authenticated %d connection(s) for one pane, want exactly 1 — the platform probe and the pane's own spawn are one open and must ride one pooled connection", got)
 	}
 
-	// 2. THE FILES PANEL BESIDE IT. The same machine's helper serves it, and
-	//    AD-4's pool is what makes it the same login: the pane's connection is
-	//    already up, so this lease rides it.
-	src := factorySession{kind: session.KindRemote, host: srv.addr, opts: session.SSHOptionsFromConfig(paneDestination(srv, secrets))}
-	provider, err := stand.factory(src, root)
+	// The install channel shares the pane's authenticated connection (AD-4).
+	opts := session.SSHOptionsFromConfig(paneDestination(srv, secrets))
+	install, err := seam.routes.HelperInstallConn(ctx, srv.addr, opts...)
 	if err != nil {
-		t.Fatalf("the Files provider for the pane's session: %v", err)
+		t.Fatalf("the helper install lease for the pane's endpoint: %v", err)
 	}
-	t.Cleanup(func() { _ = provider.Close() })
-	listing, err := provider.List(ctx, root, filesystem.Page{Limit: 50})
-	if err != nil {
-		t.Fatalf("listing the far directory through the helper's channel: %v", err)
-	}
-	if len(listing.Entries) == 0 {
-		t.Fatal("the listing through the helper's channel is empty: the Files panel reached nothing")
+	t.Cleanup(func() { _ = install.Close() })
+	content, err := install.ReadFile(filepath.Join(root, "hello.txt"))
+	if err != nil || string(content) != "hello from the far side" {
+		t.Fatalf("ReadFile through the helper install lease: %q, %v", content, err)
 	}
 
 	if got := srv.connCount(); got != 1 {
-		t.Errorf("the far host authenticated %d connection(s) for one pane and its Files panel, want exactly 1 — the Files lease must ride the pane's pooled connection, not raise one of its own", got)
+		t.Errorf("the far host authenticated %d connection(s) for one pane and an install lease, want exactly 1", got)
 	}
 	if seen := srv.subsystemsSeen(); len(seen) != 1 || seen[0] != "sftp" {
-		t.Errorf("the fixture was asked for subsystems %v, want exactly [sftp] — the Files panel is what opened one", seen)
+		t.Errorf("the fixture was asked for subsystems %v, want exactly [sftp] for the install lease", seen)
 	}
-	t.Logf("MEASURED %d authentication(s) for one pane plus its Files panel, subsystems %v",
-		srv.connCount(), srv.subsystemsSeen())
 }
 
 // A saved connection without a vault secret must retain the editor's raw

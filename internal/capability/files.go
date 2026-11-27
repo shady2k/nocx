@@ -16,7 +16,7 @@ import (
 type ProviderFactory func(sess session.Session, rootPath string) (filesystem.Provider, error)
 
 // filesystemEndpointAttester is the optional attestation surface a provider
-// may carry (spec §5.1): the composition root wraps the sftp provider with
+// may carry (spec §5.1): the composition root wraps the remote provider with
 // the v1 endpoint id so the binding's endpointId is backend-attested rather
 // than client-supplied. A local provider never implements it — an empty
 // attestation is what makes files.reveal a local-only capability (D4).
@@ -169,7 +169,7 @@ func ProviderCapabilities(provider filesystem.Provider) (filesystem.Capabilities
 		caps.Versioned = v.Versioned()
 	}
 	// A provider that can name its own domains supplies the namer itself; a
-	// provider that cannot — the SFTP one, whose namespace is the far machine
+	// provider that cannot — the helper-backed provider, whose namespace is the far machine
 	// and not a mount table — takes the attested destination as its domain,
 	// because everything behind one resolved host fails together. A provider
 	// with neither leaves the binding a single domain of its own, which is the

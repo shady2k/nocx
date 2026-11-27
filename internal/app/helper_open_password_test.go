@@ -298,8 +298,8 @@ func (s *pwSSHServer) serveDirectTCPIP(newChan gossh.NewChannel) {
 }
 
 // handleSession answers what the callers of this fixture ask of a far side: the
-// platform probe's pty-less exec, the session's own shell, and — since
-// nocx-50w7p.12 — the `sftp` subsystem the Files panel's lease runs on.
+// platform probe's pty-less exec, the session's own shell, and the install
+// lease's `sftp` subsystem.
 //
 // The requests are handled in THIS goroutine rather than beside the echo loop,
 // because a session serves one of the three and the choice is only known once

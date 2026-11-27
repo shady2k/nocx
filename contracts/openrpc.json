@@ -7726,7 +7726,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: the declared 30 s work bound is applied by filesWorkContext in internal/transport/ws_files.go; the local provider also caps listing at 10 s"
         },
         "silence": {
           "kind": "none",
@@ -7849,7 +7849,7 @@
         "max": {
           "millis": 300000,
           "basis": "read",
-          "note": "read: an open builds a provider, and on a helper-hosted session that may install the helper (600 s budget, internal.helper.install); 300 s is the declared envelope"
+          "note": "read: an open registers a provider and resolves its root within the declared 300 s work bound; a starting far-helper decision is awaited within that context"
         },
         "silence": {
           "kind": "none",
@@ -7965,7 +7965,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound; the far helper RPC uses that context"
         },
         "silence": {
           "kind": "none",
@@ -8204,7 +8204,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound; the far helper RPC uses that context"
         },
         "silence": {
           "kind": "none",
@@ -8689,7 +8689,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound to establishing the watch"
         },
         "silence": {
           "kind": "none",

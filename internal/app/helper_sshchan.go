@@ -57,12 +57,11 @@ import (
 // sshOverHelper opens ssh channels on this machine's helper.
 type sshOverHelper struct {
 	// local is the connection to this machine's daemon — the same one every
-	// local pane rides (helper_local.go's "one connection, every pane"), which
-	// is what makes an install and a file listing to one host share one
-	// transport rather than raising a second daemon connection per consumer.
+	// local pane rides (helper_local.go's "one connection, every pane").
+	// Install and exec lanes share that connection to the local daemon.
 	local *localHelperOpener
 	// resolve is the coordinator's own resolver and NOT its dialer: this type
-	// never calls Connect, FSConn, TunnelConn or any sibling, and the only
+	// never calls Connect, TunnelConn or any sibling, and the only
 	// methods it touches are the resolution seam and the error vocabulary
 	// (ssh.RealClient.ResolveTarget).
 	resolve *ssh.RealClient
@@ -295,14 +294,6 @@ func (a addrString) String() string  { return string(a) }
 // to a host the profile said is unreachable except through a bastion. Two
 // copies of that conversion would be two chances to drop one.
 
-// filesLeaseProvider is the narrow surface the file panel's factory needs, the
-// same way installLeaseProvider is the installer's. *ssh.RealClient used to
-// satisfy it; this machine's helper does now, which is the whole of
-// nocx-50w7p.12's Files half.
-type filesLeaseProvider interface {
-	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
-}
-
 // HelperInstallConn acquires the write-capable install lease over an SFTP
 // stream this machine's helper opened.
 //
@@ -324,33 +315,6 @@ func (h *sshOverHelper) HelperInstallConn(ctx context.Context, host string, opts
 		return nil, fmt.Errorf("helper install lease for %s: %w", host, err)
 	}
 	return conn, nil
-}
-
-// FSConn acquires the file manager's SFTP lease over a channel this machine's
-// helper opened (nocx-50w7p.12).
-//
-// The lease is the SAME lease the panel has always held — one bounded lane, a
-// hard timeout, close-to-cancel, the typed error ladder (ssh.NewFSConn) — and
-// that is deliberate: what moved is the transport, not the consumer. What the
-// helper adds is the connection it rides. One pooled connection per
-// (destination, identity) carries the pane's shell channel AND this sftp
-// channel, so the file panel and the terminal it belongs to authenticate once
-// (AD-4), and the reference is the helper's: closing this lease closes the
-// channel (`ssh.close`), and the connection lives on for whoever asks next.
-func (h *sshOverHelper) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
-	stream, err := h.openChannel(ctx, proto.ChannelSFTP, host, opts)
-	if err != nil {
-		return nil, err
-	}
-	lease, err := ssh.NewFSConn(ctx, stream)
-	if err != nil {
-		// The stream is released whichever way this fails: an open channel
-		// nobody holds is a pooled reference the helper keeps for a caller
-		// that has given up.
-		_ = stream.Close()
-		return nil, fmt.Errorf("sftp provider for %s: %w", host, err)
-	}
-	return lease, nil
 }
 
 // UninstallHelper removes the helper install tree from a host, over the same
@@ -517,13 +481,8 @@ func (h *sshOverHelper) translate(host string, err error) error {
 		// sentence, which is preserved verbatim.
 		return fmt.Errorf("ssh: open a channel to %s: %s", host, refusal.Message)
 	case proto.ErrCodeChannelRefused:
-		// The far side will not serve this channel. It is typed as the
-		// coordinator's own subsystem refusal because that is what the file
-		// and install paths report for the same fact, and because the sftp
-		// subsystem is the only channel kind this generation opens: a refusal
-		// at the session and a refusal at the subsystem are one answer to a
-		// caller that cannot act differently on them (proto's own note on the
-		// code).
+		// The installer receives the same refusal when the server rejects
+		// the session channel or its SFTP subsystem.
 		return fmt.Errorf("%w: %s", ssh.ErrFSSubsystemRefused, refusal.Message)
 	}
 	// Anything else keeps the helper's own sentence and its code, prefixed
@@ -553,9 +512,9 @@ func decodeHostKeyEvidence(raw json.RawMessage) (proto.HostKeyEvidence, bool) {
 // It is a DISPATCH and not a policy, exactly like hostedOpeners: each method is
 // one lease and each lease has exactly one owner. Every lease this factory
 // needs is this machine's helper's: the exec lane a remote helper's bridge
-// rides (nocx-50w7p.10), the write-capable install lease (nocx-50w7p.3) and the
-// file panel's sftp lease (nocx-50w7p.12) through `viaLocal`, and the platform
-// probe (nocx-50w7p.9) through `probes` — which is the same helper, reached as
+// rides (nocx-50w7p.10) and the write-capable install lease (nocx-50w7p.3)
+// through `viaLocal`, and the platform probe (nocx-50w7p.9) through
+// `probes` — which is the same helper, reached as
 // a named op on a probe lease rather than as a channel. There is no `direct`
 // field and no coordinator dial left in this dispatch, and that is the state
 // the epic's invariant asks for rather than a step on the way to it.
@@ -565,15 +524,14 @@ type installLeaseRoutes struct {
 }
 
 // helperLeases is what this machine's helper answers through this dispatch: the
-// exec lane the git factory rides, the install lease and the file panel's,
-// each acquired as one channel on the pooled connection it names. It is a
-// composite of the narrow surfaces rather than a wider method set, so a
+// exec lane the far helper rides and the install lease. Each acquires one
+// channel on the pooled connection it names. The interface composes those
+// narrow surfaces so a
 // consumer still declares exactly the one it needs (and the lane's own
 // interface stays where its implementation is, next to the op it names).
 type helperLeases interface {
 	laneProvider
 	installLeaseProvider
-	filesLeaseProvider
 	// The far pane's tool surface is NOT here, and that is this composite's own
 	// narrowness rule: it is a second consumer's need, declared as its own
 	// interface (farPaneToolSocketter, helper_git.go), and the composition root
@@ -608,23 +566,7 @@ func (r installLeaseRoutes) HelperInflate(ctx context.Context, host, path string
 	return r.probes.HelperInflate(ctx, host, path, opts...)
 }
 
-// FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12) —
-// the same `viaLocal` half HelperInstallConn and LaneConn use, because one value
-// answering for three leases of the same owner is one answer rather than three
-// that agree today.
-func (r installLeaseRoutes) FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error) {
-	return r.viaLocal.FSConn(ctx, host, opts...)
-}
-
-// The two assertions worth writing here: the dispatch must satisfy the
-// interface the git factory takes and the one the file-panel factory takes, or
-// a wiring line stops compiling — which is the check, and it is why there is no
-// assertion for the uninstaller (that one is satisfied at its own wiring line,
-// where transport names the interface).
-var (
-	_ helperInstallProvider = installLeaseRoutes{}
-	_ filesLeaseProvider    = installLeaseRoutes{}
-)
+var _ helperInstallProvider = installLeaseRoutes{}
 
 // farPaneToolRoutes are the three routes one far pane's tool surface is made of,
 // resolved TOGETHER and before the spawn (nocx-e2bws): the DIRECTORY that must

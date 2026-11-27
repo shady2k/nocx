@@ -79,7 +79,7 @@ func TestFilesystemDependencyGraphReachesNoConnectionStack(t *testing.T) {
 		for _, tc := range tagsets {
 			t.Run(platform.name+"/"+tc.name, func(t *testing.T) {
 				for _, pkg := range filesystemPackages {
-					deps := packageDependencies(t, pkg, platform.goos, tc.tags...)
+					deps := packageDependencies(t, pkg, platform.goos, "0", tc.tags...)
 					for _, forbidden := range forbiddenPackages {
 						if deps[forbidden] {
 							t.Errorf("%s on %s reaches %s: a filesystem provider is reused by the far helper and must link no connection stack", pkg, platform.goos, forbidden)
@@ -91,12 +91,9 @@ func TestFilesystemDependencyGraphReachesNoConnectionStack(t *testing.T) {
 	}
 }
 
-// packageDependencies lists the packages `go list -deps <pkg>` reaches under
-// the given GOOS and build tags. GOOS is stated on every call rather than
-// inherited, so "which platform did this run measure" is visible in the test
-// name that failed; CGO_ENABLED=0 matches the release build and keeps the
-// cross-platform answer independent of the host's toolchain.
-func packageDependencies(t *testing.T, pkg, goos string, tags ...string) map[string]bool {
+// packageDependencies lists the dependencies selected for the given OS, cgo
+// setting and build tags.
+func packageDependencies(t *testing.T, pkg, goos, cgo string, tags ...string) map[string]bool {
 	t.Helper()
 	args := []string{"list", "-deps"}
 	if len(tags) > 0 {
@@ -105,10 +102,10 @@ func packageDependencies(t *testing.T, pkg, goos string, tags ...string) map[str
 	args = append(args, pkg)
 	cmd := exec.Command("go", args...) // #nosec G204 — "go" and every argument are literals assembled here
 	cmd.Dir = moduleRoot(t)
-	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED="+cgo)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list -deps %s (GOOS=%s): %v\n%s", pkg, goos, err, output)
+		t.Fatalf("go list -deps %s (GOOS=%s CGO_ENABLED=%s): %v\n%s", pkg, goos, cgo, err, output)
 	}
 	deps := make(map[string]bool)
 	for _, dep := range strings.Fields(string(output)) {

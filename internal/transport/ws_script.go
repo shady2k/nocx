@@ -4,22 +4,11 @@ package transport
 // person to approve `bash deploy.sh`, this is what answers "and what IS in
 // deploy.sh, right now, on the machine that would run it".
 //
-// IT GOES THROUGH THE FILESYSTEM PROVIDER, WHICH IS THE OWNER. internal/
-// filesystem already answers "read this path on the machine this session is
-// on" for both arms — local through os, remote over SFTP on the session's own
-// connection — and files.read is served through it. A second reading path
-// here (os.ReadFile for local, a `cat` over the shell for remote) would be the
-// second implementation of one behaviour, and the remote half of it would be
-// executing a command to build a question about executing a command.
-//
-// A PROVIDER PER READING, and it is deliberate. files.open holds one across a
-// binding's lifetime because a panel makes many calls; an approval question
-// makes one or two and then the question is over, so there is nothing to hold
-// it for and holding it would be a lease outliving its reason. The remote arm
-// therefore pays an FSConn acquisition per approval — bounded by the shared
-// deadline the assistant applies (assistant.scriptReadBudget), and reported as
-// unread rather than as a wait if it does not arrive.
-//
+// The script source uses the same provider as files.read: the local
+// filesystem or the far helper bound to the session's connection. It holds
+// a provider for one approval question. The helper call is bounded by
+// assistant.scriptReadBudget, and a failed read is reported as unread.
+
 // A RELATIVE PATH NEEDS A DIRECTORY, AND A GUESSED ONE IS A DIFFERENT FILE.
 // `bash deploy.sh` names a path only in a directory, so this resolves it
 // against the run's OWN cwd — the one the question carried — and refuses in
@@ -103,8 +92,8 @@ func (s *WSServer) ReadScript(ctx context.Context, sessionID, cwd, scriptPath st
 
 // absoluteScriptPath turns the path the COMMAND wrote into one a provider can
 // open. Both providers require an absolute, cleaned path and own their own
-// path syntax; slash joining is correct for both arms nocx targets (a POSIX
-// local machine and SFTP, which specifies POSIX paths regardless of host OS).
+// path syntax. Both local and far-helper filesystems use POSIX paths on the
+// supported platforms.
 func absoluteScriptPath(cwd, scriptPath string) (string, error) {
 	if strings.TrimSpace(scriptPath) == "" {
 		return "", &assistant.ScriptUnreadableError{Reason: "the command named no file to read"}

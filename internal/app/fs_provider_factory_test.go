@@ -5,30 +5,25 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transfer"
+	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workspace"
 )
 
-// factorySession is a minimal session.Session: the factory reads Kind, Host
-// and SSHOptions and nothing else, so everything below them answers the
-// zero value rather than pretending to a terminal this double does not have.
-//
-// host and opts are the two the factory actually reads, and they are fields
-// because the acceptance test for a remote Files provider needs a real
-// destination and the connect options a locked profile would carry; every
-// other test leaves them zero.
+// factorySession supplies the identity and kind used by the provider factory.
 type factorySession struct {
 	kind session.Kind
 	host string
-	opts []ssh.ConnectOption
 	pane string
 }
 
@@ -71,7 +66,7 @@ func (s factorySession) EnqueueInputIf(p []byte, holds func() bool, settle func(
 }
 func (s factorySession) Close() error                    { return nil }
 func (s factorySession) Done() <-chan struct{}           { return make(chan struct{}) }
-func (s factorySession) SSHOptions() []ssh.ConnectOption { return s.opts }
+func (s factorySession) SSHOptions() []ssh.ConnectOption { return nil }
 func (s factorySession) EffectiveSize() session.Size     { return session.DefaultSize() }
 
 func (s factorySession) Resize(context.Context, session.Size) error {
@@ -92,18 +87,6 @@ func (s factorySession) ExitOutcome() (session.ExitCause, int) {
 
 func (s factorySession) HostKeyFingerprint() string { return "" }
 
-// refusingLease stands where the SFTP lease provider does. The remote half
-// of these tests never gets a lease — the point is what the LOCAL branch
-// builds — and a lease that refuses is how "the remote path was not
-// disturbed" stays observable without a live server.
-type refusingLease struct{ err error }
-
-func noFilesPaneConnection(string, string) (string, bool) { return "", false }
-
-func (l refusingLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
-	return nil, l.err
-}
-
 // TestFactory_ALocalSessionGetsAWritableProvider is the composition-root
 // half of D7 as corrected. It is not a restatement of the local package's
 // own test: what the product depends on is that the value THIS FACTORY
@@ -112,7 +95,7 @@ func (l refusingLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ss
 // interface anywhere between here and there would silently drop it — the
 // same failure endpointAttestedProvider's test guards on the remote side.
 func TestFactory_ALocalSessionGetsAWritableProvider(t *testing.T) {
-	factory := filesystemProviderFactory(refusingLease{err: errors.New("no lease in this test")}, nil, noFilesPaneConnection)
+	factory := filesystemProviderFactory(nil, nil)
 
 	p, err := factory(factorySession{kind: session.KindLocal}, "")
 	if err != nil {
@@ -133,7 +116,7 @@ func TestFactory_ALocalSessionGetsAWritableProvider(t *testing.T) {
 // is on (R1). A seam that exists and writes nowhere would pass the
 // assertion above.
 func TestFactory_TheLocalSinkWritesOntoThisMachine(t *testing.T) {
-	factory := filesystemProviderFactory(refusingLease{err: errors.New("no lease in this test")}, nil, noFilesPaneConnection)
+	factory := filesystemProviderFactory(nil, nil)
 	p, err := factory(factorySession{kind: session.KindLocal}, "")
 	if err != nil {
 		t.Fatalf("factory for a local session: %v", err)
@@ -162,103 +145,116 @@ func TestFactory_TheLocalSinkWritesOntoThisMachine(t *testing.T) {
 	}
 }
 
-// TestFactory_ARemoteSessionStillGoesToTheLease is the "the other path is
-// unchanged" half the brief asks for, stated the only way it can be without
-// a server: a remote session does not take the local branch — it asks for a
-// lease, and the lease's refusal is what comes back.
-func TestFactory_ARemoteSessionStillGoesToTheLease(t *testing.T) {
-	sentinel := errors.New("the lease was asked for")
-	factory := filesystemProviderFactory(refusingLease{err: sentinel}, nil, noFilesPaneConnection)
-
-	p, err := factory(factorySession{kind: session.KindRemote}, "")
-
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("error %v, want the lease's own refusal — a remote session must not fall into the local branch", err)
+func TestFilesystemProviderFactoryRefusesUnboundRemoteSession(t *testing.T) {
+	registry := &filesystemFarRegistry{}
+	factories := map[string]transport.FilesystemProviderFactory{
+		"nil registry": filesystemProviderFactory(nil, func(string, string) (string, bool) {
+			return "original", true
+		}),
+		"unbound": filesystemProviderFactory(registry, func(string, string) (string, bool) {
+			return "", false
+		}),
 	}
-	if p != nil {
-		t.Errorf("provider %v, want none when the lease could not be had", p)
+	for name, factory := range factories {
+		t.Run(name, func(t *testing.T) {
+			provider, err := factory(factorySession{kind: session.KindRemote}, "")
+			var unavailable *filesystem.ErrUnavailable
+			if provider != nil || !errors.As(err, &unavailable) || unavailable.Reason != "connection" || unavailable.Action != "none" {
+				t.Fatalf("factory = %v, %v; want ErrUnavailable(connection, none)", provider, err)
+			}
+		})
 	}
 }
 
 type filesystemFarRegistry struct {
-	state farhelper.State
-	asked []string
+	status    farhelper.Status
+	axisReads int
+	asked     []string
 }
 
 func (r *filesystemFarRegistry) Axis(id string) (farhelper.Status, bool) {
-	return farhelper.Status{State: r.state, Reason: farhelper.ReasonConsentDenied, Action: farhelper.ActionNone}, id == "original"
+	r.axisReads++
+	return r.status, id == "original"
 }
 
 func (*filesystemFarRegistry) Watch(func(string, farhelper.Status)) func() { return func() {} }
 
 func (r *filesystemFarRegistry) Acquire(_ context.Context, id string) (*farhelper.Lease, error) {
 	r.asked = append(r.asked, id)
-	return nil, &farhelper.Unavailable{Reason: farhelper.ReasonConsentDenied, Action: farhelper.ActionNone}
+	return nil, &farhelper.Unavailable{Reason: r.status.Reason, Action: r.status.Action}
 }
 
-func TestFilesystemProviderFactorySelectsServingHelperAndPinsConnection(t *testing.T) {
-	sftpFailure := errors.New("SFTP fallback requested")
+func TestFilesystemProviderFactoryBindsEveryHelperStateWithoutAcquiring(t *testing.T) {
 	sess := factorySession{kind: session.KindRemote, pane: "pane", host: "example.test"}
-	for _, state := range []farhelper.State{farhelper.StateStarting, farhelper.StatePaused, farhelper.StateUnavailable, farhelper.StateServing} {
-		t.Run(string(state), func(t *testing.T) {
-			registry := &filesystemFarRegistry{state: state}
-			current := "original"
-			factory := filesystemProviderFactory(refusingLease{err: sftpFailure}, registry, func(pane, sessionID string) (string, bool) {
-				return current, pane == sess.PaneID() && sessionID == string(sess.ID())
+	statuses := map[string]farhelper.Status{
+		"starting":       {State: farhelper.StateStarting, Action: farhelper.ActionNone},
+		"paused":         {State: farhelper.StatePaused, Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone},
+		"raw":            {State: farhelper.StateUnavailable, Reason: farhelper.ReasonModeRaw, Action: farhelper.ActionHostSettings},
+		"consent denied": {State: farhelper.StateUnavailable, Reason: farhelper.ReasonConsentDenied, Action: farhelper.ActionNone},
+		"install failed": {State: farhelper.StateUnavailable, Reason: farhelper.ReasonInstallFailed, Action: farhelper.ActionNone},
+		"serving":        {State: farhelper.StateServing, Action: farhelper.ActionNone},
+	}
+	for name, status := range statuses {
+		t.Run(name, func(t *testing.T) {
+			registry := &filesystemFarRegistry{status: status}
+			factory := filesystemProviderFactory(registry, func(pane, sessionID string) (string, bool) {
+				return "original", pane == sess.PaneID() && sessionID == string(sess.ID())
 			})
-			p, err := factory(sess, "/project")
-			if state != farhelper.StateServing {
-				if p != nil || !errors.Is(err, sftpFailure) {
-					t.Fatalf("factory: %v, %v; want SFTP fallback", p, err)
-				}
-				return
-			}
+			provider, err := factory(sess, "/project")
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("factory: %v", err)
 			}
-			attested, ok := p.(*endpointAttestedProvider)
-			if !ok || attested.EndpointID() != endpointIDFor(sess) || attested.Sink() == nil || attested.Source() == nil {
-				t.Fatalf("factory returned %T without the remote attestation or transfer seams", p)
+			if registry.axisReads != 0 || len(registry.asked) != 0 {
+				t.Fatalf("factory consulted the registry: %d axis reads, acquisitions %v", registry.axisReads, registry.asked)
 			}
-			p = attested
-
-			// The axis and the conditional write must survive the same wrapping
-			// the seams above had to survive: the composition site asserts these
-			// on what the factory returned, which is the wrapper, so a wrapper
-			// that carries only the embedded interface's methods would leave the
-			// panel with no reason to draw and the write with no version to check
-			// — while every other files.* call kept working.
-			axis, ok := any(p).(filesystem.AxisProvider)
-			if !ok {
-				t.Fatal("the factory's remote provider carries no axis; C28's reason could never reach a panel")
+			caps, endpoint := capability.ProviderCapabilities(provider)
+			if endpoint != endpointIDFor(sess) || caps.Sink == nil || caps.Source == nil || caps.Axis == nil || caps.Versioned == nil {
+				t.Fatalf("provider capabilities = %+v, endpoint = %q; want transfers, the helper axis, and versioned access for this endpoint", caps, endpoint)
 			}
-			got, known := axis.HelperAxis()
-			if !known || got.State != string(farhelper.StateServing) {
-				t.Fatalf("HelperAxis = %+v, %v; want the serving axis the registry publishes", got, known)
+			want := filesystem.HelperAxis{State: string(status.State), Reason: string(status.Reason), Action: string(status.Action)}
+			if got, known := caps.Axis(); !known || got != want {
+				t.Fatalf("HelperAxis = %+v (known %t), want %+v", got, known, want)
 			}
-			versioned, ok := any(p).(filesystem.VersionedProvider)
-			if !ok || versioned.Versioned() == nil {
-				t.Fatal("the factory's helper-backed provider carries no conditional write")
+			if status.Reason == "" {
+				// A starting decision can finish while a binding is open.
+				// A serving helper can also become unavailable on that binding.
+				registry.status = statuses["raw"]
 			}
-
-			var unavailable *filesystem.ErrUnavailable
-			if _, err := p.Root(t.Context()); !errors.As(err, &unavailable) || unavailable.Reason != "consent-denied" {
-				t.Fatalf("Root: %v; want registry refusal", err)
+			_, rootErr := provider.Root(t.Context())
+			_, listErr := provider.List(t.Context(), "/project", filesystem.Page{Limit: 1})
+			for _, err := range []error{rootErr, listErr} {
+				var unavailable *filesystem.ErrUnavailable
+				if !errors.As(err, &unavailable) || unavailable.Reason != string(registry.status.Reason) || unavailable.Action != string(registry.status.Action) {
+					t.Fatalf("provider call = %v; want ErrUnavailable(%s, %s)", err, registry.status.Reason, registry.status.Action)
+				}
 			}
-			current = "replacement"
-			if _, err := p.Root(t.Context()); !errors.As(err, &unavailable) || unavailable.Reason != "connection" {
-				t.Fatalf("Root after pane moved: %v; want connection refusal", err)
-			}
-			// The axis follows the PANE's binding, not only the connection's
-			// lifetime: the connection is still in the registry, and a panel that
-			// went on drawing its old state would name a helper this tab is no
-			// longer behind.
-			if moved, _ := axis.HelperAxis(); moved.Reason != "connection" {
-				t.Fatalf("HelperAxis after the pane moved = %+v; want the connection reason", moved)
-			}
-			if len(registry.asked) != 1 || registry.asked[0] != "original" {
-				t.Fatalf("acquisitions = %v; want [original]", registry.asked)
+			if !slices.Equal(registry.asked, []string{"original", "original"}) {
+				t.Fatalf("acquisitions = %v; want [original original]", registry.asked)
 			}
 		})
+	}
+}
+
+func TestFilesystemProviderFactoryPinsTheOriginalConnection(t *testing.T) {
+	registry := &filesystemFarRegistry{status: farhelper.Status{State: farhelper.StateServing, Action: farhelper.ActionNone}}
+	current := "original"
+	factory := filesystemProviderFactory(registry, func(string, string) (string, bool) {
+		return current, true
+	})
+	provider, err := factory(factorySession{kind: session.KindRemote}, "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = "replacement"
+	caps, _ := capability.ProviderCapabilities(provider)
+	if got, known := caps.Axis(); !known || got.Reason != "connection" || got.State != "unavailable" {
+		t.Fatalf("HelperAxis after the pane moved = %+v (known %t), want unavailable(connection)", got, known)
+	}
+	var unavailable *filesystem.ErrUnavailable
+	if _, err := provider.Root(t.Context()); !errors.As(err, &unavailable) || unavailable.Reason != "connection" {
+		t.Fatalf("Root after the pane moved: %v; want ErrUnavailable(connection)", err)
+	}
+	if len(registry.asked) != 0 {
+		t.Fatalf("acquisitions after the pane moved = %v; want none", registry.asked)
 	}
 }

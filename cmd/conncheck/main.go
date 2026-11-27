@@ -38,7 +38,7 @@
 //	                      the client that decision produced (ALX-641, design
 //	                      §5.10 C23). The decision has one owner,
 //	                      internal/farhelper.
-//	panel-host-path       a reference to ssh.NewFSConn, to proto.OpSamplePorts,
+//	panel-host-path       a reference to proto.OpSamplePorts,
 //	                      to a lease acquisition ((*client.Client).
 //	                      AcquireProbeLease), to a ProbeLease exec (Uname,
 //	                      Home, SamplePorts, Completion, Inflate,
@@ -240,7 +240,6 @@ var nocxTrackedPkgs = map[string]bool{
 	nocxInternal + "helper/proto":   true,
 	nocxInternal + "git/helper":     true,
 	nocxInternal + "hostmode":       true,
-	nocxInternal + "ssh":            true,
 	discoveryConnectorPath:          true,
 }
 
@@ -250,7 +249,7 @@ var nocxTrackedPkgs = map[string]bool{
 // `*hostmode.Store` is what a file writes in order to hold the store, and the
 // method on it is spelled `s.Lookup`.
 var nocxTargetNames = map[string]bool{
-	"Dial": true, "Lookup": true, "NewFSConn": true, "OpSamplePorts": true,
+	"Dial": true, "Lookup": true, "OpSamplePorts": true,
 	"AcquireProbeLease": true, "NewFactory": true, "NewScheduler": true, "Store": true,
 	// A ProbeLease's exec surface, and the type that carries it.
 	"Uname": true, "Home": true, "SamplePorts": true,
@@ -266,7 +265,7 @@ var nocxCallNames = map[string]bool{
 	"Lookup": true, "AcquireProbeLease": true, "NewFactory": true,
 	"Uname": true, "Home": true, "SamplePorts": true,
 	"Completion": true, "Inflate": true, "CommandNames": true,
-	"NewFSConn": true, "NewScheduler": true,
+	"NewScheduler": true,
 }
 
 // mentionsTarget reports whether a file can carry a fact the analysis reports,
@@ -847,10 +846,6 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 	case nocxInternal + "hostmode", nocxInternal + "helper/consent":
 		if isFunc && methodOn(fn, "Store", "Lookup") {
 			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
-		}
-	case nocxInternal + "ssh":
-		if isFunc && pkgLevel && receiverType(fn) == nil && fn.Name() == "NewFSConn" {
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".NewFSConn"})
 		}
 	case nocxInternal + "helper/proto":
 		// A constant is not a function, so isFunc is false and the name is the

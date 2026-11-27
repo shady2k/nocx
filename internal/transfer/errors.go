@@ -5,12 +5,6 @@ import (
 	"fmt"
 )
 
-// ErrPosixRenameUnsupported is what the fallback keys on. A RemoteFS whose
-// server does not advertise posix-rename@openssh.com returns an error
-// satisfying errors.Is against THIS sentinel — internal/ssh wraps it — so
-// neither package imports the other's errors.
-var ErrPosixRenameUnsupported = errors.New("transfer: server does not support posix-rename@openssh.com")
-
 // ErrInvalidUpload marks an Upload the sink cannot express. Path policy is
 // the transport's and the provider's (§5.3); this is the sink refusing to
 // join a Name it would have to interpret — a separator, "." or ".." would
@@ -49,10 +43,7 @@ func (e *SizeMismatchError) Error() string {
 // bound is deliberate (D5): a directory holding 32 collisions is a person
 // who needs to be told, not a loop that keeps trying.
 //
-// The atomic sink requires a confirmed collision on each attempt. The SFTP
-// sink also counts ambiguous SSH_FX_FAILURE refusals because SFTP v3 has no
-// distinct EEXIST code; other classified errors stop the search immediately.
-// Err carries the last refusal.
+// Err carries the last collision.
 type NameExhaustedError struct {
 	Name     string
 	Attempts int

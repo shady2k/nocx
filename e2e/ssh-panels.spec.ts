@@ -570,10 +570,11 @@ test('a raw host draws the Ports card and never runs the port tool', async ({ pa
     // Retry — a reason that offers no remedy draws no button.
     await expect(page.locator('[data-testid="ports-host-settings"]')).toBeVisible()
     await expect(page.locator('[data-testid="ports-helper-refresh"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="ports-retry"]')).toHaveCount(0)
-    // No wire token reaches a window.
+    await expect(page.locator('#sidebar').getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    // No wire token reaches a window, and no failure sentence either: a
+    // refusal the backend typed is a state, not an error to explain.
     await expect(card).not.toContainText('mode-raw')
-    await expect(page.locator('[data-testid="ports-panel"]')).not.toContainText('Could not read')
+    await expect(page.locator('#sidebar')).not.toContainText('Could not read')
 
     // THE HOST'S OWN ACCOUNT: the fixture's `ss` records every invocation, and
     // a gated panel asks nothing — so the file is absent, which is the only
@@ -602,9 +603,7 @@ test('a host with no port tool says so, while Git and Files keep working', async
       timeout: 90_000,
     })
     // A FIXED sentence, not the backend's classification prose.
-    await expect(page.locator('[data-testid="ports-panel"]')).toContainText(
-      'No port tool on this host.',
-    )
+    await expect(page.locator('#sidebar')).toContainText('No port tool on this host.')
     await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
     await expect(page.locator('[data-testid="ports-loading"]')).toHaveCount(0)
     // The tools did run — the fixture's own record says so, which is what

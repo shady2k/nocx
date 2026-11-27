@@ -22,6 +22,22 @@
 //                    Refresh redials and the repository returns, and nothing
 //                    is installed a second time.
 //
+// # The Ports panel of the same axis (nocx-oalo1.13.4, ALX-1852)
+//
+//   serving        the host's port tool reports one listener, and Ports shows
+//                  it — on a saved connection and on a hand-typed host alike,
+//                  which is the epic's DONE WHEN 1.
+//   raw host       the SAME card the head draws, with Host settings and no
+//                  Retry, while the host's own tools record that the ladder
+//                  never ran: a gated panel asks its host nothing.
+//   no port tool   scenario 8's other half — `-ports-tools=absent` makes every
+//                  rung exit 127, so Ports says so in a fixed sentence while
+//                  Git reads the branch and Files lists with data-helper
+//                  "serving": a missing tool is a Ports outcome, not an axis.
+//   script + forward  a closed gate and a saved forward at the same time: the
+//                  card and the forwarded row are both on screen, because the
+//                  ledger is read whatever the axis says (e2e/ports-row-width).
+//
 // # The Files half of the same axis (nocx-oalo1.12.8)
 //
 //   serving          Files lists the far host, opens a file's bytes, uploads a
@@ -72,6 +88,7 @@ import { startFaultProxy, type FaultProxy } from './fault-proxy'
 import { createRepo, type GitRepo } from './git-fixture'
 import {
   hostKeyFingerprint,
+  portsExecs,
   recordHostMethod,
   rpc,
   startSshd,
@@ -90,6 +107,11 @@ const FILES_ROW = '.files-row'
 const TREE_NAME = '.ui-tree-row__name'
 const GIT_BRANCH = '[data-testid="git-branch"]'
 const GIT_PANEL = '[data-testid="git-panel"]'
+const PORTS_AXIS = '[data-testid="ports-helper-axis"]'
+const PORTS_ROW = '[data-testid="detected-row"]'
+/** The listener `cmd/e2e-sshd -ports-tools=fake` puts on the host, and the
+ *  owner it names — the row a person reads, not a row this spec invented. */
+const FIXTURE_LISTENER_PORT = 6768
 
 /** The one fold's sentences, in the words a person reads (helper-axis.ts).
  *  Hardcoded on purpose: the spec is the independent witness that both
@@ -128,7 +150,11 @@ interface Host {
 /** A far host whose HOME is disposable and whose shell starts inside a real
  *  git repository. `-helper-kill-dir` is passed only by the scenario that
  *  kills the daemon: a run that kills nothing watches nothing. */
-async function startHost(killable = false): Promise<Host> {
+async function startHost(
+  killable = false,
+  portsTools?: 'fake' | 'absent',
+  extraArgs: string[] = [],
+): Promise<Host> {
   // THE HOME IS THE REPOSITORY, deliberately. A helper-hosted shell is spawned
   // by the far helper's own pty, whose resolveCwd falls back to the login
   // user's home when no cwd is given (cmd/e2e-sshd's seedRepo comment), so a
@@ -142,7 +168,10 @@ async function startHost(killable = false): Promise<Host> {
   const fixture = await startSshd({
     home: remoteHome,
     cwd: repo.root,
-    ...(killDir === null ? {} : { args: ['-helper-kill-dir', killDir, '-shell', 'zsh'] }),
+    ...(portsTools === undefined ? {} : { portsTools }),
+    ...(killDir === null
+      ? { args: extraArgs.length === 0 ? undefined : extraArgs }
+      : { args: ['-helper-kill-dir', killDir, '-shell', 'zsh', ...extraArgs] }),
   })
   return { fixture, remoteHome, repo, killDir }
 }
@@ -232,9 +261,14 @@ interface Wired {
  *  ask's own backend call, so `helper` also records the machine's grant. */
 async function wire(
   page: Page,
-  opts: { killable?: boolean; throughProxy?: boolean; mode: 'raw' | 'script' | 'helper' },
+  opts: {
+    killable?: boolean
+    throughProxy?: boolean
+    mode: 'raw' | 'script' | 'helper'
+    portsTools?: 'fake' | 'absent'
+  },
 ): Promise<Wired> {
-  const host = await startHost(opts.killable)
+  const host = await startHost(opts.killable, opts.portsTools)
   const proxy = opts.throughProxy
     ? await startFaultProxy(host.fixture.host, host.fixture.port)
     : null
@@ -425,6 +459,165 @@ test('a raw host draws the same reason and Host settings on the head and in Git,
     const editor = page.getByRole('dialog').filter({ hasText: 'Edit Connection' })
     await expect(editor).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('#profile-integration-method')).toBeVisible({ timeout: 20_000 })
+  } finally {
+    await unwire(page, wired)
+  }
+})
+
+// ── Ports: the same axis, the same card (nocx-oalo1.13.4) ─────────────────
+
+test('a serving host lists the ports its own tool reports, on a saved connection', async ({
+  page,
+}) => {
+  test.setTimeout(180_000)
+  const wired = await wire(page, { mode: 'helper', portsTools: 'fake' })
+  try {
+    await openSavedProfile(page, wired.profileName)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
+
+    await showSidebarView(page, 'ports')
+    // The fixture's own listener, named by the port a person reads. Nothing in
+    // this assertion knows how the sample travelled: the panel is the surface,
+    // and the row is the host's fact.
+    const row = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(row).toBeVisible({ timeout: 60_000 })
+    await expect(row).toContainText('node')
+    // No card: a serving axis has nothing to explain.
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+  } finally {
+    await unwire(page, wired)
+  }
+})
+
+test('a hand-typed host lists the same ports, and offers no Forward', async ({ page }) => {
+  test.setTimeout(240_000)
+  // A password host, because an ad-hoc connection has no stored credential of
+  // its own: this is the shape a person meets when they type a host into Quick
+  // Connect, and the ask is answered the way connection-password.spec.ts
+  // answers it.
+  const remoteHome = mkdtempSync(path.join(tmpdir(), 'nocx-ssh-panels-adhoc-'))
+  const password = 'e2e-adhoc-42'
+  const fixture = await startSshd({
+    home: remoteHome,
+    cwd: remoteHome,
+    portsTools: 'fake',
+    args: ['-password', password],
+  })
+  try {
+    trustHostKey(fixture.knownHosts)
+    await page.goto('/')
+    await appReadyForInput(page)
+    await expect(page.locator(TAB)).toHaveCount(1)
+    const endpoint = await resolveBackend(page)
+    // The host's method is the HOST's answer (ADR-727g63tr decision 1), so
+    // recording it keeps the connect-time ask off this open — this spec is
+    // about the ports panel, not the ask.
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'helper')
+
+    const target = `e2euser@127.0.0.1:${fixture.port}`
+    await page.keyboard.press('Control+Shift+P')
+    const search = page.locator('.quick-connect__search input')
+    await expect(search).toBeVisible({ timeout: 30_000 })
+    await search.fill(target)
+    // The free-form row: nothing is saved, and the label says so.
+    const adHoc = page.locator('.quick-connect__item', { hasText: 'Connect to e2euser@127.0.0.1' })
+    await expect(adHoc).toBeVisible({ timeout: 30_000 })
+    await page.keyboard.press('Enter')
+
+    // The password ask names the challenge the fixture poses, and the fixture
+    // accepts only this password.
+    const prompt = page.locator('.ui-prompt')
+    await expect(prompt).toBeVisible({ timeout: 60_000 })
+    await prompt.locator('#connection-password').fill(password)
+    await prompt.getByRole('button', { name: 'Connect', exact: true }).click()
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
+
+    await showSidebarView(page, 'ports')
+    const row = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(row).toBeVisible({ timeout: 90_000 })
+    await expect(row).toContainText('node')
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+
+    // Forward is `tunnel.open`, which is addressed by a SAVED profile: a
+    // hand-typed tab has no host record to forward from, so the control is
+    // absent rather than dead (D14).
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(0)
+    // Copy-address still works — the row is this machine's own listener view.
+    await expect(page.locator('[data-testid="ports-copy"]')).toHaveCount(1)
+  } finally {
+    fixture.proc.kill('SIGKILL')
+    rmSync(remoteHome, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
+})
+
+test('a raw host draws the Ports card and never runs the port tool', async ({ page }) => {
+  test.setTimeout(180_000)
+  const wired = await wire(page, { mode: 'raw', portsTools: 'fake' })
+  try {
+    await openSavedProfile(page, wired.profileName)
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
+    await waitForPrompt(page)
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'unavailable', {
+      timeout: 30_000,
+    })
+
+    await showSidebarView(page, 'ports')
+    const card = page.locator(PORTS_AXIS)
+    await expect(card).toBeVisible({ timeout: 30_000 })
+    await expect(card).toContainText(RAW_SENTENCE)
+    // The same card Git and Files draw: the backend's one action, and no
+    // Retry — a reason that offers no remedy draws no button.
+    await expect(page.locator('[data-testid="ports-host-settings"]')).toBeVisible()
+    await expect(page.locator('[data-testid="ports-helper-refresh"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="ports-retry"]')).toHaveCount(0)
+    // No wire token reaches a window.
+    await expect(card).not.toContainText('mode-raw')
+    await expect(page.locator('[data-testid="ports-panel"]')).not.toContainText('Could not read')
+
+    // THE HOST'S OWN ACCOUNT: the fixture's `ss` records every invocation, and
+    // a gated panel asks nothing — so the file is absent, which is the only
+    // way this side can prove "no ports exec" rather than assume it.
+    expect(
+      portsExecs(wired.host.fixture),
+      'the port tool ran on a host whose helper does not serve',
+    ).toEqual([])
+  } finally {
+    await unwire(page, wired)
+  }
+})
+
+test('a host with no port tool says so, while Git and Files keep working', async ({ page }) => {
+  test.setTimeout(240_000)
+  // Scenario 8 (design §5.10): the axis is fine, the TOOL is missing. Ports
+  // answers with its own typed outcome; the other two panels must not notice.
+  const wired = await wire(page, { mode: 'helper', portsTools: 'absent' })
+  try {
+    await openSavedProfile(page, wired.profileName)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
+
+    await showSidebarView(page, 'ports')
+    await expect(page.getByText('Could not determine what is listening')).toBeVisible({
+      timeout: 90_000,
+    })
+    // A FIXED sentence, not the backend's classification prose.
+    await expect(page.locator('[data-testid="ports-panel"]')).toContainText(
+      'No port tool on this host.',
+    )
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+    await expect(page.locator('[data-testid="ports-loading"]')).toHaveCount(0)
+    // The tools did run — the fixture's own record says so, which is what
+    // makes the sentence a consequence rather than a guess.
+    expect(portsExecs(wired.host.fixture).length).toBeGreaterThan(0)
+
+    // Git reads the branch through the same connection …
+    await showSidebarView(page, 'git')
+    await expect(page.locator(GIT_BRANCH)).toBeVisible({ timeout: 60_000 })
+    await expect(page.locator(GIT_BRANCH)).toHaveText('main')
+    // … and Files lists the far host with the axis still serving.
+    await openFilesOnTab(page, wired.host.repo.root)
+    await expect(page.locator(FILES_PANEL)).toHaveAttribute('data-helper', 'serving')
   } finally {
     await unwire(page, wired)
   }

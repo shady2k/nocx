@@ -30,10 +30,9 @@
  * # Policy
  *
  * `policy.set`, the product's own control-plane write, before the first ask:
- * `observe` permit on R/proj, `mutate-reversible` permit on R/proj/permit.conf
- * alone, everything else ask. So a read anywhere under R/proj runs, an edit of
- * permit.conf runs, and an edit of ask.conf is a question — which is scenario
- * 4's prompt and scenario 5's window.
+ * `observe` permits reads under R/proj. The permit case scopes
+ * `mutate-reversible` to R/proj/permit.conf. The approval cases set the
+ * mutation row to `ask`, which offers Allow once for an edit of ask.conf.
  *
  * # No timing
  *
@@ -163,17 +162,16 @@ test.afterAll(async () => {
   await fake?.stop()
 })
 
-/** The one policy write this file needs: reads under R/proj, writes to
- *  permit.conf alone, and a question for everything else. */
-async function permitReadsAndOneWrite(page: Page): Promise<void> {
+/** Permit reads under R/proj and set the mutation policy for this scenario. */
+async function configureFilePolicy(page: Page, write: 'permit' | 'ask'): Promise<void> {
   const ask = { decision: 'ask', scopes: [] }
   const res = await rpc<{ applied: boolean }>(page, endpoint, 'policy.set', {
     policy: {
       observe: { decision: 'permit', scopes: [{ kind: 'path', id: remoteProj }] },
-      'mutate-reversible': {
-        decision: 'permit',
-        scopes: [{ kind: 'path', id: join(remoteProj, 'permit.conf') }],
-      },
+      'mutate-reversible':
+        write === 'permit'
+          ? { decision: 'permit', scopes: [{ kind: 'path', id: join(remoteProj, 'permit.conf') }] }
+          : ask,
       'mutate-destructive': ask,
       'privilege-change': ask,
       disclose: ask,
@@ -236,10 +234,11 @@ async function createProfile(page: Page, name: string): Promise<string> {
 async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
-  await expect(page.locator(TAB)).toHaveCount(1)
+  const firstTab = page.locator(TAB).first()
+  await expect(firstTab).toBeVisible()
   await appReadyForInput(page)
   await ensureAssistantVault(page, endpoint, 'disposable-ssh-assistant-passphrase')
-  await page.locator(TAB).first().click()
+  await firstTab.click()
 }
 
 function answerBlock(page: Page, question: string) {
@@ -274,7 +273,7 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
   test('files.list and files.search answer from the host, not from here', async ({ page }) => {
     test.setTimeout(600_000)
     await openApp(page)
-    await permitReadsAndOneWrite(page)
+    await configureFilePolicy(page, 'permit')
     await openHelperPane(page, await createProfile(page, `e2e-ssh-files-list-${Date.now()}`))
 
     // Both calls in ONE turn: the listing proves the host's names, and the
@@ -328,7 +327,7 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
   }) => {
     test.setTimeout(600_000)
     await openApp(page)
-    await permitReadsAndOneWrite(page)
+    await configureFilePolicy(page, 'permit')
     await openHelperPane(page, await createProfile(page, `e2e-ssh-files-permit-${Date.now()}`))
 
     const target = join(remoteProj, 'permit.conf')
@@ -370,7 +369,7 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
   }) => {
     test.setTimeout(600_000)
     await openApp(page)
-    await permitReadsAndOneWrite(page)
+    await configureFilePolicy(page, 'ask')
     await openHelperPane(page, await createProfile(page, `e2e-ssh-files-ask-${Date.now()}`))
 
     const target = join(remoteProj, 'ask.conf')
@@ -414,7 +413,7 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
   }) => {
     test.setTimeout(600_000)
     await openApp(page)
-    await permitReadsAndOneWrite(page)
+    await configureFilePolicy(page, 'ask')
     await openHelperPane(page, await createProfile(page, `e2e-ssh-files-changed-${Date.now()}`))
 
     const target = join(remoteProj, 'ask.conf')

@@ -45,7 +45,7 @@ func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
 	remote := RunContext{Environment: anotherMachine()}
 
-	for _, name := range []string{"files.read", "files.edit", "files.create"} {
+	for _, name := range []string{"files.read", "files.list", "files.search", "files.edit", "files.create"} {
 		t.Run(name, func(t *testing.T) {
 			tool, ok := reg.Lookup(name)
 			if !ok {
@@ -78,7 +78,7 @@ func TestFileToolsBuildOnThisMachine(t *testing.T) {
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
 	here := RunContext{Environment: thisMachine(), Files: newTestFileSource(t)}
 
-	for _, name := range []string{"files.read", "files.edit", "files.create"} {
+	for _, name := range []string{"files.read", "files.list", "files.search", "files.edit", "files.create"} {
 		t.Run(name, func(t *testing.T) {
 			tool, ok := reg.Lookup(name)
 			if !ok {
@@ -112,7 +112,7 @@ func TestFileToolsBuildNoCapabilityWithoutAFileBinding(t *testing.T) {
 	}
 	grant := expiryFixturePolicy(root).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: root}})
 	unbound := RunContext{Environment: thisMachine()}
-	for _, name := range []string{"files.read", "files.edit", "files.create"} {
+	for _, name := range []string{"files.read", "files.list", "files.search", "files.edit", "files.create"} {
 		tool, ok := reg.Lookup(name)
 		if !ok {
 			t.Fatalf("%s is not in the assembled registry", name)

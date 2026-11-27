@@ -197,7 +197,16 @@ package coordinator
 // contracts/tunnel.error.schema.json, is part of the surface (ADR-0104), so a
 // 43 window validating the payload against the previous shape refuses one that
 // now conforms: the number moves with the contract.
-const ProtocolVersion = 44
+// 45 (nocx-a62cl.11, leaf .11.3): the assistant can list a directory and
+// search file contents on the pane's host — `files.list` and `files.search`
+// join the declaration table, so their params schemas are part of the surface
+// and the approval contracts' `tool` enum grows by those two names. A window
+// built against 44 renders an approval for a tool its union cannot name, and
+// the enum is what makes that a compile error there rather than a branch that
+// is never taken; hence the number moves with the contracts. The stage bumps
+// this ONCE and this leaf is where the contracts change: .11.1, .11.2 and
+// .11.4 touch no schema.
+const ProtocolVersion = 45
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

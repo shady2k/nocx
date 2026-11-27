@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/files.list.schema.json",
+  "title": "FilesListParams",
+  "description": "List the entries of a directory on the pane's host. Symlinks are reported but never followed, .git directories are skipped, and the answer stops at the declared result bound rather than looking complete: truncated true means more entries exist and the path should be narrowed. Entry paths are the lexical paths the provider lists, the same names files.read takes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory to list, inside the grant's paths."
+    },
+    "recursive": {
+      "type": "boolean",
+      "description": "Descend into subdirectories, breadth-first (a directory's own entries before any of its children's). Absent means false: only the named directory's entries."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "FilesListResult",
+      "description": "What files.list hands back. skipped counts what the traversal deliberately did not open, so a listing that left something out says so instead of looking complete.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "recursive", "entries", "truncated", "skipped"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The path that was listed, as the call spelled it."
+        },
+        "recursive": {
+          "type": "boolean",
+          "description": "Whether the call descended into subdirectories."
+        },
+        "entries": {
+          "type": "array",
+          "description": "The entries, in traversal order. Empty only for an empty directory or a very small result bound.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "path", "kind", "size"],
+            "properties": {
+              "name": { "type": "string", "description": "The entry's name within its directory." },
+              "path": {
+                "type": "string",
+                "description": "The entry's lexical path — the name to pass to files.read, not a resolved identity."
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["regular", "dir", "symlink", "other", "unreadable"],
+                "description": "What the entry is. A symlink is listed as a symlink even when it resolves to a directory; its target is never entered. other is a FIFO, device or socket; unreadable means the entry exists but its metadata could not be read."
+              },
+              "size": {
+                "type": "integer",
+                "description": "Size in bytes as the provider reported it; 0 or meaningless for directories, symlinks and pseudo-files."
+              },
+              "modTime": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Modification time, when the provider reported one."
+              },
+              "linkTarget": {
+                "type": "string",
+                "description": "The link's target as spelled, for a symlink only."
+              }
+            }
+          }
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the traversal stopped at the declared result bound; more entries exist than were returned."
+        },
+        "skipped": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gitDirs", "symlinks"],
+          "description": "What the traversal refused to enter or open.",
+          "properties": {
+            "gitDirs": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of .git directories skipped."
+            },
+            "symlinks": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of symlinks reported but not followed."
+            }
+          }
+        }
+      }
+    }
+  }
+}

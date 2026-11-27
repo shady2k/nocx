@@ -134,6 +134,42 @@ function trustHostKey(knownHosts: string): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), knownHosts + '\n')
 }
 
+/** A `Host <alias>` block in the backend's own `~/.ssh/config`, and the
+ *  restore that puts back exactly the bytes this run found.
+ *
+ *  THE OPEN CONTRACT CARRIES NO PORT (contracts/open.params.schema.json): a
+ *  hand-typed `user@host:port` reaches the backend as a host and a user, and
+ *  the number is dropped on the way — the dial then follows what `ssh -G`
+ *  answers for that host (internal/transport/session_open.go's direct-host
+ *  arm, reading exactly this file by its explicit path and re-reading it when
+ *  its mtime moves). So the hand-typed tab names an ALIAS, and the address,
+ *  the port and the account are the configuration's answer — the same
+ *  question `ssh` itself would ask for the same word.
+ *
+ *  No `IdentityFile` on purpose. A hand-typed tab carries no stored
+ *  credential, so it takes the ladder's prompt rung (DialAuthInteractive),
+ *  which is the ask the saved tab beside it answers; naming a key here would
+ *  authenticate without a person and leave the spec's own ask waiting for a
+ *  dialog that never comes. */
+function writeSSHConfigAlias(alias: string, port: number, user: string): () => void {
+  const sshDir = path.join(STAND_HOME, '.ssh')
+  mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+  const file = path.join(sshDir, 'config')
+  const previous: Buffer | null = existsSync(file) ? readFileSync(file) : null
+  const block = [
+    `Host ${alias}`,
+    '  HostName 127.0.0.1',
+    `  Port ${port}`,
+    `  User ${user}`,
+    '',
+  ].join('\n')
+  writeFileSync(file, previous === null ? block : `${previous.toString()}\n${block}`)
+  return () => {
+    if (previous === null) rmSync(file, { force: true })
+    else writeFileSync(file, previous)
+  }
+}
+
 /** The fixture's own known_hosts line, spelled for the port the profile
  *  dials — the relay's when one stands in front of the host. */
 function knownHostsFor(fixture: SshdFixture, port: number): string {
@@ -498,6 +534,7 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
   })
   const profileName = `e2e-ssh-panels-parity-${Date.now()}`
   let profileId: string | null = null
+  let restoreSSHConfig: (() => void) | null = null
   try {
     trustHostKey(fixture.knownHosts)
     await page.goto('/')
@@ -537,16 +574,21 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
     await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
 
     // ── The hand-typed tab, to the SAME listener ─────────────────────────
-    const target = `${fixture.user}@127.0.0.1:${fixture.port}`
+    // The tab names the ALIAS, not `user@127.0.0.1:port`: the open carries
+    // no port, so a typed address would land on port 22 of this machine
+    // rather than on the listener above (writeSSHConfigAlias says why).
+    const alias = `nocx-e2e-parity-${Date.now()}`
+    restoreSSHConfig = writeSSHConfigAlias(alias, fixture.port, fixture.user)
     await page.keyboard.press('Control+Shift+P')
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible({ timeout: 30_000 })
-    await search.fill(target)
-    // The free-form row: nothing is saved, and the label says so.
-    const adHoc = page.locator('.quick-connect__item', {
-      hasText: `Connect to ${fixture.user}@127.0.0.1`,
-    })
-    await expect(adHoc).toBeVisible({ timeout: 30_000 })
+    await search.fill(alias)
+    // BOTH ROWS THAT CAN ANSWER ARE THE SAME OPEN: the alias list and the
+    // free-form row each call `newSSHPane('', alias, …)`, and which one is
+    // first depends on whether `ssh.aliases` has answered by then — so the
+    // selector is the alias itself, never one row's wording.
+    const adHoc = page.locator('.quick-connect__item', { hasText: alias })
+    await expect(adHoc.first()).toBeVisible({ timeout: 30_000 })
     await page.keyboard.press('Enter')
     await answerPasswordAsk(page, password)
     await expect(page.locator(TAB)).toHaveCount(3, { timeout: 60_000 })
@@ -578,6 +620,9 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
     })
     await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
   } finally {
+    // The backend's ssh config goes back FIRST: every later assertion in this
+    // spec would otherwise run against an alias this run invented.
+    if (restoreSSHConfig !== null) restoreSSHConfig()
     if (profileId !== null) {
       try {
         const endpoint = await resolveBackend(page)

@@ -67,7 +67,7 @@ import {
   type SshdFixture,
 } from './sshd-fixture'
 import { readStand } from './stand'
-import { askFromPrompt, toolResults } from './ask-gesture'
+import { askFromPrompt, chatRequests, toolResults } from './ask-gesture'
 
 const test = base
 
@@ -487,6 +487,11 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
     expect(applied.applied).toBe(true)
     const name = await createProfile(page, `e2e-ssh-files-raw-${Date.now()}`)
     await openPane(page, name, 'raw')
+    // The attribute is published only once the ssh handshake has completed, so
+    // it is awaited rather than read once the tab exists.
+    await expect(page.locator('.pane.active')).toHaveAttribute('data-session-id', /.+/, {
+      timeout: 60_000,
+    })
     const sessionId = await page.locator('.pane.active').getAttribute('data-session-id')
     if (sessionId === null) {
       throw new Error('the raw pane published no session for the question to name')
@@ -513,29 +518,36 @@ test.describe('the assistant acts on the ssh pane’s own files', () => {
     // refuses the chord with `no-running-command` (frontend/src/
     // terminal-content.ts, canSummonEditor). What the model was SENT is the
     // proof: the two calls ran, in order, in the pane's own session.
-    const results = (): string[] =>
-      fake
-        .requests()
-        .slice(before)
-        .flatMap((request) => toolResults(request.body))
+    // Every request carries the results the model has been sent SO FAR, so the
+    // turn is read as one request holding both answers rather than as a count
+    // of results across requests, which grows 0 → 1 → 2 as the turn proceeds.
     await expect
       .poll(
         () =>
-          results().filter((result) => result.startsWith('REFUSED') || result.includes('"screen"'))
-            .length,
+          chatRequests(fake, before).some((request) => {
+            const sent = toolResults(request.body)
+            return (
+              sent.some((result) => result.startsWith('REFUSED')) &&
+              sent.some((result) => result.includes('"screen"'))
+            )
+          }),
         {
           message: 'the turn never reported both a refusal and a screen read',
           timeout: 120_000,
         },
       )
-      .toBe(2)
+      .toBe(true)
 
-    const refused = results().find((result) => result.startsWith('REFUSED')) ?? ''
+    const last = chatRequests(fake, before).at(-1)
+    if (last === undefined) throw new Error('the turn sent no request to read its results from')
+    const results = toolResults(last.body)
+
+    const refused = results.find((result) => result.startsWith('REFUSED')) ?? ''
     expect(refused).toContain('files.read')
     expect(refused).toContain('mode-raw')
     // And the run went on: the screen read answered about THIS pane, so one
     // call was refused for the axis and the other was served by the pane.
-    const screen = results().find((result) => result.includes('"screen"')) ?? ''
+    const screen = results.find((result) => result.includes('"screen"')) ?? ''
     expect(screen).toContain('"state":"screen"')
     expect(screen).toContain(sessionId)
     expect(screen.startsWith('REFUSED')).toBe(false)

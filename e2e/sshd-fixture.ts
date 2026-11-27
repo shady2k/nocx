@@ -379,6 +379,10 @@ export async function rpc<T>(
       new Promise<T>((resolve, reject) => {
         const id = 1
         const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, [`nocx.token.${token}`])
+        // This socket is not the app's, and `captureAppSocket` must not adopt
+        // it: it closes as soon as its reply arrives, so a call addressed to it
+        // afterwards would never be answered.
+        ;(ws as WebSocket & { __nocxAux?: true }).__nocxAux = true
         const timer = setTimeout(() => reject(new Error(`rpc ${method} timed out`)), 15_000)
         ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
         ws.onmessage = (ev: MessageEvent) => {
@@ -422,7 +426,11 @@ export async function captureAppSocket(page: Page): Promise<void> {
     const recorder = window as unknown as { __nocxAppSocket?: WebSocket }
     const send = WebSocket.prototype.send
     WebSocket.prototype.send = function (this: WebSocket, data: Parameters<typeof send>[0]) {
-      recorder.__nocxAppSocket = this
+      // Only a live socket is worth remembering, and never one `rpc` opened for
+      // itself — it is closed again the moment its reply lands, and the last
+      // recorded instance would then be a socket nothing can answer on.
+      const aux = (this as WebSocket & { __nocxAux?: true }).__nocxAux === true
+      if (!aux && this.readyState === WebSocket.OPEN) recorder.__nocxAppSocket = this
       return send.call(this, data)
     }
   })
@@ -447,8 +455,8 @@ export async function rpcOnAppSocket<T>(
     ({ method, params, timeoutMs }) =>
       new Promise<T>((resolve, reject) => {
         const ws = (window as unknown as { __nocxAppSocket?: WebSocket }).__nocxAppSocket
-        if (ws === undefined) {
-          reject(new Error(`${method}: the app has sent nothing on a socket to answer on`))
+        if (ws === undefined || ws.readyState !== WebSocket.OPEN) {
+          reject(new Error(`${method}: the app has no open socket to answer on`))
           return
         }
         const id = 987_654_321

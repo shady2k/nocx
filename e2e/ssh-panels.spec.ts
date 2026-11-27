@@ -254,6 +254,40 @@ async function answerPasswordAsk(page: Page, password: string): Promise<void> {
   await expect(prompt).not.toBeVisible({ timeout: 60_000 })
 }
 
+/** Answer the connection-password ask IF the fixture poses one.
+ *
+ *  A second tab to a host whose transport is already live can be handed that
+ *  transport instead of a new password round: the lease is keyed by address,
+ *  port, user, credential and route, and `ProfileID` is not in the key, so the
+ *  saved tab's authenticated connection answers the hand-typed tab's open. So
+ *  the ask is RACED against the tab arriving ready without it, and the caller
+ *  still waits for the tab afterwards — an unconditional wait for a prompt is
+ *  a minute spent on a question the product is allowed not to ask.
+ *
+ *  Neither branch may reject: the loser of a `Promise.race` is not cancelled,
+ *  and an assertion it would have thrown is a promise nobody awaits. */
+async function answerPasswordAskIfPosed(
+  page: Page,
+  password: string,
+  tabCount: number,
+): Promise<void> {
+  const askPosed = page
+    .locator('.ui-prompt #connection-password')
+    .waitFor({ state: 'visible', timeout: 60_000 })
+    .then(
+      () => true,
+      () => false,
+    )
+  const tabReady = (async (): Promise<void> => {
+    await expect(page.locator(TAB)).toHaveCount(tabCount, { timeout: 60_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 90_000 })
+  })().then(
+    () => true,
+    () => false,
+  )
+  if (await Promise.race([askPosed, tabReady])) await answerPasswordAsk(page, password)
+}
+
 /** The shell's prompt, for a raw connection: the grid takes the keys and no
  *  editor comes up. */
 async function waitForPrompt(page: Page): Promise<void> {
@@ -590,11 +624,15 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
     const adHoc = page.locator('.quick-connect__item', { hasText: alias })
     await expect(adHoc.first()).toBeVisible({ timeout: 30_000 })
     await page.keyboard.press('Enter')
-    await answerPasswordAsk(page, password)
+    // THE SAVED TAB IS STILL OPEN and its transport is live, so this open may
+    // be answered by that transport and never pose a password ask at all.
+    await answerPasswordAskIfPosed(page, password, 3)
     await expect(page.locator(TAB)).toHaveCount(3, { timeout: 60_000 })
     // The tab in front is now the HAND-TYPED one — the same host reached the
-    // other way — so the panel has to be scoped to it.
+    // other way — so the panel has to be scoped to it, and it is only readable
+    // once its helper serves.
     await expect(page.locator(TAB).nth(2)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 90_000 })
 
     // A NEW TAB OPENS WITH NO PANEL VIEW, so the sidebar the saved tab left on
     // Ports is not the hand-typed tab's view: the person opens Ports again, and
@@ -621,8 +659,17 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
     await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
   } finally {
     // The backend's ssh config goes back FIRST: every later assertion in this
-    // spec would otherwise run against an alias this run invented.
-    if (restoreSSHConfig !== null) restoreSSHConfig()
+    // spec would otherwise run against an alias this run invented. Its own
+    // failure must not cost the teardown below it — a leaked sshd and a
+    // temporary repository would outlive the run that made them.
+    if (restoreSSHConfig !== null) {
+      try {
+        restoreSSHConfig()
+      } catch {
+        // Nothing left to report: the assertions have already spoken, and the
+        // fixture is what has to come down.
+      }
+    }
     if (profileId !== null) {
       try {
         const endpoint = await resolveBackend(page)

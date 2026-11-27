@@ -2744,6 +2744,28 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['call:files.read'])
   })
 
+  it('renders distinct actions when the model reuses a call id', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    const first = {
+      callId: 'call_1',
+      actionEntryId: 'read-action',
+      tool: 'files.read',
+      effect: 'observe' as const,
+      opensBlock: false,
+    }
+    const second = {
+      ...first,
+      actionEntryId: 'edit-action',
+      tool: 'files.edit',
+      effect: 'mutate-reversible' as const,
+    }
+    h.toolCall(first)
+    h.toolCall(second)
+    h.toolCall(second)
+    expect(flowOf(h)).toEqual(['call:files.read', 'call:files.edit'])
+  })
+
   it('renders two calls when BOTH lack an id — an empty key is not an identity', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

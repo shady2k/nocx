@@ -474,9 +474,8 @@ export interface AnswerBlockHandle {
    *  A call that opened a block draws NO child of its own — the block the
    *  command opened is the account of it, and it takes the next seat.
    *
-   *  Idempotent per `callId`: the backend announces a call once per
-   *  EXECUTION, and an approved egress resume puts the same call through
-   *  the pipeline a second time. One call, one child. */
+   *  Idempotent per action entry. An approved egress resume can announce
+   *  another execution of the same action. */
   toolCall(this: void, call: AnswerToolCall): void
   /** Append one chunk of the model's thinking (agent.runReasoning) — into
    *  its own collapsed note, never into the answer text (nocx-s92so). The
@@ -3840,15 +3839,15 @@ export class BlockManager {
       id,
       el,
       toolCall(call: AnswerToolCall): void {
-        // The dedupe exists for ONE case: an approved egress resume puts the
-        // same call through the pipeline a second time, and the backend
-        // announces the same callId again. An EMPTY callId is not an
-        // identity — a provider that omits the id is not malformed, and two
-        // distinct id-less calls must not merge because their empty keys
-        // collide (w-call-id-order). So the key is only consulted when there
-        // is one.
-        if (call.callId !== '' && seenCalls.has(call.callId)) return
-        if (call.callId !== '') seenCalls.add(call.callId)
+        // An egress resume keeps the same action entry. Separate actions can
+        // carry the same model ID. Embeddings without an entry use the model
+        // ID when available.
+        const actionEntryId = call.actionEntryId
+        const callKey = actionEntryId
+          ? `entry:${actionEntryId}`
+          : call.callId && `call:${call.callId}`
+        if (callKey && seenCalls.has(callKey)) return
+        if (callKey) seenCalls.add(callKey)
         // The run of prose above ends here whatever the call turns out to be:
         // the backend sealed its `text` block when this call arrived, and the
         // next delta names the next one.
@@ -3904,7 +3903,6 @@ export class BlockManager {
         // where something can actually read the record, and it reads
         // nothing until a person opens it: a turn of ten calls would
         // otherwise fetch ten bodies nobody asked to see.
-        const actionEntryId = call.actionEntryId
         if (actionEntryId !== undefined && actionEntryId !== '' && toolResult) {
           cel.appendChild(toolCallExpansion(actionEntryId, call.args ?? {}, toolResult))
         }

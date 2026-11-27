@@ -49,14 +49,6 @@
       "reason": "the local Route constructor every request dials through, the SSH lease included; it leaves when the carrier owns channels (design §5.1.2)"
     },
     {
-      "rule": "panel-host-path",
-      "file": "internal/app/app.go",
-      "func": "github.com/shady2k/nocx/internal/app.New",
-      "object": "github.com/shady2k/nocx/internal/discovery.Connector(*github.com/shady2k/nocx/internal/app.helperProbes)",
-      "count": 1,
-      "reason": "Ports' legacy connector wired into NewScheduler; moving the scheduler argument to the farhelper-owned connector removes this fact (nocx-oalo1.13)."
-    },
-    {
       "rule": "xcrypto-ssh-import",
       "file": "internal/helper/sshdial/sshdial.go",
       "func": "github.com/shady2k/nocx/internal/helper/sshdial.DialDirectTCP",

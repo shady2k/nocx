@@ -38,10 +38,9 @@
 //	                      the client that decision produced (ALX-641, design
 //	                      §5.10 C23). The decision has one owner,
 //	                      internal/farhelper.
-//	panel-host-path       a reference to proto.OpSamplePorts,
-//	                      to a lease acquisition ((*client.Client).
-//	                      AcquireProbeLease), to a ProbeLease exec (Uname,
-//	                      Home, SamplePorts, Completion, Inflate,
+//	panel-host-path       a lease acquisition ((*client.Client).AcquireProbeLease),
+//	                      a ProbeLease exec (Uname,
+//	                      Home, Completion, Inflate,
 //	                      CommandNames), or to the argument of
 //	                      discovery.NewScheduler whose type is not the far
 //	                      helper's own: the roads by which a panel reaches a
@@ -249,10 +248,10 @@ var nocxTrackedPkgs = map[string]bool{
 // `*hostmode.Store` is what a file writes in order to hold the store, and the
 // method on it is spelled `s.Lookup`.
 var nocxTargetNames = map[string]bool{
-	"Dial": true, "Lookup": true, "OpSamplePorts": true,
+	"Dial": true, "Lookup": true,
 	"AcquireProbeLease": true, "NewFactory": true, "NewScheduler": true, "Store": true,
 	// A ProbeLease's exec surface, and the type that carries it.
-	"Uname": true, "Home": true, "SamplePorts": true,
+	"Uname": true, "Home": true,
 	"Completion": true, "Inflate": true, "CommandNames": true, "ProbeLease": true,
 	// The helper client type, whose lease acquisition the C24 rule reports.
 	"Client": true,
@@ -263,7 +262,7 @@ var nocxTargetNames = map[string]bool{
 // named in another package.
 var nocxCallNames = map[string]bool{
 	"Lookup": true, "AcquireProbeLease": true, "NewFactory": true,
-	"Uname": true, "Home": true, "SamplePorts": true,
+	"Uname": true, "Home": true,
 	"Completion": true, "Inflate": true, "CommandNames": true,
 	"NewScheduler": true,
 }
@@ -281,7 +280,7 @@ var nocxCallNames = map[string]bool{
 // One is a selector on a tracked import's alias whose NAME the rules know
 // (nocxTargetNames). A method is reached through its receiver, not through its
 // package, so the second marker is a CALL of a name the rules know whatever
-// the receiver is: `s.Lookup`, `l.SamplePorts`, `a.client.AcquireProbeLease`
+// the receiver is: `s.Lookup`, `l.Completion`, `a.client.AcquireProbeLease`
 // and `helper.Lookup` are all references the walk reports, and none of them
 // names a package. The receiver's type name is usually in the same file (a
 // parameter or a field must be typed), which is why the first marker alone
@@ -827,10 +826,9 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 		case pkgLevel && receiverType(fn) == nil && fn.Name() == "Dial":
 			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".Dial"})
 		case methodOn(fn, "ProbeLease", "Uname"), methodOn(fn, "ProbeLease", "Home"),
-			methodOn(fn, "ProbeLease", "SamplePorts"), methodOn(fn, "ProbeLease", "Completion"),
+			methodOn(fn, "ProbeLease", "Completion"),
 			methodOn(fn, "ProbeLease", "Inflate"), methodOn(fn, "ProbeLease", "CommandNames"):
-			// Every exec a lease carries, not only the ports sample: a panel
-			// that runs ANY probe for itself has taken the road C24 closes.
+			// A panel cannot run its own shell probes.
 			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
 		case methodOn(fn, "Client", "AcquireProbeLease"):
 			// The acquisition, because the execs above travel on the returned
@@ -846,13 +844,6 @@ func (c *collector) nocxFact(obj types.Object, fn *types.Func, isFunc, pkgLevel 
 	case nocxInternal + "hostmode", nocxInternal + "helper/consent":
 		if isFunc && methodOn(fn, "Store", "Lookup") {
 			c.add(Fact{Rule: "helper-decider", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: methodObject(fn)})
-		}
-	case nocxInternal + "helper/proto":
-		// A constant is not a function, so isFunc is false and the name is the
-		// whole identity; the object still has to be package-level, because a
-		// local constant of the same name is not the wire op.
-		if !isFunc && pkgLevel && obj.Name() == "OpSamplePorts" {
-			c.add(Fact{Rule: "panel-host-path", File: rel, Line: pos.Line, Column: pos.Column, Func: label, Object: path + ".OpSamplePorts"})
 		}
 	}
 }

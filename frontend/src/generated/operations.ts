@@ -1955,6 +1955,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 500,
     answerMs: null,
   },
+  'tunnel.list': {
+    waiting: 'Reading the forwards',
+    row: 'past-wait',
+    expired: 'retry-read',
+    merge: 'same-key',
+    domain: 'server',
+    turnMs: 30000,
+    maxMs: 10000,
+    answerMs: null,
+  },
   'tunnel.open': {
     waiting: 'Opening the tunnel',
     row: 'past-wait',

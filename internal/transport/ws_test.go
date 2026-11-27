@@ -2790,7 +2790,7 @@ func TestOpen_ReplaysTwoStoredForwards(t *testing.T) {
 // forward whose local port is taken must report that against its OWN row
 // (stopped with the bind error) while the session stays usable and the
 // other forward keeps forwarding — the failure never degrades anything
-// else. Both rows stay in the ledger, which is what ports.status reads.
+// else. Both rows stay in the ledger, which is what tunnel.list reads.
 func TestOpen_ReplayBusyPort_ReportsOwnRowAndLeavesSessionUsable(t *testing.T) {
 	h := newReplayHarness(t, []profile.ForwardSpec{
 		{Direction: "local", BindPort: busyPort(t), Destination: startEchoTarget(t)},

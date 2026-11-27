@@ -1351,23 +1351,10 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
-	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
-	// profile. *ssh.RealClient satisfies discovery.Connector without an
-	// adapter — the same shape that satisfies tunnel.Connector. The local
-	// machine (nocx-wzc4.8) samples through the native kernel reader,
-	// wired here at the composition root (AD-8) behind the same Provider
-	// seam the remote ladder implements. The cadence timers are named
-	// here, at the composition root (spec §4): one settle sample 1 s after
-	// the connection comes up, periodic sampling every 10 s while the panel
-	// is visible and nothing is paused.
-	discoverySched := discovery.NewScheduler(
-		probes, logger,
-		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
-			return nativeports.NewProvider(l)
-		}),
-		discovery.WithSettleDelay(1*time.Second),
-		discovery.WithSampleInterval(10*time.Second),
-	)
+	// Remote port samples use the same helper registry as Git and Files.
+	discoverySched := discovery.NewScheduler(farHelpers, logger, func(l log.Logger) discovery.LocalProvider {
+		return nativeports.NewProvider(l)
+	})
 	// The remote shell launcher, built here so its bootstrap-outcome sink
 	// can be wired once the server exists (below, beside the other
 	// integration-axis seams). Without that sink the whole closed outcome
@@ -1562,13 +1549,6 @@ func New(opts ...Option) (*App, error) {
 		// forward model was reachable from its own tests and nowhere else
 		// (AGENTS.md check 5).
 		transport.WithTunnelConnector(tunnelChans),
-		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
-		// (settle sample, hidden-tab pause, one-in-flight — spec §4) and
-		// acquires its OWN pooled discovery lease per
-		// profile. *ssh.RealClient satisfies discovery.Connector without
-		// an adapter, the same way it satisfies tunnel.Connector. Before
-		// this line the whole discovery package was reachable from its own
-		// tests and nowhere else (AGENTS.md check 5).
 		transport.WithDiscoveryScheduler(discoverySched),
 		// The in-band bootstrap builder (nocx-ynsx): *shellintegration.Impl
 		// satisfies transport.InBandBootstrapper without an adapter — the

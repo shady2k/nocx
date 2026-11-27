@@ -35,11 +35,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/ports-client.ts",
-      "symbol": "PortsClient"
-    },
-    {
-      "kind": "exports",
       "file": "src/recall.ts",
       "symbol": "isRecallShortcut"
     },

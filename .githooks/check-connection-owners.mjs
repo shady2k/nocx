@@ -71,10 +71,9 @@
  *                        licensed BY NAME below (internal/helper/local's
  *                        openOnce), never by directory: a dial added beside it
  *                        in the same package is still a second decider.
- *   panel-host-path      a reference to proto.OpSamplePorts,
- *                        to a lease acquisition ((*client.Client).
- *                        AcquireProbeLease) or to a ProbeLease exec (Uname,
- *                        Home, SamplePorts, Completion, Inflate, CommandNames)
+ *   panel-host-path      a lease acquisition ((*client.Client).
+ *                        AcquireProbeLease) or a ProbeLease exec (Uname,
+ *                        Home, Completion, Inflate, CommandNames)
  *                        outside internal/farhelper: the roads by which a
  *                        panel reaches a host without the far helper (design
  *                        §5.10 C24). A panel takes the connection's helper
@@ -114,7 +113,7 @@
  *     constant "unix" and nothing else.
  *   - For C23/C24, an exec on a lease held through THIS repository's own
  *     interface: internal/app's probeCommands is an interface, so the adapter's
- *     `l.lease.SamplePorts` resolves to the interface's method, which is not
+ *     `l.lease.Completion` resolves to the interface's method, which is not
  *     the helper client's object. A panel that reaches a ProbeLease exec, a
  *     helper-client dial, a Git factory or a store read directly is refused.
  *     The acquisition that hands such an adapter the concrete lease IS reported

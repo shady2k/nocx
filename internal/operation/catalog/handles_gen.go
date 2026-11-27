@@ -231,6 +231,7 @@ var (
 	OpTabsSetPanel                    = methodHandle("tabs.setPanel")
 	OpTransportCredit                 = methodHandle("transport.credit")
 	OpTransportPing                   = methodHandle("transport.ping")
+	OpTunnelList                      = methodHandle("tunnel.list")
 	OpTunnelOpen                      = methodHandle("tunnel.open")
 	OpTunnelStop                      = methodHandle("tunnel.stop")
 	OpUistateGet                      = methodHandle("uistate.get")

@@ -18,6 +18,7 @@ import {
   type PortsPanelServices,
 } from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
+import type { TunnelListResult } from './generated/tunnel.list'
 
 afterEach(() => cleanup())
 
@@ -50,7 +51,7 @@ const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
 // ── Fixtures (mirror ports.test.tsx) ─────────────────────────────────────
 
 const statusFixture = (port: number): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -69,15 +70,18 @@ const statusFixture = (port: number): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
-  forwards: [],
 })
 
-function fakeServices(port: number, statusResult?: PortsStatusResult): PortsPanelServices {
+function fakeServices(
+  port: number,
+  statusResult?: PortsStatusResult,
+  forwards: TunnelListResult['forwards'] = [],
+): PortsPanelServices {
   const st = statusResult ?? statusFixture(port)
   const status = (): Promise<PortsStatusResult> => Promise.resolve(st)
   return {
+    listForwards: vi.fn().mockResolvedValue({ forwards }),
     status: vi.fn(status),
     sample: vi.fn(status),
     pause: vi.fn().mockResolvedValue({}),
@@ -91,7 +95,7 @@ function fakeServices(port: number, statusResult?: PortsStatusResult): PortsPane
  *  forward whose destination is the listener's derived destination, so the
  *  row owns its port's state. */
 const forwardedStatusFixture = (): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -110,23 +114,23 @@ const forwardedStatusFixture = (): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
-  forwards: [
-    {
-      id: 'fwd-1',
-      direction: 'local',
-      requestedBind: { host: '127.0.0.1', port: 9993 },
-      actualBind: { host: '127.0.0.1', port: 9993 },
-      destination: '192.0.2.93:9993',
-      caveat: '',
-      scope: 'ports:ssh:p1:1',
-      state: 'running',
-      stopReason: null,
-      error: null,
-    },
-  ],
 })
+
+const forwardedRows: TunnelListResult['forwards'] = [
+  {
+    id: 'fwd-1',
+    direction: 'local',
+    requestedBind: { host: '127.0.0.1', port: 9993 },
+    actualBind: { host: '127.0.0.1', port: 9993 },
+    destination: '192.0.2.93:9993',
+    caveat: '',
+    scope: 'ports:ssh:p1:1',
+    state: 'running',
+    stopReason: null,
+    error: null,
+  },
+]
 
 describe('the detected row keeps the address first and primary (nocx-wzc4.9)', () => {
   it('stacks the address above the process, with the action beside them', async () => {
@@ -140,7 +144,8 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}
@@ -214,7 +219,7 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
 // the local bind and is unaffected by this change.
 describe('the forwarded destination renders in full on its own line (nocx-na05)', () => {
   it('shows the whole destination under the local bind', async () => {
-    const services = fakeServices(9993, forwardedStatusFixture())
+    const services = fakeServices(9993, forwardedStatusFixture(), forwardedRows)
     const root = document.createElement('div')
     document.body.append(root)
     const pause = createPortsPauseControl()
@@ -222,7 +227,8 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}
@@ -280,7 +286,7 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
 // reserves nothing.
 describe('the hidden actions reserve no width (nocx-4wbx)', () => {
   it("groups the forwarded row's three actions in a wrapper beside the text column", async () => {
-    const services = fakeServices(9993, forwardedStatusFixture())
+    const services = fakeServices(9993, forwardedStatusFixture(), forwardedRows)
     const root = document.createElement('div')
     document.body.append(root)
     const pause = createPortsPauseControl()
@@ -288,7 +294,8 @@ describe('the hidden actions reserve no width (nocx-4wbx)', () => {
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}

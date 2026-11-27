@@ -22,7 +22,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/remoteprobe"
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -100,7 +100,7 @@ func (p *probePeer) peer(t *testing.T) func(io.Reader, io.Writer) int {
 					resp, _ := json.Marshal(proto.Response{ID: req.ID, Result: json.RawMessage("{}")})
 					_, _ = out.Write(proto.EncodeFrame(proto.TypeResponse, 0, 0, resp))
 				default:
-					result, _ := json.Marshal(proto.ProbeExecResult{Stdout: []byte("NOCX-PD/1\n"), ExitStatus: 0})
+					result, _ := json.Marshal(proto.ProbeExecResult{Stdout: []byte("completion fixture\n"), ExitStatus: 0})
 					resp, _ := json.Marshal(proto.Response{ID: req.ID, Result: result})
 					_, _ = out.Write(proto.EncodeFrame(proto.TypeResponse, 0, 0, resp))
 				}
@@ -182,18 +182,15 @@ func TestTheProbeOpsCarryNoCommandAndNoFreeFormArgument(t *testing.T) {
 	if _, err := lease.Uname(ctx); err != nil {
 		t.Fatalf("uname: %v", err)
 	}
-	if _, err := lease.SamplePorts(ctx, remoteprobe.PortSS); err != nil {
-		t.Fatalf("sample-ports: %v", err)
-	}
 	if _, err := lease.Completion(ctx, "/etc", "git commit -m 'a line'", 6, 20, "n1"); err != nil {
 		t.Fatalf("completion: %v", err)
 	}
-	if _, err := lease.CommandNames(ctx, remoteprobe.CommandNamesProbe, "n2"); err != nil {
+	if _, err := lease.CommandNames(ctx, proto.CommandNamesProbe, "n2"); err != nil {
 		t.Fatalf("command-names: %v", err)
 	}
 
 	seen := peer.requests()
-	wantOps := []string{proto.OpLease, proto.OpUname, proto.OpSamplePorts, proto.OpCompletion, proto.OpCommandNames}
+	wantOps := []string{proto.OpLease, proto.OpUname, proto.OpCompletion, proto.OpCommandNames}
 	if len(seen) != len(wantOps) {
 		t.Fatalf("ops on the wire = %v, want %v", seen, wantOps)
 	}
@@ -209,9 +206,6 @@ func TestTheProbeOpsCarryNoCommandAndNoFreeFormArgument(t *testing.T) {
 	if got, want := seen[1].params, `{"lease":"`+testLeaseHex+`"}`; got != want {
 		t.Errorf("uname params = %s, want %s", got, want)
 	}
-	if got, want := seen[2].params, `{"lease":"`+testLeaseHex+`","probe":"ss"}`; got != want {
-		t.Errorf("sample-ports params = %s, want %s", got, want)
-	}
 	// The completion line crosses as a FIELD. Nothing in the payload is the
 	// script, the heredoc delimiter or a shell metacharacter standing alone.
 	var completion struct {
@@ -222,19 +216,19 @@ func TestTheProbeOpsCarryNoCommandAndNoFreeFormArgument(t *testing.T) {
 		Limit int    `json:"limit"`
 		Nonce string `json:"nonce"`
 	}
-	if err := json.Unmarshal([]byte(seen[3].params), &completion); err != nil {
+	if err := json.Unmarshal([]byte(seen[2].params), &completion); err != nil {
 		t.Fatalf("completion params: %v", err)
 	}
 	if completion.Line != "git commit -m 'a line'" || completion.Cwd != "/etc" || completion.Pos != 6 || completion.Limit != 20 {
 		t.Errorf("completion params lost an argument: %+v", completion)
 	}
-	if strings.Contains(seen[3].params, "NOCXEOF_") || strings.Contains(seen[3].params, "bash -s") {
-		t.Errorf("the completion payload carries shell text: %s", seen[3].params)
+	if strings.Contains(seen[2].params, "NOCXEOF_") || strings.Contains(seen[2].params, "bash -s") {
+		t.Errorf("the completion payload carries shell text: %s", seen[2].params)
 	}
 	// And no payload anywhere names a probe COMMAND: the fixed words live in the
 	// helper's build.
 	for _, r := range seen {
-		for _, word := range []string{"uname -s", "echo $HOME", "ss -H", "netstat -l", "lsof -nP", "stat -c", "sh -s", "bash -s", "NOCX-PD", "NOCX_CN", "NOCXEOF"} {
+		for _, word := range []string{"uname -s", "echo $HOME", "stat -c", "sh -s", "bash -s", "NOCX_CN", "NOCXEOF"} {
 			if strings.Contains(r.params, word) {
 				t.Errorf("op %s carries probe command text (%q): %s", r.op, word, r.params)
 			}
@@ -247,21 +241,21 @@ func TestTheProbeOpsCarryNoCommandAndNoFreeFormArgument(t *testing.T) {
 func TestAProbeRefusalArrivesAsTheKindTheConsumersSwitchOn(t *testing.T) {
 	for _, tc := range []struct {
 		code string
-		want remoteprobe.Kind
+		want probeoutcome.Kind
 	}{
-		{proto.ErrCodeExecSessionRefused, remoteprobe.KindSessionRefused},
-		{proto.ErrCodeExecProhibited, remoteprobe.KindExecProhibited},
-		{proto.ErrCodeExecTooLong, remoteprobe.KindCommandTooLong},
-		{proto.ErrCodeExecLost, remoteprobe.KindConnectionLost},
+		{proto.ErrCodeExecSessionRefused, probeoutcome.KindSessionRefused},
+		{proto.ErrCodeExecProhibited, probeoutcome.KindExecProhibited},
+		{proto.ErrCodeExecTooLong, probeoutcome.KindCommandTooLong},
+		{proto.ErrCodeExecLost, probeoutcome.KindConnectionLost},
 	} {
 		peer := &probePeer{failWith: tc.code}
 		c, _ := dialProbePeer(t, peer)
 		lease := acquireTestLease(t, c)
 
 		_, err := lease.Uname(context.Background())
-		var probeErr *remoteprobe.Error
+		var probeErr *probeoutcome.Error
 		if !errors.As(err, &probeErr) {
-			t.Fatalf("%s: err = %v (%T), want a remoteprobe.Error", tc.code, err, err)
+			t.Fatalf("%s: err = %v (%T), want a probeoutcome.Error", tc.code, err, err)
 		}
 		if probeErr.Kind != tc.want {
 			t.Errorf("%s mapped to %v, want %v", tc.code, probeErr.Kind, tc.want)
@@ -334,8 +328,8 @@ func TestAReleasedLeaseRefusesProbesLocally(t *testing.T) {
 	before := len(peer.requests())
 
 	_, err := lease.Uname(context.Background())
-	var probeErr *remoteprobe.Error
-	if !errors.As(err, &probeErr) || probeErr.Kind != remoteprobe.KindLeaseClosed {
+	var probeErr *probeoutcome.Error
+	if !errors.As(err, &probeErr) || probeErr.Kind != probeoutcome.KindLeaseClosed {
 		t.Fatalf("probe after release = %v, want the lease-closed kind", err)
 	}
 	if got := len(peer.requests()); got != before {
@@ -368,5 +362,31 @@ func TestCloseDoesNotWaitForAHelperThatStoppedAnswering(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close waited for a helper that stopped answering")
+	}
+}
+
+func TestCompletionProbeDeadlineDoesNotReportConnectionLoss(t *testing.T) {
+	peer := &probePeer{}
+	c, _ := dialProbePeer(t, peer)
+	lease := acquireTestLease(t, c)
+
+	peer.mu.Lock()
+	peer.hang = true
+	peer.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 0)
+	defer cancel()
+	_, err := lease.Completion(ctx, "/etc", "ls p", 4, 20, "nonce")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("completion deadline: %v", err)
+	}
+	var failure *probeoutcome.Error
+	if errors.As(err, &failure) && failure.Kind == probeoutcome.KindConnectionLost {
+		t.Fatalf("a completion deadline reported a lost connection: %v", err)
+	}
+	select {
+	case <-lease.Done():
+		t.Fatal("a completion deadline ended the healthy lease")
+	default:
 	}
 }

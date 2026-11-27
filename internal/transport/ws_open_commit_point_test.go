@@ -340,7 +340,7 @@ func commitPointParams() openParams {
 func commitPointServer(t *testing.T, ctx context.Context, reg session.Registry, opener *commitPointOpener, extra ...WSServerOption) (*WSServer, *discovery.Scheduler) {
 	t.Helper()
 	_, logger := logtest.New(t)
-	sched := discovery.NewScheduler(&portsFakeConnector{}, logger, discovery.WithSettleDelay(time.Hour))
+	sched := discovery.NewScheduler(nil, logger, nil)
 	t.Cleanup(func() { _ = sched.Close() })
 	opts := append([]WSServerOption{
 		WithDiscoveryScheduler(sched),

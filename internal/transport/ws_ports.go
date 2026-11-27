@@ -1,22 +1,15 @@
 package transport
 
-// ports.* — the read path for port discovery and the forwards ledger
-// (spec §9, nocx-wzc4.2). The scheduler (internal/discovery) owns the
-// cadence — when a probe runs — and the transport owns the wire: one
-// ports.status result assembling the discovery state for an authenticated
-// target plus every forward the backend currently tracks. tunnel.open and
-// tunnel.stop stay the only write paths; the panel drives them directly.
-//
-// The result shape is declared once in contracts/ports.status.schema.json;
-// ports.sample returns the same shape (a retry is a fresh status).
+// ports.* reports listening sockets for a pane. The discovery scheduler
+// owns when samples run. The tunnel ledger has its own tunnel.list read.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // iso8601UTC is the wire format of the last-successful-sample time. UTC with
@@ -34,17 +27,17 @@ func WithDiscoveryScheduler(s *discovery.Scheduler) WSServerOption {
 // ports.* — JSON-RPC types
 // ---------------------------------------------------------------------------
 
-// portsProfileParams is the payload shared by ports.status and ports.sample.
-type portsProfileParams struct {
-	ProfileID string `json:"profileId"`
+// portsPaneParams is the payload shared by ports.status and ports.sample.
+type portsPaneParams struct {
+	PaneID string `json:"paneId"`
 }
 
 // portsPauseParams is the payload of ports.pause and ports.visible: the
 // user's Pause/Resume control, and the panel watcher's visibility signal.
 type portsPauseParams struct {
-	ProfileID string `json:"profileId"`
-	Paused    bool   `json:"paused"`
-	Visible   bool   `json:"visible"`
+	PaneID  string `json:"paneId"`
+	Paused  bool   `json:"paused"`
+	Visible bool   `json:"visible"`
 }
 
 // portsProcess is the three-valued process evidence of one listener (spec
@@ -77,19 +70,13 @@ type portsDiscovery struct {
 	LastSampleAt   *string         `json:"lastSampleAt"`
 	Paused         bool            `json:"paused"`
 	Visible        bool            `json:"visible"`
-	ConnLost       bool            `json:"connLost"`
 }
 
-// portsStatusResult is the full status for one profile: the discovery state
-// plus every forward the backend tracks for the connection. Forwards include
-// stopped-by-transport records (connection loss) — they stay in the ledger
-// until stopped or the owning tab closes; the panel merges its own
-// user-stopped records on top.
+// portsStatusResult is the discovery status for one pane.
 type portsStatusResult struct {
-	ProfileID string         `json:"profileId"`
+	PaneID    string         `json:"paneId"`
 	Host      string         `json:"host"`
 	Discovery portsDiscovery `json:"discovery"`
-	Forwards  []tunnelRecord `json:"forwards"`
 }
 
 // portsDiscoveryFrom projects a scheduler status onto the wire. LastSampleAt
@@ -103,7 +90,6 @@ func portsDiscoveryFrom(st discovery.TargetStatus) portsDiscovery {
 		Stderr:         st.Sample.Stderr,
 		Paused:         st.Paused,
 		Visible:        st.Visible,
-		ConnLost:       st.ConnLost,
 		Listeners:      make([]portsListener, 0, len(st.Sample.Listeners)),
 	}
 	for _, l := range st.Sample.Listeners {
@@ -139,139 +125,114 @@ func orEmpty(s []string) []string {
 // Handlers
 // ---------------------------------------------------------------------------
 
-// portsHandlers answers the four ports.* methods. It holds the discovery
-// scheduler seam, the tunnel ledger (whose forwards the status result
-// assembles) and its Responder; nothing else.
-type portsHandlers struct {
-	sched  *discovery.Scheduler
-	ledger *tunnelLedger
-	r      Responder
+type portsErrorData struct {
+	Reason string `json:"reason"`
 }
 
-// handlePortsMethod dispatches the four ports.* methods. When the scheduler
-// is not wired the methods answer -32603, like tunnel.* without a connector.
-func (h portsHandlers) handlePortsMethod(req jsonrpcRequest) {
-	if h.sched == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Port discovery not available (no discovery scheduler wired)"})
+const (
+	portsUnknownPane       = "unknown-pane"
+	portsHelperUnavailable = "helper-unavailable"
+)
+
+type portsHandlers struct {
+	machine *WSServer
+
+	w *wsConn
+	r Responder
+}
+
+func (h portsHandlers) handlePortsMethod(ctx context.Context, req jsonrpcRequest) {
+	sched := h.machine.discoverySched
+	if sched == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Port discovery is not available"})
+		return
+	}
+	var p portsPauseParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid ports params"})
+		return
+	}
+	target, reason := h.target(p.PaneID)
+	if reason != "" {
+		if reason == portsHelperUnavailable && req.Method == "ports.visible" && !p.Visible {
+			// Remember a hide while the helper is away, so recovering it
+			// does not resume polling a panel that has already closed.
+			sched.SetVisible(target, false)
+		}
+		message := "Unknown pane"
+		if reason == portsHelperUnavailable {
+			message = "The pane's helper is not serving ports"
+		}
+		_ = h.r.TryError(req.ID, RPCError{
+			Code: -32602, Message: message, Data: portsErrorData{Reason: reason},
+		})
 		return
 	}
 	switch req.Method {
-	case "ports.status":
-		profileID, ok := portsProfileParam(h.r, req)
-		if !ok {
-			return
-		}
-		_ = h.r.TryResult(req.ID, mustMarshal(h.portsStatus(profileID)))
 	case "ports.sample":
-		profileID, ok := portsProfileParam(h.r, req)
-		if !ok {
-			return
-		}
-		// Retry semantics (spec §4): clear a terminal refusal, sample now.
-		h.sched.SampleNow(profileID)
-		_ = h.r.TryResult(req.ID, mustMarshal(h.portsStatus(profileID)))
+		sched.SampleNow(ctx, target)
+		fallthrough
+	case "ports.status":
+		st := sched.Status(target)
+		_ = h.r.TryResult(req.ID, mustMarshal(portsStatusResult{
+			PaneID: p.PaneID, Host: st.Host, Discovery: portsDiscoveryFrom(st),
+		}))
 	case "ports.pause":
-		var params portsPauseParams
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
-			return
-		}
-		h.sched.SetPaused(params.ProfileID, params.Paused)
+		sched.SetPaused(target, p.Paused)
 		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 	case "ports.visible":
-		var params portsPauseParams
-		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
-			return
-		}
-		h.sched.SetVisible(params.ProfileID, params.Visible)
+		sched.SetVisible(target, p.Visible)
 		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 	}
 }
 
-func portsProfileParam(wconn Responder, req jsonrpcRequest) (string, bool) {
-	var params portsProfileParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
-		return "", false
+// target uses the same pane ownership and connection identity as helperRefresh.
+// The session supplies the host label and distinguishes the local machine.
+func (h portsHandlers) target(paneID string) (id string, reason string) {
+	s := h.machine
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	rec := s.paneRecords[paneID]
+	if rec == nil || rec.wconn != h.w {
+		return "", portsUnknownPane
 	}
-	return params.ProfileID, true
+	var current session.Session
+	for _, sess := range s.registry.List() {
+		if sess.PaneID() == paneID && (current == nil || sess.OpenedAt().After(current.OpenedAt())) {
+			current = sess
+		}
+	}
+	if current == nil {
+		return rec.connectionID, portsHelperUnavailable
+	}
+	host := current.Host()
+	id = rec.connectionID
+	if current.Kind() == session.KindLocal {
+		id = discovery.LocalTargetID
+		host, _ = os.Hostname()
+	}
+	if !s.discoverySched.Activate(id, host) {
+		return id, portsHelperUnavailable
+	}
+	return id, ""
 }
 
-// portsStatus assembles the result: the scheduler's status for the profile
-// plus the transport's forward ledger, in stable id order (map iteration is
-// random; the renderer must not see a reordered list per call).
-func (h portsHandlers) portsStatus(profileID string) portsStatusResult {
-	st := h.sched.Status(profileID)
-	return portsStatusResult{
-		ProfileID: profileID,
-		Host:      st.Host,
-		Discovery: portsDiscoveryFrom(st),
-		Forwards:  h.ledger.forwardRecords(),
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Cadence hooks — the transport tells the scheduler what it sees
-// ---------------------------------------------------------------------------
-
-// discoveryUp is called from handleOpen once a remote session on a saved
-// profile has opened: the target is up, schedule the settle sample (spec
-// §4). The resolved config rides as the lease-keying option, exactly as the
-// tunnel path hands it to its connector (AD-4). Ad-hoc hosts (no profile)
-// get no discovery — consent is per-profile (spec §6).
-func (s *WSServer) discoveryUp(profileID, host string, cfg *ssh.ConnectConfig) {
-	if s.discoverySched == nil || profileID == "" || cfg == nil {
-		return
-	}
-	// The lease-keying option is the whole resolved config, exactly as the
-	// tunnel path hands it to its connector (AD-4). The host is the
-	// scheduler's per-target display material; the ssh.ConnectConfig itself
-	// carries no host field, so the caller (handleOpen) passes the resolved
-	// session host.
-	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
-	s.discoverySched.ConnectionUp(profileID, host, opts...)
-}
-
-// discoveryUpLocal schedules discovery for the machine the app runs on,
-// keyed by the reserved discovery.LocalTargetID — the wire identity for a
-// local tab, which has no profile. The machine is its own consent (there is
-// no remote host to ask); the cadence — settle, hidden-tab pause, user
-// Pause — governs it exactly like a profile target, and the
-// target is torn down when the last local tab closes. Host is the machine's
-// hostname, display material only.
+// discoveryUpLocal starts the initial local settle sample at session open.
 func (s *WSServer) discoveryUpLocal() {
-	if s.discoverySched == nil {
-		return
+	if s.discoverySched != nil {
+		host, _ := os.Hostname()
+		s.discoverySched.Activate(discovery.LocalTargetID, host)
 	}
-	host, _ := os.Hostname()
-	s.discoverySched.ConnectionUp(discovery.LocalTargetID, host)
 }
 
-// discoverySessionClosed is called after a session tears down. When the
-// closed session was the last one on its profile, the target is forgotten
-// and its lease released — a background poll never outlives its consumer.
 func (s *WSServer) discoverySessionClosed(sess session.Session) {
-	if s.discoverySched == nil || sess == nil {
+	if s.discoverySched == nil || sess == nil || sess.Kind() != session.KindLocal {
 		return
 	}
-	if pid := sess.ProfileID(); pid != "" {
-		for _, other := range s.registry.List() {
-			if other.ProfileID() == pid {
-				return // still live
-			}
+	for _, other := range s.registry.List() {
+		if other.Kind() == session.KindLocal {
+			return
 		}
-		s.discoverySched.ConnectionDown(pid)
-		return
 	}
-	if sess.Kind() == session.KindLocal {
-		for _, other := range s.registry.List() {
-			if other.Kind() == session.KindLocal {
-				return // still live
-			}
-		}
-		// The last local tab closed: the local target is forgotten — no
-		// background poll outlives its consumer, local or remote.
-		s.discoverySched.ConnectionDown(discovery.LocalTargetID)
-	}
+	s.discoverySched.LocalClosed()
 }

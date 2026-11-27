@@ -5,9 +5,9 @@
   "description": "Params for ports.pause.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["profileId"],
+  "required": ["paneId"],
   "properties": {
-    "profileId": {
+    "paneId": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128

@@ -14425,6 +14425,57 @@
       "preempts": []
     },
     {
+      "id": "tunnel.list",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [],
+          "dependencies": [
+            "server"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 10000,
+        "basis": "read",
+        "note": "read: snapshot the coordinator's forwarding ledger"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "same-key",
+      "waiting": "Reading the forwards",
+      "row": "past-wait",
+      "expired": "retry-read",
+      "resources": [],
+      "dependencies": [
+        "server"
+      ],
+      "preempts": []
+    },
+    {
       "id": "tunnel.open",
       "kind": "method",
       "owner": "request",

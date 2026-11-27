@@ -2,7 +2,7 @@ import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { decideIntegrationMethod } from './integration-method-decision'
 import { render } from 'solid-js/web'
-import { Show, createSignal, untrack } from 'solid-js'
+import { batch, Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { mountSettingsShortcut } from './settings-shortcut'
@@ -34,7 +34,8 @@ import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
-import { Dispatcher, RpcError } from './dispatcher'
+import { Dispatcher, RpcError, rpcRefusalCause } from './dispatcher'
+import type { PortsError } from './generated/ports.error'
 import { openForwardWithFallback } from './forward-retry'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
@@ -759,10 +760,12 @@ function main(): void {
   // terminal and cannot do that. The view follows the ACTIVE tab: the
   // target accessor below is a Solid signal fed by PaneManager's
   // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
-  // tab scopes to the reserved "local" target and shows THIS machine's
-  // listeners, and a tab with no ports scope (alias, Settings) shows the
-  // no-connection state instead of a stale host's ports (nocx-wzc4.8).
+  // tab shows this machine's listeners, and a tab with no ports scope
+  // shows the no-connection state (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
+  const [portsIsLocal, setPortsIsLocal] = createSignal(
+    tm.activeTerminalContent()?.sshOptions() === null,
+  )
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
   // Why the target is null, when it is null because the pane walked into an
   // environment we cannot enumerate (a hand-typed ssh has no managed
@@ -785,9 +788,12 @@ function main(): void {
   // is in).
   tm.onActiveTabChange = () => applyActiveTabPanel()
   tm.onActivePaneChange = () => {
-    setPortsTargetId(tm.portsTargetId())
-    setPortsUnavailable(tm.portsUnavailableReason())
-    setActiveOrigin(tm.activeOrigin())
+    batch(() => {
+      setPortsTargetId(tm.portsTargetId())
+      setPortsIsLocal(tm.activeTerminalContent()?.sshOptions() === null)
+      setPortsUnavailable(tm.portsUnavailableReason())
+      setActiveOrigin(tm.activeOrigin())
+    })
     rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
@@ -1380,16 +1386,21 @@ function main(): void {
         ariaLabel={t('app.ports.refresh', 'Refresh ports')}
         title={t('app.ports.refresh', 'Refresh ports')}
         disabled={portsTargetId() === null}
-        onClick={() => void portsServices.sample(portsTargetId() as string)}
+        onClick={() => {
+          const paneId = portsTargetId()
+          if (paneId !== null) void portsServices.sample(paneId).catch(() => {})
+        }}
       >
         <RefreshIcon />
       </IconButton>
     ),
     // The view receives the shell's view props: visible gates sampling,
-    // activeProfileId re-scopes the panel to the tab in front.
+    // activePortsPaneId re-scopes the panel to the tab in front.
     view: (props) => (
       <PortsPanel
-        profileId={props.activeProfileId}
+        paneId={props.activePortsPaneId}
+        isLocal={portsIsLocal}
+        savedProfileId={() => (props.activePortsPaneId() === null ? null : activeProfileId())}
         onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}
         services={portsServices}
@@ -1587,7 +1598,7 @@ function main(): void {
         save: (panel) => tm.setActiveTabPanel(panel),
       },
       /* eslint-disable solid/reactivity -- mountSidebar consumes these
-         accessors reactively (SidebarViewProps.activeProfileId and
+         accessors reactively (SidebarViewProps.activePortsPaneId and
          .activeOrigin, fed with the ports target and the Files origin, plus
          the settings-mode accessor below); the reads happen inside the
          views' tracked scopes, and the gate cannot see across the
@@ -1694,7 +1705,24 @@ function main(): void {
         name: 'port',
         fetch: async (selections) => {
           const server = selections[0]
-          const st = await portsServices.sample(server.item.id)
+          const paneId = tm.portsPaneForProfile(server.item.id)
+          const st =
+            paneId === null
+              ? null
+              : await portsServices.sample(paneId).catch((err: unknown) => {
+                  if (rpcRefusalCause<PortsError['reason']>(err) === 'unknown-pane') return null
+                  throw err
+                })
+          if (st === null) {
+            return [
+              {
+                id: '__no_ports_pane__',
+                label: t('ports.noConnection.title', 'No active connection'),
+                detail: t('ports.forward.openTab', 'Open this server in a tab to list its ports'),
+                system: true,
+              },
+            ]
+          }
           if (st.discovery.state === 'available' || st.discovery.state === 'available-limited') {
             if (st.discovery.listeners.length === 0) {
               return [

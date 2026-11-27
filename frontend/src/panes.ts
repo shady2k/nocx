@@ -727,11 +727,7 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * The route identity of this machine, the one backend a tab can be on today.
  *
  * The same vocabulary internal/commandnames.LocalRoute uses, and the same
- * string the notify feed stamps into every occurrence's backendId. It is
- * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
- * because that constant answers a different question — which target the
- * ports methods scope to — and one of the two will change when the helper
- * lands.
+ * string the notify feed stamps into every occurrence's backendId.
  *
  * Exported because the composition root needs it too: a session.focus push
  * carries a session id and nothing else (nocx-jiwq.1), so the backend id it
@@ -3169,12 +3165,24 @@ export class PaneManager {
     return this.activePane?.pane ?? null
   }
 
-  /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the
-   *  reserved "local" for a local shell, the saved-profile id for a
-   *  saved-profile SSH tab, null otherwise (alias tab, Settings, …): the
-   *  ports entry points are no-ops then. */
+  /** The backend pane id of the active terminal used by ports.*. */
   portsTargetId(): string | null {
     return this.activeTerminalContent()?.portsTargetId ?? null
+  }
+
+  /** Find a live SSH pane that can supply listeners for a profile's forward action. */
+  portsPaneForProfile(profileId: string): string | null {
+    for (const { content } of this.panes) {
+      if (
+        content instanceof TerminalContent &&
+        content.savedProfileId() === profileId &&
+        content.activeOrigin()?.kind === 'ssh' &&
+        content.portsTargetId !== null
+      ) {
+        return content.portsTargetId
+      }
+    }
+    return null
   }
 
   /** When portsTargetId is null because the pane walked into an environment

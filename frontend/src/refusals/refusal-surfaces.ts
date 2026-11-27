@@ -434,7 +434,16 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       where: 'ports panel: its own listing failure, named',
       retry: 'Refresh',
     },
-    note: "ports.sample is the panel's poll and is BACKGROUND while it is on screen; ports.visible is its own bookkeeping.",
+    note: 'ports.status is the panel poll. ports.sample is the Refresh action. ports.visible is bookkeeping.',
+  },
+  {
+    methods: ['tunnel.list'],
+    origin: 'background',
+    report: {
+      kind: 'background',
+      where:
+        'the ports panel keeps the last forward records and reads again on the next visible tick',
+    },
   },
   // ── dialog
   {

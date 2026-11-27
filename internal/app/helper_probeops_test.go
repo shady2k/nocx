@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -150,11 +151,11 @@ func TestTheHelperIsHandedTheResolvedDestination(t *testing.T) {
 
 type fakeProbeCommands struct {
 	unameCalls int
-	result     *remoteprobe.Result
+	result     *probeoutcome.Result
 	err        error
 }
 
-func (f *fakeProbeCommands) Uname(context.Context) (*remoteprobe.Result, error) {
+func (f *fakeProbeCommands) Uname(context.Context) (*probeoutcome.Result, error) {
 	f.unameCalls++
 	if f.err != nil {
 		return nil, f.err
@@ -162,26 +163,22 @@ func (f *fakeProbeCommands) Uname(context.Context) (*remoteprobe.Result, error) 
 	if f.result != nil {
 		return f.result, nil
 	}
-	return &remoteprobe.Result{Stdout: []byte("Linux x86_64\n")}, nil
+	return &probeoutcome.Result{Stdout: []byte("Linux x86_64\n")}, nil
 }
 
 func (f *fakeProbeCommands) Home(context.Context) (string, error) {
 	return "", errors.New("not asked")
 }
 
-func (f *fakeProbeCommands) SamplePorts(context.Context, remoteprobe.PortProbe) (*remoteprobe.Result, error) {
+func (f *fakeProbeCommands) Completion(context.Context, string, string, int, int, string) (*probeoutcome.Result, error) {
 	return nil, errors.New("not asked")
 }
 
-func (f *fakeProbeCommands) Completion(context.Context, string, string, int, int, string) (*remoteprobe.Result, error) {
+func (f *fakeProbeCommands) CommandNames(context.Context, proto.CommandNamesPhase, string) (*probeoutcome.Result, error) {
 	return nil, errors.New("not asked")
 }
 
-func (f *fakeProbeCommands) CommandNames(context.Context, remoteprobe.CommandNamesPhase, string) (*remoteprobe.Result, error) {
-	return nil, errors.New("not asked")
-}
-
-func (f *fakeProbeCommands) Inflate(context.Context, string) (*remoteprobe.Result, error) {
+func (f *fakeProbeCommands) Inflate(context.Context, string) (*probeoutcome.Result, error) {
 	return nil, errors.New("not asked")
 }
 func (f *fakeProbeCommands) Fingerprint() string   { return "SHA256:host" }
@@ -200,7 +197,7 @@ func (f *fakeProbeCommands) Close() error          { return nil }
 // machine.
 func TestThePlatformProbeRunsItsOneNamedCommandAndNothingElse(t *testing.T) {
 	lease := &fakeProbeCommands{
-		result: &remoteprobe.Result{Stdout: []byte("Darwin arm64\n"), Stderr: []byte("warning\n"), ExitStatus: 3, Truncated: true},
+		result: &probeoutcome.Result{Stdout: []byte("Darwin arm64\n"), Stderr: []byte("warning\n"), ExitStatus: 3, Truncated: true},
 	}
 	platform := &platformLease{helperProbeLease: &helperProbeLease{lease: lease}, host: "host.example"}
 

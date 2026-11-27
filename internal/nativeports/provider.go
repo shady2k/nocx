@@ -62,10 +62,3 @@ func (p *Provider) Sample(ctx context.Context) portsprobe.Sample {
 		}
 	}
 }
-
-// Retry is a no-op: the local provider has no refusal state, and a retry is
-// simply another Sample.
-func (p *Provider) Retry() {}
-
-// Close is a no-op: a native read holds nothing between calls.
-func (p *Provider) Close() error { return nil }

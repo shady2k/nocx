@@ -117,7 +117,6 @@ func TestNoProbeCommandTextLivesOutsideItsOwner(t *testing.T) {
 	owned := map[string]string{
 		"uname -s -m": "uname",
 		"echo $HOME":  "home",
-		"NOCX-PD/1":   "the port probes' framing sentinel",
 		"NOCX_CN":     "the enumeration's framing marker",
 		"NOCXEOF_":    "the completion heredoc delimiter",
 	}

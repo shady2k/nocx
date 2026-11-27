@@ -218,7 +218,7 @@ func TestReplacementNotificationRefusalClosesSession(t *testing.T) {
 	reg := session.New(logger, nil)
 	const sid = session.ID("0123456789abcdef0123456789abcdef")
 	const lane = lifecycle.LaneID("refused-open")
-	sched := discovery.NewScheduler(&portsFakeConnector{}, logger, discovery.WithSettleDelay(time.Hour))
+	sched := discovery.NewScheduler(nil, logger, nil)
 	defer func() { _ = sched.Close() }()
 	helper := &refusedDeliveryOpener{fixcHostedOpener: fixcHostedOpener{reg: reg, id: sid, driver: panedriver.New("instance", logger)}, lane: lane}
 	ws := NewWSServer(logger, reg, WithDiscoveryScheduler(sched), WithHelperSessionOpener(helper), WithProfileResolver(&fakeResolver{resolveFn: func(string) (string, *ssh.ConnectConfig, error) {

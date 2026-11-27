@@ -592,11 +592,11 @@ describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
     expect(panel.classList.contains('collapsed')).toBe(false)
   })
 
-  it('passes reactive visible and activeProfileId accessors into the active view', () => {
+  it('passes reactive visible and activePortsPaneId accessors into the active view', () => {
     const seen: { visible: boolean; profile: string | null }[] = []
     const ProbeView: Component<SidebarViewProps> = (props) => {
       createEffect(() => {
-        seen.push({ visible: props.visible(), profile: props.activeProfileId() })
+        seen.push({ visible: props.visible(), profile: props.activePortsPaneId() })
       })
       return <div />
     }

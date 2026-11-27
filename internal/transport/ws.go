@@ -1083,7 +1083,7 @@ type WSServer struct {
 	// settle sample, hidden-tab pause, one-in-flight. When
 	// nil, the ports.* methods return a JSON-RPC error and the cadence hooks
 	// are no-ops.
-	discoverySched *discovery.Scheduler
+	discoverySched *discovery.ConnectionScheduler
 	// inBand builds the in-band bootstrap plan for shell.integrate
 	// (nocx-ynsx). When nil, the method returns a JSON-RPC error; the
 	// transport never constructs the capability itself.

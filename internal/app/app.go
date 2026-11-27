@@ -137,7 +137,7 @@ type App struct {
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
-	discoverySched *discovery.Scheduler
+	discoverySched *discovery.ConnectionScheduler
 
 	// gitFactory owns the background git-environment resolution
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
@@ -1351,23 +1351,10 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
-	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
-	// profile. *ssh.RealClient satisfies discovery.Connector without an
-	// adapter — the same shape that satisfies tunnel.Connector. The local
-	// machine (nocx-wzc4.8) samples through the native kernel reader,
-	// wired here at the composition root (AD-8) behind the same Provider
-	// seam the remote ladder implements. The cadence timers are named
-	// here, at the composition root (spec §4): one settle sample 1 s after
-	// the connection comes up, periodic sampling every 10 s while the panel
-	// is visible and nothing is paused.
-	discoverySched := discovery.NewScheduler(
-		probes, logger,
-		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
-			return nativeports.NewProvider(l)
-		}),
-		discovery.WithSettleDelay(1*time.Second),
-		discovery.WithSampleInterval(10*time.Second),
-	)
+	// Remote port samples use the same helper registry as Git and Files.
+	discoverySched := discovery.NewConnectionScheduler(farHelpers, logger, func(l log.Logger) discovery.LocalProvider {
+		return nativeports.NewProvider(l)
+	})
 	// The remote shell launcher, built here so its bootstrap-outcome sink
 	// can be wired once the server exists (below, beside the other
 	// integration-axis seams). Without that sink the whole closed outcome

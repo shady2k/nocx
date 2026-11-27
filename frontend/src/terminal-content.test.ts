@@ -84,7 +84,6 @@ import {
   type SnippetFire,
   type TerminalContentHooks,
 } from './terminal-content'
-import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
 import { SURFACE_TERMINAL, type ContentViewport } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
@@ -6622,8 +6621,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
 
   it('answers the saved-profile question once, with Quick Connect’s empty id spelled as none', async () => {
     // main.tsx's Quick Connect calls newSSHPane('', …): the tab has no saved
-    // connection, and the head, the Git panel and the ports target must all
-    // read that from one answer (ALX-998).
+    // connection. Ports still has the backend pane id.
     const adhocClient = makeClient()
     adhocClient.openSSHSessionByHost.mockResolvedValue(makeSession())
     const adhoc = await mountTerminal(
@@ -6633,7 +6631,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     )
     try {
       expect(adhoc.content.savedProfileId()).toBeNull()
-      expect(adhoc.content.portsTargetId).toBeNull()
+      expect(adhoc.content.portsTargetId).toBe(adhoc.content.backendPaneId)
     } finally {
       adhoc.teardown()
     }
@@ -6647,7 +6645,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     )
     try {
       expect(saved.content.savedProfileId()).toBe('profile-1')
-      expect(saved.content.portsTargetId).toBe('profile-1')
+      expect(saved.content.portsTargetId).toBe(saved.content.backendPaneId)
     } finally {
       saved.teardown()
     }
@@ -7220,7 +7218,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()
@@ -7237,7 +7235,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       // seeded from the session facts; its destination is deliberately not
       // the child's.)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       // The parent suspends as the child establishes (protocol §9: the
       // kernel rejects a second prompt_ready without a native between).
       handler({ lane: 'lane-1', lifecycle: 'native' })
@@ -7291,7 +7289,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       handler({ lane: 'lane-1', lifecycle: 'native' })
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(onPortsTargetChange).toHaveBeenCalledTimes(2)
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()
@@ -7306,14 +7304,14 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       client,
     )
     try {
-      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
       // Even once the session's own root domain is live — whose host IS the
       // profile host — the pane is still on the machine the profile owns.
       // Host presence alone must not void the scope.
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()

@@ -206,7 +206,7 @@ package coordinator
 // is never taken; hence the number moves with the contracts. The stage bumps
 // this ONCE and this leaf is where the contracts change: .11.1, .11.2 and
 // .11.4 touch no schema.
-const ProtocolVersion = 45
+const ProtocolVersion = 46
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

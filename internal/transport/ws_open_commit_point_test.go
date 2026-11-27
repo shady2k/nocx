@@ -337,10 +337,10 @@ func commitPointParams() openParams {
 	return openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
 }
 
-func commitPointServer(t *testing.T, ctx context.Context, reg session.Registry, opener *commitPointOpener, extra ...WSServerOption) (*WSServer, *discovery.Scheduler) {
+func commitPointServer(t *testing.T, ctx context.Context, reg session.Registry, opener *commitPointOpener, extra ...WSServerOption) (*WSServer, *discovery.ConnectionScheduler) {
 	t.Helper()
 	_, logger := logtest.New(t)
-	sched := discovery.NewScheduler(&portsFakeConnector{}, logger, discovery.WithSettleDelay(time.Hour))
+	sched := discovery.NewConnectionScheduler(nil, logger, nil)
 	t.Cleanup(func() { _ = sched.Close() })
 	opts := append([]WSServerOption{
 		WithDiscoveryScheduler(sched),
@@ -359,7 +359,7 @@ func commitPointServer(t *testing.T, ctx context.Context, reg session.Registry, 
 
 // assertOpenLeftNothing states the whole of "nothing remains" for an open that
 // never reached its commit point.
-func assertOpenLeftNothing(t *testing.T, ws *WSServer, reg session.Registry, sched *discovery.Scheduler, sid session.ID, state *connState) {
+func assertOpenLeftNothing(t *testing.T, ws *WSServer, reg session.Registry, sched *discovery.ConnectionScheduler, sid session.ID, state *connState) {
 	t.Helper()
 	if sessions := reg.List(); len(sessions) != 0 {
 		t.Errorf("the open left %d sessions", len(sessions))

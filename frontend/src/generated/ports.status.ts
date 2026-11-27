@@ -10,15 +10,15 @@
  */
 
 /**
- * Result of the ports.status JSON-RPC method: the discovery state for one target (an authenticated SSH host, or the reserved "local" machine) plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
+ * The latest discovery state for the pane and the tracked forwards.
  */
 export interface PortsStatusResult {
   /**
-   * The target the status belongs to — the id the renderer echoes to every other ports.* method. A stored profile id, or the reserved value "local" for the machine the app runs on (a local tab has no profile; the renderer recognizes the identity by this exact value).
+   * The backend pane id this status belongs to.
    */
-  profileId: string
+  paneId: string
   /**
-   * Host the discovery runs against, as the session opened it — the machine's hostname for the reserved "local" target. Empty before the first connection to the target.
+   * Host the discovery runs against, as the session opened it — the machine's hostname for a local pane. Empty before the first connection to the target.
    */
   host: string
   /**
@@ -28,13 +28,7 @@ export interface PortsStatusResult {
     /**
      * Overall outcome of the last sample. pending is the state before the first sample completed; available with an empty listeners list means 'no listeners observed'.
      */
-    state:
-      | 'available'
-      | 'available-limited'
-      | 'unavailable'
-      | 'failed-transiently'
-      | 'permission-or-policy-refused'
-      | 'pending'
+    state: 'available' | 'available-limited' | 'unavailable' | 'failed-transiently' | 'pending'
     /**
      * Remote listening TCP ports from the last successful sample. Always an array, never null: an empty list is the honest 'nothing is listening' and must only appear when that is true.
      */
@@ -94,13 +88,9 @@ export interface PortsStatusResult {
      * Whether a watcher (the ports panel) is present and visible. Periodic sampling runs only while true.
      */
     visible: boolean
-    /**
-     * The underlying connection died; discovery stopped and nothing samples until the next connection. A fresh sample follows automatically.
-     */
-    connLost: boolean
   }
   /**
-   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for the reserved "local" target: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.
+   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for a local pane: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.
    */
   forwards: {
     /**

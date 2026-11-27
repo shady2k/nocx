@@ -2,17 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/ports.sample.schema.json",
   "title": "PortsSampleResult",
-  "description": "Result of the ports.sample JSON-RPC method — a manual retry that clears a terminal refusal and samples immediately: the discovery state for one target (an authenticated SSH host, or the reserved \"local\" machine) plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "description": "The pane status after asking its provider for a sample.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["profileId", "host", "discovery", "forwards"],
+  "required": ["paneId", "host", "discovery", "forwards"],
   "properties": {
-    "profileId": {
-      "description": "The target the status belongs to — the id the renderer echoes to every other ports.* method. A stored profile id, or the reserved value \"local\" for the machine the app runs on (a local tab has no profile; the renderer recognizes the identity by this exact value).",
+    "paneId": {
+      "description": "The backend pane id this status belongs to.",
       "type": "string"
     },
     "host": {
-      "description": "Host the discovery runs against, as the session opened it — the machine's hostname for the reserved \"local\" target. Empty before the first connection to the target.",
+      "description": "Host the discovery runs against, as the session opened it — the machine's hostname for a local pane. Empty before the first connection to the target.",
       "type": "string"
     },
     "discovery": {
@@ -28,21 +28,13 @@
         "stderr",
         "lastSampleAt",
         "paused",
-        "visible",
-        "connLost"
+        "visible"
       ],
       "properties": {
         "state": {
           "description": "Overall outcome of the last sample. pending is the state before the first sample completed; available with an empty listeners list means 'no listeners observed'.",
           "type": "string",
-          "enum": [
-            "available",
-            "available-limited",
-            "unavailable",
-            "failed-transiently",
-            "permission-or-policy-refused",
-            "pending"
-          ]
+          "enum": ["available", "available-limited", "unavailable", "failed-transiently", "pending"]
         },
         "listeners": {
           "description": "Remote listening TCP ports from the last successful sample. Always an array, never null: an empty list is the honest 'nothing is listening' and must only appear when that is true.",
@@ -117,15 +109,11 @@
         "visible": {
           "description": "Whether a watcher (the ports panel) is present and visible. Periodic sampling runs only while true.",
           "type": "boolean"
-        },
-        "connLost": {
-          "description": "The underlying connection died; discovery stopped and nothing samples until the next connection. A fresh sample follows automatically.",
-          "type": "boolean"
         }
       }
     },
     "forwards": {
-      "description": "Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for the reserved \"local\" target: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.",
+      "description": "Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for a local pane: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.",
       "type": "array",
       "items": {
         "type": "object",
@@ -137,6 +125,7 @@
           "actualBind",
           "destination",
           "scope",
+          "caveat",
           "state",
           "stopReason",
           "error"
@@ -177,6 +166,10 @@
           },
           "scope": {
             "description": "Owner label the renderer attached at open.",
+            "type": "string"
+          },
+          "caveat": {
+            "description": "Success-time bind caution, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server. Never an error: the forward is running.",
             "type": "string"
           },
           "state": {

@@ -223,7 +223,7 @@ func withdrawRequest(t *testing.T, conn *websocket.Conn, id int) {
 // over the wire. It is assertOpenLeftNothing without the connection's own
 // ownership map, which handleSession owns privately — the wire test asserts the
 // server-owned halves, which are the ones a leak would show up in.
-func assertSessionLeftNothingWire(t *testing.T, ws *WSServer, reg session.Registry, sched *discovery.Scheduler, sid session.ID, profileID string) {
+func assertSessionLeftNothingWire(t *testing.T, ws *WSServer, reg session.Registry, sched *discovery.ConnectionScheduler, sid session.ID, profileID string) {
 	t.Helper()
 	if sessions := reg.List(); len(sessions) != 0 {
 		t.Errorf("the refused open left %d sessions", len(sessions))
@@ -531,10 +531,10 @@ func TestStopAfterTheAnswerReleasesTheSessionOnce(t *testing.T) {
 // settlementServer is commitPointServer without its Stop cleanup: the two tests
 // above decide for themselves when the server stops, and a second Stop from a
 // cleanup would be measuring that instead.
-func settlementServer(t *testing.T, ctx context.Context, reg session.Registry, opener *commitPointOpener, extra ...WSServerOption) (*WSServer, *discovery.Scheduler) {
+func settlementServer(t *testing.T, ctx context.Context, reg session.Registry, opener *commitPointOpener, extra ...WSServerOption) (*WSServer, *discovery.ConnectionScheduler) {
 	t.Helper()
 	_, logger := logtest.New(t)
-	sched := discovery.NewScheduler(&portsFakeConnector{}, logger, discovery.WithSettleDelay(time.Hour))
+	sched := discovery.NewConnectionScheduler(nil, logger, nil)
 	t.Cleanup(func() { _ = sched.Close() })
 	opts := append([]WSServerOption{
 		WithDiscoveryScheduler(sched),

@@ -128,8 +128,9 @@ type wsRPCResult struct {
 	ID     int             `json:"id,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data,omitempty"`
 	} `json:"error,omitempty"`
 }
 

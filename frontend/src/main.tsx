@@ -759,8 +759,8 @@ function main(): void {
   // terminal and cannot do that. The view follows the ACTIVE tab: the
   // target accessor below is a Solid signal fed by PaneManager's
   // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
-  // tab scopes to the reserved "local" target and shows THIS machine's
-  // listeners, and a tab with no ports scope (alias, Settings) shows the
+  // tab shows this machine's listeners, and a tab with no ports scope
+  // shows the
   // no-connection state instead of a stale host's ports (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
@@ -1380,16 +1380,21 @@ function main(): void {
         ariaLabel={t('app.ports.refresh', 'Refresh ports')}
         title={t('app.ports.refresh', 'Refresh ports')}
         disabled={portsTargetId() === null}
-        onClick={() => void portsServices.sample(portsTargetId() as string)}
+        onClick={() => {
+          const paneId = portsTargetId()
+          if (paneId !== null) void portsServices.sample(paneId).catch(() => {})
+        }}
       >
         <RefreshIcon />
       </IconButton>
     ),
     // The view receives the shell's view props: visible gates sampling,
-    // activeProfileId re-scopes the panel to the tab in front.
+    // activePortsPaneId re-scopes the panel to the tab in front.
     view: (props) => (
       <PortsPanel
-        profileId={props.activeProfileId}
+        paneId={props.activePortsPaneId}
+        isLocal={() => props.activeOrigin()?.kind === 'local'}
+        savedProfileId={() => (props.activePortsPaneId() === null ? null : activeProfileId())}
         onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}
         services={portsServices}
@@ -1587,7 +1592,7 @@ function main(): void {
         save: (panel) => tm.setActiveTabPanel(panel),
       },
       /* eslint-disable solid/reactivity -- mountSidebar consumes these
-         accessors reactively (SidebarViewProps.activeProfileId and
+         accessors reactively (SidebarViewProps.activePortsPaneId and
          .activeOrigin, fed with the ports target and the Files origin, plus
          the settings-mode accessor below); the reads happen inside the
          views' tracked scopes, and the gate cannot see across the
@@ -1694,7 +1699,18 @@ function main(): void {
         name: 'port',
         fetch: async (selections) => {
           const server = selections[0]
-          const st = await portsServices.sample(server.item.id)
+          const paneId = tm.portsPaneForProfile(server.item.id)
+          if (paneId === null) {
+            return [
+              {
+                id: '__no_ports_pane__',
+                label: t('ports.noConnection.title', 'No active connection'),
+                detail: t('ports.forward.openTab', 'Open this server in a tab to list its ports'),
+                system: true,
+              },
+            ]
+          }
+          const st = await portsServices.sample(paneId)
           if (st.discovery.state === 'available' || st.discovery.state === 'available-limited') {
             if (st.discovery.listeners.length === 0) {
               return [

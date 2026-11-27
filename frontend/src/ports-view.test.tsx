@@ -24,15 +24,14 @@ import { PlugIcon, RefreshIcon } from './ui/icons'
 import { makeClient, makeSession, mountPaneManager } from './test-support/panes-fixtures'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { LOCAL_TARGET_ID } from './ports-client'
 import { setDocumentHidden } from './test-support/document-visibility'
 
 const PORTS_VIEW_ID = 'ports'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
-const statusFixture = (profileId: string): PortsStatusResult => ({
-  profileId,
+const statusFixture = (paneId: string): PortsStatusResult => ({
+  paneId,
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -44,7 +43,6 @@ const statusFixture = (profileId: string): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
   forwards: [],
 })
@@ -90,7 +88,9 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
 function portsView(
   services: PortsPanelServices,
   portsTargetId: () => string | null,
-  unavailableIn: () => string = () => '',
+  unavailableIn: () => string,
+  savedProfile: () => string | null,
+  isLocal: () => boolean,
 ): SidebarViewDescriptor {
   const pause = createPortsPauseControl()
   // The filter is the shell's pinned row, not the body's (nocx-708q.3):
@@ -115,7 +115,9 @@ function portsView(
     ),
     view: (props) => (
       <PortsPanel
-        profileId={props.activeProfileId}
+        paneId={props.activePortsPaneId}
+        savedProfileId={savedProfile}
+        isLocal={isLocal}
         unavailableIn={unavailableIn}
         services={services}
         visible={props.visible}
@@ -145,7 +147,16 @@ async function mountApp(
   if (profileId !== null) manager.newSSHPane(profileId, 'host.example', 'alice')
 
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(manager.portsTargetId())
-  manager.onActivePaneChange = () => setPortsTargetId(manager.portsTargetId())
+  const [savedProfile, setSavedProfile] = createSignal(
+    manager.activeTerminalContent()?.savedProfileId() ?? null,
+  )
+  const [isLocal, setIsLocal] = createSignal(profileId === null)
+  const initialPane = manager.activeTerminalContent()!.backendPaneId
+  manager.onActivePaneChange = () => {
+    setPortsTargetId(manager.portsTargetId())
+    setSavedProfile(manager.activeTerminalContent()?.savedProfileId() ?? null)
+    setIsLocal(manager.activeTerminalContent()?.activeOrigin()?.kind === 'local')
+  }
 
   const bar = document.createElement('div')
   bar.id = 'activitybar'
@@ -159,7 +170,7 @@ async function mountApp(
       /* eslint-disable solid/reactivity -- portsView consumes this accessor
          inside the view's and the header action's tracked scopes; the gate
          cannot see across that boundary (same contract as the arg below). */
-      portsView(services, () => portsTargetId(), unavailableIn),
+      portsView(services, () => portsTargetId(), unavailableIn, savedProfile, isLocal),
       /* eslint-enable solid/reactivity */
     ],
     [],
@@ -169,7 +180,7 @@ async function mountApp(
     () => portsTargetId(),
   )
   liveHandles.push(handle)
-  return { manager, bar, panel, handle }
+  return { manager, bar, panel, handle, initialPane }
 }
 
 function portsIcon(bar: HTMLElement): HTMLElement {
@@ -197,12 +208,12 @@ describe('ports sidebar view', () => {
       },
     })
     const services = fakeServices({ status })
-    const { bar, panel } = await mountApp(services)
+    const { bar, panel, initialPane } = await mountApp(services)
 
     // mountSidebar auto-selects the first view and starts expanded
     // (nocx-rp2j) — the panel is on screen and asked the backend for THIS
     // connection's ports.
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(initialPane))
     await vi.waitFor(() => expect(panel.textContent).toContain('0.0.0.0:22'))
 
     // The user path: click the activity-bar icon to close the view, then
@@ -218,11 +229,13 @@ describe('ports sidebar view', () => {
   it('switching SSH tabs re-scopes the view to the tab in front', async () => {
     const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
     const services = fakeServices({ status })
-    const { manager } = await mountApp(services)
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+    const { manager, initialPane } = await mountApp(services)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(initialPane))
 
     manager.newSSHPane('ssh:p2:2', 'other.example', 'bob')
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+    await vi.waitFor(() =>
+      expect(status).toHaveBeenCalledWith(manager.activeTerminalContent()?.backendPaneId),
+    )
   })
   it('switching SSH tabs clears the filter — one host query never carries over', async () => {
     const status = vi.fn().mockResolvedValue({
@@ -247,7 +260,9 @@ describe('ports sidebar view', () => {
     // The filter is part of the re-scoped state (decision 4): a query typed
     // for host A's ports must not meet host B's list already half-filtered.
     manager.newSSHPane('ssh:p2:2', 'other.example', 'bob')
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+    await vi.waitFor(() =>
+      expect(status).toHaveBeenCalledWith(manager.activeTerminalContent()?.backendPaneId),
+    )
     await vi.waitFor(() =>
       expect(panel.querySelectorAll('[data-testid="detected-row"]')).toHaveLength(1),
     )
@@ -255,22 +270,20 @@ describe('ports sidebar view', () => {
       '',
     )
   })
-  it("a local tab shows THIS machine's listeners, scoped to 'local'", async () => {
+  it('a local tab shows this machine’s listeners under its backend pane id', async () => {
     const status = vi.fn().mockResolvedValue({
-      ...statusFixture(LOCAL_TARGET_ID),
+      ...statusFixture('fixture-local-pane'),
       host: 'my-machine',
       discovery: {
-        ...statusFixture(LOCAL_TARGET_ID).discovery,
+        ...statusFixture('fixture-local-pane').discovery,
         listeners: [listenerFixture(22)],
       },
     })
     const services = fakeServices({ status })
-    const { panel } = await mountApp(services, null)
+    const { panel, initialPane } = await mountApp(services, null)
 
-    // The initial tab is a local shell: the panel asks the backend for the
-    // reserved "local" target and shows this machine's listeners — never
-    // the no-connection state a profile-less tab used to get.
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    // The initial tab shows the local machine’s listeners.
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(initialPane))
     await vi.waitFor(() => expect(panel.textContent).toContain('0.0.0.0:22'))
     expect(panel.textContent).not.toContain('No active connection')
     // A local row offers copy-address, never Forward.
@@ -278,45 +291,46 @@ describe('ports sidebar view', () => {
     expect(panel.querySelector('[data-testid="ports-copy"]')).not.toBeNull()
   })
   it('switching local to SSH and back re-scopes the view both ways', async () => {
-    const status = vi.fn().mockResolvedValue(statusFixture(LOCAL_TARGET_ID))
+    const status = vi.fn().mockResolvedValue(statusFixture('fixture-local-pane'))
     const services = fakeServices({ status })
-    const { manager } = await mountApp(services, null)
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    const { manager, initialPane } = await mountApp(services, null)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(initialPane))
 
     manager.newSSHPane('ssh:p1:1', 'host.example', 'alice')
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+    await vi.waitFor(() =>
+      expect(status).toHaveBeenCalledWith(manager.activeTerminalContent()?.backendPaneId),
+    )
 
-    // Back to the local tab (index 0): the panel re-scopes to 'local' — the
-    // SSH host's ports are gone, this machine's are back.
+    // Returning to the local tab restores its own pane scope.
     manager.activateByIndex(0)
-    const localCalls = () => status.mock.calls.filter(([pid]) => pid === LOCAL_TARGET_ID).length
+    const localCalls = () => status.mock.calls.filter(([pid]) => pid === initialPane).length
     await vi.waitFor(() => expect(localCalls()).toBeGreaterThanOrEqual(2))
-    expect(status.mock.calls[status.mock.calls.length - 1]?.[0]).toBe(LOCAL_TARGET_ID)
+    expect(status.mock.calls[status.mock.calls.length - 1]?.[0]).toBe(initialPane)
   })
-  it('an alias tab — neither local nor a saved profile — shows the no-connection state', async () => {
-    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
-    const services = fakeServices({ status })
-    const { manager, panel } = await mountApp(services)
-    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
+  it('opens Ports for an ad-hoc SSH pane using its backend id', async () => {
+    const status = vi.fn().mockResolvedValue(statusFixture('fixture'))
+    const { manager, initialPane } = await mountApp(fakeServices({ status }))
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(initialPane))
 
-    // Alias: an SSH session with no profile id — no ports scope at all.
     manager.newSSHPane('', 'alias.example', 'bob')
-    await vi.waitFor(() => expect(panel.textContent).toContain('No active connection'))
-    expect(status).toHaveBeenCalledTimes(1)
+    const adhocPane = manager.activeTerminalContent()?.backendPaneId
+    expect(adhocPane).toBeTruthy()
+    expect(adhocPane).not.toBe(initialPane)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith(adhocPane))
   })
 
   it('collapsing the sidebar pauses sampling; expanding resumes it', async () => {
     const visible = vi.fn().mockResolvedValue({})
     const services = fakeServices({ visible })
-    const { bar } = await mountApp(services)
-    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    const { bar, initialPane } = await mountApp(services)
+    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, true))
 
     const icon = portsIcon(bar)
     icon.click() // collapse — counts as not visible
-    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, false))
 
     icon.click() // expand
-    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, true))
   })
 
   it('hiding the window pauses sampling, then showing resumes it', async () => {
@@ -324,16 +338,16 @@ describe('ports sidebar view', () => {
     try {
       const visible = vi.fn().mockResolvedValue({})
       const services = fakeServices({ visible })
-      await mountApp(services)
-      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+      const { initialPane } = await mountApp(services)
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, true))
 
       const hide = setDocumentHidden(true)
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, false))
 
       hide()
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(visible).toHaveBeenLastCalledWith('ssh:p1:1', true))
+      await vi.waitFor(() => expect(visible).toHaveBeenLastCalledWith(initialPane, true))
     } finally {
       restore()
     }
@@ -344,12 +358,12 @@ describe('ports sidebar view', () => {
     try {
       const visible = vi.fn().mockResolvedValue({})
       const services = fakeServices({ visible })
-      await mountApp(services)
-      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+      const { initialPane } = await mountApp(services)
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, false))
 
       restore()
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith(initialPane, true))
     } finally {
       restore()
     }
@@ -443,7 +457,7 @@ describe('ports sidebar view', () => {
     const sample = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
     const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
     const services = fakeServices({ sample, status })
-    const { panel } = await mountApp(services)
+    const { panel, initialPane } = await mountApp(services)
     await vi.waitFor(() => expect(status).toHaveBeenCalled())
 
     // The action lives in the view's HEADER (SidebarViewDescriptor.actions),
@@ -456,7 +470,7 @@ describe('ports sidebar view', () => {
     // One sample costs ~12ms, so asking again is the useful control — not
     // protecting the host from a poll it does not notice.
     refreshBtn!.click()
-    await vi.waitFor(() => expect(sample).toHaveBeenCalledWith('ssh:p1:1'))
+    await vi.waitFor(() => expect(sample).toHaveBeenCalledWith(initialPane))
   })
 
   // ── The loader (nocx-wzc4.11 report 5, re-reported 2026-08-04) ─────────
@@ -502,7 +516,6 @@ describe('ports sidebar view', () => {
     'available-limited',
     'unavailable',
     'failed-transiently',
-    'permission-or-policy-refused',
     'pending',
   ] as const
 
@@ -553,14 +566,14 @@ describe('ports sidebar view', () => {
   })
 
   it('says the local listeners belong to this machine, not to whatever the tab is called', async () => {
-    const local = statusFixture(LOCAL_TARGET_ID)
+    const local = statusFixture('fixture-local-pane')
     local.host = ''
     const { bar, panel } = await mountApp(
       fakeServices({
         status: vi.fn().mockResolvedValue(local),
         sample: vi.fn().mockResolvedValue(local),
       }),
-      LOCAL_TARGET_ID,
+      null,
     )
     portsIcon(bar).click()
     await vi.waitFor(() => {
@@ -578,7 +591,7 @@ describe('ports sidebar view', () => {
     const pause = createPortsPauseControl()
     const { container } = render(() => (
       <PortsPanel
-        profileId={() => null}
+        paneId={() => null}
         unavailableIn={() => 'pi@192.0.2.93'}
         services={services}
         visible={() => true}

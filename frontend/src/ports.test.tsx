@@ -15,7 +15,6 @@ import { createSignal } from 'solid-js'
 import { clearToasts } from './ui/toast'
 import { RpcError } from './dispatcher'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { LOCAL_TARGET_ID } from './ports-client'
 import type { PortsStatusResult } from './generated/ports.status'
 import {
   PortsPanel,
@@ -53,7 +52,6 @@ const discoveryFixture = (
   lastSampleAt: null,
   paused: false,
   visible: true,
-  connLost: false,
   ...over,
 })
 
@@ -61,12 +59,14 @@ const statusFixture = (
   over: Partial<PortsStatusResult['discovery']> = {},
   extra: Partial<PortsStatusResult> = {},
 ): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: discoveryFixture(over),
   forwards: [],
   ...extra,
 })
+
+const LOCAL_PANE = 'local-pane'
 
 const listenerFixture = (
   port: number,
@@ -130,7 +130,9 @@ function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps
     <>
       <PortsFilter />
       <PortsPanel
-        profileId={() => 'ssh:p1:1'}
+        paneId={() => 'ssh:p1:1'}
+        savedProfileId={() => (over.paneId?.() === LOCAL_PANE ? null : 'ssh:p1:1')}
+        isLocal={() => over.paneId?.() === LOCAL_PANE}
         services={services}
         visible={() => true}
         pause={pause}
@@ -182,20 +184,6 @@ describe('PortsPanel — detected rows', () => {
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
-  })
-
-  it('a refused host renders the refusal and offers Retry', async () => {
-    const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture({
-          state: 'permission-or-policy-refused',
-          classification: 'additional sessions refused',
-        }),
-      ),
-    })
-    renderPanel(services)
-    await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
-    expect(screen.getByText('additional sessions refused')).toBeTruthy()
   })
 
   it('the forward action on a detected row reaches the client method and changes that row in place', async () => {
@@ -355,6 +343,18 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     }
   })
 
+  it('retries visibility when the first status arrives after the helper is ready', async () => {
+    const visible = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('helper unavailable'))
+      .mockResolvedValue({})
+    const status = vi.fn().mockResolvedValue(statusFixture({ visible: false }))
+    renderPanel(fakeServices({ status, visible }))
+
+    await waitFor(() => expect(visible).toHaveBeenCalledTimes(2))
+    expect(visible).toHaveBeenLastCalledWith('ssh:p1:1', true)
+  })
+
   it('a backend-reported pause stops the status poll (nocx-wzc4.11)', async () => {
     // The header action is Refresh now, so nothing in the renderer flips this;
     // the control only REFLECTS a pause the backend reports, and the poll must
@@ -375,21 +375,21 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     }
   })
 
-  it('a failure state offers exactly one Retry, and the body offers no toolbar copy', async () => {
+  it('an unavailable probe offers no Retry or duplicate toolbar controls', async () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(
         statusFixture({
-          state: 'permission-or-policy-refused',
-          classification: 'additional sessions refused',
+          state: 'unavailable',
+          classification: 'no probe tool usable on this host',
         }),
       ),
     })
     renderPanel(services)
-    await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText('Could not determine what is listening')).toBeTruthy(),
+    )
 
-    // Retry exists exactly where it belongs: inside the failure state. The
-    // toolbar copy (ports-retry) and the body Pause button are gone.
-    expect(screen.getAllByText('Retry')).toHaveLength(1)
+    expect(screen.queryByText('Retry')).toBeNull()
     expect(screen.queryByTestId('ports-retry')).toBeNull()
     expect(screen.queryByTestId('ports-pause')).toBeNull()
   })
@@ -824,7 +824,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid(null)
@@ -843,7 +843,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid('ssh:p2:2')
@@ -867,7 +867,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
 
     setPid('ssh:p2:2')
     await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
@@ -883,7 +883,7 @@ describe('PortsPanel — active-tab scope', () => {
     const services = fakeServices({ visible })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
     const [vis, setVis] = createSignal(true)
-    renderPanel(services, { profileId: pid, visible: vis })
+    renderPanel(services, { paneId: pid, visible: vis })
 
     await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
     setVis(false)
@@ -933,14 +933,14 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
       .mockResolvedValue(
         statusFixture(
           { state: 'available', listeners: [listenerFixture(22)] },
-          { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+          { paneId: LOCAL_PANE, host: 'my-machine' },
         ),
       )
     const openForward = vi.fn()
     const services = fakeServices({ status, openForward })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
-    await waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    await waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_PANE))
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
     // The row offers copy-address; Forward is not offered on this machine.
     expect(screen.queryByTestId('ports-forward')).toBeNull()
@@ -967,12 +967,12 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
           .mockResolvedValue(
             statusFixture(
               { state: 'available', listeners: [listenerFixture(22)] },
-              { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+              { paneId: LOCAL_PANE, host: 'my-machine' },
             ),
           ),
         openForward,
       })
-      renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+      renderPanel(services, { paneId: () => LOCAL_PANE })
       await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
       fireEvent.click(screen.getByTestId('ports-copy'))
@@ -993,11 +993,11 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
         .mockResolvedValue(
           statusFixture(
             { state: 'available', listeners: [listenerFixture(22, 'permission-denied')] },
-            { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+            { paneId: LOCAL_PANE, host: 'my-machine' },
           ),
         ),
     })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
     // The same explanation as a remote host: a fact about privilege, not an
     // error on the user's own machine.
@@ -1010,11 +1010,9 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     const services = fakeServices({
       status: vi
         .fn()
-        .mockResolvedValue(
-          statusFixture({ state: 'pending' }, { profileId: LOCAL_TARGET_ID, host: '' }),
-        ),
+        .mockResolvedValue(statusFixture({ state: 'pending' }, { paneId: LOCAL_PANE, host: '' })),
     })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
     // Connected-and-waiting is loading, not an empty state: the settle delay
     // plus a round trip is exactly the window a spinner is for (nocx-wzc4.11).
@@ -1034,7 +1032,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('renders the empty state with an enabled action when unavailableIn names a host', async () => {
     const onOpenAsConnection = vi.fn()
     const { container } = renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
       onOpenAsConnection,
     })
@@ -1050,7 +1048,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('activating it reaches the seam with the host and user split out of unavailableIn', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
       onOpenAsConnection,
     })
@@ -1063,7 +1061,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('passes an undefined user when unavailableIn names a bare host', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => '192.0.2.93',
       onOpenAsConnection,
     })
@@ -1076,7 +1074,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('offers no action when there is no unavailable host', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => '',
       onOpenAsConnection,
     })
@@ -1087,7 +1085,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
 
   it('offers no action when no seam is wired (a dead action would be worse than none)', async () => {
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
     })
     await waitFor(() => {

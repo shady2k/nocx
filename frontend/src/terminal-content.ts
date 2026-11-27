@@ -223,7 +223,6 @@ import { createPaneContext, updatePaneContext, type PaneContextFacts } from './u
 import { cwdLabel, homeRelation } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
-import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
   deriveActions,
@@ -2495,16 +2494,13 @@ export class TerminalContent extends BasePaneContent {
 
   get portsTargetId(): string | null {
     if (this._paneWalkedToRemoteChild) return null
-    if (this.sshOpts === undefined) return LOCAL_TARGET_ID
-    return this.savedProfileId()
+    return this.backendPaneId
   }
 
   /** The saved connection this tab was opened from, or null. Quick Connect and
    *  a hand-typed host carry `''` — no profile — and the surfaces that must
    *  tell "saved" from "ad-hoc" (the pane head, the Git panel) read THIS one
-   *  answer through helper-axis.ts's fold rather than testing the raw option.
-   *  `portsTargetId` asks it too: a ports target and an editable host record
-   *  are the same "this connection is saved" fact. */
+   *  answer through helper-axis.ts's fold rather than testing the raw option. */
   savedProfileId(): string | null {
     return savedProfileId(this.sshOpts?.profileId)
   }

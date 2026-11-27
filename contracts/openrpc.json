@@ -26322,6 +26322,9 @@
       "$ref": "https://nocx.local/contracts/policy.setRule.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/ports.error.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/ports.pause.schema.json"
     },
     {

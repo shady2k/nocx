@@ -50,7 +50,7 @@ const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '')
 // ── Fixtures (mirror ports.test.tsx) ─────────────────────────────────────
 
 const statusFixture = (port: number): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -69,7 +69,6 @@ const statusFixture = (port: number): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
   forwards: [],
 })
@@ -91,7 +90,7 @@ function fakeServices(port: number, statusResult?: PortsStatusResult): PortsPane
  *  forward whose destination is the listener's derived destination, so the
  *  row owns its port's state. */
 const forwardedStatusFixture = (): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -110,7 +109,6 @@ const forwardedStatusFixture = (): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
   forwards: [
     {
@@ -140,7 +138,8 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}
@@ -222,7 +221,8 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}
@@ -288,7 +288,8 @@ describe('the hidden actions reserve no width (nocx-4wbx)', () => {
     render(
       () => (
         <PortsPanel
-          profileId={() => 'ssh:p1:1'}
+          paneId={() => 'ssh:p1:1'}
+          savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
           pause={pause}

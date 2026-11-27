@@ -115,7 +115,6 @@ type openMachine interface {
 	monitorExit(rx *sessionRx, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
-	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
 	// Replays any lifecycle fact that arrived while open was still dialing.
 	// Called only after the result has published the authoritative session id.
@@ -707,12 +706,9 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// that addresses it (AD-7). This call only schedules — whatever the
 	// scheduler later publishes does its own subscriber lookup — so the
 	// ring alone is the condition the target's liveness waits on.
-	switch {
-	case cfg.ProfileID != "":
-		h.sess.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
-	case cfg.Kind == session.KindLocal:
+	if cfg.Kind == session.KindLocal {
 		// A local tab is a target too: the machine listens like any host,
-		// and the same ladder finds it (nocx-wzc4.8). Keyed by the
+		// and the native provider reads it (nocx-wzc4.8). Keyed by the
 		// reserved LocalTargetID, torn down when the last local tab closes.
 		h.sess.discoveryUpLocal()
 	}

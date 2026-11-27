@@ -66,15 +66,13 @@ export interface SidebarViewProps {
    *  application window is visible. A panel that renders background work
    *  (polling, sampling) must gate it on this complete visibility fact. */
   visible: () => boolean
-  /** Reactive accessor for the active tab's ports scope — its saved-profile
-   *  id, or the reserved "local" for a local shell (nocx-wzc4.8). Null when
-   *  the active tab has no ports scope (alias tab, Settings). */
-  activeProfileId: () => string | null
+  /** The backend pane id of the active terminal used by Ports. */
+  activePortsPaneId: () => string | null
   /** Reactive accessor for the ACTIVE tab's origin — the machine a
    *  filesystem-scoped view speaks for (design §5.4): the backend session
    *  and kind of the tab in front, or null when the tab has no origin
    *  (Settings, a nested environment the content cannot speak for). Added
-   *  for the Files view; Ports reads only activeProfileId. */
+   *  for the Files view; Ports reads only activePortsPaneId. */
   activeOrigin: () => ActiveOrigin | null
 }
 
@@ -263,7 +261,7 @@ function applyablePanel(
 interface PanelRootProps {
   state: AppState
   views: readonly SidebarViewDescriptor[]
-  getActiveProfileId: () => string | null
+  getActivePortsPaneId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
   appVisibility: AppVisibility
   /** The width controller (nocx-qmcu) — when present the panel renders the
@@ -314,7 +312,7 @@ function PanelRoot(props: PanelRootProps) {
         desc={activeDesc()!}
         appVisible={props.appVisibility.visible}
         collapsed={() => props.state.sidebar.collapsed}
-        getActiveProfileId={props.getActiveProfileId}
+        getActivePortsPaneId={props.getActivePortsPaneId}
         getActiveOrigin={props.getActiveOrigin}
       />
     </Show>
@@ -333,7 +331,7 @@ function ActiveView(props: {
   desc: SidebarViewDescriptor
   collapsed: () => boolean
   appVisible: () => boolean
-  getActiveProfileId: () => string | null
+  getActivePortsPaneId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
 }) {
   // Only the active view renders. The sidebar is visible only when expanded
@@ -360,7 +358,7 @@ function ActiveView(props: {
       <Dynamic
         component={props.desc.view}
         visible={visible}
-        activeProfileId={props.getActiveProfileId}
+        activePortsPaneId={props.getActivePortsPaneId}
         activeOrigin={props.getActiveOrigin}
       />
     </SidebarView>
@@ -696,7 +694,7 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           on the tab's layout row. Null (no persistence)
  *                           starts expanded on the first view and remembers
  *                           nothing.
- * @param getActiveProfileId reactive accessor for the active tab's
+ * @param getActivePortsPaneId reactive accessor for the active tab's
  *                           saved-profile id, forwarded to every view
  *                           (see SidebarViewProps). Defaults to null —
  *                           views that need real scope provide one.
@@ -717,12 +715,12 @@ export function mountSidebar(
   views: readonly SidebarViewDescriptor[],
   actions: readonly SidebarAction[],
   persistence?: SidebarPersistence | null,
-  getActiveProfileId?: () => string | null,
+  getActivePortsPaneId?: () => string | null,
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   indicator?: SidebarIndicator,
 ): SidebarHandle {
-  const activeProfileId = getActiveProfileId ?? (() => null)
+  const activePortsPaneId = getActivePortsPaneId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
 
   const [state, storeActions] = createAppStore()
@@ -773,7 +771,7 @@ export function mountSidebar(
       <PanelRoot
         state={state}
         views={views}
-        getActiveProfileId={activeProfileId}
+        getActivePortsPaneId={activePortsPaneId}
         appVisibility={appVisibility}
         getActiveOrigin={activeOrigin}
         resize={resize}

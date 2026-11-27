@@ -11,10 +11,8 @@
 // They answer different questions. Completion asks "what does the shell think
 // completes this prefix" — a question only a shell can answer, because it
 // includes bash's own completion rules. The tree asks "what does this
-// directory contain, with sizes, modes and mtimes" — a filesystem question,
-// and SFTP answers it structurally, works when remote exec is forbidden while
-// SFTP is allowed, and does not spend a shell. Parsing ls output for the tree
-// would be the second implementation, not this one.
+// directory contain, with sizes, modes and mtimes". The remote tree uses
+// the far helper's structured filesystem service.
 //
 // # The structural guarantee (spec D1)
 //
@@ -27,17 +25,15 @@
 //
 // # Path syntax
 //
-// Path syntax belongs to the provider. local uses path/filepath; sftp uses
-// path, because SFTP specifies POSIX-style paths regardless of the OS nocx
-// runs on. Nothing in this package (shared by both) interprets a path.
+// Providers own path syntax. The local provider uses path/filepath, and
+// the far helper interprets paths on the remote host.
 //
 // # Watching
 //
 // Watch, WatchKind and WatchMode are part of the Provider and Handle
-// contracts (spec §5.1), but the watching worker — fsnotify locally, polling
-// over SFTP — is a later step of the design's sequence (§6 step 5). Until
-// then the local provider's Watch refuses with ErrWatchUnavailable; the
-// Handle's set-replacement semantics are already live.
+// contracts (spec §5.1). A provider without live notifications returns
+// ErrWatchUnavailable so transport can poll. The Handle owns replacement
+// of the watched path set.
 package filesystem
 
 import (
@@ -107,8 +103,8 @@ type DomainNamer interface {
 }
 
 // Uploader is the optional write seam (upload design D7). A provider that
-// can write a file onto the machine it views implements it. BOTH providers
-// do: sftp writes over the tab's lease, local writes through os.
+// can write a file onto the machine it views implements it. The local
+// provider writes through os, and the remote provider uses the far helper.
 //
 // The seam is still optional, and rule R1 — "a file can only be uploaded to
 // the machine the tab is actually on" — is still its absence rather than a
@@ -144,8 +140,8 @@ type Uploader interface {
 
 // Downloader is the optional READ-STREAM seam — the mirror of Uploader.
 // A provider that can stream a file off the machine it views implements it.
-// BOTH shipped providers do: sftp reads over the tab's lease, local reads
-// through os.
+// The local provider reads through os, and the remote provider uses the far
+// helper.
 //
 // It is separate from Provider.Read, and the separation is the point rather
 // than an accident of layering. Read answers "show me this file": it is

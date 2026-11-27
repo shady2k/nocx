@@ -520,7 +520,6 @@ test('an existing reason survives a rebuild, and a count change does not lose it
 const HELPER_DIAL = 'github.com/shady2k/nocx/internal/helper/client.Dial'
 const MODE_LOOKUP = 'github.com/shady2k/nocx/internal/hostmode.(*Store).Lookup'
 const CONSENT_LOOKUP = 'github.com/shady2k/nocx/internal/helper/consent.(*Store).Lookup'
-const FS_CONN = 'github.com/shady2k/nocx/internal/ssh.NewFSConn'
 const SAMPLE_PORTS_OP = 'github.com/shady2k/nocx/internal/helper/proto.OpSamplePorts'
 const SAMPLE_PORTS = 'github.com/shady2k/nocx/internal/helper/client.(*ProbeLease).SamplePorts'
 const ACQUIRE_LEASE = 'github.com/shady2k/nocx/internal/helper/client.(*Client).AcquireProbeLease'
@@ -591,45 +590,6 @@ test('the same consent read inside internal/farhelper is the owner itself (C23)'
 
 // ─── C24: no panel reaches the host but through the far helper ───────────
 //
-// The three roads to the host a panel has today: SFTP (ssh.NewFSConn), the
-// helper's ports op named by a panel, and a ProbeLease exec for a sample. The
-// helper protocol's own packages are the road the far helper rides, not a
-// panel, so they are exempt — and the negative fixture is what proves the
-// exemption did not swallow the rule.
-
-test('ssh.NewFSConn from a panel package is a second road to the host (C24)', () => {
-  const rows = analyseOne({
-    'internal/app/second.go': `package app
-
-import (
-	"io"
-
-	nossh "github.com/shady2k/nocx/internal/ssh"
-)
-
-func files(rw io.ReadWriteCloser) (nossh.FSConn, error) { return nossh.NewFSConn(nil, rw) }
-`,
-  })
-  assert.deepEqual(rulesOf(rows), ['panel-host-path'])
-  assert.equal(rows[0].object, FS_CONN)
-})
-
-test('the same SFTP lease inside internal/farhelper is the road the helper rides (C24)', () => {
-  const rows = analyseOne({
-    'internal/farhelper/second.go': `package farhelper
-
-import (
-	"io"
-
-	nossh "github.com/shady2k/nocx/internal/ssh"
-)
-
-func files(rw io.ReadWriteCloser) (nossh.FSConn, error) { return nossh.NewFSConn(nil, rw) }
-`,
-  })
-  assert.deepEqual(rows, [])
-})
-
 test('naming the helper ports op from a panel package is a second road (C24)', () => {
   const rows = analyseOne({
     'internal/app/second.go': `package app
@@ -1693,19 +1653,11 @@ test('the committed baseline is counted, reasoned, and only shrinks', () => {
   }
 })
 
-/**
- * The debt-reason policy is one function over WHATEVER rows the baseline holds.
- * It must never require a row to exist: the ratchet's whole point is that debt
- * disappears, and the commit that deletes a row (nocx-oalo1.12 moves
- * ssh.NewFSConn onto the far helper) runs this test in the same CI job that
- * told the author to delete it (ALX-738 finding 1).
- */
 function assertDebtReasons(entries) {
   const expected = new Map([
     [GIT_FACTORY, /nocx-oalo1\.6\.3\b/],
     [CONSENT_LOOKUP, /nocx-oalo1\.6\.3\b/],
     [HELPER_DIAL, /nocx-oalo1\.6\.3\b/],
-    [FS_CONN, /nocx-oalo1\.12\b/],
     [
       'github.com/shady2k/nocx/internal/discovery.Connector(*github.com/shady2k/nocx/internal/app.helperProbes)',
       /nocx-oalo1\.13\b/,
@@ -1719,37 +1671,14 @@ function assertDebtReasons(entries) {
   }
 }
 
-/** The Files row's own two guards, over every Files row present — including none. */
-function assertFilesDebtReason(entries) {
-  for (const entry of entries.filter((e) => e.rule === 'panel-host-path' && e.object === FS_CONN)) {
-    assert.match(entry.reason, /nocx-oalo1\.12\b/, violationKey(entry))
-    assert.doesNotMatch(entry.reason, /nocx-oalo1\.6\.12/, violationKey(entry))
-  }
-}
-
 test('remaining helper and panel baseline debt names its owning task', () => {
   assertDebtReasons(loadBaseline())
-})
-
-test('the debt-reason policy accepts a baseline whose Files row is already gone', () => {
-  // The row the nocx-oalo1.12 migration deletes, and nothing else. A policy that
-  // tests the ROW rather than what it says refuses that commit; the ratchet's
-  // `stale` finding is what makes the deletion mandatory, and the fixtures are
-  // what keep the sites visible.
-  const withoutFiles = loadBaseline().filter(
-    (e) => !(e.rule === 'panel-host-path' && e.object === FS_CONN),
-  )
-  assert.doesNotThrow(() => assertDebtReasons(withoutFiles))
-  assert.doesNotThrow(() => assertFilesDebtReason(withoutFiles))
 })
 
 test('the debt-reason policy accepts an empty baseline', () => {
   // No debt is the goal. Every row is a licence with a deadline, and the last
   // commit that retires one must not be the one the test refuses.
-  assert.doesNotThrow(() => {
-    assertDebtReasons([])
-    assertFilesDebtReason([])
-  })
+  assert.doesNotThrow(() => assertDebtReasons([]))
 })
 
 test('a reason names the bead, never the branch that carries it', () => {
@@ -1768,10 +1697,6 @@ test('a reason names the bead, never the branch that carries it', () => {
       `${where} names ${branch?.[0]}, which is a branch and not a task: ${reason}`,
     )
   }
-})
-
-test('the Files debt names the stage the migration is recorded in', () => {
-  assertFilesDebtReason(loadBaseline())
 })
 
 // ─── the allowlist narrows: the carrier is exempt, the supervisor is not ──

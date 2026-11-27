@@ -1794,10 +1794,9 @@ func WithFilesystemRegistry(r *filesystem.Registry) WSServerOption {
 }
 
 // WithFilesystemProviderFactory attaches the provider builder files.open
-// uses. The composition root decides which sessions get which providers —
-// local.New for local sessions today, the SFTP provider with the SFTP worker
-// (design §6 step 4) — and the transport never constructs a provider
-// itself (AD-8). When absent, files.open returns an error.
+// uses. The composition root supplies the local or far-helper provider
+// for the session (AD-8). When the factory is absent, files.open returns
+// an error.
 func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 	return func(s *WSServer) { s.filesProviderFor = f }
 }

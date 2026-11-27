@@ -1182,11 +1182,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  Why one page of headroom and not one row: a change event is a coalesced
    *  invalidation hint (§5.5), so one notification can stand for a burst — a
    *  checkout, an unpacked archive, an agent writing a batch — and headroom
-   *  of one would surface one of them. Why not the whole directory: both
-   *  providers enumerate, sort and cap the entire directory before slicing
-   *  the page (internal/filesystem/{local,sftp}), so a wider limit buys wire
-   *  bytes and merged rows, never round trips — but handing back everything
-   *  would override the paging budget the user is already living under.
+   *  of one would surface one of them. The local filesystem and the far
+   *  helper enumerate, sort and cap the directory before slicing the page.
+   *  A wider limit sends more rows on the same request and would override
+   *  the user's paging budget.
    *  FILES_PAGE_SIZE is the increment they have already accepted here; a
    *  separate number would be a second rule to keep in step.
    *

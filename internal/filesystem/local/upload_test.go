@@ -106,10 +106,6 @@ func TestSink_LeavesNoTempBehindOnSuccess(t *testing.T) {
 	}
 }
 
-// TestSink_OverwriteReplacesTheDestination is D6 on this provider:
-// os.Rename IS rename(2), so the replace is atomic and the fallback's
-// two-rename window — the one where the destination holds nothing — is
-// never entered here.
 func TestSink_OverwriteReplacesTheDestination(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "a.txt")
@@ -126,12 +122,8 @@ func TestSink_OverwriteReplacesTheDestination(t *testing.T) {
 	if got := read(t, dest); got != "new" {
 		t.Errorf("content %q, want the new content", got)
 	}
-	// The fallback would have left one of these; PosixRename never reports
-	// unsupported here, so neither may exist.
-	for _, e := range mustReadDir(t, dir) {
-		if strings.Contains(e, ".nocx-bak-") || strings.Contains(e, ".nocx-upload-") {
-			t.Errorf("%s survived; the .bak fallback must never run on this path", e)
-		}
+	if names := mustReadDir(t, dir); len(names) != 1 || names[0] != "a.txt" {
+		t.Errorf("directory holds %v, want only the replaced destination", names)
 	}
 }
 
@@ -189,7 +181,7 @@ func TestSink_RefusesADestinationThatIsNotThere(t *testing.T) {
 		t.Fatal("Put into a directory that does not exist succeeded")
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("error %v, want one satisfying errors.Is(fs.ErrNotExist) — the sink's fallback and the transport both read it", err)
+		t.Errorf("error %v, want one satisfying errors.Is(fs.ErrNotExist) — the transport classifies the missing directory by it", err)
 	}
 	if len(out.Stranded) != 0 {
 		t.Errorf("stranded %v, want nothing: nothing was created", out.Stranded)
@@ -271,12 +263,7 @@ func TestSink_HonoursCancellation(t *testing.T) {
 // ── the RemoteFS contracts os must keep, asserted through the sink's
 // own idiom rather than by reaching for the unexported adapter ───────────
 
-// TestSink_ReplacesAnExistingDestinationWithoutTheFallback pins the one
-// contract that decides whether the two-rename window can ever open here:
-// PosixRename must succeed against an existing destination, so it never
-// reports ErrPosixRenameUnsupported and the fallback is unreachable. Two
-// consecutive overwrites are the observable form of it.
-func TestSink_ReplacesAnExistingDestinationWithoutTheFallback(t *testing.T) {
+func TestSink_ReplacesAnExistingDestinationRepeatedly(t *testing.T) {
 	dir := t.TempDir()
 	sk := sinkOf(t)
 	for _, content := range []string{"one", "two", "three"} {

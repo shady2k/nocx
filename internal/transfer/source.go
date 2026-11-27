@@ -7,7 +7,7 @@ package transfer
 // Download is upload's mirror, and the mirror is exact in the part that
 // carries the bytes and empty in the part that carries the risk. What
 // sink.go actually owns is a temp name, an O_EXCL reservation, a KeepBoth
-// suffix search, two promote strategies and an account of what was left
+// suffix search, an atomic rename and an account of what was left
 // behind when one of them failed. NONE of that has a counterpart here: a
 // download creates nothing on the source host, renames nothing, replaces
 // nothing and can strand nothing. It opens a file for reading and copies.
@@ -46,7 +46,7 @@ import (
 // length to declare, and a fifo blocks. It is this package's own sentinel
 // rather than internal/filesystem's because filesystem imports transfer and
 // not the other way round; the adapters map their platform's answer onto
-// it, which is the same shape ErrPosixRenameUnsupported already has.
+// it.
 var ErrNotRegular = errors.New("transfer: not a regular file")
 
 // RemoteReadFS is the read surface this package needs of a host's
@@ -77,16 +77,12 @@ var ErrNotRegular = errors.New("transfer: not a regular file")
 //     server fault tells the person the wrong thing to do about it.
 type RemoteReadFS interface {
 	// Open opens path for reading and reports the size of the object it
-	// actually opened. It takes no context for the same reason
-	// RemoteFS.Create takes none: it is one bounded round trip, and on the
-	// SFTP lease it is one lane call with the lease's own watchdog under
-	// it.
+	// actually opened.
 	Open(path string) (RemoteReader, int64, error)
 }
 
-// RemoteReader is an open read handle on the source host. Read is one
-// round trip per call, so the engine's chunk bound is what keeps any single
-// call inside the lease's lane timeout (D2, in the mirror direction).
+// RemoteReader is an open read handle. The engine bounds the size of
+// each Read to one transfer chunk.
 //
 // OWNERSHIP passes to whoever received it: Source.Open hands it out inside
 // a Download, and every path after that closes it exactly once.

@@ -57,14 +57,6 @@
       "reason": "Ports' legacy connector wired into NewScheduler; moving the scheduler argument to the farhelper-owned connector removes this fact (nocx-oalo1.13)."
     },
     {
-      "rule": "panel-host-path",
-      "file": "internal/app/helper_sshchan.go",
-      "func": "github.com/shady2k/nocx/internal/app.sshOverHelper.FSConn",
-      "object": "github.com/shady2k/nocx/internal/ssh.NewFSConn",
-      "count": 1,
-      "reason": "the Files panel's SFTP lease over THIS machine's helper, which opens no far helper and is the road design §5.10 C24 closes: Files takes the connection's helper client from internal/farhelper and SFTP remains only for the install (nocx-oalo1.12)."
-    },
-    {
       "rule": "xcrypto-ssh-import",
       "file": "internal/helper/sshdial/sshdial.go",
       "func": "github.com/shady2k/nocx/internal/helper/sshdial.DialDirectTCP",

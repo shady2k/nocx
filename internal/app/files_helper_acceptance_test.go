@@ -2,59 +2,23 @@
 
 package app
 
-// FILES GOES THROUGH THIS MACHINE'S HELPER, proved at the app level
-// (nocx-50w7p.12).
-//
-// The subject is the PRODUCT's own Files provider — the value
-// filesystemProviderFactory returns for a remote session — not a lease, and not
-// a stream: everything between the factory and a real SFTP server is the
-// shipped code path. What is scripted, deliberately and only, is the two things
-// that are not this package's:
-//
-//   - the SSH SERVER (somebody else's machine: pwSSHServer, extended with an
-//     sftp subsystem over a real directory for this test);
-//   - the COORDINATOR's answers to the helper's questions (helperReverseHandlers
-//     over a real ssh.RealClient for host keys and a stub credential resolver
-//     for material — the same registry the composition root builds at
-//     app.go's localOpener.setReverseHandlers).
-//
-// Between them sits the REAL helper: the real host protocol over a socketpair,
-// the real ssh service registered on it, the real daemon-side ssh client that
-// dials, and the real coordinator client with a real reverse registry. That is
-// the stand internal/helper/sshsvc's own suite builds, assembled here because
-// this is the half only internal/app can assert: that the factory a session
-// gets takes the helper's channel at all.
-//
-// # Why the helper is assembled in-process
-//
-// A daemon process would add installation, generation selection and a Unix
-// endpoint to a test whose claim is about the ROUTE. The route is the
-// composition root's: sshOverHelper over a connection to this machine's helper,
-// wired into installLeaseRoutes, consumed by filesystemProviderFactory. The
-// carrier between the two sides is the one thing that changes, and sshsvc's
-// suite already proves the protocol over a socketpair is the protocol.
-//
-// # What this test does NOT prove, and why
-//
-// "One authenticated connection serves a pane and its Files panel" needs the
-// PANE on the helper too (nocx-50w7p.5, which moves the route); today the pane
-// is still the coordinator's own dial, so the fixture's authentication count
-// here is the Files lease's alone and is asserted as exactly one for THAT
-// reason: the lease must not buy a second login, and it must ride the helper's
-// connection rather than reach for one of its own.
+// The app-level SSH fixture runs the local helper's real protocol, SSH
+// service, and session service over a socket pair. The fixture server can
+// serve SFTP, and the app answers the helper's host-key and credential
+// requests through the same reverse handlers used in production.
 
 import (
 	"context"
 	"errors"
 	"net"
-	"os"
-	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/filesystem"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -64,12 +28,15 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/hostmode"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/panedriver"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -79,23 +46,17 @@ const (
 	filesFixtureGenera = "0123456789abcdef"
 )
 
-// filesStand is one assembled stack: the fixture server, the helper peer, the
-// coordinator's resolver, and the Files factory the composition root builds.
+// filesStand assembles the local helper, the coordinator, and an SSH fixture.
 type filesStand struct {
-	srv     *pwSSHServer
-	root    string
-	factory func(session.Session, string) (filesystem.Provider, error)
-	opts    []ssh.ConnectOption
+	opts []ssh.ConnectOption
 	// khPath is the coordinator's known_hosts. It is exposed because a ROUTE
 	// has more than one host in it: a test that adds a bastion has to record
 	// that bastion's key too, and the coordinator's own verdict is what decides.
 	khPath string
 	// opener and routes are the two halves of this machine's helper exactly as
 	// the composition root builds them. They are exposed because a test of the
-	// OPEN SEAM needs the seam, not only the factory built over it: the
-	// selection probe and the pane's own spawn meet inside hostedOpeners, and
-	// the leases beside them (install, files, lane) are the same dispatch the
-	// file panel's factory is handed (nocx-k6p18.35).
+	// open path uses hostedOpeners for the selection probe and pane spawn,
+	// with install and exec leases available through the same routes.
 	opener *localHelperOpener
 	routes installLeaseRoutes
 	// prompts is the reverse side's prompt seam: the value a test sets an
@@ -146,7 +107,7 @@ func (a *askRecorder) asked() []string {
 	return append([]string(nil), a.refs...)
 }
 
-// startFilesStand assembles the stack against a fixture serving root over sftp.
+// startFilesStand assembles the stack against an SSH fixture.
 //
 // extra names FURTHER destinations this stand dials — a second host the open
 // seam asks for, a bastion a route goes through. They are fixtures like srv and
@@ -162,8 +123,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	sshLog := log.NewSlogAdapter(logger)
 
 	// The coordinator's client: it RESOLVES and it answers host-key questions.
-	// It never dials for the Files lease, and the fixture's authentication
-	// count is what says so.
+	// The local helper owns the actual dial.
 	_, khPath := homeForKnownHosts(t)
 	writeKnownHostsFor(t, khPath, append([]*pwSSHServer{srv}, extra...)...)
 	rc, err := ssh.NewReal(sshLog)
@@ -176,11 +136,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// registered on a real host protocol engine, and the carrier between the
 	// two sides is a socketpair. This is sshsvc's own stand, assembled here.
 	//
-	// The SESSION service is registered beside it, because a helper daemon has
-	// one and this stand is a daemon: the file panel's lease only needs the ssh
-	// service, while a PANE needs the sessions too — `spawn-ssh` is answered
-	// there, and a stand that answered every op except the one a pane is would
-	// make the open seam untestable at this level.
+	// A pane uses the real session service registered beside the SSH service.
 	helperEnd, coordEnd := net.Pipe()
 	sshdialClient, err := sshdial.New(logger)
 	if err != nil {
@@ -238,8 +194,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	//
 	// The resolver is wired because a PANE open resolves its destination here
 	// before the helper is handed an address (the same split app.go makes at
-	// setSSHTargets); a stand that left it nil would refuse every ssh open by
-	// name, which is the state a Files-only stand was in.
+	// setSSHTargets).
 	opener := &localHelperOpener{log: logger}
 	opener.installed = helperInstalledStub()
 	opener.dir = t.TempDir()
@@ -249,10 +204,6 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	opener.registry = registry
 
 	over := &sshOverHelper{local: opener, resolve: rc, log: logger}
-	// Both halves of the dispatch, as the composition root builds it: this
-	// test's factory asks for the FILE lease (viaLocal), and the probe half is
-	// filled in so the value under test has the shape production has rather
-	// than a nil leg that would panic the day something else asks.
 	routes := installLeaseRoutes{viaLocal: over, probes: &helperProbes{local: opener, resolve: rc}}
 
 	modes := newTestHostModes(t)
@@ -262,15 +213,12 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 
 	return &filesStand{
 		hostKeys: rc,
-		srv:      srv,
-		root:     srv.rootDir,
 		khPath:   khPath,
 		opener:   opener,
 		routes:   routes,
 		prompts:  prompts,
 		registry: registry,
 		modes:    modes,
-		factory:  filesystemProviderFactory(routes, nil, noFilesPaneConnection),
 		opts: []ssh.ConnectOption{
 			ssh.WithUser(filesFixtureUser),
 			ssh.WithAuthMode("password"),
@@ -301,182 +249,6 @@ func recordFixtureMode(t *testing.T, stand *filesStand, srv *pwSSHServer, mode h
 	mustRecordHostMode(t, stand.modes, fingerprint, mode)
 }
 
-// provider asks the PRODUCT's factory for the provider a remote session gets:
-// the same call the transport makes with the session and the root the caller
-// verified. The root is the fixture's served directory — the provider refuses a
-// relative path and hands absolute ones to the server, so "where this endpoint
-// starts" has to be named, exactly as a real session's OSC 7 cwd does.
-func (s *filesStand) provider(t *testing.T) (filesystem.Provider, error) {
-	t.Helper()
-	return s.factory(factorySession{kind: session.KindRemote, host: s.srv.addr, opts: s.opts}, s.root)
-}
-
-// path is one seeded entry's absolute remote path.
-func (s *filesStand) path(name string) string { return filepath.Join(s.root, name) }
-
-// ── the happy path ────────────────────────────────────────────────────────
-
-// TestFilesOnAnSSHHostRideThisMachinesHelper is the acceptance: a directory is
-// listed and a file is read through the provider a remote session is handed,
-// the SFTP subsystem that served them was opened by THIS MACHINE'S HELPER, and
-// the fixture authenticated exactly once — the lease does not reach for a
-// connection of its own.
-func TestFilesOnAnSSHHostRideThisMachinesHelper(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello from the far side"), 0o600); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "sub"), 0o750); err != nil {
-		t.Fatalf("seed dir: %v", err)
-	}
-	srv := startPasswordSFTPSSHServer(t, root)
-	secrets := &askRecorder{value: openPasswordFixturePassword}
-	stand := startFilesStand(t, srv, secrets)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	p, err := stand.provider(t)
-	if err != nil {
-		t.Fatalf("the Files provider for an ssh session: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
-
-	listing, err := p.List(ctx, stand.root, filesystem.Page{Limit: 50})
-	if err != nil {
-		t.Fatalf("List through the helper's channel: %v", err)
-	}
-	names := make(map[string]bool, len(listing.Entries))
-	for _, e := range listing.Entries {
-		names[e.Name] = true
-	}
-	for _, want := range []string{"hello.txt", "sub"} {
-		if !names[want] {
-			t.Errorf("the listing through the helper's channel is missing %q (got %v)", want, names)
-		}
-	}
-
-	content, err := p.Read(ctx, stand.path("hello.txt"), 0)
-	if err != nil {
-		t.Fatalf("Read through the helper's channel: %v", err)
-	}
-	if content.Text != "hello from the far side" {
-		t.Errorf("the file read through the helper's channel is %q, want %q", content.Text, "hello from the far side")
-	}
-
-	// The helper asked the coordinator for the material it had to present.
-	// Without this the test could pass against a lease that never consulted the
-	// reverse registry at all.
-	if refs := secrets.asked(); len(refs) == 0 || refs[0] != filesFixtureSecret {
-		t.Errorf("the credential references the helper asked for are %v, want %q first — the password crosses only when the helper presents it",
-			refs, filesFixtureSecret)
-	}
-
-	// The server's own view: one subsystem, opened once, over one connection.
-	if seen := srv.subsystemsSeen(); len(seen) != 1 || seen[0] != "sftp" {
-		t.Errorf("the fixture was asked for subsystems %v, want exactly [sftp]", seen)
-	}
-	if got := srv.connCount(); got != 1 {
-		t.Errorf("the fixture authenticated %d connection(s), want exactly 1 — the Files lease rides this machine's helper's connection and must not raise one of its own", got)
-	}
-	t.Logf("MEASURED %d authentication(s), subsystems %v, %d credential ask(s)", srv.connCount(), srv.subsystemsSeen(), len(secrets.asked()))
-}
-
-// ── the failure paths, each paired with the success above ─────────────────
-
-// TestFilesNamesARefusedSFTPSubsystem: a host that runs SSH and no sftp-server
-// answers the subsystem request false, and the refusal reaches the caller as
-// the typed error the file panel switches on — not as a generic transport
-// failure, and not as an empty listing.
-func TestFilesNamesARefusedSFTPSubsystem(t *testing.T) {
-	root := t.TempDir()
-	srv := startPasswordSFTPSSHServer(t, root)
-	srv.refuseSubsystem = true
-	stand := startFilesStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
-
-	if _, err := stand.provider(t); !errors.Is(err, ssh.ErrFSSubsystemRefused) {
-		t.Fatalf("the Files provider for a host with no sftp-server is %v, want a refusal wrapping ErrFSSubsystemRefused", err)
-	}
-	// Nothing was served: the fixture saw the request and refused it.
-	if got := srv.subsystemsSeen(); len(got) != 0 {
-		t.Errorf("subsystems recorded = %v, want none — the request was refused, not served", got)
-	}
-}
-
-// TestFilesLosesTheChannelMidReadAndSaysSo: the transport dies between two
-// reads, and the second read REPORTS the loss rather than answering from a
-// stale handle or hanging. That distinction is the whole reason the lease
-// carries Done/LostErr and the typed ladder.
-func TestFilesLosesTheChannelMidRead(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("first read"), 0o600); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-	srv := startPasswordSFTPSSHServer(t, root)
-	stand := startFilesStand(t, srv, &askRecorder{value: openPasswordFixturePassword})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	p, err := stand.provider(t)
-	if err != nil {
-		t.Fatalf("the Files provider for an ssh session: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
-
-	// The success half, so the failure below is a CHANGE and not a provider
-	// that never worked.
-	first, err := p.Read(ctx, stand.path("hello.txt"), 0)
-	if err != nil {
-		t.Fatalf("the first read: %v", err)
-	}
-	if first.Text != "first read" {
-		t.Fatalf("the first read is %q, want %q", first.Text, "first read")
-	}
-
-	srv.killConns()
-
-	_, err = p.Read(ctx, stand.path("hello.txt"), 0)
-	if err == nil {
-		t.Fatal("a read after the channel died SUCCEEDED — a stale handle answered where the transport was gone")
-	}
-	if !errors.Is(err, ssh.ErrFSLost) {
-		t.Fatalf("the read after the loss is %v, want a failure wrapping ErrFSLost — the caller has to be able to tell a dead channel from a missing file", err)
-	}
-	t.Logf("MEASURED the named loss: %v", err)
-}
-
-// TestFilesNamesASealedVaultOnTheHelpersQuestion: the material the helper must
-// present lives in a sealed vault, so the COORDINATOR's own reverse answer is
-// the vault's refusal — and it reaches the caller by name, rather than being
-// flattened into "the channel could not be opened".
-func TestFilesNamesASealedVaultOnTheHelpersQuestion(t *testing.T) {
-	root := t.TempDir()
-	srv := startPasswordSFTPSSHServer(t, root)
-	sealed := &askRecorder{refuse: vault.ErrVaultSealed}
-	stand := startFilesStand(t, srv, sealed)
-
-	_, err := stand.provider(t)
-	if err == nil {
-		t.Fatal("the Files provider was built for a host whose credential is in a sealed vault")
-	}
-	if !strings.Contains(err.Error(), vault.ErrVaultSealed.Error()) {
-		t.Fatalf("the refusal is %q, want the vault's own sentence (%q) in it — a sealed vault the person cannot see is a refusal they cannot act on",
-			err.Error(), vault.ErrVaultSealed.Error())
-	}
-	// The evidence is specific: the refusal came from the coordinator's
-	// answer to the helper's question, not from a dial that never happened.
-	if refs := sealed.asked(); len(refs) == 0 {
-		t.Fatalf("the assistant was never asked for material, so %v did not come from the vault", err)
-	}
-	if got := srv.connCount(); got != 0 {
-		t.Errorf("the fixture authenticated %d connection(s), want 0 — the dial must not have got as far as a login", got)
-	}
-	t.Logf("MEASURED the sealed refusal: %v", err)
-}
-
-// ── the stand's own pieces ────────────────────────────────────────────────
-
 // connCount is how many connections authenticated, and subsystemsSeen is the
 // subsystem names asked for in order.
 func (s *pwSSHServer) connCount() int {
@@ -499,5 +271,63 @@ func helperInstalledStub() helperlocal.Installed {
 	return helperlocal.Installed{
 		Binary:     "/this/test/has/no/binary",
 		Generation: proto.GenerationID(filesFixtureGenera),
+	}
+}
+
+// A host in raw mode may offer SFTP, but opening Files uses its far-helper axis.
+func TestFilesOnRawSSHHostRefusesWithoutOpeningSFTP(t *testing.T) {
+	root := t.TempDir()
+	srv := startPasswordSFTPSSHServer(t, root)
+	secrets := &askRecorder{value: openPasswordFixturePassword}
+	stand := startFilesStand(t, srv, secrets)
+	driver := panedriver.New("files-raw", nil)
+	stand.opener.paneConns = driver
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	sess := openPanes(t, ctx, openSeamOver(t, stand), paneConfig(srv, secrets, "pane-raw"), "claim-files-raw")
+	connectionID, bound := driver.SessionConnectionID(sess.PaneID(), string(sess.ID()))
+	if !bound || srv.connCount() != 1 {
+		t.Fatalf("open SSH pane: connection = %q (bound %t), authenticated connections = %d", connectionID, bound, srv.connCount())
+	}
+
+	connections := newFarHelperConnections()
+	helpers := farhelper.New(farhelper.Config{Connections: connections, Modes: stand.modes})
+	t.Cleanup(helpers.Close)
+	connections.Observe(farhelper.Connection{
+		ID: connectionID, State: hostconn.Connected, Generation: 1,
+		HostKeyFingerprint: gossh.FingerprintSHA256(srv.hostSigner.PublicKey()),
+	})
+	waittest.WaitFor(t, "raw host's unavailable helper axis", func() bool {
+		axis, ok := helpers.Axis(connectionID)
+		return ok && axis.State == farhelper.StateUnavailable && axis.Reason == farhelper.ReasonModeRaw
+	})
+
+	bindings := filesystem.New()
+	factory := filesystemProviderFactory(helpers, driver.SessionConnectionID)
+	op := capability.NewFilesystemOpenOperation(control.Unrestricted(), stand.registry, capability.ProviderFactory(factory), bindings)
+	err := op.Open(ctx, func(ctx context.Context, svc capability.FilesystemOpenService) error {
+		bid, _, openErr := svc.OpenBinding(ctx, sess, root)
+		if openErr != nil {
+			t.Fatalf("OpenBinding: %v", openErr)
+		}
+		defer func() { _ = bindings.Close(bid) }()
+		handle, release, acquireErr := svc.Acquire(bid, localFilesOwner{owner: sess.ID()})
+		if acquireErr != nil {
+			t.Fatalf("acquire Files binding: %v", acquireErr)
+		}
+		defer release()
+		want := filesystem.HelperAxis{State: "unavailable", Reason: "mode-raw", Action: "host-settings"}
+		if axis, known := handle.HelperAxis(); !known || axis != want {
+			t.Errorf("binding helper axis = %+v (known %t), want %+v", axis, known, want)
+		}
+		_, rootErr := handle.Root(ctx)
+		return rootErr
+	})
+	var unavailable *filesystem.ErrUnavailable
+	if !errors.As(err, &unavailable) || unavailable.Reason != "mode-raw" || unavailable.Action != "host-settings" {
+		t.Errorf("opening Files on a raw host: %v, want ErrUnavailable(mode-raw, host-settings)", err)
+	}
+	if seen := srv.subsystemsSeen(); slices.Contains(seen, "sftp") {
+		t.Errorf("opening Files requested an SFTP subsystem: %v", seen)
 	}
 }

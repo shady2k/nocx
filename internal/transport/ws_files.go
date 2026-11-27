@@ -945,7 +945,7 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 			return nil
 		}
 		var root filesystem.Root
-		// The root acquisition is a local stat or a far RealPath+Stat; its
+		// The root acquisition is on the local filesystem or the far helper; its
 		// domain is the requested root when one was sent, and the shared
 		// unplaced domain otherwise — files.open has no binding identity to
 		// name before the root comes back.

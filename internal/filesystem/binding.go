@@ -40,9 +40,8 @@ type Binding struct {
 	domain func(path string) Domain
 	// axis and versioned are the two seams a helper-backed provider
 	// contributes, captured beside sink, source and domain for the same
-	// reason: at Register the concrete provider is still in hand and
-	// afterwards it is not. Nil means the binding has none of it, which is
-	// the local tab's answer and the SFTP tab's answer respectively.
+	// reason: Register is the last point with the concrete provider in hand.
+	// A nil seam means the provider did not supply it.
 	axis      func() (HelperAxis, bool)
 	versioned VersionedFiles
 
@@ -107,13 +106,6 @@ type Handle interface {
 	// — and a teardown that cancels first and then waits, bounded, needs
 	// "close regardless" to be something it can actually do. So the guard
 	// covers obtaining the sink and nothing after it.
-	//
-	// What makes running unguarded safe is the lease underneath rather than
-	// hope: closing the provider closes the SFTP session and client, which
-	// unblocks a call already in flight and makes every later one report a
-	// closed lease (internal/ssh/ssh_fsconn.go, Close). A write racing a
-	// close therefore fails and names what it stranded; it never writes
-	// through a torn-down lease, and it never holds the close open.
 	Uploader() (transfer.Sink, error)
 	// DomainKey names the failure domain a path of this binding draws on.
 	// It never touches the filesystem: naming a mount must not stat it, or a
@@ -135,18 +127,12 @@ type Handle interface {
 	// Uploader's mirror in shape and in reasoning: the refusal is a missing
 	// field rather than a check, and the guard covers the hand-off (D8) —
 	// what the caller then runs on the returned value is a write of its own,
-	// bounded by the helper's mutation budget, and closing the binding
-	// closes the lease underneath it rather than waiting for it.
+	// bounded by the helper's mutation budget.
 	Versioned() (VersionedFiles, error)
 	// Downloader returns the binding's read-stream half — the source one
 	// download runs on — or *ErrDownloadUnsupported when the binding has
-	// none. It is Uploader's mirror in every respect that matters, and the
-	// two comments above apply here unchanged: the refusal is a missing
-	// field rather than a check, the guard covers the hand-off and not the
-	// transfer that follows (D8), and what makes running unguarded safe is
-	// the lease underneath — closing the provider closes the SFTP session
-	// and client, so a read racing a close fails and reports how far it
-	// got, and never reads through a torn-down lease.
+	// none. The guard covers handing out the source. The transfer uses its
+	// own context after that hand-off (D8).
 	Downloader() (transfer.Source, error)
 }
 
@@ -463,10 +449,8 @@ func (b *Binding) close() error {
 		select {
 		case <-drained:
 		case <-timer.C:
-			// The guard did not drain. Close anyway: closing an SFTP lease
-			// is exactly what unblocks a call already inside it, and a
-			// readdir on a hung mount cannot be unblocked by waiting for
-			// it. Name what was abandoned rather than hanging teardown.
+			// A provider call may be stuck on a hung mount. Report the
+			// guards still held and continue closing the binding.
 			errs = append(errs, &ErrCloseAbandoned{BindingID: b.id, Guards: waiting})
 		}
 	}
@@ -560,7 +544,7 @@ func (b *Binding) swapWatches(ctx context.Context, paths []string) (WatchMode, e
 }
 
 // aggregateMode describes a whole watch set: a degraded watch (polling with
-// a reason) is the most alarming answer, designed polling (no reason, SFTP)
+// a reason) is the most alarming answer, designed polling (no reason)
 // comes next, and only an all-live set reports live (spec §5.5).
 func aggregateMode(ws map[string]Watch) WatchMode {
 	anyPolling := false
@@ -764,10 +748,7 @@ func (h *handle) HelperAxis() (HelperAxis, bool) {
 // It is Uploader's mirror: the refusal is rule R1 expressed as a nil field
 // rather than a condition somebody must remember to check, the provider is not
 // touched on either path, and the use-guard covers the hand-off only (D8).
-// What the caller runs on the returned value is a write of its own, bounded by
-// the helper's mutation budget; closing the binding closes the lease underneath
-// it, so a write racing a close fails and names what it stranded rather than
-// writing through a torn-down lease.
+// The write uses its own context and the helper's mutation budget.
 func (h *handle) Versioned() (VersionedFiles, error) {
 	drop, err := h.begin()
 	if err != nil {

@@ -71,7 +71,7 @@
  *                        licensed BY NAME below (internal/helper/local's
  *                        openOnce), never by directory: a dial added beside it
  *                        in the same package is still a second decider.
- *   panel-host-path      a reference to ssh.NewFSConn, to proto.OpSamplePorts,
+ *   panel-host-path      a reference to proto.OpSamplePorts,
  *                        to a lease acquisition ((*client.Client).
  *                        AcquireProbeLease) or to a ProbeLease exec (Uname,
  *                        Home, SamplePorts, Completion, Inflate, CommandNames)

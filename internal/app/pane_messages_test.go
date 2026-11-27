@@ -826,13 +826,6 @@ func TestAPendingMessageBehindAMenuLeavesThePanesTargetsForTheCaller(t *testing.
 	// recheck interval.
 	reader.setFrame(boxFrame(""), agentdriver.StateFreeText, sessionruntime.TargetInput)
 	pm.PaneChanged(sessionID)
-	keys.onSend = func(req assistant.KeysRequest) {
-		if req.Text != nil {
-			reader.setBox(pastedEcho(*req.Text))
-		} else if req.Key != nil {
-			reader.setBox("")
-		}
-	}
 	waitForCondition(t, "the queued message to be delivered after the pane-change wake", func() bool {
 		for _, message := range pm.Pending(sessionID) {
 			if message.ID == "id-1" {

@@ -40,18 +40,13 @@ import (
 // source is built per call because it holds no state of its own; `os` is
 // the whole of its dependency, exactly as it is for Sink.
 //
-// internal/transfer is reused rather than paralleled, for Sink's reason and
-// one more: the chunk bound, the cancellation point and the size rule are
-// one implementation for both providers AND for both directions, so a
-// download off a local tab and a download off a remote one differ in the
-// adapter underneath and in nothing a person can observe.
+// The local source uses internal/transfer for chunking, cancellation checks,
+// and size accounting.
 func (p *Provider) Source() transfer.Source {
 	return transfer.NewSource(osReadFS{}, transfer.DefaultChunk)
 }
 
-// osReadFS presents this machine's filesystem as the read surface
-// internal/transfer declares. It is the local counterpart of the
-// composition root's fsTransferLease.
+// osReadFS adapts this machine's filesystem to transfer.RemoteReadFS.
 type osReadFS struct{}
 
 // Open opens path for reading and reports the size of the object it

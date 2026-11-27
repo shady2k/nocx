@@ -150,10 +150,7 @@ func (a assistantFiles) Acquire(ctx context.Context) (filesystem.Handle, func(),
 		a.abandon(ctx, bindingID)
 		return nil, nil, err
 	}
-	// The call may have been cancelled while the provider was being built —
-	// dialing a host is the expensive half — and a cancelled call must leave no
-	// binding behind. The same check the caller's capability makes before it
-	// acts, made at the one point where an abandoned binding could survive.
+	// Cancellation after acquisition still releases and closes the binding.
 	if err := ctx.Err(); err != nil {
 		release()
 		a.abandon(ctx, bindingID)

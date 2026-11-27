@@ -401,13 +401,9 @@ type Session interface {
 	// beat the watcher) it is ExitInterrupted — a teardown is never dressed
 	// up as a shell's own exit.
 	ExitOutcome() (ExitCause, int)
-	// SSHOptions returns the connect options this session's SSH connection
-	// was opened with: exactly what Reg.Open handed to the SSH factory, in
-	// order. Nil for local sessions. The file manager's SFTP lease
-	// (ssh.FSConn) is acquired with these same options so it resolves to
-	// the same destination the shell did (fm-w8, spec D3) — the lease
-	// shares the tab's pooled connection (AD-4) only when the pool keys
-	// agree, and the options are what make them agree.
+	// SSHOptions returns the connect options this session opened with, in
+	// order. They identify the resolved route and credentials. Local
+	// sessions return nil.
 	SSHOptions() []ssh.ConnectOption
 	// HostKeyFingerprint returns the SHA256 fingerprint of the remote
 	// host's public key, as observed and verified when the connection was

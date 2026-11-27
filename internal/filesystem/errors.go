@@ -233,11 +233,8 @@ type ErrHandleReleased struct{}
 
 func (e *ErrHandleReleased) Error() string { return "filesystem: handle released" }
 
-// ErrWatchUnavailable — Watch is declared by the Provider contract (spec
-// §5.1) but the watching worker — fsnotify locally, polling over SFTP — is a
-// later step of the design's sequence (§6 step 5). Until then the local
-// provider refuses with this error rather than returning a watch that would
-// never fire, which would be a silent lie the product could not surface.
+// ErrWatchUnavailable tells transport to use polling for a binding whose
+// provider cannot supply a live watch.
 type ErrWatchUnavailable struct{}
 
 func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is not available yet" }
@@ -289,11 +286,8 @@ func (e *ErrDownloadUnsupported) Error() string {
 }
 
 // ErrVersionedUnsupported — Versioned was called on a binding with no
-// conditional-write seam, which is a binding whose provider did not implement
-// VersionedProvider. Same shape and same reasoning as its two siblings above:
-// the refusal is the seam's absence rather than a check somebody performs, so
-// the local tab and the temporary SFTP tab inherit it without anybody adding a
-// check for the tab that cannot do it.
+// conditional-write seam. The provider's optional VersionedProvider
+// capability determines whether the binding supports conditional writes.
 //
 // It names the binding rather than the path, because the refusal is a property
 // of the binding and not of what was being written.
@@ -306,10 +300,8 @@ func (e *ErrVersionedUnsupported) Error() string {
 }
 
 // ErrCloseAbandoned — a binding was closed while a use-guard was still held,
-// and the guard did not drain within closeDrainTimeout. The provider was
-// closed anyway, which is what unblocks a call still inside an SFTP lease; a
-// call that cannot be unblocked (a readdir on a hung mount) is the case this
-// bound exists for.
+// and the guard did not drain within closeDrainTimeout. Teardown closes the
+// provider after the deadline even if a call is still blocked on a mount.
 //
 // It is an error rather than a log line because teardown that silently leaves
 // work behind is how a hung disk goes unnoticed until the process is out of

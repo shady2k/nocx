@@ -16,7 +16,7 @@ package ssh
 //
 // This file measures only. It wires no production code and changes none. It
 // is deliberately self-contained (every identifier prefixed execProbe) so
-// nothing in ssh_real_test.go or ssh_fsconn_test.go is restructured.
+// nothing in the real client or the SFTP install lease is restructured.
 
 import (
 	"bytes"

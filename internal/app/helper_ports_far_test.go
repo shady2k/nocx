@@ -86,7 +86,9 @@ type portsFarStand struct {
 func newPortsFarStand(t *testing.T, mode hostmode.Mode, absent bool) *portsFarStand {
 	t.Helper()
 	root := t.TempDir()
-	if out, err := exec.CommandContext(t.Context(), "git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+	initRepo := exec.CommandContext(t.Context(), "git", "init", "-q")
+	initRepo.Dir = root
+	if out, err := initRepo.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("ports test\n"), 0o600); err != nil {
@@ -102,7 +104,12 @@ func newPortsFarStand(t *testing.T, mode hostmode.Mode, absent bool) *portsFarSt
 	resumeSamples := make(chan struct{})
 	var served atomic.Bool
 	peer := func(in io.Reader, out io.Writer) int {
-		kill <- func() { _ = in.(*io.PipeReader).Close() }
+		pipe, ok := in.(io.ReadCloser)
+		if !ok {
+			t.Error("the helper fixture requires a closable input lane")
+			return 1
+		}
+		kill <- func() { _ = pipe.Close() }
 		h := host.New(in, out, syntheticArtifactHash, "ports-peer", discardLogger(t))
 		var runner portsprobe.Runner = tools
 		if served.Swap(true) {
@@ -117,7 +124,7 @@ func newPortsFarStand(t *testing.T, mode hostmode.Mode, absent bool) *portsFarSt
 	far, panes, seams := gitFarStandWithSeams(t, mode, &gitFarSeams{t: t, peer: peer}, true)
 	logger := farHelperTestLogger(t)
 	reg := session.New(logger, nil)
-	sched := discovery.NewConnectionScheduler(far, logger, nil)
+	sched := discovery.NewScheduler(far, logger, nil)
 	t.Cleanup(func() { _ = sched.Close() })
 	ws := transport.NewWSServer(logger, reg,
 		transport.WithDiscoveryScheduler(sched),

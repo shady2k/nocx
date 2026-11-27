@@ -26,7 +26,7 @@ const iso8601UTC = "2006-01-02T15:04:05Z07:00"
 // WithDiscoveryScheduler attaches the discovery scheduler, enabling the
 // ports.* JSON-RPC methods. When not wired, they return a JSON-RPC error;
 // the transport never constructs a detector or acquires a lease itself.
-func WithDiscoveryScheduler(s *discovery.ConnectionScheduler) WSServerOption {
+func WithDiscoveryScheduler(s *discovery.Scheduler) WSServerOption {
 	return func(ws *WSServer) { ws.discoverySched = s }
 }
 
@@ -93,7 +93,7 @@ type portsStatusResult struct {
 
 // portsDiscoveryFrom projects a scheduler status onto the wire. LastSampleAt
 // is ISO-8601 UTC — display-only, so no epoch arithmetic on the renderer.
-func portsDiscoveryFrom(st discovery.ConnectionTargetStatus) portsDiscovery {
+func portsDiscoveryFrom(st discovery.TargetStatus) portsDiscovery {
 	d := portsDiscovery{
 		State:          string(st.Sample.State),
 		Probe:          st.Sample.Probe,

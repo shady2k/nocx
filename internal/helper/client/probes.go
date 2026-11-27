@@ -44,7 +44,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/remoteprobe"
+	"github.com/shady2k/nocx/internal/probeoutcome"
 )
 
 // leaseReleaseTimeout bounds the ssh.unlease REQUEST.
@@ -189,7 +189,7 @@ func (l *ProbeLease) live() error {
 }
 
 // Uname runs the platform probe (D20) on this lease.
-func (l *ProbeLease) Uname(ctx context.Context) (*remoteprobe.Result, error) {
+func (l *ProbeLease) Uname(ctx context.Context) (*probeoutcome.Result, error) {
 	return l.run(ctx, proto.OpUname, proto.UnameParams{ProbeRunParams: proto.ProbeRunParams{Lease: l.id}})
 }
 
@@ -216,16 +216,8 @@ func (l *ProbeLease) Home(ctx context.Context) (string, error) {
 	return out.Home, nil
 }
 
-// SamplePorts runs one rung of the port-discovery ladder on this lease.
-func (l *ProbeLease) SamplePorts(ctx context.Context, probe remoteprobe.PortProbe) (*remoteprobe.Result, error) {
-	return l.run(ctx, proto.OpSamplePorts, proto.SamplePortsParams{
-		ProbeRunParams: proto.ProbeRunParams{Lease: l.id},
-		Probe:          proto.PortProbe(probe),
-	})
-}
-
 // Completion runs the completion probe for one line at one caret.
-func (l *ProbeLease) Completion(ctx context.Context, cwd, line string, pos, limit int, nonce string) (*remoteprobe.Result, error) {
+func (l *ProbeLease) Completion(ctx context.Context, cwd, line string, pos, limit int, nonce string) (*probeoutcome.Result, error) {
 	return l.run(ctx, proto.OpCompletion, proto.CompletionParams{
 		ProbeRunParams: proto.ProbeRunParams{Lease: l.id},
 		Cwd:            cwd, Line: line, Pos: pos, Limit: limit, Nonce: nonce,
@@ -236,7 +228,7 @@ func (l *ProbeLease) Completion(ctx context.Context, cwd, line string, pos, limi
 // (nocx-evj4b.1.3). A non-zero exit status is the host's answer — 127 is "no
 // gzip here" — and the CALLER decides what to do with it; this method only
 // reports it.
-func (l *ProbeLease) Inflate(ctx context.Context, path string) (*remoteprobe.Result, error) {
+func (l *ProbeLease) Inflate(ctx context.Context, path string) (*probeoutcome.Result, error) {
 	return l.run(ctx, proto.OpInflate, proto.InflateParams{
 		ProbeRunParams: proto.ProbeRunParams{Lease: l.id},
 		Path:           path,
@@ -244,10 +236,10 @@ func (l *ProbeLease) Inflate(ctx context.Context, path string) (*remoteprobe.Res
 }
 
 // CommandNames runs one half of the PATH enumeration.
-func (l *ProbeLease) CommandNames(ctx context.Context, phase remoteprobe.CommandNamesPhase, nonce string) (*remoteprobe.Result, error) {
+func (l *ProbeLease) CommandNames(ctx context.Context, phase proto.CommandNamesPhase, nonce string) (*probeoutcome.Result, error) {
 	return l.run(ctx, proto.OpCommandNames, proto.CommandNamesParams{
 		ProbeRunParams: proto.ProbeRunParams{Lease: l.id},
-		Phase:          proto.CommandNamesPhase(phase),
+		Phase:          phase,
 		Nonce:          nonce,
 	})
 }
@@ -255,18 +247,18 @@ func (l *ProbeLease) CommandNames(ctx context.Context, phase remoteprobe.Command
 // run sends one named probe and converts its answer.
 //
 // Every failure that is not a probe's own exit status becomes a
-// *remoteprobe.Error, because that is the vocabulary the three consumers switch
+// *probeoutcome.Error, because that is the vocabulary the three consumers switch
 // on and this is the one place the wire's codes are known. A `lost` refusal also
 // ends the lease: the connection it named is gone, and a consumer watching Done
 // learns it here rather than at its next probe.
-func (l *ProbeLease) run(ctx context.Context, op string, params any) (*remoteprobe.Result, error) {
+func (l *ProbeLease) run(ctx context.Context, op string, params any) (*probeoutcome.Result, error) {
 	if err := l.live(); err != nil {
 		return nil, probeFailure(err)
 	}
 	var out proto.ProbeExecResult
 	err := l.client.Call(ctx, proto.ServiceSSH, op, params, &out)
 	if err == nil {
-		return &remoteprobe.Result{
+		return &probeoutcome.Result{
 			Stdout:     out.Stdout,
 			Stderr:     out.Stderr,
 			ExitStatus: out.ExitStatus,
@@ -285,31 +277,31 @@ func (l *ProbeLease) run(ctx context.Context, op string, params any) (*remotepro
 // unclassifiable failure is reported as a lost transport rather than folded
 // into a sentence about the host, which is the direction the probe op's own
 // docs take about unclassifiable failures.
-func probeFailure(err error) *remoteprobe.Error {
+func probeFailure(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {
 		switch refusal.Code {
 		case proto.ErrCodeExecSessionRefused:
-			return &remoteprobe.Error{Kind: remoteprobe.KindSessionRefused, Err: refusal}
+			return &probeoutcome.Error{Kind: probeoutcome.KindSessionRefused, Err: refusal}
 		case proto.ErrCodeExecProhibited:
-			return &remoteprobe.Error{Kind: remoteprobe.KindExecProhibited, Err: refusal}
+			return &probeoutcome.Error{Kind: probeoutcome.KindExecProhibited, Err: refusal}
 		case proto.ErrCodeExecTooLong:
-			return &remoteprobe.Error{Kind: remoteprobe.KindCommandTooLong, Err: refusal}
+			return &probeoutcome.Error{Kind: probeoutcome.KindCommandTooLong, Err: refusal}
 		case proto.ErrCodeExecLost:
-			return &remoteprobe.Error{Kind: remoteprobe.KindConnectionLost, Err: refusal}
+			return &probeoutcome.Error{Kind: probeoutcome.KindConnectionLost, Err: refusal}
 		}
-		return &remoteprobe.Error{Kind: remoteprobe.KindConnectionLost, Err: refusal}
+		return &probeoutcome.Error{Kind: probeoutcome.KindConnectionLost, Err: refusal}
 	}
 	if errors.Is(err, ErrProbeLeaseClosed) {
-		return &remoteprobe.Error{Kind: remoteprobe.KindLeaseClosed, Err: err}
+		return &probeoutcome.Error{Kind: probeoutcome.KindLeaseClosed, Err: err}
 	}
 	if errors.Is(err, ErrLost) {
-		return &remoteprobe.Error{Kind: remoteprobe.KindConnectionLost, Err: err}
+		return &probeoutcome.Error{Kind: probeoutcome.KindConnectionLost, Err: err}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return &remoteprobe.Error{Kind: remoteprobe.KindConnectionLost, Err: err}
-	}
-	return &remoteprobe.Error{Kind: remoteprobe.KindConnectionLost, Err: err}
+	return &probeoutcome.Error{Kind: probeoutcome.KindConnectionLost, Err: err}
 }
 
 // endLeases ends every lease this client holds, with the cause the transport

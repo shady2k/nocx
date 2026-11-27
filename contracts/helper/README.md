@@ -369,7 +369,7 @@ helper answers `unknown_op`), and a new FIELD on one of these shapes does not.
 ## What landed with `nocx-50w7p.9`, and why `Version` moved to 7
 
 **Every probe is a named op, and a lease is what they run on.** Seven ops join
-the `ssh` service — `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+the `ssh` service — `lease`, `unlease`, `uname`, `home`,
 `completion`, `command-names` — and with them the last shell commands the
 coordinator used to compose for a host: `uname -s -m` for the platform probe,
 the port-discovery ladder, the completion probe, the PATH enumeration. What a

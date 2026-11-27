@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
@@ -42,10 +43,10 @@ type CompletionProbe struct {
 }
 
 // ExecResult mirrors what a probe lease returns, so this package does not
-// import the wire — it is remoteprobe.Result, declared once for the reason the
+// import the wire — it is probeoutcome.Result, declared once for the reason the
 // probe names are: the helper describes what it captured and this package reads
 // it, and two structs with the same four fields would be the pair that drifts.
-type ExecResult = remoteprobe.Result
+type ExecResult = probeoutcome.Result
 
 // ProbeConnProvider creates a ProbeConn for the given host. The composition
 // root wires a function that asks this machine's helper for a lease on it.
@@ -199,18 +200,18 @@ func classifyProbeError(err error) *Response {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return emptyResponse("timed out")
 	}
-	var probeErr *remoteprobe.Error
+	var probeErr *probeoutcome.Error
 	if errors.As(err, &probeErr) {
 		switch probeErr.Kind {
-		case remoteprobe.KindSessionRefused:
+		case probeoutcome.KindSessionRefused:
 			return emptyResponse("remote host limits sessions; completion unavailable")
-		case remoteprobe.KindExecProhibited:
+		case probeoutcome.KindExecProhibited:
 			return emptyResponse("remote host refused completion exec")
-		case remoteprobe.KindCommandTooLong:
+		case probeoutcome.KindCommandTooLong:
 			return emptyResponse("completion probe too large for this host")
-		case remoteprobe.KindConnectionLost:
+		case probeoutcome.KindConnectionLost:
 			return emptyResponse("connection lost during completion")
-		case remoteprobe.KindLeaseClosed:
+		case probeoutcome.KindLeaseClosed:
 			return emptyResponse("completion unavailable")
 		}
 	}

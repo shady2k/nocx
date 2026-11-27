@@ -34,7 +34,8 @@ import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
-import { Dispatcher, RpcError } from './dispatcher'
+import { Dispatcher, RpcError, rpcRefusalCause } from './dispatcher'
+import type { PortsError } from './generated/ports.error'
 import { openForwardWithFallback } from './forward-retry'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
@@ -1700,7 +1701,14 @@ function main(): void {
         fetch: async (selections) => {
           const server = selections[0]
           const paneId = tm.portsPaneForProfile(server.item.id)
-          if (paneId === null) {
+          const st =
+            paneId === null
+              ? null
+              : await portsServices.sample(paneId).catch((err: unknown) => {
+                  if (rpcRefusalCause<PortsError['reason']>(err) === 'unknown-pane') return null
+                  throw err
+                })
+          if (st === null) {
             return [
               {
                 id: '__no_ports_pane__',
@@ -1710,7 +1718,6 @@ function main(): void {
               },
             ]
           }
-          const st = await portsServices.sample(paneId)
           if (st.discovery.state === 'available' || st.discovery.state === 'available-limited') {
             if (st.discovery.listeners.length === 0) {
               return [

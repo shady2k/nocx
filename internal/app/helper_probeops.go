@@ -5,10 +5,10 @@ package app
 // # What this file is
 //
 // Every shell question this process used to answer by dialing ssh itself — what
-// platform is this host, where is its home, which ports are listening, what
+// platform is this host, where is its home, what
 // does its shell think the line should be, which commands are on its PATH — is
 // now a named op this machine's helper answers (`ssh.uname`, `ssh.home`,
-// `ssh.sample-ports`, `ssh.completion`, `ssh.command-names`, on a lease the
+// `ssh.completion`, `ssh.command-names`, on a lease the
 // coordinator holds). This is the adapter layer that turns each consumer's own
 // narrow seam into that op, and it exists for the reason every adapter in this
 // package does: the feature packages must not import the helper client, and the
@@ -17,10 +17,9 @@ package app
 //
 // # The consumer keeps its seam; only the transport underneath moves
 //
-// internal/discovery still owns its ladder, its framing rule and its five
-// states; internal/completion still owns its parser and its soft failures;
+// internal/completion still owns its parser and its soft failures;
 // internal/commandnames still owns its cache and its deadlines. What changed is
-// what answers `Sample`, `Complete` and `Enumerate`: a lease on the helper's
+// what answers `Complete` and `Enumerate`: a lease on the helper's
 // pooled connection, and no command composed here at all — the text lives in
 // internal/remoteprobe, which the helper links too.
 //
@@ -43,9 +42,9 @@ import (
 
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
-	"github.com/shady2k/nocx/internal/discovery"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -164,16 +163,6 @@ func hostKeyPinFromOptions(opts []ssh.ConnectOption) string {
 	return cfg.HostKeyFingerprint
 }
 
-// Lease answers discovery's Connector: one lease per target, held for as long
-// as the target's detector lives.
-//
-// It is the interface method itself rather than a wrapper around one, because
-// what discovery acquires and what this holds are the same thing: a reference to
-// a pooled connection that reports its own death.
-func (p *helperProbes) Lease(ctx context.Context, host string, opts ...ssh.ConnectOption) (discovery.Lease, error) {
-	return p.acquire(ctx, host, opts...)
-}
-
 // HelperCompletionProvider answers completion's ProbeConnProvider: one lease per
 // completion request, released with it.
 func (p *helperProbes) HelperCompletionProvider(opts ...ssh.ConnectOption) completion.ProbeConnProvider {
@@ -244,12 +233,11 @@ func (p *helperProbes) HelperInflate(ctx context.Context, host, path string, opt
 // that had to stand up a daemon to ask "does an unknown command reach the wire"
 // is a test nobody writes.
 type probeCommands interface {
-	Uname(ctx context.Context) (*remoteprobe.Result, error)
+	Uname(ctx context.Context) (*probeoutcome.Result, error)
 	Home(ctx context.Context) (string, error)
-	SamplePorts(ctx context.Context, probe remoteprobe.PortProbe) (*remoteprobe.Result, error)
-	Completion(ctx context.Context, cwd, line string, pos, limit int, nonce string) (*remoteprobe.Result, error)
-	CommandNames(ctx context.Context, phase remoteprobe.CommandNamesPhase, nonce string) (*remoteprobe.Result, error)
-	Inflate(ctx context.Context, path string) (*remoteprobe.Result, error)
+	Completion(ctx context.Context, cwd, line string, pos, limit int, nonce string) (*probeoutcome.Result, error)
+	CommandNames(ctx context.Context, phase proto.CommandNamesPhase, nonce string) (*probeoutcome.Result, error)
+	Inflate(ctx context.Context, path string) (*probeoutcome.Result, error)
 	Fingerprint() string
 	Done() <-chan struct{}
 	LostErr() error
@@ -275,22 +263,9 @@ func (l *helperProbeLease) Home(ctx context.Context) (string, error) { return l.
 // Inflate decompresses one file in place on the far host (nocx-evj4b.1.3), for
 // the install's one caller. The exit status is the host's answer and the caller
 // reads it.
-func (l *helperProbeLease) Inflate(ctx context.Context, path string) (*remoteprobe.Result, error) {
+func (l *helperProbeLease) Inflate(ctx context.Context, path string) (*probeoutcome.Result, error) {
 	return l.lease.Inflate(ctx, path)
 }
-
-// Sample answers discovery's ExecConn: one rung of the port ladder, named.
-func (l *helperProbeLease) Sample(ctx context.Context, probe discovery.ProbeName) (*discovery.ExecResult, error) {
-	return l.lease.SamplePorts(ctx, probe)
-}
-
-// Done and LostErr are discovery's connection-loss signal, which the scheduler
-// watches. They are the client lease's own, unchanged: the helper's pooled
-// connection is what dies, and the lease learns it either when the coordinator's
-// connection to the helper drops or when a probe comes back saying the far
-// transport is gone.
-func (l *helperProbeLease) Done() <-chan struct{} { return l.lease.Done() }
-func (l *helperProbeLease) LostErr() error        { return l.lease.LostErr() }
 
 // Complete answers completion's ProbeConn: one completion probe, with the typed
 // arguments the fixed script takes.
@@ -300,7 +275,7 @@ func (l *helperProbeLease) Complete(ctx context.Context, probe completion.Comple
 
 // Enumerate answers commandnames' ExecConn: one half of the PATH enumeration.
 func (l *helperProbeLease) Enumerate(ctx context.Context, phase commandnames.Phase, nonce string) (*commandnames.ExecResult, error) {
-	return l.lease.CommandNames(ctx, phase, nonce)
+	return l.lease.CommandNames(ctx, proto.CommandNamesPhase(phase), nonce)
 }
 
 // Close releases the lease: the helper drops its pooled reference and this
@@ -315,6 +290,9 @@ type platformLease struct {
 	*helperProbeLease
 	host string
 }
+
+func (l *platformLease) Done() <-chan struct{} { return l.lease.Done() }
+func (l *platformLease) LostErr() error        { return l.lease.LostErr() }
 
 // HostKeyFingerprint is the target host's host-key fingerprint as observed at
 // dial time — the value the install path keys a consent decision by (ADR-0023),

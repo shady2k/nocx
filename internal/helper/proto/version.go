@@ -80,7 +80,7 @@ package proto
 // (nocx-50w7p.2's rationale, two generations on).
 //
 // This is 7 rather than 6 because the wire grew the NAMED PROBES and the lease
-// they run on: `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+// they run on: `lease`, `unlease`, `uname`, `home`,
 // `completion` and `command-names` on the same `ssh` service (nocx-50w7p.9).
 // Seven ops added would each have been answerable as `unknown_op`, and the
 // bump is still taken because of what the SEVEN MEAN: they are the ops by which
@@ -476,4 +476,7 @@ package proto
 // disagrees about what the wire carries, and hello is where that is decided
 // rather than discovered. The next expansion — `fs.watch` in .12.10 — moves it
 // again, by the same rule.
-const Version = "35"
+//
+// "36" removes the named SSH port probe. The coordinator now samples TCP
+// listeners through the ports service on the connection's far helper.
+const Version = "36"

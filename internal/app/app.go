@@ -137,7 +137,7 @@ type App struct {
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
-	discoverySched *discovery.ConnectionScheduler
+	discoverySched *discovery.Scheduler
 
 	// gitFactory owns the background git-environment resolution
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
@@ -1352,7 +1352,7 @@ func New(opts ...Option) (*App, error) {
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
 	// Remote port samples use the same helper registry as Git and Files.
-	discoverySched := discovery.NewConnectionScheduler(farHelpers, logger, func(l log.Logger) discovery.LocalProvider {
+	discoverySched := discovery.NewScheduler(farHelpers, logger, func(l log.Logger) discovery.LocalProvider {
 		return nativeports.NewProvider(l)
 	})
 	// The remote shell launcher, built here so its bootstrap-outcome sink
@@ -1549,13 +1549,6 @@ func New(opts ...Option) (*App, error) {
 		// forward model was reachable from its own tests and nowhere else
 		// (AGENTS.md check 5).
 		transport.WithTunnelConnector(tunnelChans),
-		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
-		// (settle sample, hidden-tab pause, one-in-flight — spec §4) and
-		// acquires its OWN pooled discovery lease per
-		// profile. *ssh.RealClient satisfies discovery.Connector without
-		// an adapter, the same way it satisfies tunnel.Connector. Before
-		// this line the whole discovery package was reachable from its own
-		// tests and nowhere else (AGENTS.md check 5).
 		transport.WithDiscoveryScheduler(discoverySched),
 		// The in-band bootstrap builder (nocx-ynsx): *shellintegration.Impl
 		// satisfies transport.InBandBootstrapper without an adapter — the

@@ -259,8 +259,6 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.UnameParams{})
 	case proto.OpHome:
 		return host.SchemaFor(proto.HomeParams{})
-	case proto.OpSamplePorts:
-		return host.SchemaFor(proto.SamplePortsParams{})
 	case proto.OpCompletion:
 		return host.SchemaFor(proto.CompletionParams{})
 	case proto.OpCommandNames:
@@ -412,14 +410,6 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.home(ctx, p)
-	case proto.OpSamplePorts:
-		var p proto.SamplePortsParams
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
-			}
-		}
-		return s.samplePorts(ctx, p)
 	case proto.OpCompletion:
 		var p proto.CompletionParams
 		if len(params) > 0 {

@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/helper/client"
@@ -13,7 +14,7 @@ import (
 
 // The lease belongs to the registry. Tie the call to its serving lifetime
 // and return that lifetime so the scheduler can also check it when publishing.
-func sampleFarHelper(ctx context.Context, reg ConnectionRegistry, id string) (portsprobe.Sample, context.Context) {
+func sampleFarHelper(ctx context.Context, reg Connector, id string) (portsprobe.Sample, context.Context) {
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalDiscoverySample)
 	defer scope.Complete()
 	ctx, cancel := context.WithDeadline(ctx, scope.Deadline())
@@ -47,7 +48,7 @@ func remoteSampleError(err error) portsprobe.Sample {
 	case errors.Is(err, context.DeadlineExceeded):
 		return portsprobe.Sample{State: portsprobe.StateFailedTransiently, Classification: "probe timed out"}
 	default:
-		return portsprobe.Sample{State: portsprobe.StateFailedTransiently, Classification: err.Error()}
+		return portsprobe.Sample{State: portsprobe.StateFailedTransiently, Classification: fmt.Sprint(err)}
 	}
 }
 

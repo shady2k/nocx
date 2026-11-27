@@ -17,8 +17,7 @@
 // Linux at all), and Detector below runs the host's own tools as argv and is
 // the far helper's only path. One vocabulary and one parser set for both is
 // what makes the local panel and a far host's sample render identically; the
-// external ladder in internal/discovery stays until nocx-oalo1.13.3 deletes
-// it.
+// coordinator schedules the requests through the serving helper.
 //
 // So this package answers three questions: "is this text the dialect of
 // ss/netstat/busybox netstat/lsof/sockstat, and if so what does it say",
@@ -28,7 +27,7 @@ package portsprobe
 
 import "time"
 
-// State is the overall outcome of a discovery sample (spec §5). The five
+// State is the overall outcome of a discovery sample (spec §5). The four
 // result states are exact: a successful empty result means "no listeners
 // observed", and every other state means could-not-determine — never "no
 // ports". StatePending is not a result: it is the state before the first
@@ -36,12 +35,11 @@ import "time"
 type State string
 
 const (
-	StateAvailable                 State = "available"
-	StateAvailableLimited          State = "available-limited"
-	StateUnavailable               State = "unavailable"
-	StateFailedTransiently         State = "failed-transiently"
-	StatePermissionOrPolicyRefused State = "permission-or-policy-refused"
-	StatePending                   State = "pending"
+	StateAvailable         State = "available"
+	StateAvailableLimited  State = "available-limited"
+	StateUnavailable       State = "unavailable"
+	StateFailedTransiently State = "failed-transiently"
+	StatePending           State = "pending"
 )
 
 // AddressFamily is the IP family of a listener's bind address.
@@ -90,7 +88,7 @@ type Sample struct {
 	Duration       time.Duration // wall time of the sampling pass
 	Classification string        // human-readable why: refusal detail, truncation, ...
 	Stderr         string        // bounded excerpt of the probe's stderr, for diagnostics
-	Canceled       bool          // ctx canceled, or the lease closed while sampling; State/Listeners are the previous result
+	Canceled       bool          // ctx canceled while sampling; State/Listeners are the previous result
 }
 
 // SampleState projects the listeners of a valid sample into a state: a

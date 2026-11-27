@@ -520,8 +520,7 @@ test('an existing reason survives a rebuild, and a count change does not lose it
 const HELPER_DIAL = 'github.com/shady2k/nocx/internal/helper/client.Dial'
 const MODE_LOOKUP = 'github.com/shady2k/nocx/internal/hostmode.(*Store).Lookup'
 const CONSENT_LOOKUP = 'github.com/shady2k/nocx/internal/helper/consent.(*Store).Lookup'
-const SAMPLE_PORTS_OP = 'github.com/shady2k/nocx/internal/helper/proto.OpSamplePorts'
-const SAMPLE_PORTS = 'github.com/shady2k/nocx/internal/helper/client.(*ProbeLease).SamplePorts'
+const COMPLETION_PROBE = 'github.com/shady2k/nocx/internal/helper/client.(*ProbeLease).Completion'
 const ACQUIRE_LEASE = 'github.com/shady2k/nocx/internal/helper/client.(*Client).AcquireProbeLease'
 const GIT_FACTORY = 'github.com/shady2k/nocx/internal/git/helper.NewFactory'
 
@@ -590,45 +589,7 @@ test('the same consent read inside internal/farhelper is the owner itself (C23)'
 
 // ─── C24: no panel reaches the host but through the far helper ───────────
 //
-test('naming the helper ports op from a panel package is a second road (C24)', () => {
-  const rows = analyseOne({
-    'internal/app/second.go': `package app
-
-import "github.com/shady2k/nocx/internal/helper/proto"
-
-func op() string { return proto.OpSamplePorts }
-`,
-  })
-  assert.deepEqual(rulesOf(rows), ['panel-host-path'])
-  assert.equal(rows[0].object, SAMPLE_PORTS_OP)
-})
-
-test('the helper protocol package may name its own ports op (C24 positive)', () => {
-  const rows = analyseOne({
-    'internal/helper/client/second.go': `package client
-
-import "github.com/shady2k/nocx/internal/helper/proto"
-
-func op() string { return proto.OpSamplePorts }
-`,
-  })
-  assert.deepEqual(rows, [])
-})
-
-test('a ProbeLease exec from a panel package is a second road (C24)', () => {
-  const rows = analyseOne({
-    'internal/app/second.go': `package app
-
-import "github.com/shady2k/nocx/internal/helper/client"
-
-func ports(l *client.ProbeLease) { _, _ = l.SamplePorts(nil, "") }
-`,
-  })
-  assert.deepEqual(rulesOf(rows), ['panel-host-path'])
-  assert.equal(rows[0].object, SAMPLE_PORTS)
-})
-
-test('any ProbeLease exec is refused, not only the ports sample (C24)', () => {
+test('a home probe lease exec is refused (C24)', () => {
   const rows = analyseOne({
     'internal/app/second.go': `package app
 
@@ -647,7 +608,7 @@ test('the same ProbeLease exec inside internal/farhelper is the road the helper 
 
 import "github.com/shady2k/nocx/internal/helper/client"
 
-func ports(l *client.ProbeLease) { _, _ = l.SamplePorts(nil, "") }
+func probe(l *client.ProbeLease) { _, _ = l.Completion(nil, "", "", 0, 0, "") }
 `,
   })
   assert.deepEqual(rows, [])
@@ -689,7 +650,7 @@ func lease(c *client.Client) { _, _ = c.AcquireProbeLease(nil, proto.LeaseParams
 // The analyser walks the scope before it loads anything and loads only the
 // packages it selected; `-pkgs` is how a test can name one package directly,
 // and it is exactly how the previous fixtures missed this. A method call on a
-// value — `s.Lookup`, `l.SamplePorts` — names the method and the receiver,
+// value — `s.Lookup`, `l.Completion` — names the method and the receiver,
 // never the package, so a selector-name filter dropped the package before
 // go/types ever saw it. These fixtures go through the SAME selection the check
 // uses, with no `-pkgs`.
@@ -739,15 +700,14 @@ const schedulerFixture = (pkg, call = 'discovery.NewScheduler') => `package ${pk
 import (
   "context"
   "github.com/shady2k/nocx/internal/discovery"
-  "github.com/shady2k/nocx/internal/ssh"
+  "github.com/shady2k/nocx/internal/farhelper"
 )
 
 type testConnector struct{}
-func (testConnector) Lease(context.Context, string, ...ssh.ConnectOption) (discovery.Lease, error) { return nil, nil }
-func (testConnector) Exec(context.Context, string, ...string) (string, error) { return "", nil }
-func (testConnector) Done() <-chan struct{} { return nil }
-func (testConnector) LostErr() error { return nil }
-func schedule() { _ = ${call}(testConnector{}, nil) }
+func (testConnector) Acquire(context.Context, string) (*farhelper.Lease, error) { return nil, nil }
+func (testConnector) Axis(string) (farhelper.Status, bool) { return farhelper.Status{}, false }
+func (testConnector) Watch(func(string, farhelper.Status)) func() { return func() {} }
+func schedule() { _ = ${call}(testConnector{}, nil, nil) }
 `
 
 const CONNECTOR_FIXTURE = schedulerFixture('app')
@@ -757,6 +717,21 @@ test('the full pass reports a non-farhelper discovery connector (Ports)', () => 
     violationsFromFacts(factsThroughTheFullPass({ 'internal/app/second.go': CONNECTOR_FIXTURE })),
   )
   assert.ok(rows.some((f) => f.rule === 'panel-host-path' && f.object.includes('testConnector')))
+})
+
+test('the far helper registry supplies the real Ports scheduler (C24)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import (
+  "github.com/shady2k/nocx/internal/discovery"
+  "github.com/shady2k/nocx/internal/farhelper"
+)
+
+func schedule(registry *farhelper.Registry) { _ = discovery.NewScheduler(registry, nil, nil) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), [])
 })
 
 // ─── the seam is the axis's TYPE, wherever the call stands ───────────────
@@ -794,20 +769,18 @@ const FARHELPER_FIXTURE = `package farhelper
 
 import (
   "context"
-  "github.com/shady2k/nocx/internal/discovery"
-  "github.com/shady2k/nocx/internal/ssh"
+  axis "github.com/shady2k/nocx/internal/farhelper"
 )
 
-// FixtureOwnerConnector stands where the axis's own connector will stand.
 type FixtureOwnerConnector struct{}
-func (FixtureOwnerConnector) Lease(context.Context, string, ...ssh.ConnectOption) (discovery.Lease, error) { return nil, nil }
-func (FixtureOwnerConnector) Exec(context.Context, string, ...string) (string, error) { return "", nil }
-func (FixtureOwnerConnector) Done() <-chan struct{} { return nil }
-func (FixtureOwnerConnector) LostErr() error { return nil }
+func (FixtureOwnerConnector) Acquire(context.Context, string) (*axis.Lease, error) { return nil, nil }
+func (FixtureOwnerConnector) Axis(string) (axis.Status, bool) { return axis.Status{}, false }
+func (FixtureOwnerConnector) Watch(func(string, axis.Status)) func() { return func() {} }
 
-// FixtureOwnerShape is declared in farhelper and is still not the axis's connector.
 type FixtureOwnerShape interface {
-  Lease(context.Context, string, ...ssh.ConnectOption) (discovery.Lease, error)
+  Acquire(context.Context, string) (*axis.Lease, error)
+  Axis(string) (axis.Status, bool)
+  Watch(func(string, axis.Status)) func()
 }
 `
 
@@ -830,9 +803,9 @@ const PRODUCT_PORTS_CONNECTOR = `package farhelper
 
 type PortsConnector struct{}
 
-func (PortsConnector) Lease() {}
+func (PortsConnector) Acquire() {}
 
-type Shape interface{ Lease() }
+type Shape interface{ Acquire() }
 `
 
 /** The fixture's own declarations at the owner's path: names only the fixture owns. */
@@ -841,11 +814,11 @@ const FIXTURE_OWNER_DECLARATIONS = `package farhelper
 // FixtureOwnerConnector stands where the axis's own connector will stand.
 type FixtureOwnerConnector struct{}
 
-func (FixtureOwnerConnector) Lease() {}
+func (FixtureOwnerConnector) Acquire() {}
 
 // FixtureOwnerShape is a named interface at the owner's path — a shape, and not
 // the axis's connector.
-type FixtureOwnerShape interface{ Lease() }
+type FixtureOwnerShape interface{ Acquire() }
 `
 
 /**
@@ -855,11 +828,11 @@ type FixtureOwnerShape interface{ Lease() }
 const FIXTURE_DISCOVERY = `package discovery
 
 // Connector is the scheduler's parameter: the seam the Ports rule names.
-type Connector interface{ Lease() }
+type Connector interface{ Acquire() }
 
 type Scheduler struct{}
 
-func NewScheduler(Connector, any) Scheduler { return Scheduler{} }
+func NewScheduler(Connector, any, any) Scheduler { return Scheduler{} }
 `
 
 // These fixtures are packages INSIDE internal/ (their own import paths have to
@@ -887,9 +860,9 @@ import (
   "${importPath}"
 )
 
-func byValue(c farhelper.${connector}) { _ = discovery.NewScheduler(c, nil) }
-func byPointer(c *farhelper.${connector}) { _ = discovery.NewScheduler(c, nil) }
-func byShape(c farhelper.${shape}) { _ = discovery.NewScheduler(c, nil) }
+func byValue(c farhelper.${connector}) { _ = discovery.NewScheduler(c, nil, nil) }
+func byPointer(c *farhelper.${connector}) { _ = discovery.NewScheduler(c, nil, nil) }
+func byShape(c farhelper.${shape}) { _ = discovery.NewScheduler(c, nil, nil) }
 `
 
 /** The panel-host-path facts of one analysis, before the policy removes any. */
@@ -1043,7 +1016,7 @@ import (
   "${fixtureImport(name, 'farhelperlegacy')}"
 )
 
-func schedule(c farhelperlegacy.FixtureOwnerConnector) { _ = discovery.NewScheduler(c, nil) }
+func schedule(c farhelperlegacy.FixtureOwnerConnector) { _ = discovery.NewScheduler(c, nil, nil) }
 `,
       'internal/farhelperlegacy/fixture_owner_connector.go': FARHELPER_FIXTURE.replace(
         'package farhelper',
@@ -1125,8 +1098,8 @@ test('the full pass finds a cross-package store method call behind a parenthesiz
 
 test('the full pass reports a scheduler constructor saved in a local (Ports)', () => {
   const src = schedulerFixture('app').replace(
-    'func schedule() { _ = discovery.NewScheduler(testConnector{}, nil) }',
-    'func schedule() { newScheduler := discovery.NewScheduler; _ = newScheduler(testConnector{}, nil) }',
+    'func schedule() { _ = discovery.NewScheduler(testConnector{}, nil, nil) }',
+    'func schedule() { newScheduler := discovery.NewScheduler; _ = newScheduler(testConnector{}, nil, nil) }',
   )
   const facts = factsThroughTheFullPass({ 'internal/app/second.go': src }).filter(
     (f) => f.rule === 'panel-host-path',
@@ -1143,11 +1116,13 @@ test('the full pass resolves a dot-imported scheduler constructor (Ports)', () =
 import (
   "context"
   . "github.com/shady2k/nocx/internal/discovery"
-  "github.com/shady2k/nocx/internal/ssh"
+  "github.com/shady2k/nocx/internal/farhelper"
 )
 type testConnector struct{}
-func (testConnector) Lease(context.Context, string, ...ssh.ConnectOption) (Lease, error) { return nil, nil }
-func build() { _ = NewScheduler(testConnector{}, nil) }
+func (testConnector) Acquire(context.Context, string) (*farhelper.Lease, error) { return nil, nil }
+func (testConnector) Axis(string) (farhelper.Status, bool) { return farhelper.Status{}, false }
+func (testConnector) Watch(func(string, farhelper.Status)) func() { return func() {} }
+func build() { _ = NewScheduler(testConnector{}, nil, nil) }
 `,
   }).filter((f) => f.rule === 'panel-host-path')
   assert.ok(facts.some((f) => f.object.includes('testConnector')))
@@ -1195,13 +1170,13 @@ test('the full pass finds a ProbeLease exec called on a value (C24)', () => {
 
 import "github.com/shady2k/nocx/internal/helper/client"
 
-func ports(l *client.ProbeLease) { _, _ = l.SamplePorts(nil, "") }
+func probe(l *client.ProbeLease) { _, _ = l.Completion(nil, "", "", 0, 0, "") }
 `,
       }),
     ),
   )
   assert.deepEqual(rulesOf(rows), ['panel-host-path'])
-  assert.equal(rows[0].object, SAMPLE_PORTS)
+  assert.equal(rows[0].object, COMPLETION_PROBE)
 })
 
 test('the full pass still passes the same reads inside internal/farhelper', () => {
@@ -1292,7 +1267,7 @@ test('an unrelated function taking Connector is not the Ports constructor', () =
       'internal/app/second.go': `package app
 import "github.com/shady2k/nocx/internal/discovery"
 type connector struct{}
-func (connector) Lease() {}
+func (connector) Acquire() {}
 func run() { discovery.Unrelated(connector{}, nil) }
 `,
     },

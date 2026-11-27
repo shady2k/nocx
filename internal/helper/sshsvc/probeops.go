@@ -120,7 +120,6 @@ func (s *Service) probeOps() []string {
 		proto.OpUnlease,
 		proto.OpUname,
 		proto.OpHome,
-		proto.OpSamplePorts,
 		proto.OpCompletion,
 		proto.OpCommandNames,
 		proto.OpInflate,
@@ -272,15 +271,6 @@ func (s *Service) home(ctx context.Context, p proto.HomeParams) (proto.HomeResul
 		}
 	}
 	return proto.HomeResult{}, nil
-}
-
-// samplePorts runs one rung of port discovery's ladder, named by the caller.
-func (s *Service) samplePorts(ctx context.Context, p proto.SamplePortsParams) (proto.ProbeExecResult, error) {
-	command, ok := remoteprobe.PortCommand(remoteprobe.PortProbe(p.Probe))
-	if !ok {
-		return proto.ProbeExecResult{}, fmt.Errorf("%w: unknown port probe %q", errBadLeaseParams, p.Probe)
-	}
-	return s.runProbe(ctx, p.Lease, command)
 }
 
 // completion runs the completion probe for one line at one caret.

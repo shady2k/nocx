@@ -132,10 +132,10 @@ func TestPortsError_DTOConformsToContract(t *testing.T) {
 	}
 }
 
-func newPortsHarness(t *testing.T, provider func(log.Logger) discovery.LocalProvider) (*WSServer, *discovery.ConnectionScheduler) {
+func newPortsHarness(t *testing.T, provider func(log.Logger) discovery.LocalProvider) (*WSServer, *discovery.Scheduler) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	sched := discovery.NewConnectionScheduler(nil, logger, provider)
+	sched := discovery.NewScheduler(nil, logger, provider)
 	t.Cleanup(func() { _ = sched.Close() })
 	ws := NewWSServer(logger, newRegWithStub(logger), WithDiscoveryScheduler(sched))
 	if err := ws.Start(t.Context()); err != nil {
@@ -158,7 +158,7 @@ func openPortsPane(t *testing.T, conn *websocket.Conn, pane string) string {
 	if reply.Error != nil || reply.Result.SessionID == "" {
 		t.Fatalf("open pane %s: %s", pane, raw)
 	}
-	return string(reply.Result.SessionID)
+	return reply.Result.SessionID
 }
 
 type portsLocalFixture struct{ release <-chan struct{} }

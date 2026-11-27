@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
@@ -13,7 +14,7 @@ import (
 // the captured stdout, the remote exit status, and whether a capture bound was
 // hit (Truncated — the output is a PREFIX, and a prefix of an enumeration is
 // exactly the partial answer that may not be published).
-type ExecResult = remoteprobe.Result
+type ExecResult = probeoutcome.Result
 
 // Phase names which half of the enumeration to run. The spellings are
 // remoteprobe's, because "which phase is this" is one fact on both sides of the

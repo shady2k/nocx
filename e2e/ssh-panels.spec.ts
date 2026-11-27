@@ -265,7 +265,9 @@ async function answerPasswordAsk(page: Page, password: string): Promise<void> {
  *  a minute spent on a question the product is allowed not to ask.
  *
  *  Neither branch may reject: the loser of a `Promise.race` is not cancelled,
- *  and an assertion it would have thrown is a promise nobody awaits. */
+ *  and an assertion it would have thrown is a promise nobody awaits. Which
+ *  branch won therefore has to be named, not merely reported as success — a
+ *  tab that arrived ready must not be answered. */
 async function answerPasswordAskIfPosed(
   page: Page,
   password: string,
@@ -275,17 +277,24 @@ async function answerPasswordAskIfPosed(
     .locator('.ui-prompt #connection-password')
     .waitFor({ state: 'visible', timeout: 60_000 })
     .then(
-      () => true,
-      () => false,
+      () => 'ask' as const,
+      () => 'none' as const,
     )
   const tabReady = (async (): Promise<void> => {
     await expect(page.locator(TAB)).toHaveCount(tabCount, { timeout: 60_000 })
+    // The head belongs to the ACTIVE tab, so the last tab has to be the active
+    // one before its head is read: otherwise the third tab's arrival is
+    // confirmed off the second tab's head.
+    await expect(page.locator(TAB).nth(tabCount - 1)).toHaveAttribute('aria-selected', 'true', {
+      timeout: 60_000,
+    })
     await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 90_000 })
   })().then(
-    () => true,
-    () => false,
+    () => 'ready' as const,
+    () => 'none' as const,
   )
-  if (await Promise.race([askPosed, tabReady])) await answerPasswordAsk(page, password)
+  const outcome = await Promise.race([askPosed, tabReady])
+  if (outcome === 'ask') await answerPasswordAsk(page, password)
 }
 
 /** The shell's prompt, for a raw connection: the grid takes the keys and no

@@ -52,13 +52,13 @@ func TestAssistantBridgeForwardsCallIDOutsideToolArguments(t *testing.T) {
 		return server.Serve(context.Background(), input, output)
 	})
 	initialization(driver)
-	driver.send(2, "tools/call", `{"name":"alpha.screen","arguments":{"value":7,"__nocx_tool_call_id":"model-call-2"}}`)
+	driver.send(2, "tools/call", `{"name":"alpha.screen","arguments":{"value":7,"__nocx_tool_call_key":"2:model-call"}}`)
 	if got := toolText(t, driver.nextID(2)); got != "{}" {
 		t.Fatalf("call result = %q", got)
 	}
 	call := <-dispatch.calls
-	if call.AgentCallID != "model-call-2" {
-		t.Fatalf("endpoint call ID = %q", call.AgentCallID)
+	if call.AgentCallKey != "2:model-call" {
+		t.Fatalf("endpoint call key = %q", call.AgentCallKey)
 	}
 	var args map[string]int
 	if err := json.Unmarshal(call.RawParams, &args); err != nil || !maps.Equal(args, map[string]int{"value": 7}) {

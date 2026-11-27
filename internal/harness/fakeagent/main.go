@@ -241,7 +241,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 				calls++
 				id := "call-" + strconv.Itoa(calls)
 				emit(protocol.Line{Kind: "tool_started", ID: id, Name: "session.wait"})
-				result, _, err := callTool(ctx, prompt.Tools, id, "session.wait", map[string]any{"runId": match[1], "decision": step.Decision}, script.ProbeEnvironment, false, false)
+				result, _, err := callTool(ctx, prompt.Tools, strconv.Itoa(calls)+":"+id, "session.wait", map[string]any{"runId": match[1], "decision": step.Decision}, script.ProbeEnvironment, false, false)
 				if ctx.Err() != nil {
 					return
 				}
@@ -317,7 +317,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 					arguments[key] = value
 				}
 			}
-			result, isError, err := callTool(ctx, prompt.Tools, id, step.Name, arguments, script.ProbeEnvironment, step.FailOnError, step.ContinueOnRPCError)
+			result, isError, err := callTool(ctx, prompt.Tools, strconv.Itoa(calls)+":"+id, step.Name, arguments, script.ProbeEnvironment, step.FailOnError, step.ContinueOnRPCError)
 			if ctx.Err() != nil {
 				return
 			}
@@ -378,7 +378,7 @@ func run(ctx context.Context, script protocol.Script, prompt protocol.Prompt, st
 // callTool launches the turn's bridge as an MCP stdio client and makes one
 // tools/call. The bridge's environment is added to this child alone; this
 // process's own environment is what it is.
-func callTool(ctx context.Context, bridge harness.ToolBridge, callID, name string, arguments map[string]any, probeEnvironment, failOnError, continueOnRPCError bool) (string, bool, error) {
+func callTool(ctx context.Context, bridge harness.ToolBridge, callKey, name string, arguments map[string]any, probeEnvironment, failOnError, continueOnRPCError bool) (string, bool, error) {
 	if len(bridge.Command) == 0 {
 		return "", false, fmt.Errorf("no tool bridge was declared")
 	}
@@ -427,7 +427,7 @@ func callTool(ctx context.Context, bridge harness.ToolBridge, callID, name strin
 	}
 	for _, entry := range bridge.Env {
 		if strings.HasPrefix(entry, "NOCX_TURN_TOKEN=") {
-			args["__nocx_tool_call_id"] = callID
+			args["__nocx_tool_call_key"] = callKey
 			break
 		}
 	}

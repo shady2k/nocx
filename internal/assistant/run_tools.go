@@ -31,6 +31,7 @@ type RunTools struct {
 
 type agentToolStart struct {
 	published chan struct{}
+	modelID   string
 	claimed   bool
 }
 
@@ -66,41 +67,45 @@ func (r *RunTools) TurnArrivalCutoff() uint64 { return r.kernel.order.ArrivalCut
 
 // StartToolCall publishes a start after the ordered stream has delivered it.
 // Endpoint arrival order can differ from the order of these starts.
-func (r *RunTools) StartToolCall(id string) {
+func (r *RunTools) StartToolCall(key, modelID string) {
 	r.identityMu.Lock()
 	defer r.identityMu.Unlock()
-	start := r.agentStart(id)
+	if r.agentStarts == nil {
+		return
+	}
+	start := r.agentStart(key)
 	select {
 	case <-start.published:
 	default:
+		start.modelID = modelID
 		close(start.published)
 	}
 }
 
-func (r *RunTools) agentStart(id string) *agentToolStart {
-	start := r.agentStarts[id]
+func (r *RunTools) agentStart(key string) *agentToolStart {
+	start := r.agentStarts[key]
 	if start == nil {
 		start = &agentToolStart{published: make(chan struct{})}
-		r.agentStarts[id] = start
+		r.agentStarts[key] = start
 	}
 	return start
 }
 
-func (r *RunTools) claimAgentStart(id string) (<-chan struct{}, error) {
+func (r *RunTools) claimAgentStart(key string) (*agentToolStart, error) {
 	r.identityMu.Lock()
 	defer r.identityMu.Unlock()
 	if r.agentStarts == nil {
 		return nil, nil
 	}
-	if id == "" {
-		return nil, errors.New("assistant tools: missing agent call ID")
+	if key == "" {
+		return nil, errors.New("assistant tools: missing agent call key")
 	}
-	start := r.agentStart(id)
+	start := r.agentStart(key)
 	if start.claimed {
-		return nil, errors.New("assistant tools: agent call ID already claimed")
+		return nil, errors.New("assistant tools: agent call already claimed")
 	}
 	start.claimed = true
-	return start.published, nil
+	return start, nil
 }
 
 // ReserveInvocation fixes this call's position while the endpoint still reads
@@ -132,7 +137,7 @@ func (r *RunTools) Admit(ctx context.Context) (ToolInvocation, error) {
 // Dispatch uses the kernel's own per-turn order and complete authority chain.
 func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 	invocation.RunContext = r.RunContext()
-	started, err := r.claimAgentStart(invocation.AgentCallID)
+	started, err := r.claimAgentStart(invocation.AgentCallKey)
 	if err != nil {
 		return "", &DispatchRefusalError{Method: invocation.Method, Reason: errText(err), Cause: err}
 	}
@@ -141,11 +146,11 @@ func (r *RunTools) Dispatch(invocation ToolInvocation) (string, error) {
 		callID = uuid.NewString()
 	} else {
 		select {
-		case <-started:
+		case <-started.published:
 			if contextErr := invocation.Context.Err(); contextErr != nil {
 				return "", contextErr
 			}
-			callID = invocation.AgentCallID
+			callID = started.modelID
 		case <-invocation.Context.Done():
 			return "", invocation.Context.Err()
 		}

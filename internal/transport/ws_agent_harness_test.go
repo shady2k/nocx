@@ -331,7 +331,7 @@ func (h *concurrentDeliveryHarness) Run(ctx context.Context, spec agentharness.T
 				if err == nil {
 					invocation.Context = ctx
 					invocation.Method = "snippets.list"
-					invocation.AgentCallID = id
+					invocation.AgentCallKey = strconv.Itoa(n+1) + ":" + id
 					invocation.RawParams = json.RawMessage(`{}`)
 					_, _ = tools.Dispatch(invocation)
 				}

@@ -49,10 +49,10 @@ func (h *reorderedToolHarness) Run(ctx context.Context, spec agentharness.TurnSp
 		send(agentharness.EventToolStarted, "model-second")
 
 		// Reserve in the reverse order, as two MCP requests can arrive on the socket.
-		request := assistant.ToolInvocation{Context: turnCtx, Method: "fetch.url", AgentCallID: "model-second", RawParams: []byte(`{"url":"https://example.test/second"}`)}
+		request := assistant.ToolInvocation{Context: turnCtx, Method: "fetch.url", AgentCallKey: "2:model-second", RawParams: []byte(`{"url":"https://example.test/second"}`)}
 		second, releaseSecond := tools.ReserveInvocation(request)
 		defer releaseSecond()
-		request.AgentCallID = "model-first"
+		request.AgentCallKey = "1:model-first"
 		request.RawParams = []byte(`{"url":"https://example.test/first"}`)
 		first, releaseFirst := tools.ReserveInvocation(request)
 		defer releaseFirst()
@@ -69,12 +69,20 @@ func (h *reorderedToolHarness) Run(ctx context.Context, spec agentharness.TurnSp
 		h.results <- err
 		releaseSecond()
 		h.results <- <-firstResult
+		releaseFirst()
+
+		send(agentharness.EventToolFinished, "model-second")
+		send(agentharness.EventToolStarted, "model-first")
+		request.AgentCallKey = "3:model-first"
+		request.RawParams = []byte(`{"url":"https://example.test/later"}`)
+		_, err = tools.Dispatch(request)
+		h.results <- err
 	}()
 	return turn, nil
 }
 
 func TestAgentHarnessCorrelatesReorderedCallsAcrossFinish(t *testing.T) {
-	backend := &reorderedToolHarness{results: make(chan error, 2)}
+	backend := &reorderedToolHarness{results: make(chan error, 3)}
 	fetcher := transportFetchTextFetcher{result: apifetch.TextDocument{
 		URL: "https://example.test/page", ContentType: "text/html", Text: "hello from the page",
 	}}
@@ -98,12 +106,13 @@ func TestAgentHarnessCorrelatesReorderedCallsAcrossFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
+	for range 3 {
 		if dispatchErr := <-backend.results; dispatchErr != nil {
 			t.Fatal(dispatchErr)
 		}
 	}
-	if want := []string{"model-second:https://example.test/second", "model-first:https://example.test/first"}; !slices.Equal(details, want) {
+	want := []string{"model-second:https://example.test/second", "model-first:https://example.test/first", "model-first:https://example.test/later"}
+	if !slices.Equal(details, want) {
 		t.Fatalf("tool details = %v, want %v", details, want)
 	}
 }

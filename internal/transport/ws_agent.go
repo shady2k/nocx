@@ -1234,11 +1234,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	var toolCallsRequested, toolCallsExecuted atomic.Int64
 	var toolStatsMu sync.Mutex
 	requestedCalls := make(map[string]struct{})
-	recordRequested := func(callID string) {
+	recordRequested := func(callKey string) {
 		toolStatsMu.Lock()
 		defer toolStatsMu.Unlock()
-		if _, seen := requestedCalls[callID]; !seen {
-			requestedCalls[callID] = struct{}{}
+		if _, seen := requestedCalls[callKey]; !seen {
+			requestedCalls[callKey] = struct{}{}
 			toolCallsRequested.Add(1)
 		}
 	}
@@ -1374,7 +1374,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		switch ev.Kind {
 		case agentAskToolStarted:
 			if ev.Call != nil {
-				recordRequested(ev.Call.CallID)
+				recordRequested(ev.Call.AgentCallKey)
 			}
 			// THE BOUNDARY, and it is the backend's (ADR-0040). The prose
 			// that was streaming ends HERE, where the call arrived, because
@@ -1414,7 +1414,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			if ev.Call == nil {
 				return nil
 			}
-			recordRequested(ev.Call.CallID)
+			recordRequested(ev.Call.AgentCallKey)
 			// The wire declares `args` as an OBJECT and requires it, so a
 			// call that carried none is announced as `{}` rather than as
 			// null: absent and empty are the same sentence about a call, and
@@ -1730,6 +1730,8 @@ func (h agentHandlers) askHarness(ctx context.Context, rc askRunContext, p assis
 	// A published start is available until its details are delivered. A
 	// harness finish can arrive while an accepted endpoint call is unwinding.
 	started := make(map[string]struct{})
+	// The Pi bridge counts the same ordered starts before making MCP requests.
+	startSequence := 0
 stream:
 	for {
 		var event agentharness.Event
@@ -1738,10 +1740,10 @@ stream:
 			write.ack <- emit(agentAskEvent{Kind: agentAskSteer, Text: write.text})
 		case detail := <-details:
 			var detailErr error
-			if _, ok := started[detail.call.CallID]; !ok {
+			if _, ok := started[detail.call.AgentCallKey]; !ok {
 				detailErr = errors.New("tool details have no ordered start")
 			} else {
-				delete(started, detail.call.CallID)
+				delete(started, detail.call.AgentCallKey)
 				detailErr = emit(agentAskEvent{Kind: agentAskToolCall, Call: &detail.call})
 			}
 			detail.done <- detailErr
@@ -1766,8 +1768,9 @@ stream:
 			if event.Tool == nil || runTools == nil {
 				continue
 			}
-			started[event.Tool.ID] = struct{}{}
-			ev = agentAskEvent{Kind: agentAskToolStarted, Call: &assistant.ToolCall{CallID: event.Tool.ID}}
+			startSequence++
+			key := strconv.Itoa(startSequence) + ":" + event.Tool.ID
+			ev = agentAskEvent{Kind: agentAskToolStarted, Call: &assistant.ToolCall{CallID: event.Tool.ID, AgentCallKey: key}}
 		case agentharness.EventAnswerDelta:
 			ev = agentAskEvent{Kind: agentAskAnswer, Text: event.Text}
 		case agentharness.EventReasoningDelta:
@@ -1781,7 +1784,8 @@ stream:
 			break stream
 		}
 		if event.Kind == agentharness.EventToolStarted {
-			runTools.StartToolCall(event.Tool.ID)
+			started[ev.Call.AgentCallKey] = struct{}{}
+			runTools.StartToolCall(ev.Call.AgentCallKey, ev.Call.CallID)
 		}
 	}
 	stopDelivery()

@@ -35,12 +35,13 @@ import (
 // parse and the grant. A point that reads them reads what preparation
 // validated and what the tool will run with.
 type Call struct {
-	runID   string
-	attempt int
-	tool    string
-	callID  string
-	argHash string
-	facts   *callFacts
+	runID        string
+	attempt      int
+	tool         string
+	callID       string
+	agentCallKey string
+	argHash      string
+	facts        *callFacts
 }
 
 // callFacts is what preparation derived from one call. The pipeline builds it
@@ -449,11 +450,12 @@ func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID str
 		return dispatchOutcome{}, err
 	}
 	call := Call{
-		runID:   invocation.RunContext.RunID,
-		attempt: attempt,
-		tool:    prepared.decl.Name,
-		callID:  callID,
-		argHash: canonicalArgHash(string(invocation.RawParams)),
+		runID:        invocation.RunContext.RunID,
+		attempt:      attempt,
+		tool:         prepared.decl.Name,
+		callID:       callID,
+		agentCallKey: invocation.AgentCallKey,
+		argHash:      canonicalArgHash(string(invocation.RawParams)),
 		facts: &callFacts{
 			decl:              prepared.decl,
 			args:              prepared.args,

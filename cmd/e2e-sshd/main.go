@@ -63,6 +63,11 @@
 //	HELPERKILL=<path>       printed ONLY under -helper-kill-dir: the gate this
 //	                        run watches for a kill cue, a new content there
 //	                        kills the far helper daemon (below)
+//	PORTSTOOLS=<dir>        printed ONLY under -ports-tools: the directory of
+//	                        port-probe fixtures this run put in front of the
+//	                        session's PATH. `calls` inside it records every
+//	                        invocation, which is how a spec says "the ladder
+//	                        never ran here" (portstools.go)
 //	READY
 //
 // Fault switches, for the tests that need the far side to be the broken thing:
@@ -84,6 +89,11 @@
 //	                        HELPERKILL=<dir>/cue. The directory is the
 //	                        caller's, and it is the caller's to remove; no run
 //	                        without this flag watches anything.
+//	-ports-tools <mode>     make the host's port tool a chosen fact, by putting
+//	                        a fixture directory FIRST on the session's PATH
+//	                        (portstools.go). `fake` prints one fixed listener;
+//	                        `absent` makes ss, netstat, lsof and sockstat exit
+//	                        127 with "not found" — design §5.10 scenario 8.
 //
 // The far helper's death, on cue, is what -helper-kill-dir turns on. Each
 // distinct content written to the announced gate is one cue that SIGKILLs the
@@ -214,6 +224,7 @@ func run() error {
 	changedHostKey := flag.Bool("changed-host-key", false, "present a host key other than the one KNOWNHOSTS= names: a host whose key changed under a client that trusts its own record")
 	signInDelay := flag.Duration("sign-in-delay", 0, "hold every real userauth answer this long (a Go duration such as 2s): a host that lets a person in late")
 	helperKillDir := flag.String("helper-kill-dir", "", "watch <dir>/cue for the far helper's kill cue, announcing HELPERKILL=<dir>/cue: each new content SIGKILLs the helper daemon installed under this account's home and answers on stdout; empty disables the switch, and the directory is the caller's to remove")
+	portsTools := flag.String("ports-tools", "", "put port-probe fixtures in front of the session's PATH: `fake` is an ss that prints one fixed listener, `absent` is ss/netstat/lsof/sockstat exiting 127 with \"not found\" — a host with no port tool at all. Announced as PORTSTOOLS=<dir>, whose `calls` file records every invocation (portstools.go)")
 	flag.Parse()
 	if fixtureLoginShell != "" {
 		resolved, err := exec.LookPath(fixtureLoginShell)
@@ -328,6 +339,21 @@ func run() error {
 	// directory, which it removes — never in a global TMPDIR this fixture would
 	// leak on every start. Announced before READY so a spec never has to guess
 	// it, and armed only once READY has been said.
+	// The port-probe fixtures, if this run asked for a host whose port tool is
+	// a chosen fact. Installed before READY so a spec never has to guess the
+	// directory. The removal below is the ORDERLY exit's and no spec performs
+	// one — a fixture ended with a signal runs no defer — so the caller's
+	// teardown removes it too (portstools.go, e2e/sshd-fixture.ts stopSshd).
+	if *portsTools != "" {
+		dir, err := installPortsTools(*portsTools)
+		if err != nil {
+			return err
+		}
+		portsToolsDir = dir
+		defer func() { _ = os.RemoveAll(dir) }()
+		printLine("PORTSTOOLS=" + dir)
+	}
+
 	if *helperKillDir != "" {
 		dir, err := filepath.Abs(*helperKillDir)
 		if err != nil {
@@ -1091,14 +1117,28 @@ func sessionEnv(shell string) []string {
 	if fixtureLoginShell != "" {
 		shell = fixtureLoginShell
 	}
+	// -ports-tools puts its fixture directory FIRST on the session's PATH
+	// (portstools.go): the far helper is started from a command this fixture
+	// runs, so the ladder resolves its rungs against the environment below.
+	// The switch is off in every run that does not ask for it, and then PATH
+	// passes through untouched — a fixture that rewrote it unconditionally
+	// would be changing the thing it is supposed to serve.
+	prefix := portsToolsPathPrefix()
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "SHELL=") || strings.HasPrefix(kv, "TERM=") {
 			continue
 		}
+		if prefix != "" && strings.HasPrefix(kv, "PATH=") {
+			continue
+		}
 		env = append(env, kv)
 	}
-	return append(env, "SHELL="+shell, "TERM=xterm-256color")
+	env = append(env, "SHELL="+shell, "TERM=xterm-256color")
+	if prefix != "" {
+		env = append(env, "PATH="+withPortsToolsString(os.Getenv("PATH")))
+	}
+	return env
 }
 
 // claim reports whether this channel is still free to start something. A

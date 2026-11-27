@@ -137,6 +137,9 @@ function mountPanel(
       <ToastHost />
       <PortsPanel
         paneId={pid}
+        // The suite's subject is the hand-typed-host empty state; the axis
+        // has its own suite (ports.test.tsx) and the e2e.
+        activeOrigin={() => null}
         unavailableIn={() => 'pi@192.0.2.93'}
         onOpenAsConnection={onOpenAsConnection}
         services={services}

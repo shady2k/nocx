@@ -398,6 +398,28 @@ describe('ADR-ba6xet1b — the collector the CLI runs sees the same sites', () =
   })
 })
 
+// C26 (`nocx-oalo1.13.4`, ALX-1852): the two panels that show a host's own
+// answer — Ports and Git — choose every sentence they print from the wire's
+// typed reason, never from an error's prose. The rule above refuses a NEW
+// match; this is the assertion that the baseline carries none for THEM, so a
+// renewed exemption would fail here rather than pass as "already known".
+//
+// It is deliberately a floor over the whole file rather than a count of the
+// sites the last sweep removed: a refactor that moves `listingFailureMessage`
+// into a helper keeps the file name and still fails, and a new matcher added
+// under any other function name fails too.
+describe('C26 — neither panel decides a sentence from an error’s text', () => {
+  it('the committed error-text baseline names neither the Ports nor the Git panel', () => {
+    const errorText = owners.loadBaseline().filter((e) => e.rule === 'nocx/no-error-text-match')
+    for (const file of ['frontend/src/ports.tsx', 'frontend/src/git/git-panel.tsx']) {
+      expect(
+        errorText.filter((e) => e.file === file),
+        `${file} still chooses a sentence by matching error text`,
+      ).toEqual([])
+    }
+  })
+})
+
 describe('ADR-ba6xet1b — the baseline exempts occurrences, not sentences', () => {
   const key = {
     rule: 'nocx/no-connection-subscription',

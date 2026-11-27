@@ -349,6 +349,23 @@ test('a forwarded row keeps its destination readable at the default rail width, 
       hasText: LONG_DESTINATION,
     })
     await expect(row).toBeVisible({ timeout: 30_000 })
+
+    // THE GATE AND THE LEDGER AT ONCE (ALX-1852, nocx-oalo1.13.4). This host
+    // is script-integrated, so the panel draws the shared helper card for its
+    // Detected section — and the forward above is still on screen, because the
+    // ledger is the backend's record and not the host's answer. A panel that
+    // gated the whole surface would have taken a running forward away with it,
+    // and that is the shape this asserts against.
+    const axis = page.locator('[data-testid="ports-helper-axis"]')
+    await expect(axis).toBeVisible()
+    await expect(axis).toContainText(
+      'This host uses Script integration, so the nocx helper is not used.',
+    )
+    // The card's one action, as the backend offers it for this reason.
+    await expect(page.locator('[data-testid="ports-host-settings"]')).toBeVisible()
+    // And no detected row: nothing asked the host for ports.
+    await expect(page.locator('[data-testid="detected-row"]')).toHaveCount(0)
+
     await expectDefaultRail(page)
 
     // The measurement, pointer NOT over the row: both lines fit. The

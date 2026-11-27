@@ -145,6 +145,11 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
       () => (
         <PortsPanel
           paneId={() => 'ssh:p1:1'}
+          // This suite measures layout, not the axis: no origin means the
+          // gate has nothing to hold, and the rows under measurement are the
+          // ones a serving connection draws (the axis itself is
+          // ports.test.tsx's and e2e/ssh-panels.spec.ts's subject).
+          activeOrigin={() => null}
           savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
@@ -228,6 +233,11 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
       () => (
         <PortsPanel
           paneId={() => 'ssh:p1:1'}
+          // This suite measures layout, not the axis: no origin means the
+          // gate has nothing to hold, and the rows under measurement are the
+          // ones a serving connection draws (the axis itself is
+          // ports.test.tsx's and e2e/ssh-panels.spec.ts's subject).
+          activeOrigin={() => null}
           savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}
@@ -295,6 +305,11 @@ describe('the hidden actions reserve no width (nocx-4wbx)', () => {
       () => (
         <PortsPanel
           paneId={() => 'ssh:p1:1'}
+          // This suite measures layout, not the axis: no origin means the
+          // gate has nothing to hold, and the rows under measurement are the
+          // ones a serving connection draws (the axis itself is
+          // ports.test.tsx's and e2e/ssh-panels.spec.ts's subject).
+          activeOrigin={() => null}
           savedProfileId={() => 'ssh:p1:1'}
           services={services}
           visible={() => true}

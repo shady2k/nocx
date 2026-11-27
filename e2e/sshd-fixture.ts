@@ -27,7 +27,7 @@
 // inheritance means uploading into the checkout. The caller states it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import path from 'node:path'
 
@@ -72,6 +72,19 @@ export interface SshdFixture {
    */
   helperKillFile: string
   /**
+   * The directory of port-probe fixtures this run put in FRONT of the
+   * session's PATH, or '' when it did not.
+   *
+   * `cmd/e2e-sshd -ports-tools` (portstools.go) makes the host's port tool a
+   * fact a spec chooses: `fake` prints one fixed listener, `absent` makes
+   * ss/netstat/lsof/sockstat exit 127 with "not found" — a host with no tool
+   * at all (design §5.10 scenario 8, nocx-oalo1.13.4). Every script appends to
+   * `calls` in this directory, so `portsExecs()` is the fixture's own account
+   * of whether the ladder ran: a raw host must leave it empty, which is not
+   * something this side of the wire can otherwise observe.
+   */
+  portsTools: string
+  /**
    * Every machine-readable line the server has printed so far, in arrival
    * order — the handshake lines above and everything after READY.
    *
@@ -94,8 +107,60 @@ export interface StartSshdOptions {
   /** Working directory for the server, and therefore for the shells it
    *  spawns — the cwd a connected tab reports over OSC 7. */
   cwd: string
+  /**
+   * The host's port tool, as this run decides it: `fake` is an `ss` that
+   * prints one fixed listener, `absent` is every rung exiting 127 with
+   * "not found". Absent means the fixture puts nothing in front of PATH, and
+   * the host's own tools are whatever the machine has.
+   */
+  portsTools?: 'fake' | 'absent'
   /** Extra flags, e.g. `['-password', 'secret']`. */
   args?: string[]
+}
+
+/**
+ * Every invocation of the port-probe fixtures, one per line, or [] when none
+ * ran — which is the statement a raw-host case asserts ("no ports exec").
+ *
+ * An empty answer is only evidence when the directory is not: a case that
+ * asserts "the ladder never ran" must first require a NON-empty
+ * `fixture.portsTools`, or a run where the switch never reached the server
+ * would satisfy it with nothing raised to run the ladder.
+ */
+export function portsExecs(fixture: SshdFixture): string[] {
+  if (fixture.portsTools === '') return []
+  const file = path.join(fixture.portsTools, 'calls')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+}
+
+/**
+ * End a fixture, and remove what it made.
+ *
+ * THE PORT-TOOL DIRECTORY IS REMOVED HERE, not only by the server's own
+ * `defer`. Specifications end this fixture with a signal — SIGKILL in most of
+ * them — and a process killed by a signal runs no deferred function, so the
+ * directory `-ports-tools` created lived on under TMPDIR forever, one per run
+ * since the switch was added (nocx-oalo1.13.4 review, ALX-1865 item 7). The
+ * server's defer still covers an orderly exit; this covers the teardown a spec
+ * actually performs, and both are idempotent.
+ *
+ * The kill is awaited on the process's own `exit` event, so a caller that
+ * removes the fixture's home afterwards is not racing a live helper.
+ */
+export async function stopSshd(fixture: SshdFixture): Promise<void> {
+  const { proc } = fixture
+  if (proc.exitCode === null && proc.signalCode === null) {
+    const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()))
+    proc.kill('SIGKILL')
+    await exited
+  }
+  if (fixture.portsTools !== '') {
+    rmSync(fixture.portsTools, { recursive: true, force: true })
+  }
 }
 
 /**
@@ -134,18 +199,26 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
       cwd: path.resolve(__dirname, '..'),
     })
   }
-  const proc = spawn(bin, [...(opts.args ?? []), ...sftpArgs(opts.slowSftp)], {
-    stdio: ['ignore', 'pipe', 'inherit'],
-    cwd: opts.cwd,
-    env: {
-      ...process.env,
-      HOME: opts.home,
-      ZDOTDIR: opts.home,
-      XDG_CONFIG_HOME: path.join(opts.home, '.config'),
-      XDG_DATA_HOME: path.join(opts.home, '.local', 'share'),
-      XDG_CACHE_HOME: path.join(opts.home, '.cache'),
+  const proc = spawn(
+    bin,
+    [
+      ...(opts.args ?? []),
+      ...(opts.portsTools === undefined ? [] : ['-ports-tools', opts.portsTools]),
+      ...sftpArgs(opts.slowSftp),
+    ],
+    {
+      stdio: ['ignore', 'pipe', 'inherit'],
+      cwd: opts.cwd,
+      env: {
+        ...process.env,
+        HOME: opts.home,
+        ZDOTDIR: opts.home,
+        XDG_CONFIG_HOME: path.join(opts.home, '.config'),
+        XDG_DATA_HOME: path.join(opts.home, '.local', 'share'),
+        XDG_CACHE_HOME: path.join(opts.home, '.cache'),
+      },
     },
-  })
+  )
 
   const { promise, resolve, reject } = Promise.withResolvers<SshdFixture>()
   let addr = ''
@@ -153,6 +226,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
   let rsaKey = ''
   let knownHosts = ''
   let helperKillFile = ''
+  let portsTools = ''
   const lines: string[] = []
   // A line can split across pipe chunks; hold the partial tail so READY is
   // never missed (the same hazard nocxify-journey.spec.ts records).
@@ -174,6 +248,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
       if (trimmed.startsWith('RSAKEY=')) rsaKey = trimmed.slice(7)
       if (trimmed.startsWith('KNOWNHOSTS=')) knownHosts = trimmed.slice(11)
       if (trimmed.startsWith('HELPERKILL=')) helperKillFile = trimmed.slice(11)
+      if (trimmed.startsWith('PORTSTOOLS=')) portsTools = trimmed.slice(11)
       if (trimmed === 'READY' && addr && userKey && knownHosts) {
         clearTimeout(timer)
         const [host, port] = addr.split(':')
@@ -188,6 +263,7 @@ export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Pro
           rsaKey: rsaKey === '' ? undefined : rsaKey,
           knownHosts,
           helperKillFile,
+          portsTools,
           lines: () => lines,
         })
       }

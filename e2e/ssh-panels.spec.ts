@@ -22,6 +22,22 @@
 //                    Refresh redials and the repository returns, and nothing
 //                    is installed a second time.
 //
+// # The Ports panel of the same axis (nocx-oalo1.13.4, ALX-1852)
+//
+//   serving        the host's port tool reports one listener, and Ports shows
+//                  it — on a saved connection and on a hand-typed host alike,
+//                  which is the epic's DONE WHEN 1.
+//   raw host       the SAME card the head draws, with Host settings and no
+//                  Retry, while the host's own tools record that the ladder
+//                  never ran: a gated panel asks its host nothing.
+//   no port tool   scenario 8's other half — `-ports-tools=absent` makes every
+//                  rung exit 127, so Ports says so in a fixed sentence while
+//                  Git reads the branch and Files lists with data-helper
+//                  "serving": a missing tool is a Ports outcome, not an axis.
+//   script + forward  a closed gate and a saved forward at the same time: the
+//                  card and the forwarded row are both on screen, because the
+//                  ledger is read whatever the axis says (e2e/ports-row-width).
+//
 // # The Files half of the same axis (nocx-oalo1.12.8)
 //
 //   serving          Files lists the far host, opens a file's bytes, uploads a
@@ -72,17 +88,24 @@ import { startFaultProxy, type FaultProxy } from './fault-proxy'
 import { createRepo, type GitRepo } from './git-fixture'
 import {
   hostKeyFingerprint,
+  portsExecs,
   recordHostMethod,
   rpc,
   startSshd,
+  stopSshd,
   type SshdFixture,
 } from './sshd-fixture'
 
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
-const HEAD = '[data-testid="connection-head"]'
-const HEAD_TEXT = '[data-testid="connection-head"] .ui-connection-head__text'
-const HEAD_ACTION = '[data-testid="connection-head"] .ui-connection-head__action'
+/** The head of the tab IN FRONT, and only of it: a second SSH tab leaves its own
+ *  head in the DOM with the pane merely inactive, so the unscoped selector is two
+ *  elements and Playwright's strict mode refuses to answer — which is the right
+ *  refusal, because the head being read must belong to the tab being read. Same
+ *  selector as `ssh-foundation.spec.ts` and `ssh-reconnect.spec.ts`. */
+const HEAD = '.pane.active [data-testid="connection-head"]'
+const HEAD_TEXT = `${HEAD} .ui-connection-head__text`
+const HEAD_ACTION = `${HEAD} .ui-connection-head__action`
 const GIT_AXIS = '[data-testid="git-helper-axis"]'
 const FILES_PANEL = '[data-testid="files-panel"]'
 const FILES_AXIS = '[data-testid="files-helper-axis"]'
@@ -90,6 +113,11 @@ const FILES_ROW = '.files-row'
 const TREE_NAME = '.ui-tree-row__name'
 const GIT_BRANCH = '[data-testid="git-branch"]'
 const GIT_PANEL = '[data-testid="git-panel"]'
+const PORTS_AXIS = '[data-testid="ports-helper-axis"]'
+const PORTS_ROW = '[data-testid="detected-row"]'
+/** The listener `cmd/e2e-sshd -ports-tools=fake` puts on the host, and the
+ *  owner it names — the row a person reads, not a row this spec invented. */
+const FIXTURE_LISTENER_PORT = 6768
 
 /** The one fold's sentences, in the words a person reads (helper-axis.ts).
  *  Hardcoded on purpose: the spec is the independent witness that both
@@ -111,6 +139,42 @@ function trustHostKey(knownHosts: string): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), knownHosts + '\n')
 }
 
+/** A `Host <alias>` block in the backend's own `~/.ssh/config`, and the
+ *  restore that puts back exactly the bytes this run found.
+ *
+ *  THE OPEN CONTRACT CARRIES NO PORT (contracts/open.params.schema.json): a
+ *  hand-typed `user@host:port` reaches the backend as a host and a user, and
+ *  the number is dropped on the way — the dial then follows what `ssh -G`
+ *  answers for that host (internal/transport/session_open.go's direct-host
+ *  arm, reading exactly this file by its explicit path and re-reading it when
+ *  its mtime moves). So the hand-typed tab names an ALIAS, and the address,
+ *  the port and the account are the configuration's answer — the same
+ *  question `ssh` itself would ask for the same word.
+ *
+ *  No `IdentityFile` on purpose. A hand-typed tab carries no stored
+ *  credential, so it takes the ladder's prompt rung (DialAuthInteractive),
+ *  which is the ask the saved tab beside it answers; naming a key here would
+ *  authenticate without a person and leave the spec's own ask waiting for a
+ *  dialog that never comes. */
+function writeSSHConfigAlias(alias: string, port: number, user: string): () => void {
+  const sshDir = path.join(STAND_HOME, '.ssh')
+  mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+  const file = path.join(sshDir, 'config')
+  const previous: Buffer | null = existsSync(file) ? readFileSync(file) : null
+  const block = [
+    `Host ${alias}`,
+    '  HostName 127.0.0.1',
+    `  Port ${port}`,
+    `  User ${user}`,
+    '',
+  ].join('\n')
+  writeFileSync(file, previous === null ? block : `${previous.toString()}\n${block}`)
+  return () => {
+    if (previous === null) rmSync(file, { force: true })
+    else writeFileSync(file, previous)
+  }
+}
+
 /** The fixture's own known_hosts line, spelled for the port the profile
  *  dials — the relay's when one stands in front of the host. */
 function knownHostsFor(fixture: SshdFixture, port: number): string {
@@ -128,7 +192,11 @@ interface Host {
 /** A far host whose HOME is disposable and whose shell starts inside a real
  *  git repository. `-helper-kill-dir` is passed only by the scenario that
  *  kills the daemon: a run that kills nothing watches nothing. */
-async function startHost(killable = false): Promise<Host> {
+async function startHost(
+  killable = false,
+  portsTools?: 'fake' | 'absent',
+  extraArgs: string[] = [],
+): Promise<Host> {
   // THE HOME IS THE REPOSITORY, deliberately. A helper-hosted shell is spawned
   // by the far helper's own pty, whose resolveCwd falls back to the login
   // user's home when no cwd is given (cmd/e2e-sshd's seedRepo comment), so a
@@ -142,18 +210,19 @@ async function startHost(killable = false): Promise<Host> {
   const fixture = await startSshd({
     home: remoteHome,
     cwd: repo.root,
-    ...(killDir === null ? {} : { args: ['-helper-kill-dir', killDir, '-shell', 'zsh'] }),
+    ...(portsTools === undefined ? {} : { portsTools }),
+    ...(killDir === null
+      ? { args: extraArgs.length === 0 ? undefined : extraArgs }
+      : { args: ['-helper-kill-dir', killDir, '-shell', 'zsh', ...extraArgs] }),
   })
   return { fixture, remoteHome, repo, killDir }
 }
 
 async function stopHost(host: Host): Promise<void> {
-  const proc = host.fixture.proc
-  if (proc.exitCode === null && proc.signalCode === null) {
-    const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()))
-    proc.kill('SIGKILL')
-    await exited
-  }
+  // The kill AND the port-tool directory it created: a killed fixture runs no
+  // deferred function, so the teardown a spec performs is the one that removes
+  // what the fixture made (sshd-fixture.ts stopSshd).
+  await stopSshd(host.fixture)
   // The far helper is this machine's process too: between the daemon's death
   // and the fixture's, one can still be writing its `.nocx` tree under the
   // home, which is the checkout. Retries are the difference between a cleanup
@@ -176,6 +245,63 @@ async function openSavedProfile(page: Page, name: string): Promise<void> {
   await expect(row).toBeVisible({ timeout: 10_000 })
   await expect(row).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Enter')
+}
+
+/** Answer the connection-password ask the fixture poses: the one password it
+ *  accepts, typed in, and the prompt gone before the caller asserts anything
+ *  about the tab. A saved profile with no stored secret and a hand-typed host
+ *  meet the SAME ask, which is what lets one fixture serve both. */
+async function answerPasswordAsk(page: Page, password: string): Promise<void> {
+  const prompt = page.locator('.ui-prompt')
+  await expect(prompt).toBeVisible({ timeout: 60_000 })
+  await prompt.locator('#connection-password').fill(password)
+  await prompt.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(prompt).not.toBeVisible({ timeout: 60_000 })
+}
+
+/** Answer the connection-password ask IF the fixture poses one.
+ *
+ *  A second tab to a host whose transport is already live can be handed that
+ *  transport instead of a new password round: the lease is keyed by address,
+ *  port, user, credential and route, and `ProfileID` is not in the key, so the
+ *  saved tab's authenticated connection answers the hand-typed tab's open. So
+ *  the ask is RACED against the tab arriving ready without it, and the caller
+ *  still waits for the tab afterwards — an unconditional wait for a prompt is
+ *  a minute spent on a question the product is allowed not to ask.
+ *
+ *  Neither branch may reject: the loser of a `Promise.race` is not cancelled,
+ *  and an assertion it would have thrown is a promise nobody awaits. Which
+ *  branch won therefore has to be named, not merely reported as success — a
+ *  tab that arrived ready must not be answered. */
+async function answerPasswordAskIfPosed(
+  page: Page,
+  password: string,
+  tabCount: number,
+): Promise<void> {
+  const askPosed = page
+    .locator('.ui-prompt #connection-password')
+    .waitFor({ state: 'visible', timeout: 60_000 })
+    .then(
+      () => 'ask' as const,
+      () => 'none' as const,
+    )
+  const tabReady = (async (): Promise<void> => {
+    await expect(page.locator(TAB)).toHaveCount(tabCount, { timeout: 60_000 })
+    // The head belongs to the ACTIVE tab, so the last tab has to be the active
+    // one before its head is read: otherwise the third tab's arrival is
+    // confirmed off the second tab's head. `HEAD` is scoped to the active pane
+    // for the same reason — an unscoped selector is two heads once the second
+    // SSH tab is open, and the refusal would stand in for the wait.
+    await expect(page.locator(TAB).nth(tabCount - 1)).toHaveAttribute('aria-selected', 'true', {
+      timeout: 60_000,
+    })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 90_000 })
+  })().then(
+    () => 'ready' as const,
+    () => 'none' as const,
+  )
+  const outcome = await Promise.race([askPosed, tabReady])
+  if (outcome === 'ask') await answerPasswordAsk(page, password)
 }
 
 /** The shell's prompt, for a raw connection: the grid takes the keys and no
@@ -232,9 +358,14 @@ interface Wired {
  *  ask's own backend call, so `helper` also records the machine's grant. */
 async function wire(
   page: Page,
-  opts: { killable?: boolean; throughProxy?: boolean; mode: 'raw' | 'script' | 'helper' },
+  opts: {
+    killable?: boolean
+    throughProxy?: boolean
+    mode: 'raw' | 'script' | 'helper'
+    portsTools?: 'fake' | 'absent'
+  },
 ): Promise<Wired> {
-  const host = await startHost(opts.killable)
+  const host = await startHost(opts.killable, opts.portsTools)
   const proxy = opts.throughProxy
     ? await startFaultProxy(host.fixture.host, host.fixture.port)
     : null
@@ -425,6 +556,231 @@ test('a raw host draws the same reason and Host settings on the head and in Git,
     const editor = page.getByRole('dialog').filter({ hasText: 'Edit Connection' })
     await expect(editor).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('#profile-integration-method')).toBeVisible({ timeout: 20_000 })
+  } finally {
+    await unwire(page, wired)
+  }
+})
+
+// ── Ports: the same axis, the same card (nocx-oalo1.13.4) ─────────────────
+
+test('one port tool on one host: the saved tab and the hand-typed tab both list it, and the panel follows the tab in front', async ({
+  page,
+}) => {
+  test.setTimeout(300_000)
+  // ONE fixture for both tabs, deliberately: the epic's DONE WHEN is that the
+  // same host's ports are the same panel whichever way a person reached it, and
+  // two fixtures would make that two claims about two hosts. A PASSWORD host,
+  // because a hand-typed tab carries no stored credential of its own — the
+  // saved profile below is seeded the same way (no stored secret), so both tabs
+  // meet the same ask against the same listener.
+  const repo = createRepo()
+  writeFileSync(path.join(repo.root, '.git', 'info', 'exclude'), '.nocx/\n', { flag: 'a' })
+  const password = 'e2e-ports-parity-42'
+  const fixture = await startSshd({
+    home: repo.root,
+    cwd: repo.root,
+    portsTools: 'fake',
+    args: ['-password', password],
+  })
+  const profileName = `e2e-ssh-panels-parity-${Date.now()}`
+  let profileId: string | null = null
+  let restoreSSHConfig: (() => void) | null = null
+  try {
+    trustHostKey(fixture.knownHosts)
+    await page.goto('/')
+    await appReadyForInput(page)
+    await expect(page.locator(TAB)).toHaveCount(1)
+    const endpoint = await resolveBackend(page)
+    // The host's method is the HOST's answer (ADR-727g63tr decision 1), so
+    // recording it keeps the connect-time ask off this open — this spec is
+    // about the ports panel, not the ask.
+    await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), 'helper')
+
+    // ── The saved tab ────────────────────────────────────────────────────
+    const created = await rpc<{ id: string }>(page, endpoint, 'profiles.create', {
+      type: 'ssh',
+      name: profileName,
+      options: { host: fixture.host, port: fixture.port, user: fixture.user, auth: 'password' },
+    })
+    profileId = created.id
+    await openSavedProfile(page, profileName)
+    await answerPasswordAsk(page, password)
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
+    // The tab in front is the SAVED one, and what follows is what it shows.
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+
+    await showSidebarView(page, 'ports')
+    // The fixture's own listener, named by the port a person reads. Nothing in
+    // this assertion knows how the sample travelled: the panel is the surface,
+    // and the row is the host's fact.
+    const savedRow = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(savedRow).toBeVisible({ timeout: 60_000 })
+    await expect(savedRow).toContainText('node')
+    // No card: a serving axis has nothing to explain.
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+    // A saved host can forward: `tunnel.open` is addressed by its record.
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
+
+    // ── The hand-typed tab, to the SAME listener ─────────────────────────
+    // The tab names the ALIAS, not `user@127.0.0.1:port`: the open carries
+    // no port, so a typed address would land on port 22 of this machine
+    // rather than on the listener above (writeSSHConfigAlias says why).
+    const alias = `nocx-e2e-parity-${Date.now()}`
+    restoreSSHConfig = writeSSHConfigAlias(alias, fixture.port, fixture.user)
+    await page.keyboard.press('Control+Shift+P')
+    const search = page.locator('.quick-connect__search input')
+    await expect(search).toBeVisible({ timeout: 30_000 })
+    await search.fill(alias)
+    // BOTH ROWS THAT CAN ANSWER ARE THE SAME OPEN: the alias list and the
+    // free-form row each call `newSSHPane('', alias, …)`, and which one is
+    // first depends on whether `ssh.aliases` has answered by then — so the
+    // selector is the alias itself, never one row's wording.
+    const adHoc = page.locator('.quick-connect__item', { hasText: alias })
+    await expect(adHoc.first()).toBeVisible({ timeout: 30_000 })
+    await page.keyboard.press('Enter')
+    // THE SAVED TAB IS STILL OPEN and its transport is live, so this open may
+    // be answered by that transport and never pose a password ask at all.
+    await answerPasswordAskIfPosed(page, password, 3)
+    await expect(page.locator(TAB)).toHaveCount(3, { timeout: 60_000 })
+    // The tab in front is now the HAND-TYPED one — the same host reached the
+    // other way — so the panel has to be scoped to it, and it is only readable
+    // once its helper serves.
+    await expect(page.locator(TAB).nth(2)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 90_000 })
+
+    // A NEW TAB OPENS WITH NO PANEL VIEW, so the sidebar the saved tab left on
+    // Ports is not the hand-typed tab's view: the person opens Ports again, and
+    // only then is the panel scoped to the tab in front.
+    await showSidebarView(page, 'ports')
+    // The panel on the ad-hoc tab answers about the SAME listener: the row is
+    // the host's fact, not the profile's, and the owner is read on this tab too.
+    const adHocRow = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(adHocRow).toBeVisible({ timeout: 90_000 })
+    await expect(adHocRow).toContainText('node')
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+    // The re-scope shows in the one action that needs a host record: Forward
+    // is absent on the hand-typed tab (D14) …
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(0)
+    // … while Copy-address stays, because the row is a listener either way.
+    await expect(page.locator('[data-testid="ports-copy"]')).toHaveCount(1)
+
+    // ── And back: the saved tab in front brings its Forward with it ─────
+    await page.locator(TAB).nth(1).click()
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.locator('[data-testid="ports-forward"]')).toHaveCount(1)
+  } finally {
+    // The backend's ssh config goes back FIRST: every later assertion in this
+    // spec would otherwise run against an alias this run invented. Its own
+    // failure must not cost the teardown below it — a leaked sshd and a
+    // temporary repository would outlive the run that made them.
+    if (restoreSSHConfig !== null) {
+      try {
+        restoreSSHConfig()
+      } catch {
+        // Nothing left to report: the assertions have already spoken, and the
+        // fixture is what has to come down.
+      }
+    }
+    if (profileId !== null) {
+      try {
+        const endpoint = await resolveBackend(page)
+        await rpc(page, endpoint, 'profiles.delete', { id: profileId })
+      } catch {
+        // A cleanup that throws would replace the real failure with its own.
+      }
+    }
+    await stopSshd(fixture)
+    rmSync(repo.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
+})
+
+test('a raw host draws the Ports card and never runs the port tool', async ({ page }) => {
+  test.setTimeout(180_000)
+  const wired = await wire(page, { mode: 'raw', portsTools: 'fake' })
+  try {
+    await openSavedProfile(page, wired.profileName)
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 60_000 })
+    await waitForPrompt(page)
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'unavailable', {
+      timeout: 30_000,
+    })
+
+    await showSidebarView(page, 'ports')
+    const card = page.locator(PORTS_AXIS)
+    await expect(card).toBeVisible({ timeout: 30_000 })
+    await expect(card).toContainText(RAW_SENTENCE)
+    // The same card Git and Files draw: the backend's one action, and no
+    // Retry — a reason that offers no remedy draws no button.
+    await expect(page.locator('[data-testid="ports-host-settings"]')).toBeVisible()
+    await expect(page.locator('[data-testid="ports-helper-refresh"]')).toHaveCount(0)
+    await expect(page.locator('#sidebar').getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    // No wire token reaches a window, and no failure sentence either: a
+    // refusal the backend typed is a state, not an error to explain.
+    await expect(card).not.toContainText('mode-raw')
+    await expect(page.locator('#sidebar')).not.toContainText('Could not read')
+
+    // THE HOST'S OWN ACCOUNT: the fixture's `ss` records every invocation, and
+    // a gated panel asks nothing — so the file is absent, which is the only
+    // way this side can prove "no ports exec" rather than assume it.
+    //
+    // THE DIRECTORY IS THE PREMISE, and it is asserted first: `portsExecs`
+    // answers [] both for "nothing ran" and for "nothing was raised to run",
+    // so an empty log only means something once the fixture's own PORTSTOOLS=
+    // line named a directory (ALX-1865 item 7).
+    expect(
+      wired.host.fixture.portsTools,
+      'the fixture never announced a port-tool directory, so an empty log proves nothing',
+    ).not.toBe('')
+    expect(
+      portsExecs(wired.host.fixture),
+      'the port tool ran on a host whose helper does not serve',
+    ).toEqual([])
+  } finally {
+    await unwire(page, wired)
+  }
+})
+
+test('a host with no port tool says so, while Git and Files keep working', async ({ page }) => {
+  test.setTimeout(240_000)
+  // Scenario 8 (design §5.10): the axis is fine, the TOOL is missing. Ports
+  // answers with its own typed outcome; the other two panels must not notice.
+  const wired = await wire(page, { mode: 'helper', portsTools: 'absent' })
+  try {
+    await openSavedProfile(page, wired.profileName)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 90_000 })
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving', { timeout: 30_000 })
+
+    await showSidebarView(page, 'ports')
+    await expect(page.getByText('Could not determine what is listening')).toBeVisible({
+      timeout: 90_000,
+    })
+    // A FIXED sentence, not the backend's classification prose.
+    await expect(page.locator('#sidebar')).toContainText('No port tool on this host.')
+    await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
+    await expect(page.locator('[data-testid="ports-loading"]')).toHaveCount(0)
+    // The tools did run — the fixture's own record says so, which is what
+    // makes the sentence a consequence rather than a guess.
+    expect(portsExecs(wired.host.fixture).length).toBeGreaterThan(0)
+
+    // Git reads the branch through the same connection …
+    await showSidebarView(page, 'git')
+    await expect(page.locator(GIT_BRANCH)).toBeVisible({ timeout: 60_000 })
+    await expect(page.locator(GIT_BRANCH)).toHaveText('main')
+    // … and Files lists the far host with the axis still serving. The panel's
+    // own root draws `data-testid` and `data-root` and no helper attribute
+    // (files-view.tsx), so the axis is read where it IS drawn — the tab head —
+    // and the listing is what proves the far side answered: openFilesOnTab has
+    // already required the revealed cwd, and the repository's own file is the
+    // entry under it — named by the fixture that committed it, so the entry
+    // asked for is the one the far repository actually holds.
+    await openFilesOnTab(page, wired.host.repo.root)
+    await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving')
+    await expect(page.locator(FILES_PANEL)).toContainText(wired.host.repo.file)
   } finally {
     await unwire(page, wired)
   }

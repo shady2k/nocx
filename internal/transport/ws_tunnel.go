@@ -20,8 +20,11 @@ import (
 // WithTunnelConnector attaches the connector that acquires an owned pooled
 // SSH connection lease for a forward (spec §7.3). The single implementation
 // is *ssh.RealClient, which satisfies tunnel.Connector without an adapter —
-// the signatures are identical. When not wired, tunnel.open returns
-// a JSON-RPC error; the transport never constructs an SSH client itself.
+// the signatures are identical. When not wired, tunnel.open AND tunnel.stop
+// answer a JSON-RPC error (-32603): opening has nowhere to acquire a lease
+// from, and stopping resolves the forward's lease through the same seam — so
+// a server without a connector can neither start a forward nor end one. The
+// transport never constructs an SSH client itself.
 func WithTunnelConnector(c tunnel.Connector) WSServerOption {
 	return func(s *WSServer) { s.tunnelConnector = c }
 }
@@ -260,7 +263,7 @@ func (h tunnelHandlers) handleTunnelStop(req jsonrpcRequest) {
 // tunnelLedger is the transport-owned forward ledger, as a narrow seam: the
 // mutex and the two maps it guards. It points at the WSServer's own ledger
 // state — constructed once per server in seamSpecs — so tunnel.open,
-// tunnel.stop and ports.status share the exact maps that tab teardown and
+// tunnel.stop and tunnel.list share the exact maps that tab teardown and
 // stored-forward replay use: one ledger, several narrow holders.
 type tunnelLedger struct {
 	mu      *sync.Mutex

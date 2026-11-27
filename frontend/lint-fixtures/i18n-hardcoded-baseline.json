@@ -1038,31 +1038,31 @@
     },
     {
       "file": "src/ports.tsx",
-      "line": 546,
+      "line": 563,
       "context": "prop:message",
       "snippet": "Forwarding on :"
     },
     {
       "file": "src/ports.tsx",
-      "line": 826,
+      "line": 843,
       "context": "attr:title",
       "snippet": "Cannot see the ports on"
     },
     {
       "file": "src/ports.tsx",
-      "line": 827,
+      "line": 844,
       "context": "attr:description",
       "snippet": "You reached this shell by hand, so nocx has no connection of"
     },
     {
       "file": "src/ports.tsx",
-      "line": 836,
+      "line": 853,
       "context": "jsx-text",
       "snippet": "Open as connection"
     },
     {
       "file": "src/ports.tsx",
-      "line": 907,
+      "line": 924,
       "context": "attr:description",
       "snippet": "Open an SSH session to this profile first — the ports it lis"
     },

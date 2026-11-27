@@ -477,25 +477,42 @@ export function PortsPanel(props: PortsPanelProps) {
   )
 
   // The backend's per-target visible flag — the scheduler pauses discovery
-  // sampling while nothing is watching. Re-scope retires the previous
-  // target's flag before arming the current one.
+  // sampling while nothing is watching.
   //
-  // A CLOSED GATE SENDS NOTHING, not even a `false`: while the axis is not
-  // serving the scheduler samples nothing anyway, and "no ports.* leaves" is
-  // the invariant this leaf is accepted on (ALX-1852). The one call it owes
-  // is made by the effect below the moment the gate opens again.
+  // RETIREMENT IS OWED TO THE TARGET WE ARMED, AND TO NO OTHER NAME (ALX-1865
+  // r3). The panel remembers the one target it has told `visible(target, true)`
+  // for, and it gives that flag back exactly once: when the target is replaced,
+  // when the axis closes over it, and when this panel is disposed. A tab that
+  // was never armed owes nothing — moving between two gated tabs sends no
+  // `ports.*` at all, which is the strict zero ALX-1852 is accepted on.
+  //
+  // A `false` OWED TO A TARGET WE ARMED IS NOT AN ASK of the target we may not
+  // ask: it retires a flag the backend else keeps, and a closed gate therefore
+  // releases it while withholding every request of its own. The one call a
+  // CLOSED gate still owes the other way — arming the target the axis returns
+  // to — is made by the effect below the moment the gate opens again.
+  let armedTarget: string | null = null
+  const retireVisible = (): void => {
+    const target = armedTarget
+    armedTarget = null
+    if (target === null) return
+    void props.services.visible(target, false).catch(() => {})
+  }
+  // A PANEL THAT GOES AWAY OWES THE SAME RETIREMENT as a tab that changes under
+  // it: the sidebar can be switched away from Ports or collapsed while this tab
+  // is the visible one, and a flag left armed keeps the scheduler sampling a
+  // host nobody is watching.
+  onCleanup(retireVisible)
+
   createEffect(
-    on([paneId, () => props.visible(), gateClosed], ([pid, vis, closed], prev) => {
-      // RETIRING THE TARGET WE LEFT IS NOT AN ASK OF THE TARGET WE MAY NOT
-      // ASK (ALX-1852 r2). Leaving a serving tab for a blocked one used to
-      // return here before the retirement, so the previous pane's scheduler
-      // kept sampling a host nobody was watching for the rest of the run.
-      // Only the CURRENT target's request is what a closed gate withholds.
-      const prevPid = prev?.[0] ?? null
-      if (prevPid !== null && prevPid !== pid) {
-        void props.services.visible(prevPid, false).catch(() => {})
-      }
+    on([paneId, () => props.visible(), gateClosed], ([pid, vis, closed]) => {
+      // One moment: give back what this panel armed, then decide the next
+      // target. The retirement must not be the CURRENT target's first `false`
+      // (that is the ask below) and must not be a `false` for a tab the panel
+      // never armed, which is how a gated-to-gated switch used to leak one.
+      if (closed || pid !== armedTarget) retireVisible()
       if (closed || pid === null) return
+      armedTarget = vis ? pid : null
       void props.services.visible(pid, vis).catch(() => {})
     }),
   )

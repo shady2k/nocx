@@ -1576,6 +1576,50 @@ describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
     expect(visible).not.toHaveBeenCalledWith('ssh:p2:2', true)
   })
 
+  it('moving between two gated tabs owes the backend nothing at all', async () => {
+    const [pane, setPane] = createSignal<string | null>('ssh:p1:1')
+    const listForwards = vi.fn().mockResolvedValue({ forwards: [] })
+    const visible = vi.fn().mockResolvedValue({})
+    renderPanel(fakeServices({ listForwards, visible }), {
+      paneId: pane,
+      activeOrigin: () =>
+        sshOrigin({ state: 'unavailable', reason: 'mode-raw', action: 'host-settings' }),
+      savedProfileId: () => 'ssh:p1:1',
+    })
+
+    // A gated panel draws the card and still reads the ledger; the ledger read
+    // is the re-scope's own observable, and it lands after the visibility
+    // decision the same batch made.
+    await waitFor(() => expect(screen.getByTestId('ports-helper-axis')).toBeTruthy())
+    await waitFor(() => expect(listForwards.mock.calls.length).toBeGreaterThan(0))
+    visible.mockClear()
+
+    setPane('ssh:p2:2')
+    await waitFor(() => expect(listForwards.mock.calls.length).toBeGreaterThan(1))
+
+    // NEITHER TAB WAS EVER ARMED, so neither owes a retirement: a `false` for
+    // the tab the panel left would be a `ports.*` behind closed gates, and
+    // ALX-1852 holds the panel to zero of those (ALX-1865 r3).
+    expect(visible).not.toHaveBeenCalled()
+  })
+
+  it('a panel that goes away gives back the visibility it armed', async () => {
+    const visible = vi.fn().mockResolvedValue({})
+    const panel = renderPanel(fakeServices({ visible }), {
+      activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }),
+    })
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    visible.mockClear()
+
+    // The sidebar is switched away from Ports, or closed, while this tab is the
+    // visible one. The flag the panel armed is the panel's to give back, and a
+    // scheduler left armed keeps sampling a host nobody watches.
+    panel.unmount()
+
+    await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+    expect(visible).toHaveBeenCalledTimes(1)
+  })
+
   it('a status that lands after the gate closed does not arm the scheduler it answers', async () => {
     vi.useFakeTimers()
     try {
@@ -1600,7 +1644,10 @@ describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
       resolveStatus(statusFixture({ visible: false }))
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(visible).not.toHaveBeenCalled()
+      // The gate closing RETIRES the flag the panel armed — a `false` owed to
+      // the target it armed, not an ask — so the answer is not what may arm a
+      // scheduler on a host this panel may no longer ask (ALX-1865 r3).
+      expect(visible).not.toHaveBeenCalledWith('ssh:p1:1', true)
     } finally {
       vi.useRealTimers()
     }

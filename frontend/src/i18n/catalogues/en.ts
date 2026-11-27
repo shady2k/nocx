@@ -1730,8 +1730,11 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ports.nothing.title': 'Nothing is listening',
   'ports.nothing.descHead': 'No listeners observed on',
   'ports.nothing.descTail': '.',
-  'ports.helperUnavailable':
-    "Ports are not available on this connection — nocx's helper is not running there",
+  'ports.helperBlocked.title': 'Ports need the nocx helper on this connection',
+  'ports.helperStarting.title': 'Waiting for the nocx helper',
+  'ports.helperStarting.desc':
+    'The ports this host listens on appear when the nocx helper starts serving this connection.',
+  'ports.noTool.desc': 'No port tool on this host.',
   'ports.orphaned.title': 'Orphaned forwards',
   'ports.forwarded': 'Forwarded',
   'ports.paused': 'paused',
@@ -2065,9 +2068,11 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'perms.writer.allow': 'Allow a command',
   'perms.writer.refuse': 'Write a refusal',
   'ports.failed.disconnected': 'Could not read the ports — the connection was lost.',
-  'ports.failed.invalid': 'Could not read the ports — the request was not valid.',
+  'ports.failed.helperUnavailable':
+    'Could not read the ports — the nocx helper is not serving this connection.',
+  'ports.failed.unknownPane':
+    'Could not read the ports — this tab is no longer a connection nocx can ask.',
   'ports.failed.reason': 'Could not read the ports ({reason}).',
-  'ports.failed.unavailable': 'Could not read the ports — port discovery is not available.',
   'recall.coverage.oldest': 'oldest entry {when}',
   'recall.empty.desc': 'commands you run will appear here',
   'recall.empty.noMatch': 'no matches for "{filter}"',

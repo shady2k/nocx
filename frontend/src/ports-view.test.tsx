@@ -10,12 +10,13 @@
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
-import { batch, createSignal } from 'solid-js'
+import { batch, createSignal, Show } from 'solid-js'
 import {
   PortsPanel,
   createPortsFilter,
   createPortsFilterControl,
   createPortsPauseControl,
+  portsHelperGate,
   type PortsPanelServices,
 } from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
@@ -25,6 +26,8 @@ import { makeClient, makeSession, mountPaneManager } from './test-support/panes-
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { setDocumentHidden } from './test-support/document-visibility'
+import type { ActiveOrigin } from './pane-content'
+import type { PaneConnection } from './generated/pane.connection'
 
 const PORTS_VIEW_ID = 'ports'
 
@@ -91,6 +94,7 @@ function portsView(
   unavailableIn: () => string,
   savedProfile: () => string | null,
   isLocal: () => boolean,
+  activeOrigin: () => ActiveOrigin | null,
 ): SidebarViewDescriptor {
   const pause = createPortsPauseControl()
   // The filter is the shell's pinned row, not the body's (nocx-708q.3):
@@ -101,21 +105,29 @@ function portsView(
     title: () => 'Ports',
     icon: PlugIcon,
     filter: createPortsFilter(filter),
+    // THE HEADER ASKS NOTHING WHILE THE GATE IS CLOSED, exactly as main.tsx
+    // wires it: a press is a `ports.sample`, and this view sends no `ports.*`
+    // until the connection's helper serves (ALX-1852).
     actions: () => (
-      <IconButton
-        data-testid="ports-refresh"
-        size="sm"
-        ariaLabel="Refresh ports"
-        title="Refresh ports"
-        disabled={portsTargetId() === null}
-        onClick={() => void services.sample(portsTargetId() as string)}
-      >
-        <RefreshIcon />
-      </IconButton>
+      <Show when={portsHelperGate(portsTargetId(), activeOrigin()) === null}>
+        <IconButton
+          data-testid="ports-refresh"
+          size="sm"
+          ariaLabel="Refresh ports"
+          title="Refresh ports"
+          disabled={portsTargetId() === null}
+          onClick={() => void services.sample(portsTargetId() as string)}
+        >
+          <RefreshIcon />
+        </IconButton>
+      </Show>
     ),
     view: (props) => (
       <PortsPanel
         paneId={props.activePortsPaneId}
+        // The axis reaches the body and the header action through ONE answer
+        // (portsHelperGate), which is what this suite's gate case checks.
+        activeOrigin={activeOrigin}
         savedProfileId={savedProfile}
         isLocal={isLocal}
         unavailableIn={unavailableIn}
@@ -138,6 +150,7 @@ async function mountApp(
   services: PortsPanelServices,
   profileId: string | null = 'ssh:p1:1',
   unavailableIn: () => string = () => '',
+  activeOrigin: () => ActiveOrigin | null = () => null,
 ) {
   const client = makeClient({
     openSSHSession: vi.fn(() => Promise.resolve(makeSession())),
@@ -172,7 +185,14 @@ async function mountApp(
       /* eslint-disable solid/reactivity -- portsView consumes this accessor
          inside the view's and the header action's tracked scopes; the gate
          cannot see across that boundary (same contract as the arg below). */
-      portsView(services, () => portsTargetId(), unavailableIn, savedProfile, isLocal),
+      portsView(
+        services,
+        () => portsTargetId(),
+        unavailableIn,
+        savedProfile,
+        isLocal,
+        activeOrigin,
+      ),
       /* eslint-enable solid/reactivity */
     ],
     [],
@@ -594,6 +614,7 @@ describe('ports sidebar view', () => {
     const { container } = render(() => (
       <PortsPanel
         paneId={() => null}
+        activeOrigin={() => null}
         unavailableIn={() => 'pi@192.0.2.93'}
         services={services}
         visible={() => true}
@@ -606,5 +627,73 @@ describe('ports sidebar view', () => {
       expect(container.textContent ?? '').toContain('Cannot see the ports')
     })
     expect(status).not.toHaveBeenCalled()
+  })
+})
+
+// ── The header action behind the gate (nocx-oalo1.13.4, ALX-1852) ─────────
+// A press on Refresh is a `ports.sample`. While the connection's helper does
+// not serve, this view sends no `ports.*` at all, so the control is absent
+// from the header — not disabled, and never a dead press (D14).
+function originFor(helper: PaneConnection['helper']): ActiveOrigin {
+  return {
+    paneId: 1,
+    sessionId: 'session-1',
+    kind: 'ssh',
+    cwd: null,
+    cwdVerified: false,
+    cwdFollow: true,
+    host: 'host.example',
+    machine: 'dev@host.example',
+    connection: { paneId: 'ssh:p1:1', connectionId: 'conn-1', helper },
+  }
+}
+
+describe('the Ports header action follows the helper gate', () => {
+  it('is absent while the gate is closed, and asks nothing', async () => {
+    const sample = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const services = fakeServices({ sample, status })
+    const { panel } = await mountApp(
+      services,
+      'ssh:p1:1',
+      () => '',
+      () => originFor({ state: 'unavailable', reason: 'mode-script', action: 'host-settings' }),
+    )
+
+    // The card is drawn in the body …
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="ports-helper-axis"]')).not.toBeNull(),
+    )
+    // … and the header offers no way to ask the host for anything.
+    expect(panel.querySelector('[data-testid="ports-refresh"]')).toBeNull()
+    expect(sample).not.toHaveBeenCalled()
+    expect(status).not.toHaveBeenCalled()
+  })
+
+  it('returns the moment the axis serves again', async () => {
+    const [helper, setHelper] = createSignal<PaneConnection['helper']>({
+      state: 'starting',
+      action: 'none',
+    })
+    const sample = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
+    const services = fakeServices({ sample, status })
+    const { panel, initialPane } = await mountApp(
+      services,
+      'ssh:p1:1',
+      () => '',
+      () => originFor(helper()),
+    )
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="ports-helper-axis"]')).not.toBeNull(),
+    )
+    expect(panel.querySelector('[data-testid="ports-refresh"]')).toBeNull()
+
+    setHelper({ state: 'serving', action: 'none' })
+
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="ports-refresh"]')).not.toBeNull(),
+    )
+    expect(status).toHaveBeenCalledWith(initialPane)
   })
 })

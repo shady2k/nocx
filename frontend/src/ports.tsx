@@ -21,11 +21,29 @@
 //
 // The ledger labels, it never claims causation (spec D6): a row says what the
 // remote listens on and why we know it, never "opened by <command>".
+//
+// TWO ANSWERS, FROM TWO PLACES (nocx-oalo1.13.4, ALX-1852). The HOST is asked
+// only while the connection's helper axis serves: `helperGate` is the same
+// predicate Files and Git gate on, and while it is closed the panel draws the
+// shared `HelperAxisCard` and sends no `ports.*` at all. The LEDGER
+// (`tunnel.list`) is the backend's own record of forwards — it goes over SSH
+// channels and asks the host nothing — so it is read on every tick whatever
+// the axis says, and a forward stays visible and stoppable on a host whose
+// helper is not running. That split is one decision, taken once: the gate
+// decides what may leave, never what is drawn.
+//
+// AND NOTHING IS DECIDED FROM AN ERROR'S TEXT (C26): the sentence a failed
+// read earns is chosen by `ports.error.reason`, or by the dispatcher's own
+// typed loss, and the backend's words are only ever quoted into the open
+// fallback.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
-import { rpcRefusalCause, type Dispatcher } from './dispatcher'
+import { rpcRefusalCause, TransportUnavailableError, type Dispatcher } from './dispatcher'
+import { HelperAxisCard } from './connection/helper-axis-card'
+import { helperGate, type HelperGate } from './connection/helper-axis'
+import type { ActiveOrigin } from './pane-content'
 import { openForwardWithFallback } from './forward-retry'
 import type { PortsError } from './generated/ports.error'
 import type { TunnelListResult } from './generated/tunnel.list'
@@ -186,12 +204,37 @@ export function createPortsFilter(control: PortsFilterControl): Component {
 
 export const POLL_INTERVAL_MS = 5_000
 
+/** WHETHER THIS VIEW MAY ASK ITS HOST AT ALL — the one answer the panel body
+ *  and the header action both read (design §5.10, C25/C26; ALX-1852).
+ *
+ *  It is `helperGate`'s predicate and nothing of its own: Files, Git, the
+ *  terminal drop and the link opener gate on the same answer, and a second
+ *  spelling here is how two surfaces come to disagree about one connection.
+ *  A tab with no ports scope has nothing to gate (the panel says there is no
+ *  connection), and a local tab is always allowed — `helperGate` answers both.
+ *
+ *  The gate decides what may LEAVE, never what is drawn: the ledger
+ *  (`tunnel.list`) is the backend's own record of forwards and is read
+ *  whether the axis serves or not (ALX-1852). */
+export function portsHelperGate(paneId: string | null, origin: ActiveOrigin | null): HelperGate {
+  if (paneId === null || origin === null) return null
+  return helperGate({ kind: origin.kind, connection: origin.connection })
+}
+
 export interface PortsPanelProps {
   /** The backend pane id of the active terminal. */
   paneId: () => string | null
   /** Local panes offer copy-address. Only saved SSH profiles can open forwards. */
   isLocal?: () => boolean
   savedProfileId?: () => string | null
+  /** The ACTIVE tab's origin — the connection whose helper axis this panel
+   *  draws, and the same reactive accessor the Files panel and the Git store
+   *  gate on. A signal, never a capture: switching tabs re-scopes the panel. */
+  activeOrigin: () => ActiveOrigin | null
+  /** The axis card's actions, owned once in the composition root and shared
+   *  with Files and Git (connection/helper-axis-card.tsx). */
+  onRefreshHelper?: (paneId: string) => void
+  onHostSettings?: (profileId: string) => void
   services: PortsPanelServices
   /** Reactive visibility; false stops the status poll and tells the
    *  backend to pause sampling. A collapsed sidebar is not visible. */
@@ -218,10 +261,22 @@ export interface PortsPanelProps {
 
 type ForwardRecord = TunnelOpenResult | TunnelStopResult
 
+/** One failed ports.* read: the wire's typed cause, when it carried one, and
+ *  the text a person's diagnostic line quotes. The two travel together
+ *  because the sentence is chosen by the REASON and only ever displays the
+ *  text (C26 — nothing here is matched against). */
+interface PortsFailure {
+  reason: PortsError['reason'] | null
+  /** True when the socket dropped under the call — the dispatcher's own
+   *  class, never a reading of its words. */
+  transportLost: boolean
+  message: string
+}
+
 export function PortsPanel(props: PortsPanelProps) {
   const [helperUnavailable, setHelperUnavailable] = createSignal(false)
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
-  const [error, setError] = createSignal<string | null>(null)
+  const [error, setError] = createSignal<PortsFailure | null>(null)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
 
   /** The query, read from the shared control rather than held here: the
@@ -244,6 +299,14 @@ export function PortsPanel(props: PortsPanelProps) {
   const isLocal = () => props.isLocal?.() === true
   const savedProfileId = () => props.savedProfileId?.() ?? null
 
+  /** The gate, folded once: the panel asks its host nothing while it is
+   *  closed (ALX-1852). */
+  const gate = (): HelperGate => portsHelperGate(paneId(), props.activeOrigin())
+  /** Closed, including the moment a ports.* answer told us the helper is gone
+   *  before the connection's own observation caught up (the race ALX-1852
+   *  closes). Both draw the SAME card and neither raises a toast. */
+  const gateClosed = (): boolean => gate() !== null || helperUnavailable()
+
   const applyStatus = (st: PortsStatusResult): void => {
     setStatus(st)
     setHelperUnavailable(false)
@@ -251,14 +314,30 @@ export function PortsPanel(props: PortsPanelProps) {
     props.pause.sync(st.discovery.paused)
   }
 
-  const applyDiscoveryFailure = (error: unknown): void => {
-    if (rpcRefusalCause<PortsError['reason']>(error) === 'helper-unavailable') {
+  const applyDiscoveryFailure = (failure: unknown): void => {
+    const reason = rpcRefusalCause<PortsError['reason']>(failure)
+    if (reason === 'helper-unavailable') {
+      // A STATE, not a failure: the connection's helper is not serving this
+      // host, which the axis card says in the backend's own words. No toast,
+      // no spinner, and no second sentence of our invention (ALX-1852).
       setStatus(null)
       setHelperUnavailable(true)
       setError(null)
       return
     }
-    setError(error instanceof Error ? error.message : String(error))
+    const next: PortsFailure = {
+      reason,
+      transportLost: failure instanceof TransportUnavailableError,
+      message: failure instanceof Error ? failure.message : String(failure),
+    }
+    // THE SAME NEWS IS NOT NEWS TWICE. A failing poll re-states one failure
+    // every five seconds; a new object for it would re-fire the Toast that
+    // explains it (nocx-8sudy). The state changes when the ACCOUNT changes,
+    // which is also what keeps the toast edge-triggered on the signal's value
+    // rather than on an object's identity.
+    const prev = error()
+    if (prev !== null && prev.reason === next.reason && prev.message === next.message) return
+    setError(next)
   }
 
   const refreshForwards = async (pid: string): Promise<void> => {
@@ -300,7 +379,10 @@ export function PortsPanel(props: PortsPanelProps) {
     const pid = paneId()
     if (pid === null) return
     await Promise.all([
-      readDiscovery ? refreshDiscovery(pid) : undefined,
+      // The host is asked only while the axis serves (ALX-1852). The ledger
+      // is the backend's own record and is read either way, so a forward
+      // stays visible and stoppable on a host whose helper is not running.
+      readDiscovery && !gateClosed() ? refreshDiscovery(pid) : undefined,
       !isLocal() && props.visible() ? refreshForwards(pid) : undefined,
     ])
   }
@@ -324,53 +406,55 @@ export function PortsPanel(props: PortsPanelProps) {
   )
 
   /** Turn one status/sample failure into the sentence a person reads in a
-   *  Toast. The reason that reaches `setError` is the wire's, and a message
-   *  about an action does not live in the document flow (ui/README "Toast")
-   *  — but dropping the wire's words is a soft degrade: "Could not read the
-   *  ports" cannot tell a dropped connection from a permission refusal,
-   *  which need different responses (nocx-8sudy). So the mapped sentence
-   *  still carries what happened; only the phrasing is ours.
+   *  Toast. THE REASON DECIDES THE SENTENCE (C26, nocx-oalo1.13.4); the
+   *  message is only ever quoted, never inspected — a mapper that matches
+   *  prose is the defect the connection-owner rule exists to refuse, and
+   *  `listingFailureMessage` carried five such matches until this leaf.
    *
-   *  The backend's own words (ws_ports.go): -32603 "Port discovery not
-   *  available (no discovery scheduler wired)" for an unwired scheduler,
-   *  and -32602 "Invalid params: paneId required" for a malformed call
-   *  (which this panel never makes). The rest is an open set from arbitrary
-   *  transport and host failures — the dispatcher rejects with the RPC
-   *  message for a control error, or a plain Error from `rejectAllPending`
-   *  ("closed", "ws closed", "not connected") when the socket dropped. */
-  const listingFailureMessage = (reason: string): string => {
-    const r = reason.toLowerCase()
-    if (
-      /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
-      r.includes('disconnected')
-    ) {
+   *  Three arms, and the third is the honest one:
+   *   - the wire's closed reason (`contracts/ports.error.schema.json`),
+   *   - a socket that dropped, which the dispatcher types rather than
+   *     describes (TransportUnavailableError),
+   *   - everything else, in one open sentence with the backend's own words
+   *     appended as a diagnostic (AGENTS.md: a soft degrade must be visible
+   *     in the product, never swallowed).
+   */
+  const listingFailureMessage = (failure: PortsFailure): string => {
+    switch (failure.reason) {
+      case 'helper-unavailable':
+        return t(
+          'ports.failed.helperUnavailable',
+          'Could not read the ports — the nocx helper is not serving this connection.',
+        )
+      case 'unknown-pane':
+        return t(
+          'ports.failed.unknownPane',
+          'Could not read the ports — this tab is no longer a connection nocx can ask.',
+        )
+      case null:
+        break
+    }
+    if (failure.transportLost) {
       return t('ports.failed.disconnected', 'Could not read the ports — the connection was lost.')
-    }
-    if (r.includes('discovery scheduler') || r.includes('not available')) {
-      return t(
-        'ports.failed.unavailable',
-        'Could not read the ports — port discovery is not available.',
-      )
-    }
-    if (r.includes('invalid params')) {
-      return t('ports.failed.invalid', 'Could not read the ports — the request was not valid.')
     }
     // The open set: never pretend to a completeness we cannot have. The
     // sentence stays a person's; the reason is appended so the diagnostic
     // survives (AGENTS.md: a soft degrade must be visible in the product).
-    return t('ports.failed.reason', 'Could not read the ports ({reason}).', { reason })
+    return t('ports.failed.reason', 'Could not read the ports ({reason}).', {
+      reason: failure.message,
+    })
   }
 
   /** Raise the outcome of a failed status/sample call once, at the moment
    *  it happens — never once per poll tick (danger is sticky; a repeated
-   *  failure is the same news twice). Edge-triggered on the `error`
-   *  signal's VALUE: `on()` fires only when it changes, so a string that
-   *  persists across failing polls raises once, and a recovery (null)
-   *  followed by another failure raises again. */
+   *  failure is the same news twice). Edge-triggered on the failure state's
+   *  VALUE: `applyDiscoveryFailure` refuses to re-state an identical account,
+   *  so a field of failing polls raises one Toast and a recovery followed by
+   *  another failure raises again. */
   createEffect(
-    on(error, (msg) => {
-      if (msg !== null) {
-        showToast({ level: 'danger', message: listingFailureMessage(msg) })
+    on(error, (failure) => {
+      if (failure !== null) {
+        showToast({ level: 'danger', message: listingFailureMessage(failure) })
       }
     }),
   )
@@ -378,8 +462,14 @@ export function PortsPanel(props: PortsPanelProps) {
   // The backend's per-target visible flag — the scheduler pauses discovery
   // sampling while nothing is watching. Re-scope retires the previous
   // target's flag before arming the current one.
+  //
+  // A CLOSED GATE SENDS NOTHING, not even a `false`: while the axis is not
+  // serving the scheduler samples nothing anyway, and "no ports.* leaves" is
+  // the invariant this leaf is accepted on (ALX-1852). The one call it owes
+  // is made by the effect below the moment the gate opens again.
   createEffect(
-    on([paneId, () => props.visible()], ([pid, vis], prev) => {
+    on([paneId, () => props.visible(), gateClosed], ([pid, vis, closed], prev) => {
+      if (closed) return
       const prevPid = prev?.[0] ?? null
       if (prevPid !== null && prevPid !== pid) {
         void props.services.visible(prevPid, false).catch(() => {})
@@ -390,22 +480,29 @@ export function PortsPanel(props: PortsPanelProps) {
     }),
   )
 
-  // Initial load (a tracked scope, so solid/reactivity accepts the call)
-  // plus a visibility-gated poll: hidden views stop fetching.
+  // A read AS SOON AS ONE IS POSSIBLE, with nobody pressing anything: a
+  // re-scope, a tab coming back into view and an axis that returns to
+  // `serving` all end in a fresh read (ALX-1852). `refresh()` itself decides
+  // what may be asked — while the gate is closed that is the ledger only.
+  createEffect(
+    on([paneId, gateClosed], ([pid]) => {
+      if (pid !== null) void refresh()
+    }),
+  )
+
+  // The tick: a hidden view stops fetching, and a paused panel stops the
+  // discovery read while the ledger keeps being read — `tunnel.list` is the
+  // backend's record, not the host's answer (ALX-1852).
   let poll: ReturnType<typeof setInterval> | undefined
-  createEffect(() => {
-    const pid = paneId()
-    if (pid === null) return
-    void refresh()
-    if (!props.visible()) return
-    // The interval survives pause; the refresh is what skips. Resuming reuses
-    // the same interval, and the optimistic toggle flips the flag the moment
-    // the header action is pressed (nocx-wzc4.9).
-    poll = setInterval(() => {
-      void refresh(!props.pause.paused())
-    }, POLL_INTERVAL_MS)
-    onCleanup(() => clearInterval(poll))
-  })
+  createEffect(
+    on([paneId, () => props.visible()], ([pid, vis]) => {
+      if (pid === null || !vis) return
+      poll = setInterval(() => {
+        void refresh(!props.pause.paused())
+      }, POLL_INTERVAL_MS)
+      onCleanup(() => clearInterval(poll))
+    }),
+  )
 
   const destinationFor = (l: PortsStatusResult['discovery']['listeners'][number]): string => {
     const host = status()?.host ?? ''
@@ -502,7 +599,7 @@ export function PortsPanel(props: PortsPanelProps) {
    *  and the rows appear in. A failure state has no list to filter, and
    *  showing a search box above an explanation reads as noise (nocx-cdub). */
   const listAvailable = (): boolean =>
-    st()?.state === 'available' || st()?.state === 'available-limited'
+    !gateClosed() && (st()?.state === 'available' || st()?.state === 'available-limited')
   /** Tell the shell's pinned row whether there is a list to narrow. Only
    *  this panel knows — the descriptor that owns the row cannot see the
    *  discovery state — and a search box above an explanation of why there
@@ -519,7 +616,9 @@ export function PortsPanel(props: PortsPanelProps) {
   const hiddenOwners = (): boolean => listeners().some((l) => l.process.evidence !== 'known')
 
   const loading = (): boolean => {
-    if (helperUnavailable()) return false
+    // A closed gate has nothing to wait for: the card says what to read
+    // instead of a spinner that would never end (ALX-1852).
+    if (gateClosed()) return false
     if (st() === undefined) return true
     if (st()?.state !== 'pending') return false
     return isLocal() || !!host()
@@ -718,25 +817,52 @@ export function PortsPanel(props: PortsPanelProps) {
             </div>
           }
         >
-          <Show when={helperUnavailable()}>
+          {/* THE GATE, DRAWN ONCE (ALX-1852, design §5.10). While the
+              connection's helper is not serving — `starting`, or `blocked`
+              for any reason the observation names — the Detected section
+              holds the SAME card Files and Git draw, and the panel asks its
+              host nothing at all. The sentence, the tone and the one action
+              are the fold's answer (connection/helper-axis.ts); this surface
+              supplies only its identity and its headline. */}
+          <Show when={gateClosed()}>
             <Section title={t('ports.detected.title', 'Detected')} divided dense>
-              <p class="ports-note">
-                {t(
-                  'ports.helperUnavailable',
-                  "Ports are not available on this connection — nocx's helper is not running there",
+              <HelperAxisCard
+                surface="ports"
+                title={t(
+                  'ports.helperBlocked.title',
+                  'Ports need the nocx helper on this connection',
                 )}
-              </p>
+                startingTitle={t('ports.helperStarting.title', 'Waiting for the nocx helper')}
+                startingDescription={t(
+                  'ports.helperStarting.desc',
+                  'The ports this host listens on appear when the nocx helper starts serving this connection.',
+                )}
+                /* A typed `helper-unavailable` can arrive before the
+                   connection's own observation has caught up (ALX-1852). The
+                   backend has then said this surface cannot read the host
+                   while no axis sentence exists yet, so the card draws its
+                   WAITING state — it never mints a reason the wire did not
+                   send (ADR-ba6xet1b). */
+                helper={
+                  helperUnavailable() ? null : (props.activeOrigin()?.connection?.helper ?? null)
+                }
+                paneId={props.activeOrigin()?.connection?.paneId ?? null}
+                livePaneId={() => props.activeOrigin()?.connection?.paneId ?? null}
+                profileId={savedProfileId()}
+                onRefresh={props.onRefreshHelper}
+                onHostSettings={props.onHostSettings}
+              />
             </Section>
           </Show>
           {/* A profile with no session yet is not loading — there is nothing
               to wait for until the user opens one. */}
-          <Show when={!host() && st()?.state === 'pending' && !isLocal()}>
+          <Show when={!gateClosed() && !host() && st()?.state === 'pending' && !isLocal()}>
             <EmptyState
               title={t('ports.noConnection.title', 'No active connection')}
               description="Open an SSH session to this profile first — the ports it listens on will appear here."
             />
           </Show>
-          <Show when={!helperUnavailable() && (host() || (st()?.state ?? '') !== 'pending')}>
+          <Show when={!gateClosed() && (host() || (st()?.state ?? '') !== 'pending')}>
             {/* THE FILTER IS NOT HERE, and that is the change. It used to
                     sit above the sections it governs, which is the right
                     place inside a body and the wrong place full stop: the
@@ -780,9 +906,12 @@ export function PortsPanel(props: PortsPanelProps) {
                 />
               </Show>
               <Show when={st()?.state === 'unavailable'}>
+                {/* A FIXED SENTENCE, not the backend's classification: the
+                    person reads what the state means for them, and the wire's
+                    diagnostic prose stays a diagnostic. */}
                 <EmptyState
                   title={t('ports.undetermined.title', 'Could not determine what is listening')}
-                  description={st()?.classification || 'No probe tool is usable on this host.'}
+                  description={t('ports.noTool.desc', 'No port tool on this host.')}
                 />
               </Show>
               <Show when={st()?.state === 'failed-transiently'}>
@@ -1046,7 +1175,7 @@ export function PortsPanel(props: PortsPanelProps) {
               so there is never a moment where the rows on screen are older
               than they look. "Paused" is different: it is the one state where
               the rows genuinely stop tracking the host, and it names why. */}
-          <Show when={paused()}>
+          <Show when={paused() && !gateClosed()}>
             <p class="ports-meta" data-testid="ports-meta">
               {t('ports.paused', 'paused')}
             </p>
@@ -1087,9 +1216,17 @@ export function PortsPanel(props: PortsPanelProps) {
                             {f.stopReason ?? 'stopped'}
                           </Badge>
                         </div>
-                        <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                          {t('ports.retry', 'Retry')}
-                        </Button>
+                        {/* Retry re-opens a forward through `tunnel.open`,
+                            which is addressed by a SAVED profile: a
+                            hand-typed tab has no host record to forward
+                            from, so it offers no button rather than a dead
+                            one (D14, nocx-oalo1.13.4). Stop stays — it is
+                            addressed by the forward's own id. */}
+                        <Show when={savedProfileId() !== null}>
+                          <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                            {t('ports.retry', 'Retry')}
+                          </Button>
+                        </Show>
                       </div>
                     </div>
                   }

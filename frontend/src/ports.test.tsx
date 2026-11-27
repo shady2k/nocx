@@ -13,7 +13,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { clearToasts } from './ui/toast'
-import { RpcError } from './dispatcher'
+import { RpcError, TransportUnavailableError } from './dispatcher'
+import type { PaneConnection } from './generated/pane.connection'
+import type { ActiveOrigin } from './pane-content'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import type { PortsStatusResult } from './generated/ports.status'
 import {
@@ -126,19 +128,27 @@ function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps
   const pause = createPortsPauseControl()
   const filter = over.filter ?? createPortsFilterControl()
   const PortsFilter = createPortsFilter(filter)
+  // Built as ONE object rather than spread into the JSX: a partial spread
+  // makes every prop optional in the resulting type, and `activeOrigin` is
+  // required — a panel handed no axis would gate on nothing and ask a raw
+  // host for ports (ALX-1852).
+  const props: PortsPanelProps = {
+    paneId: () => 'ssh:p1:1',
+    savedProfileId: () => (over.paneId?.() === LOCAL_PANE ? null : 'ssh:p1:1'),
+    isLocal: () => over.paneId?.() === LOCAL_PANE,
+    // No origin by default: this suite's axis cases hand one in, and the
+    // rest model a surface with nothing to gate on.
+    activeOrigin: () => null,
+    services,
+    visible: () => true,
+    pause,
+    filter,
+    ...over,
+  }
   return render(() => (
     <>
       <PortsFilter />
-      <PortsPanel
-        paneId={() => 'ssh:p1:1'}
-        savedProfileId={() => (over.paneId?.() === LOCAL_PANE ? null : 'ssh:p1:1')}
-        isLocal={() => over.paneId?.() === LOCAL_PANE}
-        services={services}
-        visible={() => true}
-        pause={pause}
-        {...over}
-        filter={filter}
-      />
+      <PortsPanel {...props} />
     </>
   ))
 }
@@ -438,7 +448,9 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
   it('a failed status fetch raises one Toast, not one per poll tick (nocx-8sudy)', async () => {
     vi.useFakeTimers()
     try {
-      const status = vi.fn().mockRejectedValue(new Error('rpc: tunnel is closed'))
+      // A socket that dropped is the dispatcher's OWN class — the panel reads
+      // that, never the words "closed" or "not connected" (C26).
+      const status = vi.fn().mockRejectedValue(new TransportUnavailableError())
       const services = fakeServices({ status })
       renderPanel(services)
       // The first fetch fails immediately (refresh runs on mount).
@@ -449,8 +461,26 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
       // mapped, not dropped (AGENTS.md: a soft degrade must be visible;
       // nocx-8sudy BRIEF-2). A dropped connection is one case.
       expect(listingToasts[0].message).toBe('Could not read the ports — the connection was lost.')
-      expect(listingToasts[0].message).not.toContain('rpc:')
       // The failure persists across polls — the toast must not restack.
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3)
+      expect(listingToasts.length).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an untyped failure is quoted into ONE open sentence — its prose decides nothing', async () => {
+    // The sentence a failure earns is chosen by the wire's reason, the
+    // dispatcher's typed loss, and nothing else (C26). A message that spells
+    // a lost connection in English earns the OPEN sentence, with the
+    // backend's own words appended so the diagnostic survives.
+    vi.useFakeTimers()
+    try {
+      const status = vi.fn().mockRejectedValue(new Error('rpc: tunnel is closed'))
+      renderPanel(fakeServices({ status }))
+      await vi.advanceTimersByTimeAsync(0)
+      await waitFor(() => expect(listingToasts.length).toBe(1))
+      expect(listingToasts[0].message).toBe('Could not read the ports (rpc: tunnel is closed).')
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3)
       expect(listingToasts.length).toBe(1)
     } finally {
@@ -772,7 +802,11 @@ describe('PortsPanel — forwards', () => {
     expect(note.closest('.ui-marker-list__item')?.getAttribute('data-tone')).toBe('note')
   })
 
-  it('keeps Stop available when the helper is unavailable', async () => {
+  it('draws the shared axis card, not a line of its own, when a read says helper-unavailable', async () => {
+    // The race ALX-1852 closes: the answer arrives before the connection's
+    // own observation has caught up. The panel draws the SAME card Files and
+    // Git draw — its waiting state, because no axis sentence has arrived to
+    // quote — and raises no toast.
     const record = runningRecord({ id: 'fwd-orphan' })
     const status = vi
       .fn()
@@ -788,10 +822,9 @@ describe('PortsPanel — forwards', () => {
       .mockResolvedValue({ ...record, state: 'stopped', stopReason: 'user' })
     renderPanel(fakeServices({ status, listForwards, stopForward }))
 
-    const statusText = await screen.findByText(
-      "Ports are not available on this connection — nocx's helper is not running there",
-    )
-    expect(statusText.closest('section')?.textContent).toContain('Detected')
+    const card = await screen.findByTestId('ports-helper-axis')
+    expect(card.closest('section')?.textContent).toContain('Detected')
+    expect(card.getAttribute('data-helper')).toBe('starting')
     expect(screen.getByText('Orphaned forwards')).toBeTruthy()
     expect(screen.getByTestId('forwarded-row').getAttribute('data-state')).toBe('forwarded')
     expect(screen.queryByTestId('ports-loading')).toBeNull()
@@ -1257,5 +1290,219 @@ describe('PortsPanel — the filter (nocx-cdub)', () => {
     await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
     expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
     expect(screen.queryByText('No ports match that')).toBeNull()
+  })
+})
+
+// ── The helper axis (nocx-oalo1.13.4, ALX-1852) ───────────────────────────
+// The panel's host answer is gated on the connection's helper axis — the same
+// `helperGate` Files and Git gate on — while the ledger (`tunnel.list`) is
+// read whatever the axis says, because forwards live in the backend's own
+// record and not on the host. What a person gets: no spinner and no toast on
+// a host whose helper is not running, the ONE card every other panel draws
+// with its reason and its action, a forward still visible and stoppable under
+// it, and the ports back on screen by themselves the moment the helper
+// serves again.
+const SSH_PANE = 'ssh:p1:1'
+
+function sshOrigin(helper: PaneConnection['helper']): ActiveOrigin {
+  return {
+    paneId: 1,
+    sessionId: 'session-1',
+    kind: 'ssh',
+    cwd: '/home/dev',
+    cwdVerified: true,
+    cwdFollow: true,
+    host: 'host.example',
+    machine: 'dev@host.example',
+    connection: { paneId: SSH_PANE, connectionId: 'conn-1', helper },
+  }
+}
+
+/** Every reason the connection contract's closed enum can carry, with the
+ *  field a person reads in the fold's words (connection/helper-axis.ts). One
+ *  table, so a reason added to the wire fails HERE rather than reaching a
+ *  window as a blank card. */
+const BLOCKED_REASONS: Array<{
+  helper: PaneConnection['helper']
+  sentence: string
+}> = [
+  {
+    helper: { state: 'paused', reason: 'connection', action: 'none' },
+    sentence: 'The connection is paused, so the nocx helper is not reachable.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+    sentence: 'This host uses Raw integration, so the nocx helper is not used.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
+    sentence: 'This host uses Script integration, so the nocx helper is not used.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+    sentence: 'The nocx helper stopped on this connection.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'consent-pending', action: 'none' },
+    sentence: 'The nocx helper is waiting for permission on this host.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'consent-denied', action: 'none' },
+    sentence: 'The nocx helper is not allowed on this host.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'unsupported-platform', action: 'none' },
+    sentence: 'This host cannot run the nocx helper.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'install-failed', action: 'none' },
+    sentence: 'The nocx helper could not be installed on this host.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'exec-forbidden', action: 'none' },
+    sentence: 'The host refused to run the nocx helper.',
+  },
+  {
+    helper: { state: 'unavailable', reason: 'version-mismatch', action: 'none' },
+    sentence: 'The nocx helper on this host is a different version.',
+  },
+]
+
+describe('PortsPanel — the helper axis (nocx-oalo1.13.4)', () => {
+  it('every closed-enum reason draws the shared card, in the fold’s own words', () => {
+    for (const { helper, sentence } of BLOCKED_REASONS) {
+      const { unmount } = renderPanel(fakeServices(), {
+        activeOrigin: () => sshOrigin(helper),
+      })
+      const card = screen.getByTestId('ports-helper-axis')
+      expect(card.closest('section')?.textContent).toContain('Detected')
+      expect(card.textContent).toContain(sentence)
+      // The wire's vocabulary never reaches a window.
+      expect(card.textContent).not.toMatch(/mode-raw|mode-script|helper-lost|consent-/)
+      unmount()
+      cleanup()
+    }
+  })
+
+  it('draws no ports.* answer at all while the gate is closed — but keeps reading the ledger', async () => {
+    const record = runningRecord({ id: 'fwd-orphan', destination: 'host.example:9999' })
+    const listForwards = vi.fn().mockResolvedValue({ forwards: [record] })
+    const status = vi.fn().mockResolvedValue(statusFixture())
+    const sample = vi.fn().mockResolvedValue(statusFixture())
+    const visible = vi.fn().mockResolvedValue({})
+    const pause = vi.fn().mockResolvedValue({})
+    const services = fakeServices({ listForwards, status, sample, visible, pause })
+    renderPanel(services, {
+      activeOrigin: () =>
+        sshOrigin({ state: 'unavailable', reason: 'mode-raw', action: 'host-settings' }),
+    })
+
+    const card = await screen.findByTestId('ports-helper-axis')
+    expect(card.textContent).toContain('This host uses Raw integration')
+    // The ledger answers whatever the axis says (ALX-1852): the forward is
+    // on screen under the card and stays stoppable.
+    await waitFor(() => expect(screen.getByText('Orphaned forwards')).toBeTruthy())
+    expect(screen.getByText(/host.example:9999/)).toBeTruthy()
+    expect(listForwards).toHaveBeenCalled()
+
+    expect(status).not.toHaveBeenCalled()
+    expect(sample).not.toHaveBeenCalled()
+    expect(visible).not.toHaveBeenCalled()
+    expect(pause).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('ports-loading')).toBeNull()
+    expect(listingToasts).toEqual([])
+  })
+
+  it('returns by itself: the axis serves again and the ports are read with nobody pressing anything', async () => {
+    const [origin, setOrigin] = createSignal(sshOrigin({ state: 'starting', action: 'none' }))
+    // A forward for a destination no listener owns: it stays in the ledger
+    // across the gate, which is the map this test proves is not discarded.
+    const record = runningRecord({ id: 'fwd-live', destination: 'host.example:9999' })
+    const status = vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] }))
+    const visible = vi.fn().mockResolvedValue({})
+    const listForwards = vi.fn().mockResolvedValue({ forwards: [record] })
+    const services = fakeServices({ status, visible, listForwards })
+    renderPanel(services, { activeOrigin: origin })
+
+    // `starting` is the waiting card, and still nothing leaves.
+    await waitFor(() =>
+      expect(screen.getByTestId('ports-helper-axis').getAttribute('data-helper')).toBe('starting'),
+    )
+    expect(status).not.toHaveBeenCalled()
+
+    setOrigin(sshOrigin({ state: 'serving', action: 'none' }))
+
+    await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
+    expect(status).toHaveBeenCalledWith(SSH_PANE)
+    // The visibility flag the gate held back is sent on the way in, with the
+    // visibility the tab has NOW — and no button was pressed to cause it.
+    expect(visible).toHaveBeenCalledWith(SSH_PANE, true)
+    // The forward map is not discarded on the way through the gate.
+    expect(screen.queryByTestId('ports-helper-axis')).toBeNull()
+    expect(listForwards).toHaveBeenCalled()
+  })
+
+  it('an ad-hoc tab (no saved profile) offers no Forward button', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+    })
+    renderPanel(services, {
+      savedProfileId: () => null,
+      activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }),
+    })
+    await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
+    // Forward is `tunnel.open`, which is addressed by a saved profile: a
+    // hand-typed tab has no host record to forward from, so the control is
+    // absent from the DOM rather than dead (D14).
+    expect(screen.queryByTestId('ports-forward')).toBeNull()
+    expect(screen.getByTestId('ports-copy')).toBeTruthy()
+  })
+
+  it('chooses the sentence by the wire’s reason, never by the message’s prose', async () => {
+    vi.useFakeTimers()
+    try {
+      // A refusal the wire typed: `unknown-pane` has a sentence of its own.
+      const unknownPane = vi
+        .fn()
+        .mockRejectedValue(new RpcError('Invalid params', -32602, { reason: 'unknown-pane' }))
+      const first = renderPanel(fakeServices({ status: unknownPane }))
+      await vi.advanceTimersByTimeAsync(0)
+      await waitFor(() => expect(listingToasts.length).toBe(1))
+      expect(listingToasts[0].message).toBe(
+        'Could not read the ports — this tab is no longer a connection nocx can ask.',
+      )
+      first.unmount()
+      cleanup()
+      listingToasts.length = 0
+
+      // The same words WITHOUT the typed cause decide nothing: the prose
+      // that used to be matched ("invalid params", "not available", "closed")
+      // is quoted into the one open sentence.
+      const prose = vi
+        .fn()
+        .mockRejectedValue(new Error('Invalid params: port discovery is not available, ws closed'))
+      renderPanel(fakeServices({ status: prose }))
+      await vi.advanceTimersByTimeAsync(0)
+      await waitFor(() => expect(listingToasts.length).toBe(1))
+      expect(listingToasts[0].message).toBe(
+        'Could not read the ports (Invalid params: port discovery is not available, ws closed).',
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a probe-less host names the state in a fixed sentence, not the backend’s classification', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture({
+          state: 'unavailable',
+          classification: 'no probe tool usable on this host',
+        }),
+      ),
+    })
+    renderPanel(services, { activeOrigin: () => sshOrigin({ state: 'serving', action: 'none' }) })
+    await waitFor(() => expect(screen.getByText('No port tool on this host.')).toBeTruthy())
+    expect(screen.queryByText('Nothing is listening')).toBeNull()
   })
 })

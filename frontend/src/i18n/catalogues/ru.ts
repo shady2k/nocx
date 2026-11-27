@@ -1510,8 +1510,11 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ports.nothing.title': 'Ничего не слушает',
   'ports.nothing.descHead': 'На',
   'ports.nothing.descTail': ' не замечено слушающих.',
-  'ports.helperUnavailable':
-    'Порты недоступны для этого подключения — на хосте не запущен helper nocx',
+  'ports.helperBlocked.title': 'Портам нужен helper nocx на этом соединении',
+  'ports.helperStarting.title': 'Ждём helper nocx',
+  'ports.helperStarting.desc':
+    'Порты этого хоста появятся, когда helper nocx начнёт обслуживать это соединение.',
+  'ports.noTool.desc': 'На этом хосте нет инструмента для снятия портов.',
   'ports.orphaned.title': 'Осиротевшие пробросы',
   'ports.forwarded': 'Проброшен',
   'ports.paused': 'приостановлен',
@@ -1521,6 +1524,12 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ports.copy': 'Копировать',
   'ports.copy.head': 'Копировать',
   'ports.open.head': 'Открыть',
+  'ports.failed.disconnected': 'Не удалось прочитать порты — соединение потеряно.',
+  'ports.failed.helperUnavailable':
+    'Не удалось прочитать порты — helper nocx не обслуживает это соединение.',
+  'ports.failed.unknownPane':
+    'Не удалось прочитать порты — эта вкладка больше не соединение, которое nocx может опросить.',
+  'ports.failed.reason': 'Не удалось прочитать порты ({reason}).',
   'tabs.pinned': 'Закреплена',
   'tabs.saveAsConnection': 'Сохранить как подключение',
   'tabs.close': 'Закрыть вкладку',

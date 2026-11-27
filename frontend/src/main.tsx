@@ -95,6 +95,7 @@ import {
   createPortsFilterControl,
   createPortsPanelServices,
   createPortsPauseControl,
+  portsHelperGate,
 } from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
@@ -1379,20 +1380,28 @@ function main(): void {
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
     // nothing to protect a host from; what a user actually wants is to ask
     // again after starting something.
+    // THE HEADER ASKS NOTHING WHILE THE GATE IS CLOSED (ALX-1852). A pressed
+    // Refresh is a `ports.sample`, and this view sends no `ports.*` at all
+    // until the connection's helper serves — so the action is absent from the
+    // DOM rather than disabled, the same way a panel that cannot act draws no
+    // control (D14). The gate is the one `portsHelperGate` answer the body
+    // reads, so header and body cannot disagree about whether a tab may ask.
     actions: () => (
-      <IconButton
-        data-testid="ports-refresh"
-        size="sm"
-        ariaLabel={t('app.ports.refresh', 'Refresh ports')}
-        title={t('app.ports.refresh', 'Refresh ports')}
-        disabled={portsTargetId() === null}
-        onClick={() => {
-          const paneId = portsTargetId()
-          if (paneId !== null) void portsServices.sample(paneId).catch(() => {})
-        }}
-      >
-        <RefreshIcon />
-      </IconButton>
+      <Show when={portsHelperGate(portsTargetId(), activeOrigin()) === null}>
+        <IconButton
+          data-testid="ports-refresh"
+          size="sm"
+          ariaLabel={t('app.ports.refresh', 'Refresh ports')}
+          title={t('app.ports.refresh', 'Refresh ports')}
+          disabled={portsTargetId() === null}
+          onClick={() => {
+            const paneId = portsTargetId()
+            if (paneId !== null) void portsServices.sample(paneId).catch(() => {})
+          }}
+        >
+          <RefreshIcon />
+        </IconButton>
+      </Show>
     ),
     // The view receives the shell's view props: visible gates sampling,
     // activePortsPaneId re-scopes the panel to the tab in front.
@@ -1401,6 +1410,13 @@ function main(): void {
         paneId={props.activePortsPaneId}
         isLocal={portsIsLocal}
         savedProfileId={() => (props.activePortsPaneId() === null ? null : activeProfileId())}
+        // The axis, through the same two seams Files and Git are handed
+        // (connection/helper-axis-card.tsx): the origin is a reactive
+        // accessor, and the card's actions are the composition root's one
+        // pair, whose press-time guard is pressHelperRefresh's.
+        activeOrigin={activeOrigin}
+        onRefreshHelper={pressHelperRefresh}
+        onHostSettings={(profileId) => openSettingsPane().editConnection(profileId)}
         onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}
         services={portsServices}

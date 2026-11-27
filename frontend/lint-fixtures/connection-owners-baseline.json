@@ -102,46 +102,6 @@
     },
     {
       "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "listingFailureMessage",
-      "target": "includes:\"disconnected\"",
-      "count": 1,
-      "reason": "the Ports panel's connection-loss sentence, matched from an error's prose. nocx-oalo1.6, with nocx-oalo1.5's one condition beneath it"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "listingFailureMessage",
-      "target": "includes:\"discovery scheduler\"",
-      "count": 1,
-      "reason": "the Ports panel picks a sentence by matching a backend refusal's prose. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "listingFailureMessage",
-      "target": "includes:\"invalid params\"",
-      "count": 1,
-      "reason": "the Ports panel's malformed-request sentence, matched from prose. nocx-oalo1.6"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "listingFailureMessage",
-      "target": "includes:\"not available\"",
-      "count": 1,
-      "reason": "the Ports panel decides what to show by matching a refusal's prose. nocx-oalo1.6 replaces the mapper with the backend's answer"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "symbol": "listingFailureMessage",
-      "target": "test:/not connected|ws closed|closed|connection (lost|closed|reset|refused)/",
-      "count": 1,
-      "reason": "the Ports panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Ports answers its availability from the backend's answer"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
       "file": "frontend/src/profiles.ts",
       "symbol": "ProfileClient.importSSHConfig",
       "target": "includes:\"profile already exists\"",

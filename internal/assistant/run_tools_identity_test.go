@@ -58,7 +58,7 @@ func TestRunToolsAgentCallIDRefusalDoesNotShiftLaterCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls []ToolCall
-	tools, err := BindRunTools(context.Background(), cl, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1, Environment: localPaneEnvironment()}, func(call ToolCall) error { calls = append(calls, call); return nil })
+	tools, err := BindRunTools(context.Background(), cl, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1, Environment: localPaneEnvironment(), Files: newLocalFileSource(t)}, func(call ToolCall) error { calls = append(calls, call); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

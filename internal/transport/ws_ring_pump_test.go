@@ -63,7 +63,7 @@ func TestRingToConn_EndsWhenTheRingHasTrimmedPastIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("id to bytes: %v", err)
 	}
-	rx := ws.getOrCreateRx(sid)
+	rx := ws.getOrCreateRxAt(sid, 0)
 	if rx == nil {
 		t.Fatal("the server would not make a ring")
 	}

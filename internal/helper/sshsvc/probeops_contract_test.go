@@ -19,7 +19,6 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // TestTheLeaseAndEveryProbeConformToTheirContractsOverTheWire runs one lease and
@@ -28,7 +27,7 @@ import (
 func TestTheLeaseAndEveryProbeConformToTheirContractsOverTheWire(t *testing.T) {
 	f := newFixture(t, "pw", newSigner(t))
 	stand := probeStand(t, f, func(string) (string, string, int, bool) {
-		return "NOCX-PD/1\nLISTEN 0 511 0.0.0.0:6768 0.0.0.0:*\nNOCX-PD/1\n", "", 0, false
+		return "probe fixture\n", "", 0, false
 	})
 	lease := acquireLease(t, stand, f)
 	ctx := context.Background()
@@ -39,13 +38,10 @@ func TestTheLeaseAndEveryProbeConformToTheirContractsOverTheWire(t *testing.T) {
 	if _, err := lease.Home(ctx); err != nil {
 		t.Fatalf("home: %v", err)
 	}
-	if _, err := lease.SamplePorts(ctx, remoteprobe.PortSS); err != nil {
-		t.Fatalf("sample-ports: %v", err)
-	}
 	if _, err := lease.Completion(ctx, "/etc", "ls pas", 6, 20, "nonce-1"); err != nil {
 		t.Fatalf("completion: %v", err)
 	}
-	if _, err := lease.CommandNames(ctx, remoteprobe.CommandNamesScan, "nonce-2"); err != nil {
+	if _, err := lease.CommandNames(ctx, proto.CommandNamesScan, "nonce-2"); err != nil {
 		t.Fatalf("command-names: %v", err)
 	}
 	// Released HERE rather than left to the test's cleanup: the unlease is one
@@ -60,7 +56,6 @@ func TestTheLeaseAndEveryProbeConformToTheirContractsOverTheWire(t *testing.T) {
 		proto.OpUnlease:      loadHelperSchema(t, "ssh.unlease.params.schema.json"),
 		proto.OpUname:        loadHelperSchema(t, "ssh.uname.params.schema.json"),
 		proto.OpHome:         loadHelperSchema(t, "ssh.home.params.schema.json"),
-		proto.OpSamplePorts:  loadHelperSchema(t, "ssh.sample-ports.params.schema.json"),
 		proto.OpCompletion:   loadHelperSchema(t, "ssh.completion.params.schema.json"),
 		proto.OpCommandNames: loadHelperSchema(t, "ssh.command-names.params.schema.json"),
 	}
@@ -69,7 +64,6 @@ func TestTheLeaseAndEveryProbeConformToTheirContractsOverTheWire(t *testing.T) {
 		proto.OpUnlease:      loadHelperSchema(t, "ssh.unlease.schema.json"),
 		proto.OpUname:        loadHelperSchema(t, "ssh.uname.schema.json"),
 		proto.OpHome:         loadHelperSchema(t, "ssh.home.schema.json"),
-		proto.OpSamplePorts:  loadHelperSchema(t, "ssh.sample-ports.schema.json"),
 		proto.OpCompletion:   loadHelperSchema(t, "ssh.completion.schema.json"),
 		proto.OpCommandNames: loadHelperSchema(t, "ssh.command-names.schema.json"),
 	}

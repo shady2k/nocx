@@ -20,6 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -162,6 +163,15 @@ func newAskHarnessWith(t *testing.T, script protocol.Script, queueing, withVault
 		WithContentDB(db),
 		WithAgentHarness("fixture", agent.harness),
 		WithAssistantClient(kernel),
+		// The file tools act through a binding acquired from the SAME
+		// registry and factory the Files panel uses (nocx-a62cl.11.1), so a
+		// transport env built without them has no route for files.read and
+		// answers ErrNoAssistantFiles. That refusal is the honest answer to
+		// an unwired build and stays where it is; this harness is the wiring
+		// a run really has, so it carries both. A test that needs the
+		// unwired build names its own server instead.
+		WithFilesystemRegistry(filesystem.New()),
+		WithFilesystemProviderFactory(filesLocalFactory),
 	}
 	if withVault {
 		reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))

@@ -80,10 +80,10 @@ package proto
 // (nocx-50w7p.2's rationale, two generations on).
 //
 // This is 7 rather than 6 because the wire grew the NAMED PROBES and the lease
-// they run on: `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+// they run on: `lease`, `unlease`, `uname`, `home`,
 // `completion` and `command-names` on the same `ssh` service (nocx-50w7p.9).
-// Seven ops added would each have been answerable as `unknown_op`, and the
-// bump is still taken because of what the SEVEN MEAN: they are the ops by which
+// The added ops would each have been answerable as `unknown_op`. The bump
+// marks a change in where probes run. With these ops,
 // every shell command the coordinator used to compose is now composed by the
 // helper from internal/remoteprobe. A coordinator speaking 6 has no ops to ask
 // these questions with and would fall back to its own dial — which is the state
@@ -408,4 +408,75 @@ package proto
 // not derivable on the receiving side (a `reconnecting` overtaken by
 // `connected` reads as one `connected`), which is why the field has to exist at
 // all.
-const Version = "30"
+//
+// This is 31 rather than 30 because the wire grew a SERVICE (nocx-oalo1.12.2):
+// `fs`, whose five read ops — `root`, `stat`, `list`, `canonical` and `read` —
+// are how a coordinator reads a host's filesystem through this helper instead
+// of opening SFTP on the connection itself (ADR-727g63tr, design §5.10). Every
+// op is one a 30-helper answers `unknown_op` to, and that is the half that
+// must not be misread: the refusal means "this machine's helper is older than
+// this app" — the same sentence every generation boundary states — and not
+// "this host refuses files", which is what a person would be told by a panel
+// that read the empty answer as a permission problem. The service is also the
+// closed set of ops a reader switches on, and two peers that disagree refuse
+// each other at hello in both directions, which is what makes the number the
+// whole of the compatibility story. Later expansions move this number again
+// because published generations keep their wire contracts.
+//
+// This is 32 rather than 31 because the wire grew the WRITE SESSION
+// (nocx-oalo1.12.3): `write-open`, `write`, `write-commit` and `write-abort` on
+// the same `fs` service, and with them the expectation a commit is checked
+// against and the outcome it answers. Four ops added would each have been
+// answerable as `unknown_op`, and the bump is taken anyway because of what they
+// mean together: a 31-helper has no conditional write at all, and a caller that
+// read an unchanged answer from it would be reading a refusal — "this machine's
+// helper is older than this app" — as "the file was fine to overwrite". The
+// other half is the SHAPE: an outcome carries `current` and a `version`, both
+// `additionalProperties: false` on their own terms, and a generation that never
+// answered an outcome would not be reaching for this one. Two peers that
+// disagree refuse each other at hello in both directions, which is what makes
+// the number the whole of the compatibility story.
+// This is 33 rather than 32 because the wire grew the WRITE-SESSION JOURNAL's
+// reader (nocx-oalo1.12.4): `inventory` on the same `fs` service, whose answer
+// names every temporary an earlier generation left behind and could not
+// delete. The op alone would have been answerable as `unknown_op` — a sentence
+// a coordinator reads as "this machine's helper is older than this app" — and
+// the bump is still taken, for the reason 32 took it: a generation whose closed
+// set of ops differs is a generation that disagrees about what the wire
+// carries, and hello is where that is decided rather than discovered. The
+// second half is the ANSWER's shape: `stranded` is a list whose empty case must
+// be `[]` and never `null`, and a 32-generation has no op to ask it with, so
+// there is no shape to misread — only a question that never gets asked, and a
+// coordinator that would then report a host whose leftovers it never saw.
+//
+// This is 34 rather than 33 because fs.stat now records the same object's
+// size and dev:ino. A ranged download must pin both before its first read:
+// matching only the lengths lets a replacement supply a different file.
+// `identity` is a required field on a frozen response, so hello must fence a
+// peer that cannot send or accept it. The next fs.watch extension moves the
+// number again (nocx-oalo1.12.10).
+//
+// This is 35 rather than 34 because the wire grew a SERVICE (nocx-oalo1.13.2):
+// `ports`, whose single `sample` op answers the listening sockets of the host
+// the helper is deployed to, read by that host's own tools. It is the far
+// helper's half of port discovery — the ladder and its parsers moved into
+// internal/portsprobe in .13.1, and this is the op a coordinator asks them
+// with.
+//
+// Every op of it is one a 34-helper answers `unknown_service` to — there is no
+// service by that name at all — and that is the half that must be read
+// correctly: the refusal says "this machine's helper is older than this app",
+// the same sentence every generation boundary states, and not "this host has
+// no ports", which is what a panel would be told by a reader that treated an
+// empty answer as an empty host. The states the op answers with are NOT a
+// refusal at all: a host with no port tool is `unavailable`, an ANSWER, so the
+// connection's helper axis stays `serving` and Git and Files keep working on
+// the same connection (design scenario 8). The number moves because a
+// generation whose closed set of services differs is a generation that
+// disagrees about what the wire carries, and hello is where that is decided
+// rather than discovered. The next expansion — `fs.watch` in .12.10 — moves it
+// again, by the same rule.
+//
+// "36" removes the named SSH port probe. The coordinator now samples TCP
+// listeners through the ports service on the connection's far helper.
+const Version = "36"

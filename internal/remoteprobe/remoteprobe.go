@@ -1,5 +1,5 @@
 // Package remoteprobe is the closed set of shell probes nocx runs on a remote
-// host, and the vocabulary their failures answer in. It is a LEAF: standard
+// host. It is a LEAF: standard
 // library only, no internal imports.
 //
 // # Why the commands live here and not where they are run
@@ -14,14 +14,14 @@
 // So the text is here, once, and both ends link it. What crosses the wire is a
 // NAME (a probe member, a phase) and typed arguments — never a command, never
 // an argv, never a script. The helper composes the command from this package
-// and runs it; the coordinator keeps the parsing, the ladder and the framing
+// and runs it; the coordinator keeps the parsing and the framing
 // checks, which are decisions about the ANSWER rather than about the command.
 //
 // # What "a probe" means here
 //
 // One bounded command whose output is the answer to one question somebody inside
-// nocx asked: what platform is this host, where is its home, which ports are
-// listening, what does its shell think the line should be. None of them takes
+// nocx asked: what platform is this host, where is its home, and what does its shell
+// think the line should be. None of them takes
 // user-supplied shell text: the completion probe carries the typed line as an
 // ARGUMENT to a fixed script, quoted, which is a data question and not a command
 // one.
@@ -37,87 +37,8 @@
 package remoteprobe
 
 import (
-	"fmt"
 	"strings"
 )
-
-// # The failure vocabulary
-//
-// Every way a probe can fail to run is one of these, because every consumer
-// tells them apart differently: discovery caches a refused session, completion
-// softens it into a sentence, commandnames reports a deadline. The spellings
-// are the ones internal/discovery already used for the same facts (AD-8: one
-// vocabulary per set of facts), and the ssh layer converts its own sentinels to
-// them at the one place the transport is known.
-
-// Kind classifies why a probe did not run. Zero is not a kind: a probe that ran
-// returns a Result and no error.
-type Kind int
-
-const (
-	// KindSessionRefused means the far side would not give us a new session
-	// channel — MaxSessions reached, ordinarily because the user's own
-	// interactive shell holds the only one. It is NOT "the tool is absent" and
-	// not "there are no ports".
-	KindSessionRefused Kind = iota + 1
-	// KindExecProhibited means the far side refuses exec requests at all
-	// (ForceCommand, a restricted shell, an sshd policy).
-	KindExecProhibited
-	// KindConnectionLost means the transport died under the probe.
-	KindConnectionLost
-	// KindLeaseClosed means the CALLER closed the lease while the probe was in
-	// flight. It is a fact about us and never about the host, which is why it
-	// is separate from KindConnectionLost even though both end the same way.
-	KindLeaseClosed
-	// KindCommandTooLong means the composed command exceeded the bound a remote
-	// execve can carry. It is refused by nocx before anything is sent.
-	KindCommandTooLong
-)
-
-// String names a kind for a log line. It is not the wire's spelling — the wire
-// uses the ssh service's own refusal codes — and exists so a failure is
-// readable wherever it is reported.
-func (k Kind) String() string {
-	switch k {
-	case KindSessionRefused:
-		return "session-refused"
-	case KindExecProhibited:
-		return "exec-prohibited"
-	case KindConnectionLost:
-		return "connection-lost"
-	case KindLeaseClosed:
-		return "lease-closed"
-	case KindCommandTooLong:
-		return "command-too-long"
-	}
-	return "unknown"
-}
-
-// Error is a classified probe failure. Kind is the transport-neutral fact; Err
-// carries the underlying cause so errors.Is still reaches it.
-type Error struct {
-	Kind Kind
-	Err  error
-}
-
-func (e *Error) Error() string {
-	if e.Err == nil {
-		return "remote probe: " + e.Kind.String()
-	}
-	return "remote probe: " + e.Kind.String() + ": " + e.Err.Error()
-}
-
-func (e *Error) Unwrap() error { return e.Err }
-
-// Result is one probe's answer: the captured streams, the remote exit status,
-// and whether a capture bound was hit — a truncated answer is a PREFIX, and a
-// partial answer must never surface as a complete one.
-type Result struct {
-	Stdout     []byte
-	Stderr     []byte
-	ExitStatus int
-	Truncated  bool
-}
 
 // MaxCommandLen bounds a composed probe command.
 //
@@ -187,14 +108,4 @@ func heredoc(command, delim, body string) string {
 	b.WriteString(delim)
 	b.WriteString("\n")
 	return b.String()
-}
-
-// sentinelPrintf composes one of the port probes' sentinel-wrapped commands.
-//
-// The wrapper is not decoration: the leading and trailing marker are what make
-// an answer whole, and the explicit `exit "$e"` is what preserves the probe's
-// own status across the trailing printf — the shell's exit status is the LAST
-// command's, so without it every probe would report success.
-func sentinelPrintf(probe string) string {
-	return fmt.Sprintf("printf '%s\\n'; %s; e=$?; printf '%s\\n'; exit \"$e\"", Sentinel, probe, Sentinel)
 }

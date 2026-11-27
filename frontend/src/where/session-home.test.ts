@@ -187,3 +187,55 @@ describe('createSessionHomeSource — subscribe', () => {
     expect(seen).toEqual([])
   })
 })
+
+describe('createSessionHomeSource — a tab the far helper does not serve', () => {
+  const tab = (helper: { state: string; reason?: string; action: string }) => ({
+    kind: 'ssh' as const,
+    connection: { helper: helper as never },
+  })
+
+  it('answers null and opens nothing while the axis is paused or unavailable', async () => {
+    for (const helper of [
+      { state: 'paused', reason: 'connection', action: 'none' },
+      { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+    ]) {
+      const d = deps()
+      const source = createSessionHomeSource(d)
+      await expect(source.ensure('sess-1', '/home/a', true, tab(helper))).resolves.toBeNull()
+      // NOTHING went on the wire: reading a home is a files.open, and the
+      // contract has already said this host cannot be reached.
+      expect(d.openBinding, JSON.stringify(helper)).not.toHaveBeenCalled()
+      expect(source.home('sess-1')).toBeUndefined()
+    }
+  })
+
+  it('answers null before an SSH tab’s first observation arrives', async () => {
+    const d = deps()
+    const source = createSessionHomeSource(d)
+    await expect(
+      source.ensure('sess-1', '/home/a', true, { kind: 'ssh', connection: null }),
+    ).resolves.toBeNull()
+    expect(d.openBinding).not.toHaveBeenCalled()
+  })
+
+  it('opens the one binding on an axis that serves', async () => {
+    const d = deps()
+    const source = createSessionHomeSource(d)
+    const res = await source.ensure(
+      'sess-1',
+      '/home/a',
+      true,
+      tab({ state: 'serving', action: 'none' }),
+    )
+    expect(res?.bindingId).toBe('b1')
+    expect(d.openBinding).toHaveBeenCalledOnce()
+  })
+
+  it('a local tab is never gated', async () => {
+    const d = deps()
+    const source = createSessionHomeSource(d)
+    await source.ensure('sess-1', '/Users/a/repo', true, { kind: 'local', connection: null })
+    expect(d.openBinding).toHaveBeenCalledOnce()
+  })
+})

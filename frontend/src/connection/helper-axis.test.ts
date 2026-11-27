@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import type { PaneConnection } from '../generated/pane.connection'
 import { setActiveLocale } from '../i18n/locale-model'
-import { helperAxis, savedProfileId, withSavedConnection } from './helper-axis'
+import { helperAxis, helperGate, savedProfileId, withSavedConnection } from './helper-axis'
 
 type Helper = PaneConnection['helper']
 
@@ -120,5 +120,35 @@ describe('the saved-connection fold is one answer for the head and the panel', (
     const lost = helperAxis({ state: 'unavailable', reason: 'helper-lost', action: 'refresh' })
     expect(withSavedConnection(lost, '')?.action).toBe('refresh')
     expect(withSavedConnection(null, '')).toBeNull()
+  })
+})
+
+describe('the gate every surface asks before it touches a host', () => {
+  it('allows a local tab, which has no helper at all', () => {
+    expect(helperGate({ kind: 'local' })).toBeNull()
+    expect(helperGate({ kind: 'local', connection: null })).toBeNull()
+  })
+
+  it('holds an SSH tab whose observation has not arrived, and one that says starting', () => {
+    // Both mean "nothing to ask yet": an observation that has not arrived has
+    // no state to draw, and inventing one would be this layer deciding a
+    // connection fact (ADR-ba6xet1b).
+    expect(helperGate({ kind: 'ssh' })).toBe('starting')
+    expect(helperGate({ kind: 'ssh', connection: null })).toBe('starting')
+    expect(
+      helperGate({ kind: 'ssh', connection: { helper: { state: 'starting', action: 'none' } } }),
+    ).toBe('starting')
+  })
+
+  it('allows exactly the serving axis, and blocks every other state', () => {
+    expect(
+      helperGate({ kind: 'ssh', connection: { helper: { state: 'serving', action: 'none' } } }),
+    ).toBeNull()
+    for (const helper of branches) {
+      if (helper.state === 'serving' || helper.state === 'starting') continue
+      expect(helperGate({ kind: 'ssh', connection: { helper } }), JSON.stringify(helper)).toBe(
+        'blocked',
+      )
+    }
   })
 })

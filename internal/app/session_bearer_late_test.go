@@ -208,6 +208,7 @@ func TestSessionBearerLateApprovalAnswerCannotAuthorizeNextTurn(t *testing.T) {
 			},
 			RunID: run, SessionID: string(stand.sess.ID()), Attempt: 1,
 			Environment:   content.Environment{Kind: content.EnvLocal},
+			Files:         localFilesForTest(t, stand.sess.ID()),
 			AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: "not-present-in-the-file"}, Approvals: store, Questioner: person,
 		}, nil)
 		if bindErr != nil {

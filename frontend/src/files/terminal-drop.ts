@@ -80,6 +80,8 @@
 // touches a drag, and the reason EnableFileDrop does not break reordering.
 
 import { hasWailsWebview } from '../wails-runtime'
+import { helperGate, helperHoldSentence } from '../connection/helper-axis'
+import type { PaneConnection } from '../generated/pane.connection'
 import type { UploadServices } from './upload-client'
 import { uploadMovesTheFile } from './upload-eligibility'
 import type { UploadFlow, UploadReport, UploadSource } from './upload-flow'
@@ -103,6 +105,12 @@ export interface DropOrigin {
    *  there is no tab to ask, so the answer travels with the transfer from
    *  the moment it starts. */
   machine: string
+  /** The far helper's axis on this tab's connection, verbatim from the
+   *  observation (ADR-727g63tr decision 2). A drop is a write to the host, so
+   *  it is allowed only where the axis serves — the same rule the panel's
+   *  binding follows (§5.10, C25). Absent on a local tab and on an SSH tab
+   *  whose first observation has not arrived. */
+  connection?: { helper: PaneConnection['helper'] } | null
 }
 
 /** One dropped file as this module sees it, before the drop's meaning is
@@ -258,6 +266,20 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
         'This tab cannot say which machine it is on, so there is nowhere to put a file.',
         'warning',
       )
+      return
+    }
+    // THE AXIS SPEAKS FIRST (design §5.10, C25/C26). A tab whose helper does
+    // not serve cannot take a file: the gesture answers with the SAME sentence
+    // the head and the Files card draw, and nothing is sent — no files.open for
+    // the upload's binding, no transfer. The refusal is a sentence rather than
+    // a silent no-op because a drop that lands nowhere is indistinguishable
+    // from a broken app.
+    const gate = helperGate(o)
+    if (gate !== null) {
+      // The sentence is the fold's — the same one the head and the Files card
+      // draw — and the waiting case says "waiting", never "cannot reach": an
+      // observation that has not arrived is not a fault (ADR-ba6xet1b).
+      report(helperHoldSentence(o), 'warning')
       return
     }
     if (!uploadMovesTheFile({ native: native(), kind: o.kind })) {

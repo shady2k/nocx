@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +31,8 @@ import (
 
 // ── a binding that can be written to ──────────────────────────────────────
 
-// osRemoteFS is transfer.RemoteFS over the local filesystem: the narrow
-// write surface the sink declares, satisfied here by os instead of by an
-// SFTP lease. The tests therefore drive the REAL sink — its temp naming,
-// its O_EXCL create, its promote and its cleanup — rather than a stand-in
-// that agrees with the transport by construction.
+// osRemoteFS lets transport tests run the real staged upload with a small
+// chunk size, using a filesystem owned by the test.
 type osRemoteFS struct{}
 
 func (osRemoteFS) Create(p string) (transfer.RemoteFile, error) {
@@ -47,21 +43,11 @@ func (osRemoteFS) Create(p string) (transfer.RemoteFile, error) {
 	return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // see above
 }
 
-func (osRemoteFS) PosixRename(old, dst string) error { return os.Rename(old, dst) }
-
-// Rename is plain SFTP v3 rename, which refuses an existing destination.
-func (osRemoteFS) Rename(old, dst string) error {
-	if _, err := os.Lstat(dst); err == nil {
-		return fs.ErrExist
-	}
-	return os.Rename(old, dst)
-}
+func (osRemoteFS) Rename(old, dst string) error { return os.Rename(old, dst) }
 
 func (osRemoteFS) Remove(p string) error { return os.Remove(p) }
 
-// uploadableProvider is a provider that implements filesystem.Uploader —
-// what the composition root's sftp provider will be. The local provider
-// deliberately does not, and that difference is rule R1.
+// uploadableProvider supplies a sink whose chunk size the tests control.
 type uploadableProvider struct {
 	filesystem.Provider
 	sink transfer.Sink

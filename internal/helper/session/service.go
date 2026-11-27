@@ -434,6 +434,26 @@ func (s *Service) sweepLoop(interval time.Duration) {
 	}
 }
 
+// Admit reserves the daemon's right to keep serving until the returned release
+// is called. It is the same reservation a spawn takes, because it answers the
+// same question — "is work in progress that the daemon must not be retired
+// under" — and the fs service takes it for the life of every open write
+// session so the last hosted session's drain waits for a commit or an abort
+// (nocx-oalo1.12.5).
+func (s *Service) Admit() (func(), error) { return s.lifecycle.admit() }
+
+// ConnectionPanelWork is the host.PanelWork capability: this connection has
+// asked `git` or `fs` for something, so it is not a client on its way to a
+// spawn and ConnectedIdleGrace has nothing left to ask about it
+// (nocx-oalo1.12.5).
+func (s *Service) ConnectionPanelWork(*host.Host) { s.lifecycle.panelWorking() }
+
+// panelWorkedSink is the optional extra a connection may implement: its own
+// record of having asked for panel work (host.Host.PanelWorked). It is asked
+// at release rather than remembered here, because the connection is the thing
+// that asked and a second record of it would be a copy that could drift.
+type panelWorkedSink interface{ PanelWorked() bool }
+
 // Bind adds sink to the connections this service speaks on and returns the
 // release that ends it. Releasing drops every attachment made ON THAT
 // CONNECTION — an attachment IS a connection and its lease (D2) — and touches
@@ -471,7 +491,15 @@ func (s *Service) Bind(sink Sink) (release func()) {
 			for _, hs := range live {
 				hs.releaseConnection(sink)
 			}
-			s.lifecycle.clientReleased()
+			// The connection's own errand decides what happens to the bound: a
+			// panel client that asked git or fs is armed again only now, and a
+			// client that asked nothing is the abandoned coordinator the bound
+			// exists for (nocx-oalo1.12.5, nocx-398ca).
+			worked := false
+			if panel, ok := sink.(panelWorkedSink); ok {
+				worked = panel.PanelWorked()
+			}
+			s.lifecycle.clientReleased(worked)
 		})
 	}
 }
@@ -644,7 +672,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	}
 	switch {
 	case errors.Is(err, ErrDraining):
-		return "draining", nil
+		return proto.ErrCodeDraining, nil
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
 	case errors.Is(err, ErrNotAttached), errors.Is(err, ErrBadSubscriber),

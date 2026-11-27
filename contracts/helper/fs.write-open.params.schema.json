@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-open.params.schema.json",
+  "title": "HelperFSWriteOpenParams",
+  "description": "Params of the helper fs service's write-open op. The id is the caller's 128-bit session identity, spelled as 32 lower-case hex characters: it travels back on every chunk, the commit and the abort, and it is also the temporary file's name, so the alphabet is the guarantee that a session cannot name a path. The path is the target as the caller knows it; the helper resolves every symlink on it ONCE and answers where the bytes will land.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "path"],
+  "properties": {
+    "id": {
+      "description": "The caller's 128-bit session identifier, lower-case hex only. Any other spelling is refused `bad-session`.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "path": {
+      "description": "The absolute path to write. The final component may not exist yet — the directory it would be created in must. A symlink, including a final component that is one, is followed so the write lands where the link points; the link survives. A dangling link, a directory, a FIFO, a device or a socket is refused `not-regular`.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

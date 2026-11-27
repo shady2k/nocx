@@ -10,36 +10,15 @@ import (
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
-// errDisconnected is the fake's lost-lease error: once dead is set every
-// call fails with it, including Remove. That is the shape of a poisoned
-// FSConn — the transfer's own lease is gone, so nothing the sink knows how
-// to do can still reach the server, and the temp it created stays there.
+// errDisconnected simulates an unavailable filesystem during a transfer.
 var errDisconnected = fmt.Errorf("fake: lease poisoned, connection lost")
-
-// errExists is what an O_EXCL create hits when the name is taken. It is
-// deliberately NOT fs.ErrExist: SFTP v3 answers EEXIST as a generic
-// SSH_FX_FAILURE (the same protocol fact internal/shellintegration pays for
-// at install_remote.go:33), so a sink that keyed its KeepBoth retry on a
-// classified EEXIST would work here and fail against a real server.
-var errExists = fmt.Errorf("fake: file exists")
-
-// errNoPosixRename wraps the package's sentinel rather than being it, which
-// is how internal/ssh will report it: the sink must key on errors.Is, never
-// on identity.
-var errNoPosixRename = fmt.Errorf("fake: %w", transfer.ErrPosixRenameUnsupported)
 
 func notFound(op, p string) error {
 	return fmt.Errorf("fake: %s %s: %w", op, p, fs.ErrNotExist)
 }
 
-// fakeFS is the write half of an SFTP lease, in memory. It stands in for
-// ssh.FSConn the way internal/filesystem/sftp/fsfake_test.go stands in for
-// the read half, and it exists so every row of design §6 can be reached:
-// each external call the sink makes has a switch here that makes it fail.
-//
-// It is not concurrency-safe and does not need to be. Put runs on one
-// goroutine, and every test that changes the fake mid-transfer does so from
-// a hook the sink itself calls, on that same goroutine.
+// fakeFS is a writable filesystem with injectable failures. Its hooks
+// run synchronously on the transfer's goroutine.
 type fakeFS struct {
 	files map[string]string
 
@@ -59,24 +38,12 @@ type fakeFS struct {
 	closeFailAt int
 	// removeErr fails every Remove.
 	removeErr error
-	// noPosixRename makes PosixRename report the extension as unsupported,
-	// which is what sends the sink down the fallback.
-	noPosixRename bool
-	// renameFailAt is the 1-based index of the v3 Rename call that fails.
-	// PosixRename counts only when it actually renames, so with
-	// noPosixRename set 1 is dest→bak and 2 is temp→dest.
-	renameFailAt int
-	renameErr    error
+	// renameErr fails the atomic rename.
+	renameErr error
+	// onWrite fires after each write with the handle's running total.
+	onWrite func(total int)
 
-	// onWrite fires after each successful Write with the running total for
-	// that handle; onRename fires after each successful rename with its
-	// 1-based index. They are how a test kills the connection, or cancels
-	// the context, at an exact point inside the transfer.
-	onWrite  func(total int)
-	onRename func(n int)
-
-	renames int
-	closes  int
+	closes int
 	// creates counts every Create call, which is what shows a KeepBoth
 	// search stopping on the first classifiable refusal rather than
 	// spending its whole bound on it.
@@ -103,52 +70,25 @@ func (f *fakeFS) Create(p string) (transfer.RemoteFile, error) {
 		return nil, f.createErr
 	}
 	if _, ok := f.files[p]; ok {
-		return nil, errExists // O_EXCL
+		return nil, fmt.Errorf("fake: create %s: %w", p, fs.ErrExist)
 	}
 	f.files[p] = ""
 	return &fakeFile{fs: f, path: p}, nil
-}
-
-func (f *fakeFS) PosixRename(old, nw string) error {
-	if f.dead {
-		return errDisconnected
-	}
-	if f.noPosixRename {
-		return errNoPosixRename
-	}
-	return f.rename(old, nw, true)
 }
 
 func (f *fakeFS) Rename(old, nw string) error {
 	if f.dead {
 		return errDisconnected
 	}
-	return f.rename(old, nw, false)
-}
-
-// rename moves old to nw. replace is the posix-rename@openssh.com semantic;
-// without it this is SFTP v3, which refuses an existing destination —
-// nocx-340t, and the whole reason the fallback exists.
-func (f *fakeFS) rename(old, nw string, replace bool) error {
-	f.renames++
-	if f.renameFailAt != 0 && f.renames == f.renameFailAt {
-		if f.renameErr != nil {
-			return f.renameErr
-		}
-		return fmt.Errorf("fake: rename %s -> %s refused", old, nw)
+	if f.renameErr != nil {
+		return f.renameErr
 	}
 	c, ok := f.files[old]
 	if !ok {
 		return notFound("rename", old)
 	}
-	if _, taken := f.files[nw]; taken && !replace {
-		return errExists
-	}
 	delete(f.files, old)
 	f.files[nw] = c
-	if f.onRename != nil {
-		f.onRename(f.renames)
-	}
 	return nil
 }
 
@@ -167,8 +107,7 @@ func (f *fakeFS) Remove(p string) error {
 	return nil
 }
 
-// fakeFile is one open handle. Its Write and Close are the lane calls the
-// real FSFile makes, so both are failable independently.
+// fakeFile is one open handle. Write and Close can fail independently.
 type fakeFile struct {
 	fs      *fakeFS
 	path    string
@@ -221,9 +160,6 @@ func (f *fakeFS) failWriteAfter(n int, err error) {
 func (f *fakeFS) failCloseAt(step int, err error) {
 	f.closeFailAt, f.closeErr = step, err
 }
-
-// failRenameAt fails the step-th v3 rename; see renameFailAt.
-func (f *fakeFS) failRenameAt(step int) { f.renameFailAt = step }
 
 func (f *fakeFS) content(p string) string { return f.files[p] }
 

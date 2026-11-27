@@ -32,9 +32,17 @@ import (
 	iofs "io/fs"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/pkg/sftp"
 )
+
+// ErrFSSubsystemRefused marks a refused SFTP channel for helper installation.
+var ErrFSSubsystemRefused = errors.New("ssh: sftp subsystem refused")
+
+// The install lease bounds the SFTP version handshake even when the caller
+// has no deadline. Closing the stream at expiry unblocks the client setup.
+const fsHardTimeout = 30 * time.Second
 
 // HelperInstallConn is the write-capable lease the helper installer holds
 // for the duration of one install: the SFTP write surface deploy.RemoteFS

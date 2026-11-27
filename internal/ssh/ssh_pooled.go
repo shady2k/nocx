@@ -2,37 +2,11 @@
 
 package ssh
 
-// The pool as a seam for a caller that is NOT this package's dial path: the
-// helper that dials on this machine's behalf.
-//
-// # Why this exists, given FSConn/TunnelConn/DiscoveryConn already exist
-//
-// Those leases are the COORDINATOR's: each builds a ConnectConfig out of
-// ConnectOptions, resolves it through ~/.ssh/config, enforces credential
-// authorization against the resolved endpoint, and hands back a purpose-shaped
-// capability. A helper can do none of that — it reads no config, holds no
-// credential and must not decide what a credential is authorized for — and the
-// caller that CAN do it is the coordinator, which resolves the destination and
-// then asks the helper to dial exactly that.
-//
-// So what the helper needs from this package is the part that is genuinely
-// about holding connections: AD-4's ref-counted pool, keyed by
-// host+port+user+identity, with the dial performed once and every channel
-// multiplexing over it. That is what AcquirePooled answers, and it is
-// deliberately the smallest thing that can: it does not resolve, does not
-// authorize and does not classify — it takes a resolved address and a
-// caller-built *gossh.ClientConfig and gives back a borrowed connection.
-//
-// # What it is not
-//
-// It is not a second way for the COORDINATOR to dial. Nothing in this
-// repository's coordinator path calls it: the consumers reach FSConn,
-// TunnelConn and their siblings, and each of those is being re-pointed at the
-// helper's proxied channels rather than at this (epic nocx-50w7p, plan §3).
-// This is the pool the helper's `ssh` service acquires from, and the identity a
-// connection is shared under is derived in ONE place below (PooledSpec.Key and
-// RouteKeys), used by the pool's own table and passed to the connection
-// supervisor unchanged (nocx-oalo1.4.4).
+// AcquirePooled is the local helper's ref-counted connection pool (AD-4).
+// The coordinator resolves the route and authorizes credentials before
+// handing the helper the destination. The pool keys the resulting identity
+// in PooledSpec.Key and RouteKeys, and passes it to the connection supervisor
+// unchanged (nocx-oalo1.4.4). All channels for a live connection share its dial.
 
 import (
 	"context"

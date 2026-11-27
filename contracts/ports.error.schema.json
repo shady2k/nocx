@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ports.error.schema.json",
+  "title": "PortsError",
+  "description": "The data in a ports.* invalid-params refusal for an unknown pane or a known pane whose helper is unavailable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason"],
+  "properties": {
+    "reason": {
+      "type": "string",
+      "enum": ["unknown-pane", "helper-unavailable"]
+    }
+  }
+}

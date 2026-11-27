@@ -124,7 +124,7 @@ func sftpStreamOver(t *testing.T, gclient *gossh.Client, srv *fsTestServer) io.R
 // install left) is removed wholesale, while the shell bundle's files beside
 // it survive — the capability's remit is the helper tree alone (D25).
 func TestUninstallHelper_RemovesTheWholeTreeAndNothingElse(t *testing.T) {
-	srv := startFSTestServer(t, fsModeReal)
+	srv := startFSTestServer(t)
 	rc := fsTestClient(t, srv)
 
 	root := filepath.Join(srv.rootDir, ".nocx", "helper")
@@ -197,7 +197,7 @@ func TestUninstallHelper_RemovesTheWholeTreeAndNothingElse(t *testing.T) {
 // by closing the session underneath it — the way a helper ending a channel ends
 // it — and the lease must report the loss rather than going quiet.
 func TestAnInstallLeaseOverAStreamEndsWhenItsStreamEnds(t *testing.T) {
-	srv := startFSTestServer(t, fsModeReal)
+	srv := startFSTestServer(t)
 	rc := fsTestClient(t, srv)
 	stream := helperStreamTo(t, rc, srv)
 

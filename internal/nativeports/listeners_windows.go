@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 	"golang.org/x/sys/windows"
 )
 
@@ -59,7 +59,7 @@ type mibTCP6RowOwnerPID struct {
 	DwOwningPid     uint32
 }
 
-func listeners(ctx context.Context) ([]discovery.Listener, error) {
+func listeners(ctx context.Context) ([]portsprobe.Listener, error) {
 	v4, err := extendedTCPTable(ctx, windows.AF_INET, false)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 // the API hands back the byte-swapped values, so the port is the
 // big-endian read of the stored bytes and the address is the stored bytes
 // as-is.
-func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.Listener, error) {
+func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]portsprobe.Listener, error) {
 	size := uint32(0)
 	var buf []byte
 	for {
@@ -102,7 +102,7 @@ func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.List
 		buf = make([]byte, size)
 	}
 	if len(buf) == 0 {
-		return []discovery.Listener{}, nil
+		return []portsprobe.Listener{}, nil
 	}
 
 	rowSize := int(unsafe.Sizeof(mibTCPRowOwnerPID{}))
@@ -110,7 +110,7 @@ func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.List
 		rowSize = int(unsafe.Sizeof(mibTCP6RowOwnerPID{}))
 	}
 	n := int(binary.LittleEndian.Uint32(buf[:4]))
-	out := make([]discovery.Listener, 0, n)
+	out := make([]portsprobe.Listener, 0, n)
 	for i := 0; i < n; i++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -125,8 +125,8 @@ func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.List
 				continue
 			}
 			port := binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&row.DwLocalPort))[:])
-			out = append(out, discovery.Listener{
-				Family:  discovery.FamilyIPv6,
+			out = append(out, portsprobe.Listener{
+				Family:  portsprobe.FamilyIPv6,
 				Address: net.IP(row.LocalAddr[:]).String(),
 				Port:    int(port),
 				Process: ownerProcess(row.DwOwningPid),
@@ -139,8 +139,8 @@ func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.List
 		}
 		port := binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&row.DwLocalPort))[:])
 		addrBytes := (*[4]byte)(unsafe.Pointer(&row.DwLocalAddr))
-		out = append(out, discovery.Listener{
-			Family:  discovery.FamilyIPv4,
+		out = append(out, portsprobe.Listener{
+			Family:  portsprobe.FamilyIPv4,
 			Address: net.IPv4(addrBytes[0], addrBytes[1], addrBytes[2], addrBytes[3]).String(),
 			Port:    int(port),
 			Process: ownerProcess(row.DwOwningPid),
@@ -152,7 +152,7 @@ func extendedTCPTable(ctx context.Context, af uint32, v6 bool) ([]discovery.List
 // ownerProcess names the owning PID. The table hands the PID to any user,
 // so evidence is always known; the name may be empty for a process that
 // exited between the table read and the query.
-func ownerProcess(pid uint32) discovery.Process {
+func ownerProcess(pid uint32) portsprobe.Process {
 	name := ""
 	if h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid); err == nil {
 		defer windows.CloseHandle(h)
@@ -162,8 +162,8 @@ func ownerProcess(pid uint32) discovery.Process {
 			name = filepath.Base(windows.UTF16ToString(buf[:size]))
 		}
 	}
-	return discovery.Process{
-		Evidence: discovery.EvidenceKnown,
+	return portsprobe.Process{
+		Evidence: portsprobe.EvidenceKnown,
 		Name:     name,
 		PID:      int(pid),
 	}

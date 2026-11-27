@@ -98,6 +98,8 @@ export interface ActiveOrigin {
    */
   connection?: {
     paneId: string
+    /** Stable identity of the SSH connection across shell replacements. */
+    connectionId?: string
     helper: import('./generated/pane.connection').PaneConnection['helper']
   } | null
   /**

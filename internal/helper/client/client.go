@@ -270,17 +270,9 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		return fmt.Errorf("%w: helper: write request: %v", ErrLost, err)
 	}
 
+	var resp proto.Response
 	select {
-	case resp := <-ch:
-		if resp.Error != nil {
-			return &RefusalError{Code: resp.Error.Code, Message: resp.Error.Message, Details: resp.Error.Details}
-		}
-		if out != nil && len(resp.Result) > 0 {
-			if err := json.Unmarshal(resp.Result, out); err != nil {
-				return fmt.Errorf("helper: result: %w", err)
-			}
-		}
-		return nil
+	case resp = <-ch:
 	case <-ctx.Done():
 		// The caller gave up on the answer. Tell the helper, so the work
 		// actually stops on the remote host (D10) — abandoning the wait
@@ -290,8 +282,23 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		c.Cancel(id)
 		return ctx.Err()
 	case <-c.done:
-		return fmt.Errorf("%w: %v", ErrLost, c.lostErr)
+		// A draining helper can close immediately after its last answer.
+		// Prefer the answer the read pump has already delivered.
+		select {
+		case resp = <-ch:
+		default:
+			return fmt.Errorf("%w: %v", ErrLost, c.lostErr)
+		}
 	}
+	if resp.Error != nil {
+		return &RefusalError{Code: resp.Error.Code, Message: resp.Error.Message, Details: resp.Error.Details}
+	}
+	if out != nil && len(resp.Result) > 0 {
+		if err := json.Unmarshal(resp.Result, out); err != nil {
+			return fmt.Errorf("helper: result: %w", err)
+		}
+	}
+	return nil
 }
 
 // Cancel sends a TypeCancel frame naming the request. Whether the helper

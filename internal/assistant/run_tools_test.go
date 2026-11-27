@@ -24,7 +24,7 @@ func TestRunTools_AdmissionBindsCompleteContextAndFreshAuthority(t *testing.T) {
 	}
 	calls := 0
 	pane := &struct{ run string }{"run-bound"}
-	p := AskParams{Grant: &grant, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-bound", SessionID: "pane-bound", AutomaticSessionItems: []string{"frozen"}, MarkedSessionWindows: []MarkedSessionWindow{{ItemID: "marked", Start: 2, Count: 3}}, FreshGrant: func() *content.Grant { calls++; fresh := grant; fresh.ExpiresAt = int64(100 + calls); return &fresh }, PaneAccessBinder: func(run, paneID string) (any, any, any, any, session.Identity) {
+	p := AskParams{Grant: &grant, KnownMaterial: &fakeKnownMaterial{}, Files: newLocalFileSource(t), RunID: "run-bound", SessionID: "pane-bound", AutomaticSessionItems: []string{"frozen"}, MarkedSessionWindows: []MarkedSessionWindow{{ItemID: "marked", Start: 2, Count: 3}}, FreshGrant: func() *content.Grant { calls++; fresh := grant; fresh.ExpiresAt = int64(100 + calls); return &fresh }, PaneAccessBinder: func(run, paneID string) (any, any, any, any, session.Identity) {
 		return pane, pane, pane, pane, session.Identity{InstanceID: "bound-instance", Epoch: 7}
 	}}
 	tools, err := BindRunTools(context.Background(), cl, p, nil)
@@ -61,7 +61,7 @@ func TestRunTools_FrozenAttachmentReadsKeepTheirMarkedWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	capture := &recordingRequester{body: liveFrameBodyRows(11)}
-	p := AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1, ScreenCapture: capture, AutomaticSessionItems: []string{"att-shell"}, MarkedSessionWindows: []MarkedSessionWindow{{ItemID: "att-shell", Start: 3, Count: 2}}}
+	p := AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, Files: newLocalFileSource(t), AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1, ScreenCapture: capture, AutomaticSessionItems: []string{"att-shell"}, MarkedSessionWindows: []MarkedSessionWindow{{ItemID: "att-shell", Start: 3, Count: 2}}}
 	tools, err := BindRunTools(context.Background(), cl, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestRunTools_PolicyRefusalIsATypedEndpointRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1}
+	p := AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, KnownMaterial: &fakeKnownMaterial{}, Files: newLocalFileSource(t), AttemptLedger: &fakeLedger{}, RunID: "run-1", SessionID: "pane-a", Attempt: 1}
 	tools, err := BindRunTools(context.Background(), cl, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestRunTools_DispatchUsesApprovalAndEgress(t *testing.T) {
 	}
 	approvals := NewApprovalStore()
 	q := &recordingQuestioner{store: approvals, answer: Approved{}}
-	p := askParamsWith("", &grant, &fakeLedger{}, approvals, &knownMatcher{value: secret, name: "token"}, nil)
+	p := askParamsWithFiles(t, &grant, &fakeLedger{}, approvals, &knownMatcher{value: secret, name: "token"}, nil)
 	p.Questioner = q
 	p.RunID = "run-1"
 	p.Attempt = 1
@@ -156,7 +156,7 @@ func TestRunTools_CancelledAdmissionDoesNotMintAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	mints := 0
-	tools, err := BindRunTools(context.Background(), cl, AskParams{Grant: &grant, KnownMaterial: &fakeKnownMaterial{}, FreshGrant: func() *content.Grant { mints++; return &grant }}, nil)
+	tools, err := BindRunTools(context.Background(), cl, AskParams{Grant: &grant, KnownMaterial: &fakeKnownMaterial{}, Files: newLocalFileSource(t), FreshGrant: func() *content.Grant { mints++; return &grant }}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRunTools_RunOutcomesPreserveEndpointSemantics(t *testing.T) {
 			}
 			tools, err := BindRunTools(context.Background(), cl, AskParams{
 				Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
-				KnownMaterial: &fakeKnownMaterial{}, AttemptLedger: &fakeLedger{},
+				KnownMaterial: &fakeKnownMaterial{}, Files: newLocalFileSource(t), AttemptLedger: &fakeLedger{},
 				RunID: "run-1", SessionID: "pane-a", Attempt: 1,
 				Requester: &recordingRunner{err: tc.requestErr, body: tc.body},
 			}, nil)

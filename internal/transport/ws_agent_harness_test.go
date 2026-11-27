@@ -16,6 +16,7 @@ import (
 	agentharness "github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -386,6 +387,10 @@ func TestAgentHarnessPlacesDelayedToolAtStreamBoundary(t *testing.T) {
 		{Kind: protocol.StepEnd, Model: "actual"},
 	}})
 	h := newAskHarnessVault(t, answeringScript(), WithAgentHarness("test", backend.harness), WithAgentPolicy(autonomousPolicyStore(t)))
+	// The run reads a real file, so its tools act through the pane's binding:
+	// this asks the server for a real pane and names the file route through
+	// the handler's own builder, so the fixture composes nothing itself.
+	sid := openLocalSession(t, h.conn)
 	handler := h.ws.agentTerminalizer(nil)
 	grant := h.ws.runGrantFor("test")
 	ledger := &boundaryDeliveryLedger{release: make(chan struct{}), entered: make(chan struct{})}
@@ -393,7 +398,7 @@ func TestAgentHarnessPlacesDelayedToolAtStreamBoundary(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- handler.askHarness(t.Context(), askRunContext{}, assistant.AskParams{
-			RunID: "boundary-run", SessionID: "boundary-pane", Environment: content.Environment{Kind: content.EnvLocal}, Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: ledger, KnownMaterial: adapterKnownMaterial(h.v),
+			RunID: "boundary-run", SessionID: sid, Environment: content.Environment{Kind: content.EnvLocal}, Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: ledger, KnownMaterial: adapterKnownMaterial(h.v), Files: handler.filesFor(session.ID(sid)),
 		}, func(ev agentAskEvent) error {
 			switch string(ev.Kind) {
 			case "tool_started":

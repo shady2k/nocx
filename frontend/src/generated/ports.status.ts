@@ -10,15 +10,15 @@
  */
 
 /**
- * Result of the ports.status JSON-RPC method: the discovery state for one target (an authenticated SSH host, or the reserved "local" machine) plus every forward the backend currently tracks. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.
+ * The latest discovery state for the pane.
  */
 export interface PortsStatusResult {
   /**
-   * The target the status belongs to — the id the renderer echoes to every other ports.* method. A stored profile id, or the reserved value "local" for the machine the app runs on (a local tab has no profile; the renderer recognizes the identity by this exact value).
+   * The backend pane id this status belongs to.
    */
-  profileId: string
+  paneId: string
   /**
-   * Host the discovery runs against, as the session opened it — the machine's hostname for the reserved "local" target. Empty before the first connection to the target.
+   * Host the discovery runs against, as the session opened it — the machine's hostname for a local pane. Empty before the first connection to the target.
    */
   host: string
   /**
@@ -28,13 +28,7 @@ export interface PortsStatusResult {
     /**
      * Overall outcome of the last sample. pending is the state before the first sample completed; available with an empty listeners list means 'no listeners observed'.
      */
-    state:
-      | 'available'
-      | 'available-limited'
-      | 'unavailable'
-      | 'failed-transiently'
-      | 'permission-or-policy-refused'
-      | 'pending'
+    state: 'available' | 'available-limited' | 'unavailable' | 'failed-transiently' | 'pending'
     /**
      * Remote listening TCP ports from the last successful sample. Always an array, never null: an empty list is the honest 'nothing is listening' and must only appear when that is true.
      */
@@ -94,60 +88,5 @@ export interface PortsStatusResult {
      * Whether a watcher (the ports panel) is present and visible. Periodic sampling runs only while true.
      */
     visible: boolean
-    /**
-     * The underlying connection died; discovery stopped and nothing samples until the next connection. A fresh sample follows automatically.
-     */
-    connLost: boolean
   }
-  /**
-   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for the reserved "local" target: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.
-   */
-  forwards: {
-    /**
-     * Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.
-     */
-    id: string
-    /**
-     * Forwarding strategy.
-     */
-    direction: 'local' | 'remote' | 'dynamic'
-    /**
-     * The bind the caller asked for. Port 0 means 'allocate' — the usable address is actualBind, never this.
-     */
-    requestedBind: {
-      host: string
-      port: number
-    }
-    /**
-     * The address the listener really holds. Never the requested port when the request was 0.
-     */
-    actualBind: {
-      host: string
-      port: number
-    }
-    /**
-     * Remote target of the forward, host:port, as dialed over the SSH connection.
-     */
-    destination: string
-    /**
-     * Owner label the renderer attached at open.
-     */
-    scope: string
-    /**
-     * Success-time bind caution, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server. Never an error: the forward is running.
-     */
-    caveat: string
-    /**
-     * Lifecycle state. A tracked record is running, or stopped by transport loss.
-     */
-    state: 'starting' | 'running' | 'stopped'
-    /**
-     * Why the forward stopped. Null while running.
-     */
-    stopReason: 'user' | 'connection lost' | 'error' | null
-    /**
-     * The error behind a stopped forward. Null while running or after a clean user stop.
-     */
-    error: string | null
-  }[]
 }

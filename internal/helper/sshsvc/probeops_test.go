@@ -20,6 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/probeoutcome"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -55,7 +56,7 @@ func acquireLease(t *testing.T, s *stand, f *fixture) *client.ProbeLease {
 }
 
 // TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire is the criterion's core:
-// five probes, five named ops, and the host sees exactly the command each name
+// four probes, four named ops, and the host sees exactly the command each name
 // means — spelled by internal/remoteprobe, which is the package the helper
 // composes from and the coordinator parses alongside.
 func TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire(t *testing.T) {
@@ -73,8 +74,6 @@ func TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire(t *testing.T) {
 			return "NONCE:n1:START\npath\tfile.txt\t/tmp/file.txt\t0\nNONCE:n1:END\n", "", 0, false
 		case strings.Contains(cmd, "NOCX_CN"):
 			return "NOCX_CN n2 BEGIN\nN ls\nNOCX_CN n2 END\n", "", 0, false
-		case strings.Contains(cmd, "NOCX-PD/1"):
-			return "NOCX-PD/1\nLISTEN 0 511 0.0.0.0:6768 0.0.0.0:*\nNOCX-PD/1\n", "", 0, false
 		case strings.Contains(cmd, "uname"):
 			return "Linux x86_64\n", "", 0, false
 		default:
@@ -101,14 +100,6 @@ func TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire(t *testing.T) {
 		t.Fatalf("home = %q, want the trimmed answer to the home question", home)
 	}
 
-	ports, err := lease.SamplePorts(ctx, remoteprobe.PortSS)
-	if err != nil {
-		t.Fatalf("sample-ports: %v", err)
-	}
-	if !strings.Contains(string(ports.Stdout), "0.0.0.0:6768") {
-		t.Fatalf("sample-ports stdout = %q", ports.Stdout)
-	}
-
 	completion, err := lease.Completion(ctx, "/etc", "ls pas", 6, 20, "n1")
 	if err != nil {
 		t.Fatalf("completion: %v", err)
@@ -117,7 +108,7 @@ func TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire(t *testing.T) {
 		t.Fatalf("completion stdout = %q", completion.Stdout)
 	}
 
-	names, err := lease.CommandNames(ctx, remoteprobe.CommandNamesProbe, "n2")
+	names, err := lease.CommandNames(ctx, proto.CommandNamesProbe, "n2")
 	if err != nil {
 		t.Fatalf("command-names: %v", err)
 	}
@@ -132,46 +123,39 @@ func TestEveryNamedProbeRunsItsOwnFixedCommandOverTheWire(t *testing.T) {
 		remoteprobe.UnameCommand: "uname",
 		remoteprobe.HomeCommand:  "home",
 	}
-	for _, probe := range []remoteprobe.PortProbe{remoteprobe.PortSS} {
-		cmd, ok := remoteprobe.PortCommand(probe)
-		if !ok {
-			t.Fatalf("no command for %q", probe)
-		}
-		wantCommands[cmd] = "sample-ports"
-	}
-	if len(ran) != 5 {
-		t.Fatalf("the host ran %d commands, want 5: %q", len(ran), ran)
+	if len(ran) != 4 {
+		t.Fatalf("the host ran %d commands, want 4: %q", len(ran), ran)
 	}
 	for cmd, what := range wantCommands {
 		if !contains(ran, cmd) {
 			t.Errorf("the %s probe's own command never reached the host; ran: %q", what, ran)
 		}
 	}
-	if !strings.Contains(ran[3], "NOCXEOF_") || !strings.HasPrefix(ran[3], "bash -s -- '/etc' 'ls pas' 6 20 ") {
-		t.Errorf("the completion command was not the composed one: %q", ran[3])
+	if !strings.Contains(ran[2], "NOCXEOF_") || !strings.HasPrefix(ran[2], "bash -s -- '/etc' 'ls pas' 6 20 ") {
+		t.Errorf("the completion command was not the composed one: %q", ran[2])
 	}
-	if !strings.HasPrefix(ran[4], "sh -s n2") {
-		t.Errorf("the enumeration command was not the composed one: %q", ran[4])
+	if !strings.HasPrefix(ran[3], "sh -s n2") {
+		t.Errorf("the enumeration command was not the composed one: %q", ran[3])
 	}
 
-	// ONE connection for five probes: the lease is what makes a sample cost no
+	// ONE connection for four probes: the lease is what makes a sample cost no
 	// handshake, and AD-4's pool is what the probes ride.
 	if got := f.connections(); got != 1 {
-		t.Fatalf("the host was dialed %d times for five probes on one lease, want 1", got)
+		t.Fatalf("the host was dialed %d times for four probes on one lease, want 1", got)
 	}
 }
 
 // TestAnExitStatusIsAnAnswerNotARefusal: 127 means the tool is missing, and
 // every consumer classifies that itself. A helper that folded it into a failure
-// would report "discovery is broken" where the answer is "this host has no ss".
+// would report "discovery is broken" where the answer is "this host has no uname".
 func TestAnExitStatusIsAnAnswerNotARefusal(t *testing.T) {
 	f := newFixture(t, "pw", newSigner(t))
 	stand := probeStand(t, f, func(string) (string, string, int, bool) {
-		return "NOCX-PD/1\nNOCX-PD/1\n", "sh: ss: not found\n", 127, false
+		return "", "sh: uname: not found\n", 127, false
 	})
 	lease := acquireLease(t, stand, f)
 
-	result, err := lease.SamplePorts(context.Background(), remoteprobe.PortSS)
+	result, err := lease.Uname(context.Background())
 	if err != nil {
 		t.Fatalf("a probe whose command exited 127 was reported as a failure: %v", err)
 	}
@@ -235,13 +219,13 @@ func TestAProbeTooLargeToSendIsRefusedByNocx(t *testing.T) {
 // them".
 func TestAnAnswerPastTheCaptureBoundIsTruncated(t *testing.T) {
 	f := newFixture(t, "pw", newSigner(t))
-	big := strings.Repeat("NOCX-PD/1\n", remoteprobe.MaxOutputBytes/4)
+	big := strings.Repeat("probe-output\n", remoteprobe.MaxOutputBytes/4)
 	stand := probeStand(t, f, func(string) (string, string, int, bool) { return big, "", 0, false })
 	lease := acquireLease(t, stand, f)
 
-	result, err := lease.SamplePorts(context.Background(), remoteprobe.PortSS)
+	result, err := lease.Uname(context.Background())
 	if err != nil {
-		t.Fatalf("sample-ports: %v", err)
+		t.Fatalf("uname: %v", err)
 	}
 	if !result.Truncated {
 		t.Fatalf("an answer of %d bytes was not marked truncated", len(result.Stdout))
@@ -291,8 +275,8 @@ func TestAReleaseEndsTheLeaseAndItsRunningProbe(t *testing.T) {
 	// nobody holds. (The wire-level "this helper holds no such lease" case is
 	// the next test.)
 	_, err := lease.Uname(context.Background())
-	var probeErr *remoteprobe.Error
-	if !errors.As(err, &probeErr) || probeErr.Kind != remoteprobe.KindLeaseClosed {
+	var probeErr *probeoutcome.Error
+	if !errors.As(err, &probeErr) || probeErr.Kind != probeoutcome.KindLeaseClosed {
 		t.Fatalf("probe after release = %v, want the lease-closed kind", err)
 	}
 }
@@ -316,19 +300,20 @@ func TestAProbeOnALeaseThisHelperDoesNotHoldIsLost(t *testing.T) {
 	}
 }
 
-// TestAnUnknownProbeNameIsRefusedBeforeAnythingRuns: the closed set is closed at
+// TestAnUnknownEnumerationPhaseIsRefusedBeforeAnythingRuns: the closed set is closed at
 // the service too, not only in its schema — a member nobody implemented is a bad
 // request and not a command invented on the spot.
-func TestAnUnknownProbeNameIsRefusedBeforeAnythingRuns(t *testing.T) {
+func TestAnUnknownEnumerationPhaseIsRefusedBeforeAnythingRuns(t *testing.T) {
 	f := newFixture(t, "pw", newSigner(t))
 	stand := probeStand(t, f, func(string) (string, string, int, bool) { return "", "", 0, false })
 	lease := acquireLease(t, stand, f)
 
 	var out proto.ProbeExecResult
-	err := stand.client.Call(context.Background(), proto.ServiceSSH, proto.OpSamplePorts,
-		proto.SamplePortsParams{
+	err := stand.client.Call(context.Background(), proto.ServiceSSH, proto.OpCommandNames,
+		proto.CommandNamesParams{
 			ProbeRunParams: proto.ProbeRunParams{Lease: lease.ID()},
-			Probe:          proto.PortProbe("nmap"),
+			Phase:          proto.CommandNamesPhase("unknown"),
+			Nonce:          "n",
 		}, &out)
 	if code := refusalCode(err); code != proto.ErrCodeBadParams {
 		t.Fatalf("refusal = %q (%v), want %q", code, err, proto.ErrCodeBadParams)
@@ -343,17 +328,6 @@ func TestAnUnknownProbeNameIsRefusedBeforeAnythingRuns(t *testing.T) {
 // a member added to one without the other is exactly how a probe silently stops
 // existing.
 func TestTheProbePlaneAgreesWithTheLeafSpellings(t *testing.T) {
-	for _, probe := range []remoteprobe.PortProbe{
-		remoteprobe.PortSS, remoteprobe.PortNetstat, remoteprobe.PortBusyboxNetstat,
-		remoteprobe.PortLsof, remoteprobe.PortSockstat,
-	} {
-		if _, ok := remoteprobe.PortCommand(probe); !ok {
-			t.Errorf("the ladder names %q and remoteprobe has no command for it", probe)
-		}
-		if proto.PortProbe(probe) == "" {
-			t.Errorf("the wire has no member for %q", probe)
-		}
-	}
 	for _, phase := range []remoteprobe.CommandNamesPhase{remoteprobe.CommandNamesProbe, remoteprobe.CommandNamesScan} {
 		if _, ok := remoteprobe.CommandNamesCommand(phase, "n"); !ok {
 			t.Errorf("the enumeration names %q and remoteprobe has no command for it", phase)

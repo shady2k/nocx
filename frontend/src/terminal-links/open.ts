@@ -22,6 +22,7 @@
 
 import type { FilesOpenResult } from '../generated/files.open'
 import type { ActiveOrigin } from '../pane-content'
+import { helperGate, helperHoldSentence } from '../connection/helper-axis'
 import type { FileViewerTarget } from '../file-viewer'
 import type { SessionHomeSource } from '../where/session-home'
 import type { LinkTarget } from './detect'
@@ -69,19 +70,38 @@ export interface LinkOpener {
 }
 
 export function createLinkOpener(deps: LinkOpenDeps): LinkOpener {
-  function bindingFor(origin: Omit<ActiveOrigin, 'paneId'>): Promise<FilesOpenResult> {
-    return deps.sessionHome.ensure(origin.sessionId, origin.cwd, origin.cwdVerified)
+  function bindingFor(origin: Omit<ActiveOrigin, 'paneId'>): Promise<FilesOpenResult | null> {
+    // The tab rides along: a connection the far helper does not serve answers
+    // null and spends no files.open (design §5.10, C25). The gate above has
+    // already answered the person in that case, so null here is a race with a
+    // connection that changed in the same instant, not a second refusal.
+    return deps.sessionHome.ensure(origin.sessionId, origin.cwd, origin.cwdVerified, origin)
   }
 
   async function openPath(
     target: Extract<LinkTarget, { kind: 'path' }>,
     origin: Omit<ActiveOrigin, 'paneId'>,
   ): Promise<void> {
-    let binding: FilesOpenResult
+    // THE AXIS ANSWERS FIRST (design §5.10, C25/C26): on a tab whose helper
+    // does not serve, a path click says the SAME sentence the head and the
+    // Files card draw, and asks nothing — no files.open, no files.stat, no
+    // viewer read. The sentence is the one fold's, not this module's, so a
+    // leaked wire token cannot appear here alone.
+    if (helperGate(origin) !== null) {
+      deps.notify(helperHoldSentence(origin))
+      return
+    }
+    let binding: FilesOpenResult | null
     try {
       binding = await bindingFor(origin)
     } catch {
       deps.notify(`Could not reach this tab's filesystem to open ${target.path}`)
+      return
+    }
+    if (binding === null) {
+      // The axis changed between the gate above and this answer: the same
+      // fold's sentence, never a second wording for one fact.
+      deps.notify(helperHoldSentence(origin))
       return
     }
     const resolved = resolvePath(target, {

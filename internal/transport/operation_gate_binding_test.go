@@ -135,7 +135,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "filesystem",
 			gate:     "filesystem",
 			wantGate: 0,
-			specs:    server.filesSpecs(gates["session"]),
+			specs:    server.filesSpecs(server.filesOperations(gates["session"])),
 			method:   "files.list",
 			raw:      `{"bindingId":"0123456789abcdef0123456789abcdef","path":"/","limit":1}`,
 		},

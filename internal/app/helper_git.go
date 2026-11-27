@@ -109,7 +109,7 @@ func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.Op
 	if unavailable := binding.unavailable(); unavailable != nil {
 		return nil, git.OpenOutcome{}, unavailable
 	}
-	repo, outcome, err := helpergit.NewFactory(lease.Client).Open(openCtx, cwd)
+	repo, outcome, err := helpergit.NewFactory(*lease).Open(openCtx, cwd)
 	if unavailable := binding.unavailable(); unavailable != nil {
 		if repo != nil {
 			_ = repo.Close()

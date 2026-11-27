@@ -9,11 +9,11 @@ package nativeports
 import (
 	"context"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 const probeName = ""
 
-func listeners(context.Context) ([]discovery.Listener, error) {
+func listeners(context.Context) ([]portsprobe.Listener, error) {
 	return nil, ErrUnsupported
 }

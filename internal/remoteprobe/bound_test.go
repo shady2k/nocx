@@ -26,13 +26,8 @@ import (
 func TestEveryProbeCommandFitsTheBound(t *testing.T) {
 	const nonce = "0123456789abcdef0123456789abcdef"
 	recorded := map[string]int{
-		"uname":                 11,
-		"home":                  10,
-		"ports.ss":              81,
-		"ports.netstat":         74,
-		"ports.busybox-netstat": 73,
-		"ports.lsof":            88,
-		"ports.sockstat":        75,
+		"uname": 11,
+		"home":  10,
 		// The two enumeration commands carry the heredoc framing this package's
 		// builder adds around the script, so they are bigger than the scripts
 		// alone were; the recorded number is the WHOLE command, because that is

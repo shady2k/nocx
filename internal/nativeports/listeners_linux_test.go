@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 // TestParseHexAddress pins the /proc/net address encoding: IPv4 is 8 hex
@@ -61,7 +61,7 @@ func TestProcNet_ParsesListenRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := procNet(context.Background(), path, discovery.FamilyIPv4)
+	rows, err := procNet(context.Background(), path, portsprobe.FamilyIPv4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestProcNet_ParsesListenRows(t *testing.T) {
 	if rows[1].port != 22 || rows[1].inode != 15329 {
 		t.Errorf("row 1 = %+v, want port 22 inode 15329", rows[1])
 	}
-	if rows[0].family != discovery.FamilyIPv4 {
+	if rows[0].family != portsprobe.FamilyIPv4 {
 		t.Errorf("family = %q, want ipv4", rows[0].family)
 	}
 }
@@ -83,7 +83,7 @@ func TestProcNet_ParsesListenRows(t *testing.T) {
 // port first, address as tie-break, regardless of enumeration order (the
 // shared Listeners entry point sorts before the row cap applies).
 func TestListeners_IsSorted(t *testing.T) {
-	ls := []discovery.Listener{
+	ls := []portsprobe.Listener{
 		{Port: 443, Address: "0.0.0.0"},
 		{Port: 22, Address: "0.0.0.0"},
 		{Port: 8080, Address: "127.0.0.1"},

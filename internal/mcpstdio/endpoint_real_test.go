@@ -93,9 +93,12 @@ func (a *slotAuthorizer) admitted() int {
 // heldDispatcher is the tool surface on the far side: one call that does not
 // answer until the test lets it, and one that answers at once.
 type heldDispatcher struct {
-	held     chan struct{}
-	release  chan struct{}
-	holdOnce sync.Once
+	// held reports EVERY entry into alpha.hold, one signal per call, because
+	// the adapter runs non-mutating calls on concurrent goroutines: an answer
+	// beside a held call orders nothing, while the executor's own entry says
+	// that call was accepted (nocx-oalo1.6.20).
+	held    chan struct{}
+	release chan struct{}
 	// stopped reports that a held call's CONTEXT ended, which is the fact a
 	// cancellation asserts and a released call cannot stand in for: both end
 	// the call, and only one of them is the backend having been told.
@@ -107,7 +110,7 @@ func (d *heldDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) 
 	if inv.Method != "alpha.hold" {
 		return `{"screen":true}`, nil
 	}
-	d.holdOnce.Do(func() { close(d.held) })
+	d.held <- struct{}{}
 	select {
 	case <-d.release:
 		return `{"held":true}`, nil
@@ -320,11 +323,12 @@ func TestTurnSettlementAnswersBlockedCallBeforeClosingEndpoint(t *testing.T) {
 	driver.send(2, "tools/call", `{"name":"alpha.hold"}`)
 	<-dispatcher.held
 	driver.send(3, "tools/call", `{"name":"alpha.hold"}`)
-	// This answer fences acceptance of both blocked calls on the shared socket.
-	driver.send(4, "tools/call", `{"name":"alpha.screen"}`)
-	if text := toolText(t, driver.nextID(4)); text != `{"screen":true}` {
-		t.Fatalf("fence = %s", text)
-	}
+	// One entry per call into the backend's own Dispatch. An answer beside a
+	// held call fences nothing: the adapter runs non-mutating calls on
+	// concurrent goroutines, so alpha.screen can answer before alpha.hold has
+	// been accepted, and settling then closes the connection under it. Two
+	// entries are the fence that says both calls are accepted (nocx-oalo1.6.20).
+	<-dispatcher.held
 	settled := make(chan struct{})
 	go func() { endpoint.SettleAdmissions("session", 1); close(settled) }()
 	seen := make(map[string]bool)

@@ -75,14 +75,22 @@ func (s *WSServer) closePaneSessions(paneID string) {
 		if sess.PaneID() != paneID {
 			continue
 		}
-		sid := sess.ID()
-		s.closeLane(sid)
-		s.markCloseRequested(sid)
-		if err := s.registry.EndSession(sid); err != nil {
-			s.log.Warn("closing the session a reconnect replaces", "session_id", string(sid), "error", err)
-		}
-		s.closeSession(sid, sess)
+		s.endPaneSession(sess)
 	}
+}
+
+func (s *WSServer) endPaneSession(sess session.Session) {
+	if !s.claimClose(sess) {
+		return
+	}
+	sid := sess.ID()
+	defer s.releaseClose(sid)
+	s.closeLane(sid)
+	s.markCloseRequested(sid)
+	if err := s.registry.EndSession(sid); err != nil {
+		s.log.Warn("ending pane session", "session_id", string(sid), "error", err)
+	}
+	s.closeSession(sid, sess)
 }
 
 // ReconnectPane replaces a held shell after the supervisor restores transport.
@@ -150,13 +158,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 	// Only the captured lifetime's sessions may end. A new pane with the same
 	// id can open while an external Close is waiting.
 	for _, sess := range replaced {
-		sid := sess.ID()
-		s.closeLane(sid)
-		s.markCloseRequested(sid)
-		if err := s.registry.EndSession(sid); err != nil {
-			s.log.Warn("closing the session a reconnect replaces", "session_id", string(sid), "error", err)
-		}
-		s.closeSession(sid, sess)
+		s.endPaneSession(sess)
 	}
 	h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 	openCtx, cancel := context.WithCancel(rec.ctx)
@@ -165,16 +167,13 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 	bindCtx := context.WithValue(openCtx, paneBindingKey{}, func(generation uint64) {
 		attemptGeneration = generation
 	})
-	_, err := h.openInto(context.WithValue(bindCtx, paneReconnectOpenKey{}, rec), rec.wconn, rec.state, rec.params, func(result openResult) {
-		s.paneMu.Lock()
-		defer s.paneMu.Unlock()
-		if s.paneRecords[paneID] != rec || rec.bindingGeneration != attemptGeneration || openCtx.Err() != nil || rec.ctx.Err() != nil {
-			cancel()
-			return
+	_, err := h.openInto(context.WithValue(bindCtx, paneReconnectOpenKey{}, rec), rec.wconn, rec.state, rec.params, func(result openResult) error {
+		// openInto holds the pane binding and shutdown fences across this
+		// enqueue, just as it does for an RPC result.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		if err := rec.wconn.TryNotify("pane.opened", mustMarshal(paneOpened{PaneID: paneID, Generation: attemptGeneration, Open: result})); err != nil {
-			cancel()
-		}
+		return rec.wconn.TryNotify("pane.opened", mustMarshal(paneOpened{PaneID: paneID, Generation: attemptGeneration, Open: result}))
 	})
 	return err
 }

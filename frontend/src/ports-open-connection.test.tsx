@@ -47,7 +47,7 @@ afterEach(() => {
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
 const statusFixture = (): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: {
     state: 'available',
@@ -59,9 +59,7 @@ const statusFixture = (): PortsStatusResult => ({
     lastSampleAt: null,
     paused: false,
     visible: true,
-    connLost: false,
   },
-  forwards: [],
 })
 
 const runningRecord = (): TunnelOpenResult => ({
@@ -79,6 +77,7 @@ const runningRecord = (): TunnelOpenResult => ({
 
 function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelServices {
   return {
+    listForwards: vi.fn().mockResolvedValue({ forwards: [] }),
     status: vi.fn<PortsPanelServices['status']>().mockResolvedValue(statusFixture()),
     sample: vi.fn<PortsPanelServices['sample']>().mockResolvedValue(statusFixture()),
     pause: vi.fn<PortsPanelServices['pause']>().mockResolvedValue({}),
@@ -139,7 +138,7 @@ function mountPanel(
     <>
       <ToastHost labels={toastHostLabels()} />
       <PortsPanel
-        profileId={pid}
+        paneId={pid}
         unavailableIn={() => 'pi@192.0.2.93'}
         onOpenAsConnection={onOpenAsConnection}
         services={services}
@@ -185,10 +184,14 @@ describe('PortsPanel — open as connection (W2)', () => {
       options: { host: '192.0.2.93', user: 'pi' },
     })
 
-    // The user lands on a tab whose ports target is the minted id — Ports
+    // The user lands on a tab backed by the newly saved profile — Ports
     // works there. The panel re-scopes to it without a tab switch.
-    await waitFor(() => expect(manager.portsTargetId()).toBe('ssh:created:1'))
-    await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:created:1'))
+    await waitFor(() =>
+      expect(manager.activeTerminalContent()?.savedProfileId()).toBe('ssh:created:1'),
+    )
+    await waitFor(() =>
+      expect(status).toHaveBeenCalledWith(manager.activeTerminalContent()?.backendPaneId),
+    )
   })
 
   it('tells the user on screen when profile creation rejects, and opens nothing', async () => {
@@ -211,8 +214,8 @@ describe('PortsPanel — open as connection (W2)', () => {
       expect(document.body.textContent ?? '').toContain('vault locked')
     })
     // Nothing opened: the user is still on the hand-typed tab, whose ports
-    // target stays the reserved local one.
+    // target remains its own local pane id.
     expect(manager.paneCount).toBe(1)
-    expect(manager.portsTargetId()).toBe(LOCAL_TARGET_ID)
+    expect(manager.portsTargetId()).toBe(manager.activeTerminalContent()?.backendPaneId)
   })
 })

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-open.schema.json",
+  "title": "HelperFSWriteOpenResult",
+  "description": "Result of the helper fs service's write-open op: where the write will actually land. Every symlink on the requested path was resolved exactly once, at open time, so a caller writing through a link reports the file rather than the link — and a commit naming the link installs at this resolved path, leaving the link intact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["resolved"],
+  "properties": {
+    "resolved": {
+      "description": "The absolute path the bytes will be installed at. It is the provider-canonical spelling of the target, never the lexical one the caller sent.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

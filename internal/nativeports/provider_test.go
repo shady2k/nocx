@@ -13,11 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
-func testProvider(read func(ctx context.Context) ([]discovery.Listener, error)) *Provider {
+func testProvider(read func(ctx context.Context) ([]portsprobe.Listener, error)) *Provider {
 	return &Provider{read: read}
 }
 
@@ -25,11 +25,11 @@ func testProvider(read func(ctx context.Context) ([]discovery.Listener, error)) 
 // the unavailable state — a sentence the panel already renders — never to a
 // convincing empty list.
 func TestProvider_UnsupportedPlatform_IsUnavailable(t *testing.T) {
-	p := testProvider(func(context.Context) ([]discovery.Listener, error) {
+	p := testProvider(func(context.Context) ([]portsprobe.Listener, error) {
 		return nil, ErrUnsupported
 	})
 	s := p.Sample(context.Background())
-	if s.State != discovery.StateUnavailable {
+	if s.State != portsprobe.StateUnavailable {
 		t.Fatalf("state = %q, want unavailable", s.State)
 	}
 	if len(s.Listeners) != 0 {
@@ -46,11 +46,11 @@ func TestProvider_UnsupportedPlatform_IsUnavailable(t *testing.T) {
 // TestProvider_ToolMissing_IsUnavailable: darwin's lsof absent is terminal,
 // like an unsupported platform — retrying cannot conjure the tool.
 func TestProvider_ToolMissing_IsUnavailable(t *testing.T) {
-	p := testProvider(func(context.Context) ([]discovery.Listener, error) {
+	p := testProvider(func(context.Context) ([]portsprobe.Listener, error) {
 		return nil, ErrToolMissing
 	})
 	s := p.Sample(context.Background())
-	if s.State != discovery.StateUnavailable {
+	if s.State != portsprobe.StateUnavailable {
 		t.Fatalf("state = %q, want unavailable", s.State)
 	}
 	if !strings.Contains(s.Classification, "no listener tool") {
@@ -61,11 +61,11 @@ func TestProvider_ToolMissing_IsUnavailable(t *testing.T) {
 // TestProvider_ReadFailure_IsFailedTransiently: a generic read failure is
 // failed-transiently with the cause named — the cadence retries it.
 func TestProvider_ReadFailure_IsFailedTransiently(t *testing.T) {
-	p := testProvider(func(context.Context) ([]discovery.Listener, error) {
+	p := testProvider(func(context.Context) ([]portsprobe.Listener, error) {
 		return nil, errors.New("procfs exploded")
 	})
 	s := p.Sample(context.Background())
-	if s.State != discovery.StateFailedTransiently {
+	if s.State != portsprobe.StateFailedTransiently {
 		t.Fatalf("state = %q, want failed-transiently", s.State)
 	}
 	if !strings.Contains(s.Classification, "procfs exploded") {
@@ -77,21 +77,21 @@ func TestProvider_ReadFailure_IsFailedTransiently(t *testing.T) {
 // same SampleState the remote ladder uses, so available vs available-limited
 // means the same thing on both transports.
 func TestProvider_Success_ProjectsEvidence(t *testing.T) {
-	known := discovery.Listener{Port: 1, Process: discovery.Process{Evidence: discovery.EvidenceKnown, Name: "a", PID: 1}}
-	denied := discovery.Listener{Port: 2, Process: discovery.Process{Evidence: discovery.EvidencePermissionDenied}}
+	known := portsprobe.Listener{Port: 1, Process: portsprobe.Process{Evidence: portsprobe.EvidenceKnown, Name: "a", PID: 1}}
+	denied := portsprobe.Listener{Port: 2, Process: portsprobe.Process{Evidence: portsprobe.EvidencePermissionDenied}}
 
 	tests := []struct {
 		name string
-		in   []discovery.Listener
-		want discovery.State
+		in   []portsprobe.Listener
+		want portsprobe.State
 	}{
-		{"mixed evidence", []discovery.Listener{known, denied}, discovery.StateAvailable},
-		{"all permission-denied", []discovery.Listener{denied, denied}, discovery.StateAvailableLimited},
-		{"empty table", []discovery.Listener{}, discovery.StateAvailable},
+		{"mixed evidence", []portsprobe.Listener{known, denied}, portsprobe.StateAvailable},
+		{"all permission-denied", []portsprobe.Listener{denied, denied}, portsprobe.StateAvailableLimited},
+		{"empty table", []portsprobe.Listener{}, portsprobe.StateAvailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := testProvider(func(context.Context) ([]discovery.Listener, error) { return tc.in, nil })
+			p := testProvider(func(context.Context) ([]portsprobe.Listener, error) { return tc.in, nil })
 			s := p.Sample(context.Background())
 			if s.State != tc.want {
 				t.Fatalf("state = %q, want %q", s.State, tc.want)
@@ -122,7 +122,7 @@ func TestProvider_ListsPortOpenedByThisTest(t *testing.T) {
 
 	p := NewProvider(log.NewSlogAdapter(nil))
 	s := p.Sample(context.Background())
-	if s.State != discovery.StateAvailable && s.State != discovery.StateAvailableLimited {
+	if s.State != portsprobe.StateAvailable && s.State != portsprobe.StateAvailableLimited {
 		t.Fatalf("state = %q, want available/available-limited (classification=%q)",
 			s.State, s.Classification)
 	}
@@ -130,7 +130,7 @@ func TestProvider_ListsPortOpenedByThisTest(t *testing.T) {
 	for _, l := range s.Listeners {
 		if l.Port == port && l.Address == "127.0.0.1" {
 			found = true
-			if l.Process.Evidence != discovery.EvidenceKnown || l.Process.PID != os.Getpid() {
+			if l.Process.Evidence != portsprobe.EvidenceKnown || l.Process.PID != os.Getpid() {
 				t.Errorf("test listener evidence = %+v, want known with the test pid %d",
 					l.Process, os.Getpid())
 			}

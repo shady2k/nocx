@@ -157,16 +157,11 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 	}
 }
 
-// The version is PINNED LITERALLY, and that is the whole of what this test is
-// for: the fence's job is to refuse a peer that does not agree about this
-// number, so a bump that nothing asserts is a bump a later edit takes back
-// inside a change about something else. It names the LAST reason the number
-// moved — the connection table (nocx-oalo1.6.2): the `connections` op, and the
-// `generation` field on every connection observation, which is a field a frozen
-// shape cannot gain without a fence.
-func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "30" {
-		t.Fatalf("helper protocol version = %q, want 30", Version)
+// The protocol handshake must reject older peers after the SSH port probe
+// is removed from the set of operations.
+func TestHelperProtocolVersionBumpedForPortsCutover(t *testing.T) {
+	if Version != "36" {
+		t.Fatalf("helper protocol version = %q, want 36", Version)
 	}
 }
 

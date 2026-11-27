@@ -225,6 +225,7 @@ func (c *client) bindRunKernel(logger log.Logger, p AskParams, onCall func(ToolC
 		cwd:               p.Cwd,
 		paneAccessBinder:  p.PaneAccessBinder,
 		paneEnvironment:   p.Environment,
+		files:             p.Files,
 		questioner:        p.Questioner,
 		freshGrant:        freshGrant,
 	})

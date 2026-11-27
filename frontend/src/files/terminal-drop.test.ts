@@ -15,6 +15,9 @@ const REMOTE: DropOrigin = {
   cwd: '/home/deploy',
   cwdVerified: true,
   machine: 'deploy@srv-01',
+  // A drop is a write to the host, so it needs an axis that serves
+  // (design §5.10, C25). The refusal tests hand it the other states.
+  connection: { helper: { state: 'serving', action: 'none' } },
 }
 
 const LOCAL: DropOrigin = {
@@ -575,5 +578,81 @@ describe('what a row calls a dropped file', () => {
     await settle()
     expect(h.services.uploads.map((u) => u.name)).toEqual([odd])
     expect(h.store.transfers().map((t) => t.name)).toEqual([odd])
+  })
+})
+
+describe('a drop on a tab the far helper does not serve sends nothing', () => {
+  /** Every refusal of the closed helper enum that is not a serving axis. */
+  const REFUSED: Array<DropOrigin['connection']> = [
+    undefined,
+    null,
+    { helper: { state: 'starting', action: 'none' } },
+    { helper: { state: 'paused', reason: 'connection', action: 'none' } },
+    { helper: { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' } },
+    { helper: { state: 'unavailable', reason: 'helper-lost', action: 'refresh' } },
+    { helper: { state: 'unavailable', reason: 'consent-denied', action: 'none' } },
+    { helper: { state: 'unavailable', reason: 'install-failed', action: 'none' } },
+  ]
+
+  it('says the same sentence the head draws, and makes no call at all', async () => {
+    for (const connection of REFUSED) {
+      const h = harness({ ...REMOTE, connection })
+      fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
+      await settle()
+
+      const said = h.said.length === 0 ? '' : (h.said[h.said.length - 1]?.message ?? '')
+      expect(said, JSON.stringify(connection)).not.toBe('')
+      // The one fold's words — never a wire token, and never this module's
+      // own paraphrase of the state.
+      expect(said, JSON.stringify(connection)).not.toMatch(
+        /mode-raw|mode-script|helper-lost|install-failed|consent-pending|consent-denied/,
+      )
+      // NOTHING is sent: no binding is opened for the upload, no source is
+      // registered, no body is posted, and no transfer row is minted.
+      expect(h.bindings, JSON.stringify(connection)).toEqual([])
+      expect(h.services.uploads, JSON.stringify(connection)).toEqual([])
+      expect(h.services.bodies, JSON.stringify(connection)).toEqual([])
+      expect(h.store.transfers(), JSON.stringify(connection)).toEqual([])
+      expect(h.inserted, JSON.stringify(connection)).toEqual([])
+    }
+  })
+
+  it('says the pause sentence, which is the head’s, on a cut connection', async () => {
+    const paused: DropOrigin = {
+      ...REMOTE,
+      connection: { helper: { state: 'paused', reason: 'connection', action: 'none' } },
+    }
+    const h = harness(paused)
+    fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
+    await settle()
+    expect(h.said[h.said.length - 1]?.message).toContain('paused')
+  })
+
+  it('still uploads on a tab whose axis serves', async () => {
+    const h = harness(REMOTE)
+    h.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
+    fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
+    await settle()
+    expect(h.bindings).toEqual([REMOTE.sessionId])
+    expect(h.services.uploads).toHaveLength(1)
+  })
+})
+
+describe('a drop before the connection has answered says it is waiting', () => {
+  // The gate holds a tab whose observation has not arrived, and the sentence
+  // must say exactly that: "cannot reach its host" is a fault, and nothing has
+  // told nocx there is one (ADR-ba6xet1b). The words come from the fold's own
+  // waiting case, through one helper, so the opener and the drop agree.
+  it('says the connection is still being learned, never that it cannot be reached', async () => {
+    for (const connection of [undefined, null]) {
+      const h = harness({ ...REMOTE, connection })
+      fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
+      await settle()
+      const said = h.said[h.said.length - 1]?.message ?? ''
+      expect(said, JSON.stringify(connection)).toMatch(/waiting/i)
+      expect(said, JSON.stringify(connection)).not.toMatch(/cannot reach/i)
+      expect(h.bindings, JSON.stringify(connection)).toEqual([])
+      expect(h.services.uploads, JSON.stringify(connection)).toEqual([])
+    }
   })
 })

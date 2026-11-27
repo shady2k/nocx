@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write.params.schema.json",
+  "title": "HelperFSWriteParams",
+  "description": "Params of the helper fs service's write op: one chunk of a session's stream. A session is a stream and not a sparse file, so offset must equal the number of bytes already written; anything else is refused `bad-offset`. The data is base64 on the wire because Go's []byte marshals that way, and its decoded length is bounded by the transport's frame rather than by a product decision — a chunk above 256 KiB is refused `too-large` because it could not arrive.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "offset", "data"],
+  "properties": {
+    "id": {
+      "description": "The session id write-open was given.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "offset": {
+      "description": "The first byte of this chunk: exactly the number of bytes the session already holds.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "data": {
+      "description": "The chunk's bytes, base64. Empty is legal and answers the same size, which is what a caller that has nothing left to send can do without opening a second op.",
+      "type": "string",
+      "contentEncoding": "base64",
+      "maxLength": 349528
+    }
+  }
+}

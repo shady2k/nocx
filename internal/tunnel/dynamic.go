@@ -71,7 +71,7 @@ func (d *dynamic) start(ctx context.Context, host string, opts []ssh.ConnectOpti
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		_ = lease.Close()
-		return Bind{}, err
+		return Bind{}, &localBindError{err: err}
 	}
 	if !d.fl.publish(lease, ln) {
 		_ = lease.Close()

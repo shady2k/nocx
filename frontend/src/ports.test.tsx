@@ -13,8 +13,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { clearToasts } from './ui/toast'
+import { RpcError } from './dispatcher'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { LOCAL_TARGET_ID } from './ports-client'
 import type { PortsStatusResult } from './generated/ports.status'
 import {
   PortsPanel,
@@ -52,7 +52,6 @@ const discoveryFixture = (
   lastSampleAt: null,
   paused: false,
   visible: true,
-  connLost: false,
   ...over,
 })
 
@@ -60,12 +59,13 @@ const statusFixture = (
   over: Partial<PortsStatusResult['discovery']> = {},
   extra: Partial<PortsStatusResult> = {},
 ): PortsStatusResult => ({
-  profileId: 'ssh:p1:1',
+  paneId: 'ssh:p1:1',
   host: 'host.example',
   discovery: discoveryFixture(over),
-  forwards: [],
   ...extra,
 })
+
+const LOCAL_PANE = 'local-pane'
 
 const listenerFixture = (
   port: number,
@@ -94,6 +94,7 @@ const runningRecord = (over: Partial<TunnelOpenResult> = {}): TunnelOpenResult =
 
 function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelServices {
   return {
+    listForwards: vi.fn().mockResolvedValue({ forwards: [] }),
     status: vi.fn().mockResolvedValue(statusFixture()),
     sample: vi.fn().mockResolvedValue(statusFixture()),
     pause: vi.fn().mockResolvedValue({}),
@@ -129,7 +130,9 @@ function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps
     <>
       <PortsFilter />
       <PortsPanel
-        profileId={() => 'ssh:p1:1'}
+        paneId={() => 'ssh:p1:1'}
+        savedProfileId={() => (over.paneId?.() === LOCAL_PANE ? null : 'ssh:p1:1')}
+        isLocal={() => over.paneId?.() === LOCAL_PANE}
         services={services}
         visible={() => true}
         pause={pause}
@@ -183,20 +186,6 @@ describe('PortsPanel — detected rows', () => {
     await waitFor(() => expect(screen.getByText('Nothing is listening')).toBeTruthy())
   })
 
-  it('a refused host renders the refusal and offers Retry', async () => {
-    const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture({
-          state: 'permission-or-policy-refused',
-          classification: 'additional sessions refused',
-        }),
-      ),
-    })
-    renderPanel(services)
-    await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
-    expect(screen.getByText('additional sessions refused')).toBeTruthy()
-  })
-
   it('the forward action on a detected row reaches the client method and changes that row in place', async () => {
     const openForward = vi.fn().mockResolvedValue(runningRecord())
     const services = fakeServices({
@@ -235,7 +224,11 @@ describe('PortsPanel — detected rows', () => {
   it('a busy local port falls back to an allocated loopback port', async () => {
     const openForward = vi
       .fn()
-      .mockRejectedValueOnce(new Error('listen tcp 127.0.0.1:6768: bind: address already in use'))
+      .mockRejectedValueOnce(
+        new RpcError('listen tcp 127.0.0.1:6768: bind: address already in use', -32603, {
+          reason: 'address-in-use',
+        }),
+      )
       .mockResolvedValueOnce(
         runningRecord({
           requestedBind: { host: '127.0.0.1', port: 0 },
@@ -263,6 +256,30 @@ describe('PortsPanel — detected rows', () => {
       (r.textContent ?? '').includes('6768'),
     )
     expect(rows).toHaveLength(1)
+  })
+
+  it('an "address already in use" MESSAGE alone is not a reason to retry', async () => {
+    // The old rule was a regex over this exact prose. A plain Error carries
+    // no typed cause (contracts/tunnel.error.schema.json), so the panel must
+    // report the failure rather than silently opening a second port.
+    const openForward = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('listen tcp 127.0.0.1:6768: bind: address already in use'))
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      openForward,
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId('ports-forward'))
+
+    // The failure reaching the person is the observable the retry would have
+    // pre-empted; assert on it, then on the single call.
+    await waitFor(() =>
+      expect(listingToasts.some((t) => /address already in use/.test(t.message))).toBe(true),
+    )
+    expect(openForward).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -326,41 +343,56 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     }
   })
 
-  it('a backend-reported pause stops the status poll (nocx-wzc4.11)', async () => {
+  it('retries visibility when the first status arrives after the helper is ready', async () => {
+    const visible = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('helper unavailable'))
+      .mockResolvedValue({})
+    const status = vi.fn().mockResolvedValue(statusFixture({ visible: false }))
+    renderPanel(fakeServices({ status, visible }))
+
+    await waitFor(() => expect(visible).toHaveBeenCalledTimes(2))
+    expect(visible).toHaveBeenLastCalledWith('ssh:p1:1', true)
+  })
+
+  it('a backend-reported pause stops the status poll and keeps the forward list current', async () => {
     // The header action is Refresh now, so nothing in the renderer flips this;
     // the control only REFLECTS a pause the backend reports, and the poll must
     // still honour it.
     vi.useFakeTimers()
     try {
       const status = vi.fn().mockResolvedValue(statusFixture({ state: 'available', paused: true }))
-      const services = fakeServices({ status })
-      renderPanel(services)
+      const listForwards = vi.fn().mockResolvedValue({ forwards: [] })
+      renderPanel(fakeServices({ status, listForwards }))
       await vi.advanceTimersByTimeAsync(0)
+      const listsAfterFirst = listForwards.mock.calls.length
+      expect(listsAfterFirst).toBeGreaterThan(0)
       const callsAfterFirst = status.mock.calls.length
       expect(callsAfterFirst).toBeGreaterThan(0)
 
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2)
       expect(status.mock.calls.length).toBe(callsAfterFirst)
+      expect(listForwards).toHaveBeenCalledTimes(listsAfterFirst + 2)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a failure state offers exactly one Retry, and the body offers no toolbar copy', async () => {
+  it('an unavailable probe offers no Retry or duplicate toolbar controls', async () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(
         statusFixture({
-          state: 'permission-or-policy-refused',
-          classification: 'additional sessions refused',
+          state: 'unavailable',
+          classification: 'no probe tool usable on this host',
         }),
       ),
     })
     renderPanel(services)
-    await waitFor(() => expect(screen.getByText('Discovery refused on this host')).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText('Could not determine what is listening')).toBeTruthy(),
+    )
 
-    // Retry exists exactly where it belongs: inside the failure state. The
-    // toolbar copy (ports-retry) and the body Pause button are gone.
-    expect(screen.getAllByText('Retry')).toHaveLength(1)
+    expect(screen.queryByText('Retry')).toBeNull()
     expect(screen.queryByTestId('ports-retry')).toBeNull()
     expect(screen.queryByTestId('ports-pause')).toBeNull()
   })
@@ -500,25 +532,21 @@ describe('PortsPanel — forwards', () => {
       .fn()
       .mockResolvedValue(runningRecord({ id: 'fwd-retried', destination: 'host.example:5432' }))
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [listenerFixture(5432)] },
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(5432)] })),
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({
-                  id: 'fwd-lost',
-                  destination: 'host.example:5432',
-                  requestedBind: { host: '127.0.0.1', port: 5432 },
-                }),
-                state: 'stopped' as const,
-                stopReason: 'connection lost' as const,
-                error: 'connection closed',
-              },
-            ],
+            ...runningRecord({
+              id: 'fwd-lost',
+              destination: 'host.example:5432',
+              requestedBind: { host: '127.0.0.1', port: 5432 },
+            }),
+            state: 'stopped' as const,
+            stopReason: 'connection lost' as const,
+            error: 'connection closed',
           },
-        ),
-      ),
+        ],
+      }),
       openForward,
     })
     renderPanel(services)
@@ -553,25 +581,20 @@ describe('PortsPanel — forwards', () => {
   it('a self-stopped forward whose port is no longer detected stays visible, with its reason and Retry', async () => {
     const openForward = vi.fn().mockResolvedValue(runningRecord())
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [] },
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({
-                  id: 'fwd-lost',
-                  destination: 'host.example:5432',
-                  requestedBind: { host: '127.0.0.1', port: 5432 },
-                }),
-                state: 'stopped' as const,
-                stopReason: 'error' as const,
-                error: 'remote refused the channel',
-              },
-            ],
+            ...runningRecord({
+              id: 'fwd-lost',
+              destination: 'host.example:5432',
+              requestedBind: { host: '127.0.0.1', port: 5432 },
+            }),
+            state: 'stopped' as const,
+            stopReason: 'error' as const,
+            error: 'remote refused the channel',
           },
-        ),
-      ),
+        ],
+      }),
       openForward,
     })
     renderPanel(services)
@@ -604,26 +627,21 @@ describe('PortsPanel — forwards', () => {
     // what has already been done.
     const dest = '192.0.2.93:9993'
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [] },
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({
-                  id: 'fwd-first',
-                  destination: dest,
-                  requestedBind: { host: '127.0.0.1', port: 39871 },
-                }),
-                state: 'stopped' as const,
-                stopReason: 'connection lost' as const,
-                error: 'ssh: connection lost',
-              },
-              runningRecord({ id: 'fwd-live', destination: dest }),
-            ],
+            ...runningRecord({
+              id: 'fwd-first',
+              destination: dest,
+              requestedBind: { host: '127.0.0.1', port: 39871 },
+            }),
+            state: 'stopped' as const,
+            stopReason: 'connection lost' as const,
+            error: 'ssh: connection lost',
           },
-        ),
-      ),
+          runningRecord({ id: 'fwd-live', destination: dest }),
+        ],
+      }),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByText('Orphaned forwards')).toBeTruthy())
@@ -640,26 +658,22 @@ describe('PortsPanel — forwards', () => {
   it('a detected row shows the RUNNING forward, never a stale failure for the same destination', async () => {
     const dest = 'host.example:6768'
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [listenerFixture(6768)] },
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({
-                  id: 'fwd-lost',
-                  destination: dest,
-                  requestedBind: { host: '127.0.0.1', port: 6768 },
-                }),
-                state: 'stopped' as const,
-                stopReason: 'connection lost' as const,
-                error: 'connection closed',
-              },
-              runningRecord({ id: 'fwd-live', destination: dest }),
-            ],
+            ...runningRecord({
+              id: 'fwd-lost',
+              destination: dest,
+              requestedBind: { host: '127.0.0.1', port: 6768 },
+            }),
+            state: 'stopped' as const,
+            stopReason: 'connection lost' as const,
+            error: 'connection closed',
           },
-        ),
-      ),
+          runningRecord({ id: 'fwd-live', destination: dest }),
+        ],
+      }),
     })
     renderPanel(services)
     // The port's own row carries the LIVE forward: Stop is reachable, the
@@ -676,21 +690,17 @@ describe('PortsPanel — forwards', () => {
 
   it('a user stop offers no retry — the row is simply back to un-forwarded', async () => {
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [listenerFixture(5432)] },
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(5432)] })),
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({ id: 'fwd-user', destination: 'host.example:5432' }),
-                state: 'stopped' as const,
-                stopReason: 'user' as const,
-                error: null,
-              },
-            ],
+            ...runningRecord({ id: 'fwd-user', destination: 'host.example:5432' }),
+            state: 'stopped' as const,
+            stopReason: 'user' as const,
+            error: null,
           },
-        ),
-      ),
+        ],
+      }),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByText('0.0.0.0:5432')).toBeTruthy())
@@ -708,20 +718,15 @@ describe('PortsPanel — forwards', () => {
       error: null,
     })
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          { listeners: [] },
-          {
-            forwards: [
-              runningRecord({
-                id: 'fwd-orphan',
-                destination: 'host.example:9999',
-                actualBind: { host: '127.0.0.1', port: 9999 },
-              }),
-            ],
-          },
-        ),
-      ),
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
+          runningRecord({
+            id: 'fwd-orphan',
+            destination: 'host.example:9999',
+            actualBind: { host: '127.0.0.1', port: 9999 },
+          }),
+        ],
+      }),
       stopForward,
     })
     renderPanel(services)
@@ -741,23 +746,18 @@ describe('PortsPanel — forwards', () => {
     const caveat =
       'bind address 0.0.0.0 requested but not verified: the server may have bound a different address (GatewayPorts), so a URL built from this forward may only work on the server'
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(
-        statusFixture(
-          {},
+      listForwards: vi.fn().mockResolvedValue({
+        forwards: [
           {
-            forwards: [
-              {
-                ...runningRecord({
-                  id: 'fwd-remote',
-                  direction: 'remote',
-                  destination: 'host.example:5901',
-                }),
-                caveat,
-              },
-            ],
+            ...runningRecord({
+              id: 'fwd-remote',
+              direction: 'remote',
+              destination: 'host.example:5901',
+            }),
+            caveat,
           },
-        ),
-      ),
+        ],
+      }),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
@@ -772,12 +772,49 @@ describe('PortsPanel — forwards', () => {
     expect(note.closest('.ui-marker-list__item')?.getAttribute('data-tone')).toBe('note')
   })
 
+  it('keeps Stop available when the helper is unavailable', async () => {
+    const record = runningRecord({ id: 'fwd-orphan' })
+    const status = vi
+      .fn()
+      .mockRejectedValue(
+        new RpcError('helper unavailable', -32602, { reason: 'helper-unavailable' }),
+      )
+    const listForwards = vi
+      .fn()
+      .mockResolvedValueOnce({ forwards: [record] })
+      .mockResolvedValue({ forwards: [] })
+    const stopForward = vi
+      .fn()
+      .mockResolvedValue({ ...record, state: 'stopped', stopReason: 'user' })
+    renderPanel(fakeServices({ status, listForwards, stopForward }))
+
+    const statusText = await screen.findByText(
+      "Ports are not available on this connection — nocx's helper is not running there",
+    )
+    expect(statusText.closest('section')?.textContent).toContain('Detected')
+    expect(screen.getByText('Orphaned forwards')).toBeTruthy()
+    expect(screen.getByTestId('forwarded-row').getAttribute('data-state')).toBe('forwarded')
+    expect(screen.queryByTestId('ports-loading')).toBeNull()
+    expect(listingToasts).toEqual([])
+
+    fireEvent.click(screen.getByTestId('ports-stop'))
+    await waitFor(() => expect(stopForward).toHaveBeenCalledWith(record.id))
+    await waitFor(() => expect(screen.queryByTestId('forwarded-row')).toBeNull())
+  })
+
+  it('shows detected listeners when reading forwards fails', async () => {
+    const status = vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] }))
+    const listForwards = vi.fn().mockRejectedValue(new Error('forward list unavailable'))
+    renderPanel(fakeServices({ status, listForwards }))
+
+    expect(await screen.findByText('0.0.0.0:6768')).toBeTruthy()
+    expect(listForwards).toHaveBeenCalled()
+  })
+
   it('a clean bind renders no caveat chrome', async () => {
     const { container } = renderPanel(
       fakeServices({
-        status: vi
-          .fn()
-          .mockResolvedValue(statusFixture({}, { forwards: [runningRecord({ id: 'fwd-clean' })] })),
+        listForwards: vi.fn().mockResolvedValue({ forwards: [runningRecord({ id: 'fwd-clean' })] }),
       }),
     )
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
@@ -795,7 +832,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available', listeners: [listenerFixture(22)] }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid(null)
@@ -814,7 +851,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
     setPid('ssh:p2:2')
@@ -838,7 +875,7 @@ describe('PortsPanel — active-tab scope', () => {
       .mockResolvedValue(statusFixture({ state: 'available' }))
     const services = fakeServices({ status })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
-    renderPanel(services, { profileId: pid })
+    renderPanel(services, { paneId: pid })
 
     setPid('ssh:p2:2')
     await waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
@@ -854,7 +891,7 @@ describe('PortsPanel — active-tab scope', () => {
     const services = fakeServices({ visible })
     const [pid, setPid] = createSignal<string | null>('ssh:p1:1')
     const [vis, setVis] = createSignal(true)
-    renderPanel(services, { profileId: pid, visible: vis })
+    renderPanel(services, { paneId: pid, visible: vis })
 
     await waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
     setVis(false)
@@ -904,18 +941,20 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
       .mockResolvedValue(
         statusFixture(
           { state: 'available', listeners: [listenerFixture(22)] },
-          { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+          { paneId: LOCAL_PANE, host: 'my-machine' },
         ),
       )
     const openForward = vi.fn()
-    const services = fakeServices({ status, openForward })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    const listForwards = vi.fn().mockResolvedValue({ forwards: [] })
+    const services = fakeServices({ status, openForward, listForwards })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
-    await waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
+    await waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_PANE))
     await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
     // The row offers copy-address; Forward is not offered on this machine.
     expect(screen.queryByTestId('ports-forward')).toBeNull()
     expect(screen.getByTestId('ports-copy')).toBeTruthy()
+    expect(listForwards).not.toHaveBeenCalled()
     // No forwarding vocabulary at all on a local scope — the sections would
     // be an empty offer of an impossible action.
     expect(screen.queryByText('Forwarded')).toBeNull()
@@ -938,12 +977,12 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
           .mockResolvedValue(
             statusFixture(
               { state: 'available', listeners: [listenerFixture(22)] },
-              { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+              { paneId: LOCAL_PANE, host: 'my-machine' },
             ),
           ),
         openForward,
       })
-      renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+      renderPanel(services, { paneId: () => LOCAL_PANE })
       await waitFor(() => expect(screen.getByText('0.0.0.0:22')).toBeTruthy())
 
       fireEvent.click(screen.getByTestId('ports-copy'))
@@ -964,11 +1003,11 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
         .mockResolvedValue(
           statusFixture(
             { state: 'available', listeners: [listenerFixture(22, 'permission-denied')] },
-            { profileId: LOCAL_TARGET_ID, host: 'my-machine' },
+            { paneId: LOCAL_PANE, host: 'my-machine' },
           ),
         ),
     })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
     // The same explanation as a remote host: a fact about privilege, not an
     // error on the user's own machine.
@@ -981,11 +1020,9 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     const services = fakeServices({
       status: vi
         .fn()
-        .mockResolvedValue(
-          statusFixture({ state: 'pending' }, { profileId: LOCAL_TARGET_ID, host: '' }),
-        ),
+        .mockResolvedValue(statusFixture({ state: 'pending' }, { paneId: LOCAL_PANE, host: '' })),
     })
-    renderPanel(services, { profileId: () => LOCAL_TARGET_ID })
+    renderPanel(services, { paneId: () => LOCAL_PANE })
 
     // Connected-and-waiting is loading, not an empty state: the settle delay
     // plus a round trip is exactly the window a spinner is for (nocx-wzc4.11).
@@ -1005,7 +1042,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('renders the empty state with an enabled action when unavailableIn names a host', async () => {
     const onOpenAsConnection = vi.fn()
     const { container } = renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
       onOpenAsConnection,
     })
@@ -1021,7 +1058,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('activating it reaches the seam with the host and user split out of unavailableIn', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
       onOpenAsConnection,
     })
@@ -1034,7 +1071,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('passes an undefined user when unavailableIn names a bare host', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => '192.0.2.93',
       onOpenAsConnection,
     })
@@ -1047,7 +1084,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
   it('offers no action when there is no unavailable host', async () => {
     const onOpenAsConnection = vi.fn()
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => '',
       onOpenAsConnection,
     })
@@ -1058,7 +1095,7 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
 
   it('offers no action when no seam is wired (a dead action would be worse than none)', async () => {
     renderPanel(fakeServices(), {
-      profileId: () => null,
+      paneId: () => null,
       unavailableIn: () => 'pi@192.0.2.93',
     })
     await waitFor(() => {
@@ -1185,9 +1222,8 @@ describe('PortsPanel — the filter (nocx-cdub)', () => {
       requestedBind: { host: '127.0.0.1', port: 9993 },
     })
     const services = fakeServices({
-      status: vi
-        .fn()
-        .mockResolvedValue(statusFixture({ listeners: threeListeners }, { forwards: [fwd] })),
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+      listForwards: vi.fn().mockResolvedValue({ forwards: [fwd] }),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
@@ -1211,9 +1247,8 @@ describe('PortsPanel — the filter (nocx-cdub)', () => {
       error: 'connection reset',
     })
     const services = fakeServices({
-      status: vi
-        .fn()
-        .mockResolvedValue(statusFixture({ listeners: threeListeners }, { forwards: [fwd] })),
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+      listForwards: vi.fn().mockResolvedValue({ forwards: [fwd] }),
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))

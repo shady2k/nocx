@@ -40,7 +40,7 @@ func kernelFor(t *testing.T, grant content.Grant, ledger AttemptLedger) *effectK
 		t.Fatalf("Assemble: %v", err)
 	}
 	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, Attachments{}, nil,
-		toolSeams{paneEnvironment: localPaneEnvironment()})
+		toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	}
 
 	// And the capability minted from that very grant still refuses it.
-	capability, err := decl.Narrow(grant, refs, localRunContext())
+	capability, err := decl.Narrow(grant, refs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("narrow files.read: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("files.read narrowed to %T, not *filesystem.ScopedReader", capability)
 	}
-	if _, readErr := reader.Read(context.Background(), target, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
+	if _, readErr := reader.ReadSnapshot(context.Background(), target, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
 		t.Fatalf("the asked-about path read back with error %v, want ErrOutOfScope — a policy ask is not a widening", readErr)
 	}
 
@@ -289,7 +289,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	if outcome, _, _ := kernel.decideInvocationWithReason(decl, escapeRefs, true, content.Invocation{Parsed: true}); outcome != policyPermit {
 		t.Fatalf("policy on the symlink %q gave outcome=%v; the lexical predicate cannot see the escape and must permit it here", escape, outcome)
 	}
-	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext())
+	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("narrow files.read for the symlink: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("files.read narrowed to %T, not *filesystem.ScopedReader", escapeCapability)
 	}
-	if _, readErr := escapeReader.Read(context.Background(), escape, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
+	if _, readErr := escapeReader.ReadSnapshot(context.Background(), escape, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
 		t.Fatalf("the symlink escape read back with error %v, want ErrOutOfScope — the capability is the enforcement", readErr)
 	}
 }

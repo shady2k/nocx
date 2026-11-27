@@ -1,14 +1,12 @@
 package agenttools
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
-	"github.com/shady2k/nocx/internal/filesystem/local"
 )
 
 // The effect ROW each general-purpose file tool's capability is bounded by.
@@ -28,30 +26,40 @@ const (
 	filesWriteRowEffect = content.EffectMutateReversible
 )
 
-// The three file tools are built on THIS machine's filesystem (local.New()
-// below), so a run whose pane is somewhere else must get no capability at all
-// — otherwise an SSH pane reads and writes the local disk, which is the leak
-// ADR-anntnxdj §5 closes until stage 8 gives these tools the pane's own
-// provider through the files binding.
+// errNoFileBinding is why a file tool has no capability when the run carries no
+// HandleSource: nothing bound the pane's files to this run, and a constructor
+// cannot invent one. It is an error rather than a silent nil capability for the
+// reason every other constructor refusal is — the call must fail closed, and the
+// failure must say what is missing.
+var errNoFileBinding = errors.New("no file binding is bound to this run")
+
+// The three file tools act through the pane's OWN file binding: RunContext.Files
+// is the source each capability acquires a short-lived Handle from, so an SSH
+// pane reads and writes that server's files and a local pane reads this
+// machine's — with one implementation and no path by which the tool could name
+// the other (ADR-anntnxdj §5, stage 10).
 //
-// Refusing HERE is the guarantee, not the answer: the constructor declining to
-// construct is what makes "the tool cannot exceed what it was given" true by
-// the same mechanism the grant's deadline uses (withinGrantLifetime). A caller
-// that wants the model to READ a refusal composes a guard over the same two
-// facts — the tool's name (ReachesLocalDisk) and the run's pane — so the
-// sentence is ours rather than a failure about a constructor.
+// Two guarantees remain, and both are the constructor declining to construct.
+// A pane that is not this machine is refused by localPaneOnly until the last
+// leaf of the stage (.11.4) removes the stub; a run with no Files source gets no
+// capability at all. Refusing HERE is what makes "the tool cannot exceed what it
+// was given" true by the same mechanism the grant's deadline uses
+// (withinGrantLifetime). A caller that wants the model to READ a refusal
+// composes a guard over the same facts — the tool's name (ReachesLocalDisk) and
+// the run's pane — so the sentence is ours rather than a failure about a
+// constructor.
 var ErrRemoteFileTools = errors.New("nocx's file tools reach this machine's disk only; the remote file tools are coming")
 
-// ReachesLocalDisk reports whether the declaration's capability is this
-// machine's filesystem: files.read, files.edit and files.create, whose
-// constructors call local.New(). It is the one answer to "does this tool need
-// the pane to be local", read by the constructors below and by the guard that
-// turns their refusal into a sentence — so the two cannot disagree about which
-// tools the fact is about. It goes with local.New() when the file tools move
-// to the pane's own provider (ADR-anntnxdj stage 8).
+// ReachesLocalDisk reports whether the declaration's capability is the pane's
+// filesystem: files.read, files.list, files.search, files.edit and
+// files.create, which reach whatever disk the pane is on. It is the one answer
+// to "does this tool need the pane to be local", read by the guard that turns
+// a refusal into a sentence — so the two cannot disagree about which tools the
+// fact is about. It goes with localPaneOnly when the last leaf of the stage
+// removes the stub (ADR-anntnxdj stage 8, nocx-a62cl.11.4).
 func ReachesLocalDisk(name string) bool {
 	switch name {
-	case "files.read", "files.edit", "files.create":
+	case "files.read", "files.list", "files.search", "files.edit", "files.create":
 		return true
 	}
 	return false
@@ -60,6 +68,13 @@ func ReachesLocalDisk(name string) bool {
 // localPaneOnly is why a file tool has no capability on a pane that is not
 // this machine. The zero Environment names no pane and is refused with it: a
 // caller that never said where the run is has not said it is here.
+//
+// It is a STUB with a date, not the design: the capability below already acts
+// through the pane's own binding, so what still keeps an SSH pane out is this
+// sentence rather than a missing route. Two leaves remain before it can go —
+// evidence read through the Handle (.11.2) and list/search over it (.11.3) —
+// and the stub is removed by the leaf that can then describe an SSH pane's
+// files honestly (.11.4).
 func localPaneOnly(tool string, runCtx RunContext) error {
 	if runCtx.Environment.Kind == content.EnvLocal {
 		return nil
@@ -72,15 +87,32 @@ func localPaneOnly(tool string, runCtx RunContext) error {
 // that are also in the grant; other grant paths are not authority for this
 // call.
 func narrowFilesRead(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
-	if err := localPaneOnly("files.read", runCtx); err != nil {
+	return narrowFilesQuery("files.read", grant, resources, runCtx)
+}
+
+// narrowFilesList and narrowFilesSearch are files.list's and files.search's
+// constructors, and they are files.read's: listing a directory and searching
+// its files are reads within the grant's paths, with the same exact-path
+// narrowing and the same refusal on a pane that is not this machine. One
+// constructor, so the three cannot drift into three answers about what a file
+// capability may reach.
+func narrowFilesList(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	return narrowFilesQuery("files.list", grant, resources, runCtx)
+}
+
+func narrowFilesSearch(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	return narrowFilesQuery("files.search", grant, resources, runCtx)
+}
+
+func narrowFilesQuery(tool string, grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+	if err := localPaneOnly(tool, runCtx); err != nil {
 		return nil, err
 	}
-	paths := resourceIDs(grant, resources, content.ResourcePath)
-	r, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(), filesystemRoots(grant, filesReadRowEffect), paths)
-	if err != nil {
-		return nil, fmt.Errorf("narrow files.read: %w", err)
+	if runCtx.Files == nil {
+		return nil, fmt.Errorf("narrow %s: %w", tool, errNoFileBinding)
 	}
-	return r, nil
+	paths := resourceIDs(grant, resources, content.ResourcePath)
+	return filesystem.NewScopedReaderWithExactFiles(runCtx.Files, filesystemRoots(grant, filesReadRowEffect), paths), nil
 }
 
 // filesystemRoots is the containment scope the narrowed capability holds for
@@ -113,17 +145,19 @@ func narrowFilesEdit(grant content.Grant, resources []ResourceRef, runCtx RunCon
 	if err := localPaneOnly("files.edit", runCtx); err != nil {
 		return nil, err
 	}
-	paths := resourceIDs(grant, resources, content.ResourcePath)
-	editor, err := filesystem.NewScopedEditorWithExactFiles(context.Background(), local.New(), filesystemRoots(grant, filesWriteRowEffect), paths)
-	if err != nil {
-		return nil, fmt.Errorf("narrow files.edit: %w", err)
+	if runCtx.Files == nil {
+		return nil, fmt.Errorf("narrow files.edit: %w", errNoFileBinding)
 	}
-	return editor, nil
+	paths := resourceIDs(grant, resources, content.ResourcePath)
+	return filesystem.NewScopedEditorWithExactFiles(runCtx.Files, filesystemRoots(grant, filesWriteRowEffect), paths), nil
 }
 
 func narrowFilesCreate(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
 	if err := localPaneOnly("files.create", runCtx); err != nil {
 		return nil, err
+	}
+	if runCtx.Files == nil {
+		return nil, fmt.Errorf("narrow files.create: %w", errNoFileBinding)
 	}
 	// A new target cannot itself be canonicalized until it exists. Bind the
 	// capability to the existing parent directories of the resolved targets;
@@ -133,11 +167,7 @@ func narrowFilesCreate(grant content.Grant, resources []ResourceRef, runCtx RunC
 	for _, path := range paths {
 		parents = append(parents, filepath.Dir(path))
 	}
-	editor, err := filesystem.NewScopedEditorWithExactParents(context.Background(), local.New(), filesystemRoots(grant, filesWriteRowEffect), parents)
-	if err != nil {
-		return nil, fmt.Errorf("narrow files.create: %w", err)
-	}
-	return editor, nil
+	return filesystem.NewScopedEditorWithExactParents(runCtx.Files, filesystemRoots(grant, filesWriteRowEffect), parents), nil
 }
 
 // narrowSession is the session.list and session.read constructor. The

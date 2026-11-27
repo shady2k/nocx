@@ -75,7 +75,7 @@ func TestGitOpenNeverAnsweredIsBoundedRatherThanHungForever(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = lease.Client.Close(); err != nil {
+	if err = lease.Client().Close(); err != nil {
 		t.Fatal(err)
 	}
 	waittest.WaitFor(t, "lost helper", func() bool { s, _ := far.Axis("conn"); return s.Reason == farhelper.ReasonHelperLost })

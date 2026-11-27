@@ -61,53 +61,6 @@ func TestPut_OverwriteReplacesTheExistingContent(t *testing.T) {
 	}
 }
 
-// The paired success for the fallback: a server with no
-// posix-rename@openssh.com writes the file too, and leaves no .nocx-bak-
-// behind (§6, "and the paired success assertions").
-func TestPut_FallbackOnAServerWithoutPosixRename_WritesTheFileAndLeavesNoBackup(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.State != transfer.StateWritten || len(out.Stranded) != 0 {
-		t.Fatalf("got %+v", out)
-	}
-	if got := fs.content("/home/u/a.txt"); got != "new" {
-		t.Fatalf("destination holds %q", got)
-	}
-	if got := fs.paths(); len(got) != 1 || got[0] != "/home/u/a.txt" {
-		t.Fatalf("the fallback must leave exactly the destination; got %v", got)
-	}
-}
-
-// The same server with nothing at the destination: there is no collision, so
-// rename(dest→bak) reports fs.ErrNotExist and the fallback carries on with
-// no backup at all. A sink that read that refusal as a failure would refuse
-// every first upload to a v3 server.
-func TestPut_FallbackWithNothingAtTheDestination_WritesTheFile(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.State != transfer.StateWritten || len(out.Stranded) != 0 {
-		t.Fatalf("got %+v", out)
-	}
-	if got := fs.paths(); len(got) != 1 || got[0] != "/home/u/a.txt" {
-		t.Fatalf("want only the destination; got %v", got)
-	}
-}
-
 func TestPut_ZeroByteFileIsWritten(t *testing.T) {
 	fs := newFakeFS()
 
@@ -382,12 +335,10 @@ func TestPut_SourceDeliversMoreThanDeclared_FailsWithoutWritingTheExcess(t *test
 
 // --- rows: the promote ------------------------------------------------------
 
-// A PosixRename that fails for any reason OTHER than the extension being
-// unsupported is a failed promote, not an invitation to the fallback.
-func TestPromote_PosixRenameFailsForAnotherReason_RemovesTheTempAndReports(t *testing.T) {
+func TestPromote_RenameFailureRemovesTheTempAndKeepsTheDestination(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(1)
+	fs.renameErr = errors.New("rename refused")
 
 	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
@@ -402,163 +353,6 @@ func TestPromote_PosixRenameFailsForAnotherReason_RemovesTheTempAndReports(t *te
 		t.Fatalf("the temp was removable: stranded=%v files=%v", out.Stranded, fs.paths())
 	}
 }
-
-// Row: rename(dest → bak) fails. Nothing has moved yet, so the destination
-// still holds the old content and the temp is the sink's to clean up.
-func TestPromote_BackupRenameFails_LeavesTheOldContentInPlace(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(1)
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if err == nil {
-		t.Fatal("a failed backup must be an error")
-	}
-	if got := fs.content("/home/u/a.txt"); got != "old" {
-		t.Fatalf("destination holds %q, want the old content untouched", got)
-	}
-	if len(out.Stranded) != 0 {
-		t.Fatalf("the temp was removable; got %v", out.Stranded)
-	}
-	if got := fs.paths(); len(got) != 1 {
-		t.Fatalf("want only the destination; got %v", got)
-	}
-}
-
-// The same row on a lease that cannot remove either: the temp is named.
-func TestPromote_BackupRenameFailsAndTheTempCannotBeRemoved_StrandsIt(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(1)
-	fs.removeErr = errors.New("permission denied")
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if err == nil {
-		t.Fatal("a failed backup must be an error")
-	}
-	if !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("the reason the temp could not be cleaned up must reach the caller; got %v", err)
-	}
-	temps := fs.matching("*.nocx-upload-*")
-	if len(out.Stranded) != 1 || len(temps) != 1 || out.Stranded[0] != temps[0] {
-		t.Fatalf("stranded %v must name the temp %v", out.Stranded, temps)
-	}
-	if got := fs.content("/home/u/a.txt"); got != "old" {
-		t.Fatalf("destination holds %q", got)
-	}
-}
-
-func TestPromote_FallbackKeepsTheOldContentUnderBak(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(2) // dest→bak succeeds; temp→dest fails
-
-	s := transfer.NewSink(fs, transfer.DefaultChunk)
-	out, err := s.Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-
-	if err == nil {
-		t.Fatal("a failed promote must be an error")
-	}
-	if len(out.Stranded) != 2 {
-		t.Fatalf("a failed fallback strands BOTH the backup and the temp; got %v", out.Stranded)
-	}
-	bak := findStranded(out.Stranded, ".nocx-bak-")
-	if bak == "" {
-		t.Fatal("the outcome must NAME the path holding the old content")
-	}
-	if fs.content(bak) != "old" {
-		t.Fatal("the backup must hold the previous content — this is the whole reason we do not unlink first")
-	}
-	temp := findStranded(out.Stranded, ".nocx-upload-")
-	if temp == "" || fs.content(temp) != "new" {
-		t.Fatalf("the temp must still hold the new content; stranded %v", out.Stranded)
-	}
-	if fs.exists("/home/u/a.txt") {
-		t.Fatal("the destination is missing inside this window; the design says so rather than pretending otherwise")
-	}
-	// D6: the backup carries the SAME random suffix as the temp, so two
-	// concurrent fallbacks in one directory cannot collide on it.
-	if strings.TrimPrefix(bak, "/home/u/a.txt"+".nocx-bak-") != strings.TrimPrefix(temp, "/home/u/a.txt"+".nocx-upload-") {
-		t.Fatalf("temp and backup must share one nonce: %q vs %q", temp, bak)
-	}
-}
-
-// Row: the connection is lost inside the fallback window. Same post-state as
-// the failed second rename, reached by losing the lease rather than by a
-// refusal — and reported the same way, because the person's file is in the
-// same place either way.
-func TestPromote_ConnectionLostInsideTheFallbackWindow_StrandsBothPaths(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	lostInsideTheWindow := false
-	fs.onRename = func(n int) {
-		if n == 1 {
-			fs.dead = true
-			lostInsideTheWindow = !fs.exists("/home/u/a.txt")
-		}
-	}
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if !lostInsideTheWindow {
-		t.Fatal("the test never entered the window it exists to guard")
-	}
-	if !errors.Is(err, errDisconnected) {
-		t.Fatalf("want the lost lease reported; got %v", err)
-	}
-	if len(out.Stranded) != 2 {
-		t.Fatalf("both the backup and the temp are stranded; got %v", out.Stranded)
-	}
-	bak := findStranded(out.Stranded, ".nocx-bak-")
-	if bak == "" || fs.content(bak) != "old" {
-		t.Fatalf("the backup must be named and hold the old content; stranded %v", out.Stranded)
-	}
-	if fs.exists("/home/u/a.txt") {
-		t.Fatal("the destination is missing in this window")
-	}
-}
-
-// Row: unlink(bak) fails after a promote that LANDED. This is a success
-// outcome that still carries a stranded path — the one row where err is nil
-// and Stranded is not empty.
-func TestPromote_BackupRemoveFails_IsASuccessThatStillNamesTheBackup(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	fs.removeErr = errors.New("permission denied")
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if err != nil {
-		t.Fatalf("the file is in place; a stray backup is not a failed upload: %v", err)
-	}
-	if out.State != transfer.StateWritten || out.FinalName != "a.txt" {
-		t.Fatalf("got %+v", out)
-	}
-	if got := fs.content("/home/u/a.txt"); got != "new" {
-		t.Fatalf("destination holds %q, want the new content", got)
-	}
-	if len(out.Stranded) != 1 {
-		t.Fatalf("the backup that could not be removed must be named; got %v", out.Stranded)
-	}
-	if fs.content(out.Stranded[0]) != "old" {
-		t.Fatalf("the stranded path must be the backup holding the old content; got %q", out.Stranded[0])
-	}
-}
-
-// --- rows: cancellation -----------------------------------------------------
 
 func TestPut_CancelledByThePerson_LeavesTheDestinationUntouched(t *testing.T) {
 	fs := newFakeFS()
@@ -584,49 +378,6 @@ func TestPut_CancelledByThePerson_LeavesTheDestinationUntouched(t *testing.T) {
 		t.Fatalf("a cancel cleans up after itself: stranded=%v files=%v", out.Stranded, fs.paths())
 	}
 }
-
-// The rule, not an observation: cancellation is REFUSED inside the
-// fallback's two-rename window. A cancel that landed there would be the one
-// path that deliberately leaves a person with no file at all, and
-// "I pressed cancel" must never be how the destination goes missing.
-func TestPromote_CancelInsideTheTwoRenameWindow_IsRefusedAndThePromoteCompletes(t *testing.T) {
-	fs := newFakeFS()
-	fs.noPosixRename = true
-	fs.put("/home/u/a.txt", "old")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cancelledInsideTheWindow := false
-	fs.onRename = func(n int) {
-		if n == 1 { // dest is now at bak; the destination does not exist
-			cancel()
-			cancelledInsideTheWindow = ctx.Err() != nil && !fs.exists("/home/u/a.txt")
-		}
-	}
-
-	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(ctx,
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
-		strings.NewReader("new"), func(int64) {})
-	if !cancelledInsideTheWindow {
-		t.Fatal("the test never entered the window it exists to guard")
-	}
-	if fs.renames != 2 {
-		t.Fatalf("the fallback runs two renames; saw %d", fs.renames)
-	}
-	if err != nil {
-		t.Fatalf("the promote must not be abandoned: %v", err)
-	}
-	if out.State != transfer.StateWritten {
-		t.Fatalf("got %+v", out)
-	}
-	if got := fs.content("/home/u/a.txt"); got != "new" {
-		t.Fatalf("destination holds %q; a cancel in this window must not leave it missing", got)
-	}
-	if got := fs.paths(); len(got) != 1 || got[0] != "/home/u/a.txt" {
-		t.Fatalf("want only the destination; got %v", got)
-	}
-}
-
-// --- rows: KeepBoth and the O_EXCL race -------------------------------------
 
 func TestPut_KeepBoth_ResolvesTheFinalNameBeforeTheTransfer(t *testing.T) {
 	fs := newFakeFS()
@@ -868,7 +619,7 @@ func (r *failingReader) Read([]byte) (int, error) { return 0, r.err }
 func TestPut_KeepBothReservationIsRemovedWhenThePromoteFails(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(1) // the promote itself fails
+	fs.renameErr = errors.New("rename refused")
 
 	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
@@ -892,7 +643,7 @@ func TestPut_KeepBothReservationIsRemovedWhenThePromoteFails(t *testing.T) {
 func TestPut_KeepBothReservationStrandedWhenThePromoteAndTheRemoveBothFail(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
-	fs.failRenameAt(1)
+	fs.renameErr = errors.New("rename refused")
 	fs.removeErr = errors.New("permission denied")
 
 	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
@@ -911,15 +662,10 @@ func TestPut_KeepBothReservationStrandedWhenThePromoteAndTheRemoveBothFail(t *te
 
 // --- KeepBoth: a refusal that is not a collision stops the search -----------
 
-// SFTP v3 answers EEXIST as a generic SSH_FX_FAILURE, so "the name was
-// taken" and "the create was refused" genuinely are not distinguishable on
-// the wire — the bound and the ambiguity both stay. What must not happen is
-// that a refusal the sink CAN classify buys 32 more round trips and is then
-// reported as "no free name", which is simply false.
 func TestPut_KeepBothCreateRefusedWithPermission_StopsAtOnceAndReportsTheRefusal(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
-	fs.createErr = fmt.Errorf("sftp: open %s: %w", "/home/u/a (1).txt", iofs.ErrPermission)
+	fs.createErr = fmt.Errorf("fake: open %s: %w", "/home/u/a (1).txt", iofs.ErrPermission)
 
 	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
@@ -932,7 +678,7 @@ func TestPut_KeepBothCreateRefusedWithPermission_StopsAtOnceAndReportsTheRefusal
 		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
 	}
 	if fs.creates != 1 {
-		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+		t.Fatalf("a non-collision stops the search; saw %d creates", fs.creates)
 	}
 	if len(out.Stranded) != 0 {
 		t.Fatalf("nothing was created; got %v", out.Stranded)
@@ -959,29 +705,26 @@ func TestPut_KeepBothCreateRefusedBecauseTheDirectoryIsGone_StopsAtOnce(t *testi
 		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
 	}
 	if fs.creates != 1 {
-		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+		t.Fatalf("a non-collision stops the search; saw %d creates", fs.creates)
 	}
 }
 
-// A dead lease is classifiable too, and it is the case that costs most: 32
-// round trips onto a connection that is gone, ending in a diagnosis about
-// names.
-func TestPut_KeepBothCreateRefusedByADeadLease_StopsAtOnce(t *testing.T) {
+func TestPut_KeepBothCreateRefusedForAnUnclassifiedError_StopsAtOnce(t *testing.T) {
 	fs := newFakeFS()
-	fs.createErr = fmt.Errorf("sftp: %w", iofs.ErrClosed)
+	fs.createErr = errors.New("input/output error")
 
 	_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	var exhausted *transfer.NameExhaustedError
 	if errors.As(err, &exhausted) {
-		t.Fatalf("a gone lease is not a directory full of collisions; got %v", err)
+		t.Fatalf("an I/O error is not a directory full of collisions; got %v", err)
 	}
-	if !errors.Is(err, iofs.ErrClosed) {
+	if !errors.Is(err, fs.createErr) {
 		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
 	}
 	if fs.creates != 1 {
-		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+		t.Fatalf("a non-collision stops the search; saw %d creates", fs.creates)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 type fakeLedger struct {
@@ -266,6 +267,14 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 // the same one except where a test is about the relation.
 func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string) *kernelFixture {
 	t.Helper()
+	return middlewareForSeams(t, grant, ledger, approvals, requester, known, turnEntryID, localPaneEnvironment(), newLocalFileSource(t))
+}
+
+// middlewareForSeams is middlewareForTurn with the two facts a test about the
+// PANE supplies: where the pane is, and the binding its files are read
+// through. Every other caller takes the local pair.
+func middlewareForSeams(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string, pane content.Environment, files filesystem.HandleSource) *kernelFixture {
+	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -282,7 +291,7 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 	if source, ok := requester.(ScreenCaptureSource); ok {
 		screenCapture = source
 	}
-	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: localPaneEnvironment()})
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: pane, files: files})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}
@@ -555,7 +564,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newKernelFixture(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment()})
+	mw2, mwErr := newKernelFixture(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
 	if mwErr != nil {
 		t.Fatalf("newKernelFixture(run-2): %v", mwErr)
 	}
@@ -583,11 +592,11 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	refs, err := decl.ResolveResources(map[string]any{"path": short}, localRunContext())
+	refs, err := decl.ResolveResources(map[string]any{"path": short}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	narrowed, err := decl.Narrow(grant, refs, localRunContext())
+	narrowed, err := decl.Narrow(grant, refs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
@@ -613,11 +622,11 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	// a zero-length window, no error.
 	empty := filepath.Join(dir, "empty.txt")
 	writeFile(t, empty, "")
-	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, localRunContext())
+	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, localRunContext(t))
 	if err != nil {
 		t.Fatalf("ResolveResources(empty): %v", err)
 	}
-	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, localRunContext())
+	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, localRunContext(t))
 	if err != nil {
 		t.Fatalf("Narrow(empty): %v", err)
 	}
@@ -714,7 +723,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.keys", "session.message", "session.run", "session.wait", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "workers.holdings", "workers.spawn", "workers.say", "workers.inbox", "workers.report", "workers.close", "workers.removeCheckout"}
+	want := []string{"files.list", "files.search", "files.read", "fetch.url", "session.list", "session.read", "session.keys", "session.message", "session.run", "session.wait", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "workers.holdings", "workers.spawn", "workers.say", "workers.inbox", "workers.report", "workers.close", "workers.removeCheckout"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}
@@ -753,7 +762,7 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	if !found {
 		t.Fatal("files.read declaration not found")
 	}
-	mw, err := newKernelFixture(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment()})
+	mw, err := newKernelFixture(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}

@@ -13,11 +13,13 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -235,9 +237,63 @@ func TestTunnelOpen_BusyLocalPortFailsSynchronously(t *testing.T) {
 	roundTrip(t, net.JoinHostPort(rec.ActualBind.Host, strconv.Itoa(rec.ActualBind.Port)))
 }
 
+// ── the typed bind refusal (nocx-oalo1.13.5) ─────────────────────────────
+//
+// The renderer used to decide "the local port is taken, retry on an
+// allocated one" by matching the message text (EADDRINUSE / "address
+// already in use"). Prose is not a discriminator: a reworded message turns
+// the retry off silently. The wire carries data.reason instead, and these
+// tests prove it arrives over the real socket.
+
+// tunnelErrorDataWire is the on-wire shape of a tunnel error's data payload.
+// Mirrors the Go tunnelErrorData struct (ws_tunnel.go) for test-side decoding.
+type tunnelErrorDataWire struct {
+	Reason string `json:"reason"`
+}
+
+func decodeTunnelErrorData(t *testing.T, raw json.RawMessage) tunnelErrorDataWire {
+	t.Helper()
+	if len(raw) == 0 || string(raw) == "null" {
+		t.Fatalf("error data is absent; the handler must send data.reason")
+	}
+	// The payload must satisfy the declared contract — the closed enum and
+	// additionalProperties:false make the discriminator exact in both
+	// directions (contracts/tunnel.error.schema.json, AGENTS.md rule 5).
+	validateJSON(t, loadSchema(t, "tunnel.error.schema.json"), raw, "tunnel error data (real socket)")
+	var d tunnelErrorDataWire
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal error data: %v (raw: %s)", err, raw)
+	}
+	return d
+}
+
+// TestTunnelOpen_BusyLocalPortCarriesAddressInUseOverTheWire: a bind on a
+// held local port answers data.reason = "address-in-use" — the typed cause
+// the renderer retries on port 0 from, never the message.
+func TestTunnelOpen_BusyLocalPortCarriesAddressInUseOverTheWire(t *testing.T) {
+	h := newTunnelHarness(t, nil)
+	defer h.stop()
+	target := startEchoTarget(t)
+	busy := busyPort(t)
+
+	resp := tunnelCall(t, connectWS(t, h.ws), "tunnel.open", map[string]any{
+		"profileId":   "ssh:p1:1",
+		"port":        busy,
+		"destination": target,
+	}, 1)
+	if resp.Error == nil {
+		t.Fatalf("tunnel.open on a held port %d: expected an error, got a result", busy)
+	}
+	if got := decodeTunnelErrorData(t, resp.Error.Data).Reason; got != "address-in-use" {
+		t.Fatalf("data.reason = %q, want %q", got, "address-in-use")
+	}
+}
+
 // TestTunnelOpen_ConnectorRefuses proves the acquire-failure path: a
 // connector that refuses must surface as a clean RPC error, never a half
-// forward.
+// forward — and it must carry no reason, because a connection that cannot be
+// acquired is not a taken local port and the renderer must not retry it on
+// another one.
 func TestTunnelOpen_ConnectorRefuses(t *testing.T) {
 	h := newTunnelHarness(t, refusingTunnelConnector{})
 	defer h.stop()
@@ -253,6 +309,9 @@ func TestTunnelOpen_ConnectorRefuses(t *testing.T) {
 	if !strings.Contains(resp.Error.Message, "refused") {
 		t.Fatalf("error %q does not name the connector failure", resp.Error.Message)
 	}
+	if len(resp.Error.Data) != 0 && string(resp.Error.Data) != "null" {
+		t.Fatalf("connector refusal carries data %s; only a taken local port is typed", resp.Error.Data)
+	}
 }
 
 // refusingTunnelConnector is the rule-3 failure stand-in: the SSH connection
@@ -261,6 +320,38 @@ type refusingTunnelConnector struct{}
 
 func (refusingTunnelConnector) TunnelConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.TunnelConn, error) {
 	return nil, errors.New("connection refused by connector")
+}
+
+// TestTunnelOpen_ConnectorDialAddressInUseIsNotATakenLocalPort pins the
+// boundary of the typed cause (review ALX-1824, Major): the connection's own
+// failure can carry EADDRINUSE — a dial through a local socket pair, a name
+// collision inside the SSH stack — while the local bind was never attempted.
+// The port here is FREE, so a retry on port 0 would answer a question nobody
+// asked; only the local net.Listen may say "address-in-use".
+func TestTunnelOpen_ConnectorDialAddressInUseIsNotATakenLocalPort(t *testing.T) {
+	free := freePort(t)
+	h := newTunnelHarness(t, dialAddressInUseConnector{})
+	defer h.stop()
+
+	resp := tunnelCall(t, connectWS(t, h.ws), "tunnel.open", map[string]any{
+		"profileId":   "ssh:p1:1",
+		"port":        free,
+		"destination": "127.0.0.1:6768",
+	}, 1)
+	if resp.Error == nil {
+		t.Fatal("tunnel.open with a failing dial: expected an error, got a result")
+	}
+	if len(resp.Error.Data) != 0 && string(resp.Error.Data) != "null" {
+		t.Fatalf("a connection dial failure carries data %s; only a taken local port is typed", resp.Error.Data)
+	}
+}
+
+// dialAddressInUseConnector fails the connection acquire with the same
+// syscall a held local port produces, on a port that is free.
+type dialAddressInUseConnector struct{}
+
+func (dialAddressInUseConnector) TunnelConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.TunnelConn, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EADDRINUSE}
 }
 
 // TestTunnelStop_UnknownID proves a stop for an id that does not exist is an
@@ -352,5 +443,57 @@ func TestTunnelOpen_NotWired(t *testing.T) {
 	}, 1)
 	if resp.Error == nil {
 		t.Fatal("tunnel.open with no connector wired: expected an error, got a result")
+	}
+}
+
+func TestTunnelList_OverTheWireConformsToContract(t *testing.T) {
+	destination := startEchoTarget(t)
+	h := newReplayHarness(t, []profile.ForwardSpec{
+		{Direction: "local", BindPort: 0, Destination: destination},
+	})
+	schema := loadSchema(t, "tunnel.list.schema.json")
+	reply := vaultCall(t, h.conn, "tunnel.list", map[string]any{}, 1)
+	if reply.Error != nil || string(reply.Result) != `{"forwards":[]}` {
+		t.Fatalf("empty tunnel list: %+v, %s", reply.Error, reply.Result)
+	}
+	validateJSON(t, schema, reply.Result, "empty tunnel list")
+	h.openProfile(t, nil)
+	row := h.waitForTunnels(t, 1)[0]
+	reply = vaultCall(t, h.conn, "tunnel.list", map[string]any{}, 2)
+	if reply.Error != nil {
+		t.Fatalf("tunnel.list: %+v", reply.Error)
+	}
+	validateJSON(t, schema, reply.Result, "replayed forward")
+	var result tunnelListResult
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Forwards) != 1 || result.Forwards[0].ID != row.ID ||
+		result.Forwards[0].Destination != destination || result.Forwards[0].State != "running" {
+		t.Fatalf("tunnel.list did not expose the stored forward: %s", reply.Result)
+	}
+	for _, invalid := range []json.RawMessage{
+		json.RawMessage(`{"paneId":"anything"}`), json.RawMessage(`[]`),
+	} {
+		raw := jsonrpcCallWithID(t, h.conn, "tunnel.list", invalid, 3)
+		var response struct{ Error *jsonrpcErrorObj }
+		if err := json.Unmarshal(raw, &response); err != nil || response.Error == nil || response.Error.Code != -32602 {
+			t.Fatalf("tunnel.list(%s) = %s, want -32602", invalid, raw)
+		}
+	}
+}
+
+func TestTunnelList_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.list.schema.json")
+	for _, forwards := range [][]tunnelRecord{
+		{},
+		{{
+			ID: "forward-1", Direction: "local", Destination: "example.test:22",
+			RequestedBind: tunnelBind{Host: "127.0.0.1"},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 50022},
+			Scope:         "ports:example", State: "running",
+		}},
+	} {
+		validateJSON(t, schema, mustMarshal(tunnelListResult{Forwards: forwards}), "tunnel list result")
 	}
 }

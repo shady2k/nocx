@@ -71,7 +71,7 @@ func TestCloseSession_LeavesTheBindingsToWhoeverClaimedTheTeardown(t *testing.T)
 	s := NewWSServer(logger, newRegWithStub(logger))
 
 	sid := session.ID("00000000000000000000000000000002")
-	s.getOrCreateRx(sid)
+	s.getOrCreateRxAt(sid, 0)
 
 	s.gitMu.Lock()
 	if s.gitBySession == nil {

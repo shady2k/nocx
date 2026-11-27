@@ -369,7 +369,7 @@ helper answers `unknown_op`), and a new FIELD on one of these shapes does not.
 ## What landed with `nocx-50w7p.9`, and why `Version` moved to 7
 
 **Every probe is a named op, and a lease is what they run on.** Seven ops join
-the `ssh` service — `lease`, `unlease`, `uname`, `home`, `sample-ports`,
+the `ssh` service — `lease`, `unlease`, `uname`, `home`,
 `completion`, `command-names` — and with them the last shell commands the
 coordinator used to compose for a host: `uname -s -m` for the platform probe,
 the port-discovery ladder, the completion probe, the PATH enumeration. What a
@@ -729,3 +729,122 @@ Two decisions worth naming rather than leaving to a reader:
 
 The schemas are frozen from here like every sibling's: a new op degrades, and a
 new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.2`, and why `Version` moved to 31
+
+The **`fs` service**, read half: `root`, `stat`, `list`, `canonical` and
+`read`. It is how a coordinator reads a host's filesystem once Files stops
+opening SFTP itself — the owner's invariant of 2026-09-13 puts every ssh
+connection in the helper, and SFTP is a subsystem on one of them
+(ADR-727g63tr, design §5.10). What crosses is a path, an offset and a length,
+never a descriptor and never a command.
+
+Four decisions in these shapes are worth naming rather than leaving to a
+reader:
+
+- **`read` has two contracts, and `whole` chooses one.** A whole-file read
+  answers a `version{size, mtimeNs, sha256}` over exactly the bytes it returns:
+  it samples the open descriptor before and after, retries while size or mtime
+  moves, and answers `changed-during-read` after three attempts rather than a
+  version of a mixture. A range read answers `identity` — `dev:ino` on a unix
+  build — and NO version: a window's version is not the file's, and an append
+  preserving the inode is the only fact that tells it from a replacement.
+- **A file that does not fit is refused, not truncated.** `whole` with a file
+  larger than the caller's `length` answers `too-large{observed, limit}`. A
+  prefix carrying a version would describe bytes the caller never saw, which is
+  the defect the version exists to prevent.
+- **The descriptor is the object.** `read` opens with `O_NONBLOCK` and
+  `fstat`s the SAME descriptor before the type check, so a FIFO or a device
+  swapped in for a regular file is answered `not-regular{kind}` instead of
+  blocking the daemon. `kind` spells `fifo`, `device`, `socket` or `dir` — the
+  finer vocabulary a refusal needs, beside the file row's own coarse `kind`.
+- **The refusal codes are the plan's closed list**, not the wire's generic
+  ones: `not-found`, `permission-denied`, `not-dir`, `not-regular`,
+  `invalid-path`, `invalid-page`, `too-large`, `too-large-size`, `timed-out`,
+  `changed-during-read`, and the write session's own — `no-space`,
+  `changed-since-read`, `exists`, `bad-offset`, `size-mismatch` and
+  `bad-session` (nocx-oalo1.12.3). `too-large` is the entry cap (or a whole-file
+  read past the caller's bound) and `too-large-size` is the listing's byte cap:
+  two limits on two different things, and a caller that recovers the error type
+  behind the refusal needs the word to tell them apart. `bad-offset` and
+  `size-mismatch` are the same rule for a session: both carry both ends in
+  `details`, because the caller's next chunk depends on where the session
+  actually is. A refused op is one request's answer; the host keeps serving,
+  which is what lets one unreadable directory — or one changed file — leave the
+  rest of the panel working.
+
+The number moved because the wire grew a SERVICE whose every op a 30-helper
+answers `unknown_op` to. That refusal is the half that must be read correctly:
+it says "this machine's helper is older than this app" — the same sentence
+every generation boundary states — and NOT "this host refuses files", which a
+person would be told by a panel that read an empty answer as a permission
+problem. Two peers that disagree refuse each other at hello in both directions,
+and each generation installs beside the other (D7). The window protocol's
+number does not move: the renderer never speaks this wire.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.3`, and why `Version` moved to 32
+
+The **write session**: `write-open`, `write`, `write-commit` and `write-abort`.
+A write is not one request — the bytes cross in chunks that each fit a frame,
+the target's version has to be checked at the instant of the install, and an
+answer that never arrives must not become a second write — so the caller opens a
+session with an id it chose, streams chunks into a temporary file beside the
+target, and ends it by committing or aborting.
+
+Five decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **The id is the caller's, and that is what makes a retry safe.** 128 bits,
+  lower-case hex only (`^[0-9a-f]{32}$`), because the same value is the
+  temporary's filename: an id that could spell `..` or a separator would be a
+  path traversal waiting for the first caller that is not ours. A repeat of a
+  commit answers the FIRST outcome and touches no file, so the target's inode
+  does not move; an id this daemon never held answers `unknown-outcome` with the
+  target's `current`, and the caller decides by comparing digests. There is no
+  eviction: an outcome lives as long as the process, because a caller that lost
+  its reply may ask minutes later.
+- **`expect.version` and `expect.absent` are alternatives, and the schema says
+  so.** Both at once is `bad_params`, decided before anything is mutated.
+  `absent` is `const: true`: "must not be absent" states no condition at all.
+  `version` is not declared again here — it `$ref`s the whole-file read's
+  `version` in `fs.read.schema.json`, because an expectation that spoke a
+  different version shape from the read it came from would be two truths about
+  one file.
+- **A refusal leaves the session usable, and that is the design rather than a
+  courtesy.** `size-mismatch`, `changed-since-read`, `exists` and even a failed
+  fsync or rename all return the session to `open` with the temporary and its
+  bytes intact, so a caller answers a KeepBoth collision by committing under
+  another name in the same directory without sending a byte again. Only the
+  rename is a point of no return, and the outcome it produced is then answered
+  forever.
+- **A commit may change the name, never the directory.** `path` is resolved
+  again, so a symlink named at commit time still installs at its target — the
+  link survives a write through it — and a path that resolves outside the
+  directory `write-open` answered is `invalid-path`, decided before anything is
+  touched.
+- **A version is three fields and not two.** `size` and `mtimeNs` are the cheap
+  check; `sha256` is what catches a rewrite of the same length inside one
+  filesystem timestamp granule. The reverse is why `current` offers a digest
+  ONLY when the target's size is the one the caller stated: hashing a file of
+  another size answers a question nobody asked.
+
+The number moved because the wire grew four ops a 31-helper answers
+`unknown_op` to — and because of what the refusal would mean if it were not
+read: "this machine's helper is older than this app" arriving as a conditional
+write that silently did not happen. Two peers that disagree refuse each other at
+hello in both directions, and each generation installs beside the other (D7).
+The window protocol's number does not move: the renderer never speaks this wire.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.
+
+## What landed with `nocx-oalo1.12.6`, and why `Version` moved to 34
+
+`fs.stat` returns `identity` alongside the size sampled from the same object.
+The Files panel pins both when it opens a download. Each range must report
+that identity, including the first, so an append does not extend the promised
+length and a replacement does not supply bytes for the wrong file. The field
+is required on the frozen stat response: helpers that disagree about the shape
+refuse at hello.

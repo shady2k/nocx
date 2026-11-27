@@ -89,8 +89,13 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
     // Seed the connection the way Settings would. The name is unique per run:
     // the stand's document store persists across runs in this home, and a
     // stale profile would dial a dead fixture. This spec's subject is
-    // upload, not the connect-time ask (ADR-0069) — script is recorded for the
-    // HOST so the connection is never asked (ADR-727g63tr decision 1).
+    // upload, not the connect-time ask (ADR-0069) — the method is recorded for
+    // the HOST so the connection is never asked (ADR-727g63tr decision 1).
+    //
+    // `helper`, not `script` (nocx-oalo1.12.8): Files reaches an SSH host only
+    // through the far helper, so this is the path a person's upload actually
+    // takes. Recording `script` would exercise a road the product no longer
+    // has.
     const profileName = `e2e-upload-${Date.now()}`
     const created = await rpc<{ id: string }>(page, stand, 'profiles.create', {
       type: 'ssh',
@@ -103,7 +108,7 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
       },
     })
     profileId = created.id
-    await recordHostMethod(page, stand, hostKeyFingerprint(fixture.knownHosts), 'script')
+    await recordHostMethod(page, stand, hostKeyFingerprint(fixture.knownHosts), 'helper')
 
     // Open it the way a person does: quick connect finds the saved profile and
     // Enter opens it (a file-based key needs no vault preflight).

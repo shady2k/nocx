@@ -7726,7 +7726,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: the declared 30 s work bound is applied by filesWorkContext in internal/transport/ws_files.go; the local provider also caps listing at 10 s"
         },
         "silence": {
           "kind": "none",
@@ -7849,7 +7849,7 @@
         "max": {
           "millis": 300000,
           "basis": "read",
-          "note": "read: an open builds a provider, and on a helper-hosted session that may install the helper (600 s budget, internal.helper.install); 300 s is the declared envelope"
+          "note": "read: an open registers a provider and resolves its root within the declared 300 s work bound; a starting far-helper decision is awaited within that context"
         },
         "silence": {
           "kind": "none",
@@ -7965,7 +7965,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound; the far helper RPC uses that context"
         },
         "silence": {
           "kind": "none",
@@ -8204,7 +8204,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound; the far helper RPC uses that context"
         },
         "silence": {
           "kind": "none",
@@ -8689,7 +8689,7 @@
         "max": {
           "millis": 30000,
           "basis": "read",
-          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
+          "note": "read: filesWorkContext in internal/transport/ws_files.go applies the declared 30 s work bound to establishing the watch"
         },
         "silence": {
           "kind": "none",
@@ -22468,6 +22468,106 @@
       }
     },
     {
+      "name": "tunnel.list",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/tunnel.list.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "tunnel.list",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [],
+            "dependencies": [
+              "server"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 10000,
+          "basis": "read",
+          "note": "read: snapshot the coordinator's forwarding ledger"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "same-key",
+        "waiting": "Reading the forwards",
+        "row": "past-wait",
+        "expired": "retry-read",
+        "resources": [],
+        "dependencies": [
+          "server"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "tunnel.listResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/tunnel.list.schema.json"
+        }
+      }
+    },
+    {
       "name": "tunnel.open",
       "params": [
         {
@@ -26322,6 +26422,9 @@
       "$ref": "https://nocx.local/contracts/policy.setRule.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/ports.error.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/ports.pause.schema.json"
     },
     {
@@ -26488,6 +26591,12 @@
     },
     {
       "$ref": "https://nocx.local/contracts/transport.ping.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/tunnel.error.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/tunnel.list.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/tunnel.open.schema.json"

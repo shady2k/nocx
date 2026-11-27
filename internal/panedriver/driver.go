@@ -267,13 +267,26 @@ func (d *Driver) SetAction(fn func(context.Context, string, uint64) error) {
 
 // ConnectionID answers which connection a live pane rides without exposing mutable binding state.
 func (d *Driver) ConnectionID(paneID string) (string, bool) {
+	return d.connectionID(paneID, "")
+}
+
+// SessionConnectionID returns the connection of the pane's adopted session.
+// An older shell on a rebound pane cannot borrow its replacement's route.
+func (d *Driver) SessionConnectionID(paneID, sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	return d.connectionID(paneID, sessionID)
+}
+
+func (d *Driver) connectionID(paneID, sessionID string) (string, bool) {
 	if d == nil || paneID == "" {
 		return "", false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	b, ok := d.panes[paneID]
-	if !ok || b.connectionID == "" {
+	b := d.panes[paneID]
+	if b == nil || b.connectionID == "" || (sessionID != "" && b.sessionID != sessionID) {
 		return "", false
 	}
 	return b.connectionID, true

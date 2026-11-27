@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.inventory.schema.json",
+  "title": "HelperFSInventoryResult",
+  "description": "Result of the helper fs service's inventory op: every write-session temporary this helper could not remove. A helper that dies between write-open and the end of its session leaves a temporary beside a target; the journal is what lets a later generation name and remove it, and this op is what reports the ones it could not. `stranded` is never null — a clean host answers [] — because a decoder must not have to tell 'no leftovers' from 'no answer', and a panel that read null as 'cannot say' would report a clean host as an unknown one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stranded"],
+  "properties": {
+    "stranded": {
+      "description": "The temporary files that outlived their session and survived this helper's attempt to remove them. Never null.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stranded"
+      }
+    }
+  },
+  "$defs": {
+    "stranded": {
+      "description": "One temporary file: where it is, and why removing it failed. The path is absolute and names the temporary itself, not the target it was written for; the reason is the refusal the operating system gave, because 'read-only file system' and 'operation not permitted' are different facts a person acts on differently.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": {
+          "description": "The absolute path of the temporary that could not be removed.",
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "description": "Why the removal failed, in the operating system's own words. Required so 'stranded' always says what would have to change.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

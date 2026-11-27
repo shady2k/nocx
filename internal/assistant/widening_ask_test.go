@@ -252,7 +252,7 @@ func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, a
 			break
 		}
 	}
-	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil)
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil, toolSeams{files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}

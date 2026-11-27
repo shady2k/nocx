@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write.schema.json",
+  "title": "HelperFSWriteResult",
+  "description": "Result of the helper fs service's write op: the number of bytes the session holds after this chunk. It is the value the NEXT chunk's offset must equal, so a caller that keeps the answer never has to ask for its own position.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["size"],
+  "properties": {
+    "size": {
+      "description": "How many bytes the session holds now, counted from 0 over every chunk accepted so far.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

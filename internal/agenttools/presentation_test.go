@@ -38,8 +38,12 @@ func TestPresentationProjectionRebuildsEligibleSet(t *testing.T) {
 	if got := toolNames(p.Visible); !reflect.DeepEqual(got, []string{"files.read"}) {
 		t.Fatalf("visible after grant shrink = %v, want only current essential tool", got)
 	}
-	if got := toolNames(p.Catalog); len(got) != 0 {
-		t.Fatalf("catalog after grant shrink = %v, want no hidden current tools", got)
+	// files.list and files.search are eligible for an observe+path grant and
+	// are neither essential nor loaded, so they are exactly what the catalog
+	// is for. What must not appear is a tool from ANOTHER grant: files.create
+	// is mutate and dropped with the mutating grant above.
+	if got := toolNames(p.Catalog); !reflect.DeepEqual(got, []string{"files.list", "files.search"}) {
+		t.Fatalf("catalog after grant shrink = %v, want the two hidden observe+path tools and nothing else", got)
 	}
 }
 

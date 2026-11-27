@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.write-commit.schema.json",
+  "title": "HelperFSWriteCommitResult",
+  "description": "Result of the helper fs service's write-commit op: the one outcome this session had, and it never changes. `committed` means the bytes are in place at path and version describes the file now there; asking again with the same id answers this answer again without touching the file, so the target's inode does not move. `aborted` means this daemon knows the session wrote nothing. `unknown-outcome` means the daemon never held this session — it restarted, or another generation answered the open — and current is the target as it stands, which the caller compares against the digest it intended.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "path"],
+  "properties": {
+    "outcome": {
+      "description": "Which of the three mutually exclusive outcomes this session had.",
+      "type": "string",
+      "enum": ["committed", "aborted", "unknown-outcome"]
+    },
+    "path": {
+      "description": "The path the answer is about: the target the bytes were installed at when committed, and the caller's requested path otherwise.",
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "description": "Present exactly when the outcome is `committed`: the version of the file now at path — its size, its mtime and the digest of exactly the bytes this session wrote.",
+      "$ref": "https://nocx.local/contracts/helper/fs.read.schema.json#/$defs/version"
+    },
+    "current": {
+      "description": "Present for `unknown-outcome` when the target exists: the target's metadata as it is now. Omitted when there is no target at all, which is itself an answer — nothing was installed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "mtimeNs"],
+      "properties": {
+        "size": {
+          "description": "The target's size now.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "mtimeNs": {
+          "description": "The target's modification time in Unix nanoseconds.",
+          "type": "integer"
+        },
+        "sha256": {
+          "description": "Hex SHA-256 of the target's bytes. Present ONLY when the target's size equals the size the caller stated, because a digest of a file of another size answers a question the caller did not ask.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "committed" } },
+        "required": ["outcome"]
+      },
+      "then": { "required": ["version"] },
+      "else": { "not": { "required": ["version"] } }
+    },
+    {
+      "if": {
+        "properties": { "outcome": { "const": "committed" } },
+        "required": ["outcome"]
+      },
+      "then": { "not": { "required": ["current"] } }
+    }
+  ]
+}

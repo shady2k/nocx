@@ -15,7 +15,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
-	"github.com/shady2k/nocx/internal/hashline"
 )
 
 // realToolsFS is the repo's contracts/tools directory, the way the transport
@@ -47,16 +46,19 @@ func mustDirFS(t *testing.T) fs.FS {
 	return fsys
 }
 
-// localPane is the run context of a run whose pane is THIS machine, which every
-// capability test here assumes: the file tools are built on local.New(), and
-// the admitting adapter derives this value from the session's own facts
-// (environmentForSession). A context that names no pane is refused by them on
-// purpose, so a test that expects a capability says where its pane is.
-func localPane() RunContext {
+// localPane is the run context of a run whose pane is THIS machine, with the
+// real per-call file binding over a local provider in a package Registry — the
+// shape the transport binds for the assistant, and the same one the Files panel
+// registers in. The admitting adapter derives the environment from the
+// session's own facts (environmentForSession); a context that names no pane is
+// refused on purpose, so a test that expects a capability says where its pane
+// is.
+func localPane(t *testing.T) RunContext {
+	t.Helper()
 	return RunContext{Environment: content.Environment{
 		ID:   content.EnvironmentIDFor(content.EnvLocal, ""),
 		Kind: content.EnvLocal,
-	}}
+	}, Files: newTestFileSource(t)}
 }
 
 const filesReadSchema = `{
@@ -69,6 +71,35 @@ const filesReadSchema = `{
     "additionalProperties": false,
     "required": ["text"],
     "properties": {"text": {"type": "string"}}
+  }}
+}`
+
+// filesListSchema and filesSearchSchema are the in-memory shapes for the two
+// read-side file tools: enough for Assemble to lift a params object and a
+// $defs/result out of, which is all these tests ask of a contract.
+const filesListSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["entries", "truncated"],
+    "properties": {"entries": {"type": "array"}, "truncated": {"type": "boolean"}}
+  }}
+}`
+
+const filesSearchSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "pattern"],
+  "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["matches", "truncated"],
+    "properties": {"matches": {"type": "array"}, "truncated": {"type": "boolean"}}
   }}
 }`
 
@@ -452,6 +483,8 @@ func TestFamilyCoveredIgnoresNonContentScopes(t *testing.T) {
 
 func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 	want := map[string][]content.Effect{
+		"files.list":   {content.EffectObserve},
+		"files.search": {content.EffectObserve},
 		"files.read":   {content.EffectObserve},
 		"fetch.url":    {content.EffectCrossBoundary},
 		"session.list": {content.EffectObserve},
@@ -529,8 +562,8 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// or anything that is not one of nocx's own checkouts.
 		"workers.removeCheckout": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 27 {
-		t.Fatalf("declaration count = %d, want 27", len(declarations))
+	if len(declarations) != 29 {
+		t.Fatalf("declaration count = %d, want 29", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -597,6 +630,8 @@ func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":             filesReadSchema,
+		"files.list.schema.json":             filesListSchema,
+		"files.search.schema.json":           filesSearchSchema,
 		"fetch.url.schema.json":              fetchURLSchema,
 		"git.status.schema.json":             gitStatusSchema,
 		"session.list.schema.json":           sessionListSchema,
@@ -630,7 +665,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 
 	observePath := grant([]content.Effect{content.EffectObserve}, content.ResourcePath)
 	got := toolNames(reg.ForGrant(observePath))
-	want := []string{"files.read"}
+	// Every observe+path tool and nothing else: the three file reads, with
+	// git.status declared but not executable and session/mutating tools out.
+	want := []string{"files.list", "files.search", "files.read"}
 	if len(got) != len(want) {
 		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v (git.status is declared but not executable)", got, want)
 	}
@@ -764,6 +801,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"fetch.url.schema.json":              fetchURLSchema,
 		"files.read.schema.json":             filesReadSchema,
+		"files.list.schema.json":             filesListSchema,
+		"files.search.schema.json":           filesSearchSchema,
 		"git.status.schema.json":             gitStatusSchema,
 		"session.list.schema.json":           sessionListSchema,
 		"session.read.schema.json":           sessionReadSchema,
@@ -795,8 +834,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	}
 
 	set := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath))
-	if len(set) != 1 {
-		t.Fatalf("ForGrant = %d tools, want 1 (git.status is declared but not executable)", len(set))
+	if len(set) != 3 {
+		t.Fatalf("ForGrant = %d tools, want 3 (files.list, files.search, files.read; git.status is declared but not executable)", len(set))
 	}
 	for _, tool := range set {
 		if len(tool.ParamsSchema) == 0 {
@@ -1266,7 +1305,7 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 	// literal names declaration coverage and no authority. The assertions
 	// below are unchanged.
 	capability, err := narrowFilesRead(pathScopeGrant(insideRoot, otherRoot),
-		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, localPane())
+		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, localPane(t))
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -1274,10 +1313,10 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 	if !ok {
 		t.Fatalf("capability = %T, want *filesystem.ScopedReader", capability)
 	}
-	if _, err := reader.Read(context.Background(), inside, 100); err != nil {
+	if _, err := reader.ReadSnapshot(context.Background(), inside, 100); err != nil {
 		t.Fatalf("resolved path refused: %v", err)
 	}
-	if _, err := reader.Read(context.Background(), other, 100); !errors.Is(err, filesystem.ErrOutOfScope) {
+	if _, err := reader.ReadSnapshot(context.Background(), other, 100); !errors.Is(err, filesystem.ErrOutOfScope) {
 		t.Fatalf("second granted root read error = %v, want ErrOutOfScope", err)
 	}
 }
@@ -1303,7 +1342,7 @@ func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
 	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
 	grant := pathScopeGrant(insideRoot, otherRoot)
 	resolved := []ResourceRef{{Kind: content.ResourcePath, ID: inside}}
-	capability, err := narrowFilesEdit(grant, resolved, localPane())
+	capability, err := narrowFilesEdit(grant, resolved, localPane(t))
 	if err != nil {
 		t.Fatalf("narrowFilesEdit: %v", err)
 	}
@@ -1311,15 +1350,12 @@ func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
 	if !ok {
 		t.Fatalf("capability = %T, want *filesystem.ScopedEditor", capability)
 	}
-	snapshot, err := hashline.Read(inside, 64<<10)
-	if err != nil {
-		t.Fatalf("hashline.Read: %v", err)
-	}
-	if _, err := editor.Edit(context.Background(), inside, snapshot.Revision, "PUT 1.=1:\n+changed"); err != nil {
+	revision := readRevision(t, grant, inside)
+	if _, err := editor.Edit(context.Background(), inside, revision, "PUT 1.=1:\n+changed"); err != nil {
 		t.Fatalf("resolved edit refused: %v", err)
 	}
 	for _, path := range []string{sibling, other} {
-		if _, err := editor.Edit(context.Background(), path, snapshot.Revision, "PUT 1.=1:\n+changed"); !errors.Is(err, filesystem.ErrOutOfScope) {
+		if _, err := editor.Edit(context.Background(), path, revision, "PUT 1.=1:\n+changed"); !errors.Is(err, filesystem.ErrOutOfScope) {
 			t.Fatalf("unrequested edit %q error = %v, want ErrOutOfScope", path, err)
 		}
 	}
@@ -1343,7 +1379,7 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 	other := filepath.Join(otherRoot, "other.txt")
 	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
 	grant := pathScopeGrant(insideRoot, otherRoot)
-	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, localPane())
+	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, localPane(t))
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)
 	}
@@ -1362,7 +1398,7 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", symlinkErr)
 	}
 	escapeTarget := filepath.Join(link, "escape.txt")
-	escapeCapability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: escapeTarget}}, localPane())
+	escapeCapability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: escapeTarget}}, localPane(t))
 	if err != nil {
 		t.Fatalf("narrowFilesCreate escape: %v", err)
 	}

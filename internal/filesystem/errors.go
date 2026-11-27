@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionid"
 )
 
 // Domain error markers for the filesystem package. Transport switches on
@@ -111,6 +111,9 @@ type ErrTimedOut struct {
 }
 
 func (e *ErrTimedOut) Error() string {
+	if e.Timeout == 0 {
+		return "filesystem: remote operation timed out"
+	}
 	return fmt.Sprintf("filesystem: directory enumeration exceeded the %s time cap", e.Timeout)
 }
 
@@ -127,6 +130,76 @@ type ErrTooLargeSize struct {
 
 func (e *ErrTooLargeSize) Error() string {
 	return fmt.Sprintf("filesystem: listing is about %d bytes, exceeding the %d-byte cap", e.ObservedBytes, e.Limit)
+}
+
+// ErrUnavailable says why the bound host cannot be reached through its helper.
+// Reason and Action are the connection's published values.
+type ErrUnavailable struct {
+	Reason, Action string
+}
+
+func (e *ErrUnavailable) Error() string { return "filesystem: helper unavailable (" + e.Reason + ")" }
+
+// ErrChangedDuringRead means the provider could not keep reading the same file.
+type ErrChangedDuringRead struct{ Path string }
+
+func (e *ErrChangedDuringRead) Error() string {
+	return fmt.Sprintf("filesystem: %s changed during read", e.Path)
+}
+
+// ErrChangedSinceRead means a conditional commit refused to replace a changed file.
+type ErrChangedSinceRead struct{ Path, Reason string }
+
+func (e *ErrChangedSinceRead) Error() string {
+	return fmt.Sprintf("filesystem: %s changed since read (%s)", e.Path, e.Reason)
+}
+
+// ErrExists means a conditional write that asked for an absent name found the
+// name taken, so nothing was replaced. It is typed here rather than left as
+// the filesystem's fs.ErrExist because the two answer different questions:
+// fs.ErrExist is "this name is occupied", which is how the upload sink's
+// KeepBoth retry recognises a collision, and ErrExists is "the condition you
+// committed under did not hold", which is what the panel tells a person.
+// Unwrap carries fs.ErrExist so both readings survive one error.
+type ErrExists struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrExists) Error() string {
+	return fmt.Sprintf("filesystem: %s exists", e.Path)
+}
+
+func (e *ErrExists) Unwrap() error { return e.Err }
+
+// ErrUnknownWriteOutcome means a commit response was lost and the intended
+// bytes could not be confirmed. Installing the upload again is not safe.
+type ErrUnknownWriteOutcome struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrUnknownWriteOutcome) Error() string {
+	return fmt.Sprintf("filesystem: could not confirm the write to %s", e.Path)
+}
+
+func (e *ErrUnknownWriteOutcome) Unwrap() error { return e.Err }
+
+// ErrByteLimit is a file operation that exceeded its byte bound.
+type ErrByteLimit struct {
+	Path            string
+	Observed, Limit int64
+}
+
+func (e *ErrByteLimit) Error() string {
+	return fmt.Sprintf("filesystem: %s: %d bytes exceeds the %d-byte operation limit", e.Path, e.Observed, e.Limit)
+}
+
+// ErrWriteAborted reports the helper's definitive answer that it did not install the upload.
+type ErrWriteAborted struct{ Path string }
+
+func (e *ErrWriteAborted) Error() string {
+	return fmt.Sprintf("filesystem: write to %s was aborted", e.Path)
 }
 
 // ErrUnknownBinding — Acquire or Close named a binding id that does not exist
@@ -146,7 +219,7 @@ func (e *ErrUnknownBinding) Error() string {
 // that lives inside Acquire so no handler can forget it.
 type ErrNotOwned struct {
 	ID        string
-	SessionID session.ID
+	SessionID sessionid.ID
 }
 
 func (e *ErrNotOwned) Error() string {
@@ -160,11 +233,8 @@ type ErrHandleReleased struct{}
 
 func (e *ErrHandleReleased) Error() string { return "filesystem: handle released" }
 
-// ErrWatchUnavailable — Watch is declared by the Provider contract (spec
-// §5.1) but the watching worker — fsnotify locally, polling over SFTP — is a
-// later step of the design's sequence (§6 step 5). Until then the local
-// provider refuses with this error rather than returning a watch that would
-// never fire, which would be a silent lie the product could not surface.
+// ErrWatchUnavailable tells transport to use polling for a binding whose
+// provider cannot supply a live watch.
 type ErrWatchUnavailable struct{}
 
 func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is not available yet" }
@@ -215,11 +285,23 @@ func (e *ErrDownloadUnsupported) Error() string {
 	return fmt.Sprintf("filesystem: binding %q has no read-stream seam; files cannot be downloaded from this tab", e.BindingID)
 }
 
+// ErrVersionedUnsupported — Versioned was called on a binding with no
+// conditional-write seam. The provider's optional VersionedProvider
+// capability determines whether the binding supports conditional writes.
+//
+// It names the binding rather than the path, because the refusal is a property
+// of the binding and not of what was being written.
+type ErrVersionedUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrVersionedUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no conditional-write seam; a write cannot be checked against a version on this tab", e.BindingID)
+}
+
 // ErrCloseAbandoned — a binding was closed while a use-guard was still held,
-// and the guard did not drain within closeDrainTimeout. The provider was
-// closed anyway, which is what unblocks a call still inside an SFTP lease; a
-// call that cannot be unblocked (a readdir on a hung mount) is the case this
-// bound exists for.
+// and the guard did not drain within closeDrainTimeout. Teardown closes the
+// provider after the deadline even if a call is still blocked on a mount.
 //
 // It is an error rather than a log line because teardown that silently leaves
 // work behind is how a hung disk goes unnoticed until the process is out of

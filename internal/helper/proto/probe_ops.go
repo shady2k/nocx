@@ -60,10 +60,6 @@ const (
 	OpUname = "uname"
 	// OpHome answers where the account's home directory is.
 	OpHome = "home"
-	// OpSamplePorts runs ONE rung of port discovery's ladder, named by the
-	// caller. The rung is a member of a closed set and not a command: the
-	// caller chooses WHICH probe to run, and the helper owns what it is.
-	OpSamplePorts = "sample-ports"
 	// OpCompletion runs the shell-completion probe for one line at one caret.
 	//
 	// It carries the line, and that is not a command crossing: the line is an
@@ -170,31 +166,6 @@ type HomeParams struct {
 // rather than guesses around.
 type HomeResult struct {
 	Home string `json:"home"`
-}
-
-// PortProbe names one rung of the port-discovery ladder, in the spellings
-// internal/discovery uses for them (the name is what a person sees reported as
-// "which dialect produced this sample").
-//
-// The two halves are spelled here rather than imported because this package is
-// the wire's leaf: it is linked by every helper, including the untagged artifact
-// deployed to somebody else's host. TestPortProbeSpellingsMatchTheProbeVocabulary
-// is the guard that keeps the two in step, and it lives with the code that
-// converts between them (internal/helper/sshsvc).
-type PortProbe string
-
-const (
-	PortSS             PortProbe = "ss"
-	PortNetstat        PortProbe = "netstat"
-	PortBusyboxNetstat PortProbe = "busybox-netstat"
-	PortLsof           PortProbe = "lsof"
-	PortSockstat       PortProbe = "sockstat"
-)
-
-// SamplePortsParams runs one ladder rung.
-type SamplePortsParams struct {
-	ProbeRunParams
-	Probe PortProbe `json:"probe"`
 }
 
 // CompletionParams runs the completion probe for one line at one caret.

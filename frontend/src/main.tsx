@@ -2,7 +2,7 @@ import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { decideIntegrationMethod } from './integration-method-decision'
 import { render } from 'solid-js/web'
-import { Show, createSignal, untrack } from 'solid-js'
+import { batch, Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { mountSettingsShortcut } from './settings-shortcut'
@@ -34,7 +34,9 @@ import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
-import { Dispatcher, RpcError } from './dispatcher'
+import { Dispatcher, RpcError, rpcRefusalCause } from './dispatcher'
+import type { PortsError } from './generated/ports.error'
+import { openForwardWithFallback } from './forward-retry'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
 import { CheckoutsStatusStore } from './checkouts-status'
@@ -768,10 +770,12 @@ function main(): void {
   // terminal and cannot do that. The view follows the ACTIVE tab: the
   // target accessor below is a Solid signal fed by PaneManager's
   // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
-  // tab scopes to the reserved "local" target and shows THIS machine's
-  // listeners, and a tab with no ports scope (alias, Settings) shows the
-  // no-connection state instead of a stale host's ports (nocx-wzc4.8).
+  // tab shows this machine's listeners, and a tab with no ports scope
+  // shows the no-connection state (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
+  const [portsIsLocal, setPortsIsLocal] = createSignal(
+    tm.activeTerminalContent()?.sshOptions() === null,
+  )
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
   // Why the target is null, when it is null because the pane walked into an
   // environment we cannot enumerate (a hand-typed ssh has no managed
@@ -794,9 +798,12 @@ function main(): void {
   // is in).
   tm.onActiveTabChange = () => applyActiveTabPanel()
   tm.onActivePaneChange = () => {
-    setPortsTargetId(tm.portsTargetId())
-    setPortsUnavailable(tm.portsUnavailableReason())
-    setActiveOrigin(tm.activeOrigin())
+    batch(() => {
+      setPortsTargetId(tm.portsTargetId())
+      setPortsIsLocal(tm.activeTerminalContent()?.sshOptions() === null)
+      setPortsUnavailable(tm.portsUnavailableReason())
+      setActiveOrigin(tm.activeOrigin())
+    })
     rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
@@ -861,6 +868,25 @@ function main(): void {
   const downloadSurface = downloadSurfaceFor(dispatcher)
   let revealFilesPath: ((path: string) => Promise<boolean>) | null = null
   let revealFilesView: () => void = () => {}
+  /** THE AXIS CARD'S TWO ACTIONS, owned ONCE for both panels
+   *  (connection/helper-axis-card.tsx draws the same card in Files and Git).
+   *  The press names the pane its button was drawn for; the ACTIVE tab must
+   *  still BE that pane, or the press is about a tab that is no longer in
+   *  front and goes no further (ALX-1019) — the epoch is read inside the pane,
+   *  at press time. Two copies of this check is two places to forget it. */
+  const pressHelperRefresh = (paneId: string): void => {
+    const content = tm.activeTerminalContent()
+    if (content === null || content.backendPaneId !== paneId) {
+      log.warn('nocx: a helper refresh press names a pane that is not in front', { paneId })
+      return
+    }
+    content.pressHelperRefresh()
+  }
+  /** The saved connection the tab in front was opened from, read live: a
+   *  saved profile has a host record whose mode can be edited, a hand-typed
+   *  tab does not. The pane normalizes Quick Connect's empty id to null, so
+   *  both surfaces draw the one answer (helper-axis.ts's savedProfileId). */
+  const activeProfileId = (): string | null => tm.activeTerminalContent()?.savedProfileId() ?? null
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
@@ -872,6 +898,14 @@ function main(): void {
       revealFilesPath = (path) => store.revealPath(path)
       rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
     },
+    // THE AXIS ACTIONS ARE THE SHARED CARD'S, and they are the same two the
+    // Git panel draws (connection/helper-axis-card.tsx): one answer about one
+    // connection, whichever panel is in front.
+    onRefreshHelper: pressHelperRefresh,
+    onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
+    // The tab's own opening option, read live — the same accessor the Git
+    // panel is handed.
+    activeProfileId,
   })
 
   // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
@@ -1148,26 +1182,12 @@ function main(): void {
     services: gitServicesTracked,
     store: gitStore,
     activeOrigin,
-    // The axis action is the active pane's press. The panel names the pane
-    // its button was drawn for; the ACTIVE tab must still BE that pane, or
-    // the press is about a tab that is no longer in front and goes no
-    // further (ALX-1019). The epoch is read inside the pane, at press time.
-    onRefreshHelper: (paneId) => {
-      const content = tm.activeTerminalContent()
-      if (content === null || content.backendPaneId !== paneId) {
-        log.warn('nocx: the Git panel helper refresh press names a pane that is not in front', {
-          paneId,
-        })
-        return
-      }
-      content.pressHelperRefresh()
-    },
+    // The axis action is the active pane's press — the same one the Files
+    // panel's card gets (see pressHelperRefresh, whose guard is the authority
+    // on whether the tab named is still in front).
+    onRefreshHelper: pressHelperRefresh,
     onHostSettings: (profileId) => openSettingsPane().editConnection(profileId),
-    // The tab's own opening option, read live: a saved profile has a host
-    // record whose mode can be edited, a hand-typed tab does not. The pane
-    // normalizes Quick Connect's empty id to null, so both surfaces draw the
-    // one answer (helper-axis.ts's savedProfileId).
-    activeProfileId: () => tm.activeTerminalContent()?.savedProfileId() ?? null,
+    activeProfileId,
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────
@@ -1377,16 +1397,21 @@ function main(): void {
         ariaLabel={t('app.ports.refresh', 'Refresh ports')}
         title={t('app.ports.refresh', 'Refresh ports')}
         disabled={portsTargetId() === null}
-        onClick={() => void portsServices.sample(portsTargetId() as string)}
+        onClick={() => {
+          const paneId = portsTargetId()
+          if (paneId !== null) void portsServices.sample(paneId).catch(() => {})
+        }}
       >
         <RefreshIcon />
       </IconButton>
     ),
     // The view receives the shell's view props: visible gates sampling,
-    // activeProfileId re-scopes the panel to the tab in front.
+    // activePortsPaneId re-scopes the panel to the tab in front.
     view: (props) => (
       <PortsPanel
-        profileId={props.activeProfileId}
+        paneId={props.activePortsPaneId}
+        isLocal={portsIsLocal}
+        savedProfileId={() => (props.activePortsPaneId() === null ? null : activeProfileId())}
         onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}
         services={portsServices}
@@ -1584,7 +1609,7 @@ function main(): void {
         save: (panel) => tm.setActiveTabPanel(panel),
       },
       /* eslint-disable solid/reactivity -- mountSidebar consumes these
-         accessors reactively (SidebarViewProps.activeProfileId and
+         accessors reactively (SidebarViewProps.activePortsPaneId and
          .activeOrigin, fed with the ports target and the Files origin, plus
          the settings-mode accessor below); the reads happen inside the
          views' tracked scopes, and the gate cannot see across the
@@ -1664,18 +1689,11 @@ function main(): void {
         scope: `palette:${profileId}`,
       })
     try {
-      announce(await open(port))
+      // A taken local port is the wire's typed `address-in-use` cause; the
+      // same one retry the Ports panel makes lives in forward-retry.ts.
+      announce(await openForwardWithFallback(open, port))
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/address already in use|EADDRINUSE/i.test(msg)) {
-        showToast({ level: 'danger', message: msg })
-        return
-      }
-      try {
-        announce(await open(0))
-      } catch (e2) {
-        showToast({ level: 'danger', message: e2 instanceof Error ? e2.message : String(e2) })
-      }
+      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
     }
   }
 
@@ -1702,7 +1720,24 @@ function main(): void {
         name: 'port',
         fetch: async (selections) => {
           const server = selections[0]
-          const st = await portsServices.sample(server.item.id)
+          const paneId = tm.portsPaneForProfile(server.item.id)
+          const st =
+            paneId === null
+              ? null
+              : await portsServices.sample(paneId).catch((err: unknown) => {
+                  if (rpcRefusalCause<PortsError['reason']>(err) === 'unknown-pane') return null
+                  throw err
+                })
+          if (st === null) {
+            return [
+              {
+                id: '__no_ports_pane__',
+                label: t('ports.noConnection.title', 'No active connection'),
+                detail: t('ports.forward.openTab', 'Open this server in a tab to list its ports'),
+                system: true,
+              },
+            ]
+          }
           if (st.discovery.state === 'available' || st.discovery.state === 'available-limited') {
             if (st.discovery.listeners.length === 0) {
               return [

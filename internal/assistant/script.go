@@ -57,10 +57,8 @@ const MaxScriptBytes = 64 << 10
 // missing from it: the escalation is already holding a call blocked on a
 // person's answer, so the reads get one shared deadline and whatever
 // is past it is reported as unread, in words, rather than making the window
-// wait. Two seconds because the remote arm acquires an SFTP lease over the
-// session's own connection before it can read anything, and a local read that
-// needs two seconds has something wrong with it that the window should say out
-// loud rather than absorb.
+// wait. The two-second budget covers far-helper acquisition and reads over
+// the session's connection, and caps the wait for local reads on a slow mount.
 const scriptReadBudget = 2 * time.Second
 
 // ScriptRefusal names why a named file's bytes are not being shown. The set is

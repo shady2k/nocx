@@ -84,7 +84,6 @@ import {
   type SnippetFire,
   type TerminalContentHooks,
 } from './terminal-content'
-import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
 import { SURFACE_TERMINAL, type ContentViewport } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
@@ -6622,8 +6621,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
 
   it('answers the saved-profile question once, with Quick Connect’s empty id spelled as none', async () => {
     // main.tsx's Quick Connect calls newSSHPane('', …): the tab has no saved
-    // connection, and the head, the Git panel and the ports target must all
-    // read that from one answer (ALX-998).
+    // connection. Ports still has the backend pane id.
     const adhocClient = makeClient()
     adhocClient.openSSHSessionByHost.mockResolvedValue(makeSession())
     const adhoc = await mountTerminal(
@@ -6633,7 +6631,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     )
     try {
       expect(adhoc.content.savedProfileId()).toBeNull()
-      expect(adhoc.content.portsTargetId).toBeNull()
+      expect(adhoc.content.portsTargetId).toBe(adhoc.content.backendPaneId)
     } finally {
       adhoc.teardown()
     }
@@ -6647,7 +6645,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     )
     try {
       expect(saved.content.savedProfileId()).toBe('profile-1')
-      expect(saved.content.portsTargetId).toBe('profile-1')
+      expect(saved.content.portsTargetId).toBe(saved.content.backendPaneId)
     } finally {
       saved.teardown()
     }
@@ -6820,6 +6818,47 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       await Promise.resolve()
       fireFrameMetadata(sessionOf(content), 3, { cwd: { host: '', path: '/home/nocx/two' } })
       expect(sessionHome.ensureCalls).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks for the home again when the helper starts serving, so the prompt line shortens without a `cd` (m3)', async () => {
+    // On an SSH tab the first home ask is spent while the helper is still
+    // starting, and the source answers "not known" without opening anything
+    // (design §5.10, C25). Nothing else would ask again until the shell
+    // reported a NEW directory, so a person sitting at their prompt kept
+    // reading the absolute path on a host that had been answering for
+    // minutes. The axis becoming `serving` is that trigger.
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    sessionHome.failNext = 1
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/home/nocx/project' } })
+      expect(sessionHome.ensureCalls).toHaveLength(1)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The helper starts serving: nobody pressed anything, and the home is
+      // now readable instead of refused.
+      publishConnection(client, content)
+      expect(sessionHome.ensureCalls).toHaveLength(2)
+      expect(sessionHome.ensureCalls[1]).toMatchObject({ cwd: '/home/nocx/project' })
+
+      // A later observation of the same axis is not a new reason to ask.
+      publishConnection(client, content)
+      expect(sessionHome.ensureCalls).toHaveLength(2)
+
+      // And once it lands, the `~` arrives on its own.
+      sessionHome.resolveHome(sessionOf(content).sessionId, '/home/nocx')
+      await Promise.resolve()
+      expect(partText(editorOf(content).root, 'path')).toBe('~/project')
     } finally {
       teardown()
     }
@@ -7179,7 +7218,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()
@@ -7196,7 +7235,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       // seeded from the session facts; its destination is deliberately not
       // the child's.)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       // The parent suspends as the child establishes (protocol §9: the
       // kernel rejects a second prompt_ready without a native between).
       handler({ lane: 'lane-1', lifecycle: 'native' })
@@ -7250,7 +7289,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       handler({ lane: 'lane-1', lifecycle: 'native' })
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(onPortsTargetChange).toHaveBeenCalledTimes(2)
-      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()
@@ -7265,14 +7304,14 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       client,
     )
     try {
-      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
       // Even once the session's own root domain is live — whose host IS the
       // profile host — the pane is still on the machine the profile owns.
       // Host presence alone must not void the scope.
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsTargetId).toBe(content.backendPaneId)
       expect(content.portsUnavailableReason).toBe('')
     } finally {
       teardown()

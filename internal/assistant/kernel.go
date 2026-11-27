@@ -40,7 +40,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -98,14 +97,14 @@ const (
 	// and it is why the refusal comes BEFORE the attempt is opened rather
 	// than after.
 	RefusedExpired PolicyRefusalReason = "refused-expired"
-	// RefusedRemotePane: this call's tool acts on THE MACHINE NOCX RUNS ON
-	// (files.read, files.edit, files.create are built on local.New()), and
-	// the pane the person asked from is on another one. Until stage 8 gives
-	// those tools the pane's own provider there is no capability that could
-	// do the work, so the call is refused and says the remote file tools are
-	// coming — the sentence a person and a model both read. It is not about
-	// this call's arguments, so proposing the same call differently changes
-	// nothing.
+	// RefusedRemotePane: this call's tool reaches whatever disk the PANE is
+	// on (files.read, files.edit, files.create), and the pane the person asked
+	// from is not this machine. The tools act through the pane's own binding,
+	// but a non-local pane has no route yet — agenttools.localPaneOnly refuses
+	// the capability — so there is nothing that could do the work, and the
+	// call is refused and says the remote file tools are coming: the sentence
+	// a person and a model both read. It is not about this call's arguments,
+	// so proposing the same call differently changes nothing.
 	RefusedRemotePane PolicyRefusalReason = "refused-remote-pane"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
@@ -511,6 +510,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			RunID:                 runID,
 			Session:               sessionID,
 			Environment:           runSeams.paneEnvironment,
+			Files:                 runSeams.files,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 			ControllerIdentity:    controllerIdentity,
@@ -917,11 +917,13 @@ func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
 	return refusalResult(call.Tool(), RefusedExpired, ""), true
 }
 
-// kernelPaneGuard refuses a tool that acts on THIS machine's disk when the
-// run's pane is on another one (ADR-anntnxdj §5, decision 3): until stage 8
-// files.read, files.edit and files.create are built on local.New(), and on an
-// SSH pane they would read and write the local disk instead of the host the
-// person is working on.
+// kernelPaneGuard refuses a tool that reaches the pane's files when the pane is
+// not this machine (ADR-anntnxdj §5, decision 3). The file tools act through the
+// pane's own binding, and a non-local pane has no route yet: no capability comes
+// into existence for one, so a chain that forgot this link still cannot read or
+// write any disk. What is missing without it is the SENTENCE — the model would
+// read a failure about a constructor where the person and the model should read
+// that the remote file tools are coming.
 //
 // It is a GUARD and not a PreCall because it can only refuse — the policy may
 // well permit this call and that is not the question being asked — and it is
@@ -983,7 +985,7 @@ func (g kernelEvidenceGuard) Refuse(ctx context.Context, call Call) (string, boo
 	if !k.approvals.IsApproved(proposal) {
 		return "", false
 	}
-	if err := k.approvals.VerifyApprovedFileVersions(proposal); err != nil {
+	if err := k.approvals.VerifyApprovedFileVersions(ctx, k.runCtx.Files, proposal); err != nil {
 		return refusalResult(call.Tool(), RefusedFileChanged, "", err.Error()), true
 	}
 	if shown, ok := k.approvals.ApprovedExpansions(proposal); ok && len(shown) > 0 {
@@ -1230,10 +1232,15 @@ func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
 }
 
 // bindApprovalFileVersions captures path identities before an approval is
-// requested. files.create treats ENOENT as NotApplicable because creating a
+// requested, through the run's own pane binding (RunContext.Files). On an SSH
+// pane that read reaches the host behind the helper, so the evidence describes
+// the file the call will act on and never this machine's same-named one.
+//
+// files.create treats a missing path as NotApplicable because creating a
 // missing path is its successful precondition; every other capture failure
-// remains Required and therefore fails closed at execution.
-func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
+// remains Required and therefore fails closed at execution — "the evidence
+// could not be read" is never an approval that covers anything.
+func bindApprovalFileVersions(ctx context.Context, files filesystem.HandleSource, ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
 	pathCount := 0
 	versions := make([]FileVersion, 0, len(resources))
 	for _, resource := range resources {
@@ -1241,9 +1248,9 @@ func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []ag
 			continue
 		}
 		pathCount++
-		version, err := CaptureFileVersion(resource.ID)
+		version, err := CaptureFileVersion(ctx, files, resource.ID)
 		if err != nil {
-			if decl.Name == "files.create" && errors.Is(err, fs.ErrNotExist) {
+			if decl.Name == "files.create" && isNotFound(err) {
 				continue
 			}
 			ap.FileVersionState = FileVersionBindingRequired
@@ -1340,7 +1347,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	// method, on another connection's turn, and by then only the record
 	// remembers which resource the widening would have to cover.
 	ap.OutOfScope = outOfScope
-	bindApprovalFileVersions(&ap, decl, resources)
+	bindApprovalFileVersions(ctx, m.runCtx.Files, &ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap)

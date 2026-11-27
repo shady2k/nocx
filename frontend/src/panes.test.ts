@@ -43,6 +43,7 @@ import type { SessionEffect } from './generated/session.effect'
 import {
   BasePaneContent,
   SURFACE_TERMINAL,
+  type ActiveOrigin,
   type ContentDescriptor,
   type PaneHost,
   type ContentViewport,
@@ -3379,6 +3380,108 @@ describe('anyLocalSession — a live answer, never a latch', () => {
     })
 
     expect(manager.anyLocalSession()).toBeNull()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A frozen origin rides the LIVE connection (ALX-1793 round 1, B1)
+//
+// A viewer tab (and a Git diff tab) answers the origin it was opened from:
+// `cwdFollow: false` and no `connection`, because a snapshot must not go
+// stale. Every origin consumer gates on `helperGate`, which reads a missing
+// observation as `starting` — so taken at face value, activating the viewer of
+// a SERVING SSH file looked like a connection whose helper had never reported,
+// and the Files panel closed the binding the viewer was reading through.
+// The pane manager answers with the terminal's live axis instead.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('activeOrigin — a frozen origin carries the live connection', () => {
+  /** A viewer's answer: the machine, frozen, and no connection of its own. */
+  class FrozenOriginContent extends BasePaneContent {
+    constructor(private readonly frozen: Omit<ActiveOrigin, 'paneId'>) {
+      super()
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async mount(_target: HTMLElement, _host: PaneHost, _signal: AbortSignal): Promise<void> {}
+    viewportChanged(): void {}
+    focus(): void {}
+    dispose(): void {}
+    activeOrigin(): Omit<ActiveOrigin, 'paneId'> {
+      return this.frozen
+    }
+  }
+
+  function observation(
+    paneId: string,
+    helper: import('./generated/pane.connection').PaneConnection['helper'],
+    epoch: number,
+  ): import('./generated/pane.connection').PaneConnection {
+    return {
+      paneId,
+      connectionId: 'conn-1',
+      connectionEpoch: epoch,
+      generation: 1,
+      instanceId: 'test-instance',
+      helper,
+      transport: { state: 'connected', stateMs: 0, plainShells: 1 },
+      attempt: { shown: 'none', candidate: 'none', reason: '' },
+      observedAt: new Date().toISOString(),
+    }
+  }
+
+  it('answers the terminal’s axis for the viewer of its file, and follows a pause', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => expect(client.openSSHSession).toHaveBeenCalledTimes(1))
+
+    const terminal = manager.activeTerminalContent()
+    expect(terminal).not.toBeNull()
+    const sessionId = terminal!.activeOrigin()!.sessionId
+    const backendPane = terminal!.backendPaneId
+    client._firePaneConnection(observation(backendPane, { state: 'serving', action: 'none' }, 1))
+    await vi.waitFor(() => {
+      expect(manager.activeOrigin()?.connection?.helper.state).toBe('serving')
+    })
+
+    // The viewer tab: same session, frozen origin, no connection of its own.
+    manager.openPane(
+      new FrozenOriginContent({
+        sessionId,
+        kind: 'ssh',
+        cwd: '/home/dev',
+        cwdVerified: true,
+        cwdFollow: false,
+        host: 'host.example.com',
+      }),
+      {
+        surfaceType: 'file.viewer' as unknown as SurfaceType,
+        singletonKey: null,
+        restoreDescriptor: null,
+        supportsAttention: false,
+        defaultTitle: 'File',
+      },
+    )
+
+    expect(manager.activeOrigin()?.cwdFollow).toBe(false)
+    expect(manager.activeOrigin()?.connection?.helper.state).toBe('serving')
+
+    // A break of the terminal's connection is visible FROM THE VIEWER: the
+    // axis is read live, never copied into the snapshot.
+    client._firePaneConnection(
+      observation(backendPane, { state: 'paused', reason: 'connection', action: 'none' }, 2),
+    )
+    await vi.waitFor(() => {
+      expect(manager.activeOrigin()?.connection?.helper.state).toBe('paused')
+    })
+  })
+
+  it('leaves a pane that answers for itself alone', async () => {
+    const { manager } = await mountPaneManager()
+    // A local terminal answers `connection: null` itself: the manager adds
+    // nothing and rewrites nothing.
+    const origin = manager.activeOrigin()
+    expect(origin?.kind).toBe('local')
+    expect(origin?.connection).toBeNull()
   })
 })
 

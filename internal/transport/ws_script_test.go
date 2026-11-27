@@ -24,9 +24,10 @@ import (
 	"github.com/shady2k/nocx/internal/harness/fakeagent/protocol"
 )
 
-// scriptHarness is the ask harness with a real local filesystem provider
-// factory and one open local session — the wiring an approval question about
-// a command in that session actually has.
+// scriptHarness is the ask harness — which already carries the local
+// filesystem provider factory every run acts through — with one open local
+// session: the wiring an approval question about a command in that session
+// actually has.
 type scriptHarness struct {
 	*askHarness
 	sid string
@@ -35,9 +36,7 @@ type scriptHarness struct {
 
 func newScriptHarness(t *testing.T, script protocol.Script, opts ...WSServerOption) *scriptHarness {
 	t.Helper()
-	h := newAskHarnessWithOpts(t, script, append([]WSServerOption{
-		WithFilesystemProviderFactory(filesLocalFactory),
-	}, opts...)...)
+	h := newAskHarnessWithOpts(t, script, opts...)
 	return &scriptHarness{askHarness: h, sid: openLocalSession(t, h.conn), dir: t.TempDir()}
 }
 
@@ -180,9 +179,11 @@ func TestReadScript_AnUnknownSessionIsARefusalNotAPanic(t *testing.T) {
 }
 
 // No provider factory wired at all — a build that cannot reach any machine's
-// files. Nothing is read, and it is said rather than crashed.
+// files. Nothing is read, and it is said rather than crashed. The harness's own
+// factory is overridden away, because "no factory at all" is the state under
+// test and every other harness is the wiring a run really has.
 func TestReadScript_WithNoProviderFactorySaysSo(t *testing.T) {
-	h := newAskHarness(t, answerScript())
+	h := newAskHarnessWithOpts(t, answerScript(), WithFilesystemProviderFactory(nil))
 	sid := openLocalSession(t, h.conn)
 	dir := t.TempDir()
 	writeScript(t, dir, "deploy.sh", "echo hi\n")

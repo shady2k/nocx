@@ -151,7 +151,7 @@ func TestGitAcquiresFarHelperIndependentlyOfHostedShell(t *testing.T) {
 				t.Fatal(err)
 			}
 			select {
-			case <-lease.Client.Done():
+			case <-lease.Client().Done():
 				t.Fatal("Git close ended the far client")
 			default:
 			}
@@ -159,6 +159,9 @@ func TestGitAcquiresFarHelperIndependentlyOfHostedShell(t *testing.T) {
 				held, ok := shell.reg.hostFor(shellID)
 				if !ok {
 					t.Fatal("hosted shell lost its carrier")
+				}
+				if held.client == lease.Client() {
+					t.Fatal("Git acquired the shell carrier instead of the panel client")
 				}
 				select {
 				case <-held.client.Done():
@@ -190,7 +193,7 @@ func TestGitPausesOnHelperLossAndResumesAfterRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = lease.Client.Close(); err != nil {
+	if err = lease.Client().Close(); err != nil {
 		t.Fatal(err)
 	}
 	waittest.WaitFor(t, "helper loss", func() bool { s, _ := far.Axis("conn"); return s.Reason == farhelper.ReasonHelperLost })

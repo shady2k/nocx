@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/files.search.schema.json",
+  "title": "FilesSearchParams",
+  "description": "Search the contents of the files under a directory on the pane's host and return the matching lines with their line numbers. The pattern is a regular expression in RE2 syntax (the same language Go and ripgrep's -e use): an expression RE2 cannot compile is refused with the compiler's message. Each file is read whole up to the same ceiling files.read has, so a match past that byte in a very large file is not reported; the traversal stops at the declared result bound, and truncated true then means more matches exist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "pattern"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory to search under, inside the grant's paths."
+    },
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "description": "RE2 regular expression matched against each line, without the line's terminator."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "FilesSearchResult",
+      "description": "What files.search hands back: one record per matching line, in traversal order, plus what the traversal skipped. Binary files and symlinks are never searched, because their bytes are not the file's lines or are not inside the granted tree.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "pattern", "matches", "files", "truncated", "skipped"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The directory that was searched, as the call spelled it."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "The expression the call named."
+        },
+        "matches": {
+          "type": "array",
+          "description": "One record per matching line. Empty when nothing matched.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "line", "text"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The file holding the line, as files.read would name it."
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based line number within that file."
+              },
+              "text": {
+                "type": "string",
+                "description": "The line itself, without its line terminator."
+              }
+            }
+          }
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of files whose bytes were read, binary ones included."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the traversal stopped at the declared result bound; more matches exist than were returned."
+        },
+        "skipped": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gitDirs", "symlinks", "binaryFiles"],
+          "description": "What the traversal refused to enter or search.",
+          "properties": {
+            "gitDirs": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of .git directories skipped."
+            },
+            "symlinks": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of symlinks passed over without following."
+            },
+            "binaryFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of files read and skipped because their bytes are not text."
+            }
+          }
+        }
+      }
+    }
+  }
+}

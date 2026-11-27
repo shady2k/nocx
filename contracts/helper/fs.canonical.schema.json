@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.canonical.schema.json",
+  "title": "HelperFSCanonicalResult",
+  "description": "Result of the helper fs service's canonical op: the provider-canonical identity of the path, with every symlink resolved by the provider's own rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["canonical"],
+  "properties": {
+    "canonical": {
+      "description": "The resolved path, as the provider's Canonical answers it.",
+      "type": "string"
+    }
+  }
+}

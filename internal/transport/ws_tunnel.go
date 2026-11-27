@@ -7,8 +7,11 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
+	"syscall"
 
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
@@ -17,7 +20,7 @@ import (
 // WithTunnelConnector attaches the connector that acquires an owned pooled
 // SSH connection lease for a forward (spec §7.3). The single implementation
 // is *ssh.RealClient, which satisfies tunnel.Connector without an adapter —
-// the signatures are identical. When not wired, the tunnel.* methods return
+// the signatures are identical. When not wired, tunnel.open returns
 // a JSON-RPC error; the transport never constructs an SSH client itself.
 func WithTunnelConnector(c tunnel.Connector) WSServerOption {
 	return func(s *WSServer) { s.tunnelConnector = c }
@@ -26,6 +29,37 @@ func WithTunnelConnector(c tunnel.Connector) WSServerOption {
 // ---------------------------------------------------------------------------
 // tunnel.open / tunnel.stop — JSON-RPC types
 // ---------------------------------------------------------------------------
+
+// tunnelErrorData is the payload of a tunnel.open JSON-RPC error: the fixed
+// cause vocabulary the renderer acts on (contracts/tunnel.error.schema.json).
+// The message rides beside it as prose and decides nothing.
+type tunnelErrorData struct {
+	Reason string `json:"reason"`
+}
+
+// tunnelReasonAddressInUse is the one cause with a remedy the renderer drives:
+// the local port is held, so the same forward can be opened on an allocated
+// one. Spelled once here; the schema's enum is the other copy, and the
+// contract test refuses a payload that is not in it.
+const tunnelReasonAddressInUse = "address-in-use"
+
+// tunnelOpenError maps a tunnel.open failure onto the wire. ONLY a bind on a
+// held local port is typed: every other failure — an unresolvable profile, a
+// refused connection, an invalid destination — carries no reason, so the
+// renderer never retries where another port cannot help. The EADDRINUSE check
+// alone is not enough: a failed SSH dial can carry that syscall too, while the
+// local listener was never attempted, so the refusal must be the local bind's
+// own (tunnel.IsLocalBind).
+func tunnelOpenError(err error) RPCError {
+	// fmt.Sprint is the error's text, and not a logging call: the
+	// log-context ratchet reads the method name alone and would refuse the
+	// usual getter here.
+	e := RPCError{Code: -32603, Message: fmt.Sprint(err)}
+	if tunnel.IsLocalBind(err) && errors.Is(err, syscall.EADDRINUSE) {
+		e.Data = tunnelErrorData{Reason: tunnelReasonAddressInUse}
+	}
+	return e
+}
 
 // tunnelOpenParams is the payload of the "tunnel.open" RPC call.
 type tunnelOpenParams struct {
@@ -55,10 +89,14 @@ type tunnelBind struct {
 	Port int    `json:"port"`
 }
 
+type tunnelListResult struct {
+	Forwards []tunnelRecord `json:"forwards"`
+}
+
 // tunnelRecord is the full forward record the spec §7 names: direction,
 // requested and actual bind, destination, scope/owner, lifecycle state, stop
 // reason, error — plus the success-time bind caveat only remote (-R)
-// forwards carry. Shared by tunnel.open and tunnel.stop results.
+// forwards carry. Shared by tunnel.open, tunnel.stop and tunnel.list results.
 type tunnelRecord struct {
 	ID            string     `json:"id"`
 	Direction     string     `json:"direction"`
@@ -161,7 +199,7 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, r R
 		Provenance:  tunnel.ProvenanceManual,
 	}, h.connector)
 	if err != nil {
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		_ = r.TryError(req.ID, tunnelOpenError(err))
 		return
 	}
 
@@ -174,12 +212,16 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, r R
 	// connection.
 	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
 	if err := t.Start(ctx, host, opts...); err != nil {
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		_ = r.TryError(req.ID, tunnelOpenError(err))
 		return
 	}
 
 	h.ledger.track(wconn, t)
 	_ = r.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
+}
+
+func (h tunnelHandlers) handleTunnelList(req jsonrpcRequest) {
+	_ = h.r.TryResult(req.ID, mustMarshal(tunnelListResult{Forwards: h.ledger.forwardRecords()}))
 }
 
 // handleTunnelStop stops one forward by its backend id and reports the

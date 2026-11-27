@@ -184,7 +184,14 @@ describe('createLinkOpener — files', () => {
     const d = deps({ openBinding: () => Promise.resolve(openResult({ endpointId: 'ep1' })) })
     await createLinkOpener(d).open(
       { kind: 'path', path: '/srv/x.conf' },
-      { ...origin, kind: 'ssh', host: 'srv-01' },
+      {
+        ...origin,
+        kind: 'ssh',
+        host: 'srv-01',
+        // A click reaches a host only through a serving helper (design
+        // §5.10); the refusal is its own test below.
+        connection: { paneId: 'pane-1', helper: { state: 'serving', action: 'none' } },
+      },
     )
     expect(d.viewed[0]).toMatchObject({ endpointId: 'ep1', displayHost: 'srv-01' })
   })
@@ -268,5 +275,43 @@ describe('createLinkOpener — files', () => {
     await createLinkOpener(d).open({ kind: 'path', path: 'a.ts' }, null)
     expect(d.viewed).toEqual([])
     expect(d.said).toHaveLength(1)
+  })
+})
+
+describe('createLinkOpener — a tab the far helper does not serve', () => {
+  const tab = (helper: unknown): Omit<ActiveOrigin, 'paneId'> => ({
+    ...origin,
+    kind: 'ssh',
+    host: 'srv-01',
+    connection: { paneId: 'pane-1', helper: helper as never },
+  })
+
+  it('says the axis sentence and asks nothing: no binding, no probe, no viewer', async () => {
+    for (const helper of [
+      { state: 'paused', reason: 'connection', action: 'none' },
+      { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' },
+      { state: 'unavailable', reason: 'helper-lost', action: 'refresh' },
+      { state: 'unavailable', reason: 'consent-denied', action: 'none' },
+    ]) {
+      const d = deps()
+      await createLinkOpener(d).open({ kind: 'path', path: '/srv/x.conf' }, tab(helper))
+
+      expect(d.openBinding, JSON.stringify(helper)).not.toHaveBeenCalled()
+      expect(d.pathKind, JSON.stringify(helper)).not.toHaveBeenCalled()
+      expect(d.viewed, JSON.stringify(helper)).toEqual([])
+      const said = d.said.join(' ')
+      expect(said, JSON.stringify(helper)).not.toBe('')
+      expect(said, JSON.stringify(helper)).not.toMatch(/mode-raw|helper-lost|consent-denied/)
+    }
+  })
+
+  it('still opens the url half, which never touches a host', async () => {
+    const d = deps()
+    await createLinkOpener(d).open(
+      { kind: 'url', url: 'https://example.com/x' },
+      tab({ state: 'unavailable', reason: 'mode-raw', action: 'none' }),
+    )
+    expect(d.openUrl).toHaveBeenCalledOnce()
+    expect(d.openBinding).not.toHaveBeenCalled()
   })
 })

@@ -35,8 +35,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
+	fshostsvc "github.com/shady2k/nocx/internal/filesystem/hostsvc"
+	filesystemlocal "github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -48,6 +51,8 @@ import (
 	"github.com/shady2k/nocx/internal/helper/session"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/mcpstdio"
+	"github.com/shady2k/nocx/internal/portsprobe"
+	portshostsvc "github.com/shady2k/nocx/internal/portsprobe/hostsvc"
 )
 
 func main() {
@@ -138,7 +143,7 @@ func main() {
 		ctx = nocxlog.WithLogger(ctx, nocxlog.NewSlogAdapter(serveLog))
 		nocxlog.SetRoot(nocxlog.NewSlogAdapter(serveLog))
 		keepCrashOutput(ctx, logFile)
-		code := serve(ctx, serveLog, dir, generation, contentHash, exe)
+		code := serve(ctx, serveLog, dir, home, generation, contentHash, exe)
 		if logFile != nil {
 			_ = logFile.Close()
 		}
@@ -162,7 +167,7 @@ func main() {
 // changed nothing. That is the race two coordinators reaching for the same
 // generation at the same time produce, and the socket is the only authority
 // present on both sides of it.
-func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID, contentHash, exe string) int {
+func serve(ctx context.Context, log *slog.Logger, dir, home string, generation proto.GenerationID, contentHash, exe string) int {
 	// Everything that can fail and is not the endpoint happens BEFORE the
 	// bind. The instance id used to be minted after it, which left one window
 	// in which the socket existed and this process was about to exit without
@@ -187,6 +192,57 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		log.Info("a helper of this generation is already serving", "generation", generation)
 		return 0
 	}
+
+	// The fs service's write sessions hold the SESSION service's daemon
+	// admission (nocx-oalo1.12.5) — the last hosted session closing drains this
+	// daemon, and an open write session is work that drain waits for. The
+	// session service does not exist yet and cannot: its startup grace must not
+	// begin before the endpoint does, and the journal must be opened before the
+	// endpoint exists. admission is that binding, made between the two.
+	admission := &daemonAdmission{}
+
+	// The fs service is a property of the DAEMON, like the sessions: a write
+	// session's temporary and the outcome a lost reply is answered with must
+	// outlive the connection that started them, so one service serves every
+	// host this process accepts and an id it never held is what answers
+	// `unknown-outcome` after a restart (nocx-oalo1.12.3).
+	//
+	// Its write-session JOURNAL is a property of this RUN (nocx-oalo1.12.4): the
+	// directory is named by the host and this process's instance id, so a
+	// predecessor's directory is never shared, and the flock this construction
+	// takes is what tells the next generation the difference between a directory
+	// that was abandoned and one that is still serving. The sweep of those
+	// predecessors happens inside the construction.
+	//
+	// It is built BEFORE the bind, with the instance id above, to keep the
+	// promise this function's own comment makes: everything that can fail
+	// happens before a socket exists, so a helper whose journal cannot be opened
+	// never announces itself.
+	hostname, err := os.Hostname()
+	if err != nil {
+		nocxlog.From(ctx).Error("hostname", "err", err)
+		return 1
+	}
+	files, err := fshostsvc.New(filesystemlocal.New(), fshostsvc.JournalConfig{
+		Root:       filepath.Join(home, ".nocx", "fs-writes"),
+		Hostname:   hostname,
+		InstanceID: instanceID,
+	}, fshostsvc.WithAdmission(admission))
+	if err != nil {
+		nocxlog.From(ctx).Error("fs write journal", "err", err)
+		return 1
+	}
+	// Closing the service is what ends the sessions still in flight and what
+	// removes this run's directory once nothing is stranded in it. It runs after
+	// endpoint.Serve has returned, and that function waits for every connection
+	// handler before it does — so no request is in flight here, and a write-open
+	// that has not started yet is refused rather than writing into a journal
+	// that is already closed.
+	defer func() {
+		if closeErr := files.Close(); closeErr != nil {
+			nocxlog.From(ctx).Warn("fs write journal close", "err", closeErr)
+		}
+	}()
 
 	ln, err := endpoint.Listen(dir, generation)
 	if err != nil {
@@ -275,6 +331,9 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		Limits:         session.DefaultLimits(),
 	})
 	defer sessions.Close()
+	// The daemon's admission is the session service's lifecycle; the fs service
+	// was built with this binding before the endpoint existed.
+	admission.sessions = sessions
 
 	if err := endpoint.Serve(daemonCtx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
@@ -282,7 +341,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		// registerHelperServices, in one place (services.go) — including
 		// whether an ssh service is among them, which is the whole of what
 		// nocx_local_ssh changes about a helper.
-		registerHelperServices(h, hostsvc.New(factory), sessions, sshCap)
+		registerHelperServices(h, hostsvc.New(factory), sessions, files, portshostsvc.New(portsprobe.NewExecRunner()), sshCap)
 		// The connection is bound to the service, not the other way round:
 		// the sessions outlive it. These are the two lines that used to sit
 		// in main around one stdin/stdout connection and now sit inside the

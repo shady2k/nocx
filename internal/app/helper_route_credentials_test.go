@@ -44,7 +44,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	gossh "golang.org/x/crypto/ssh"
@@ -89,11 +88,8 @@ func (s *pwSSHServer) port(t *testing.T) int {
 	return port
 }
 
-// TestAFilesLeaseReachesAHostBehindAJumpHost is the Files half of the route
-// criterion: the provider a remote session is handed lists and reads a
-// directory on a host that is only reachable through a bastion, and every
-// channel of the lease rode ONE connection per hop.
-//
+// TestAHelperInstallLeaseReachesAHostBehindAJumpHost checks the routed
+// host-key identity and connection sharing across two SFTP install leases.
 // Its first half is the accept-on-first-use flow, because a ROUTED destination
 // is a separate entry in known_hosts from the same host dialed directly: the
 // refusal carries the storage identity to record, the test records it the way
@@ -101,7 +97,7 @@ func (s *pwSSHServer) port(t *testing.T) int {
 // bastion's own record of which address it was asked to reach is the evidence
 // that the dial went through it — both fixtures are on loopback, so a helper
 // that dropped the hops would still have listed the directory.
-func TestAFilesLeaseReachesAHostBehindAJumpHost(t *testing.T) {
+func TestAHelperInstallLeaseReachesAHostBehindAJumpHost(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "routed.txt"), []byte("through the bastion"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
@@ -121,7 +117,7 @@ func TestAFilesLeaseReachesAHostBehindAJumpHost(t *testing.T) {
 	// First contact with the destination: its key is unknown, and the evidence
 	// names the STORAGE identity it belongs to under a route — a digest, never
 	// the address.
-	first, err := stand.provider(t)
+	first, err := stand.routes.HelperInstallConn(ctx, target.addr, stand.opts...)
 	if err == nil {
 		_ = first.Close()
 		t.Fatal("a routed destination with an unrecorded key opened a lease")
@@ -148,46 +144,44 @@ func TestAFilesLeaseReachesAHostBehindAJumpHost(t *testing.T) {
 	// has a key per hop, and the bastion's line is already there.
 	appendHostKey(t, stand.khPath, unknown.KnownHostsAddr, mustParseKey(t, unknown.Key))
 
-	p, err := stand.provider(t)
+	install, err := stand.routes.HelperInstallConn(ctx, target.addr, stand.opts...)
 	if err != nil {
-		t.Fatalf("the Files provider after the routed key was accepted: %v", err)
+		t.Fatalf("the install lease after the routed key was accepted: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Close() })
+	t.Cleanup(func() { _ = install.Close() })
 
-	listing, err := p.List(ctx, stand.root, filesystem.Page{Limit: 50})
+	entries, err := install.ReadDir(root)
 	if err != nil {
-		t.Fatalf("List through the helper's routed channel: %v", err)
+		t.Fatalf("ReadDir through the routed install lease: %v", err)
 	}
-	if len(listing.Entries) != 1 || listing.Entries[0].Name != "routed.txt" {
-		t.Fatalf("the listing through the route is %+v, want the seeded file", listing.Entries)
+	if len(entries) != 1 || entries[0].Name() != "routed.txt" {
+		t.Fatalf("the listing through the route is %+v, want the seeded file", entries)
 	}
 
-	// The pool's own property, measured across two more operations and a
-	// deliberate wait for a connection that would have been made by now: the
-	// lease's connection is shared, so listing twice and reading once do not
-	// add a dial on either hop. This is AD-4 asserted on the servers' counters
-	// rather than on the pool's key.
+	// Another lease takes its own channel on the same pooled connection.
 	beforeBastion, beforeTarget := bastion.connCount(), target.connCount()
-	if _, relistErr := p.List(ctx, stand.root, filesystem.Page{Limit: 50}); relistErr != nil {
-		t.Fatalf("second List through the route: %v", relistErr)
-	}
-	content, err := p.Read(ctx, stand.path("routed.txt"), 0)
+	second, err := stand.routes.HelperInstallConn(ctx, target.addr, stand.opts...)
 	if err != nil {
-		t.Fatalf("Read through the helper's routed channel: %v", err)
+		t.Fatalf("open another routed install lease: %v", err)
 	}
-	if content.Text != "through the bastion" {
-		t.Fatalf("the file read through the route is %q", content.Text)
+	t.Cleanup(func() { _ = second.Close() })
+	content, err := second.ReadFile(filepath.Join(root, "routed.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile through the second routed install lease: %v", err)
+	}
+	if string(content) != "through the bastion" {
+		t.Fatalf("the file read through the route is %q", content)
 	}
 	if got := bastion.connCount(); got != beforeBastion {
-		t.Fatalf("the bastion authenticated %d time(s) in total, want %d: a second operation on one lease must not dial again", got, beforeBastion)
+		t.Fatalf("the bastion authenticated %d time(s) in total, want %d: a second lease must share the connection", got, beforeBastion)
 	}
 	if got := target.connCount(); got != beforeTarget {
-		t.Fatalf("the destination authenticated %d time(s) in total, want %d: a second operation on one lease must not dial again", got, beforeTarget)
+		t.Fatalf("the destination authenticated %d time(s) in total, want %d: a second lease must share the connection", got, beforeTarget)
 	}
 
 	// ONE connection per hop for the lease: the bastion was dialed twice in
 	// total (the refused attempt and the accepted one) and the destination
-	// exactly once — and every channel of the lease rode that one.
+	// exactly once — and both install channels rode that one.
 	if got := bastion.connCount(); got != 2 {
 		t.Fatalf("the bastion authenticated %d connection(s), want exactly 2 (one per attempt)", got)
 	}

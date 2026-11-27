@@ -15,40 +15,31 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/helper/client"
 )
 
-// NewFactory builds a git.RepoFactory over one helper client.
-//
-// THE CLIENT'S LIFETIME IS NOT THIS FACTORY'S TO DECIDE (nocx-xn63t.6.3).
-// It used to be: the factory counted its own repos and closed the client
-// when the last one released, on the reasoning that the helper process
-// lives as long as any binding references it (D4's "one process per helper
-// connection", bounded by the binding registry). That reasoning broke the
-// moment a git.RepoFactory could be built over a client a LIVE SESSION was
-// also attached to (ADR-0057/ADR-0068: a pane's PTY is opened through the
-// far helper from the start, and internal/app's hostHelper hands that same
-// client to this factory for git.open). Every caller of NewFactory is
-// hostHelper (internal/app/helper_git.go, its only construction site), and
-// hostHelper already keeps its OWN reference count for exactly this
-// question — extended, since the fix, with whether a session is still
-// hosted on it. Two independent counters deciding when one connection dies
-// is the defect this fix removes, not a duplication to keep in step: a
-// factory that also closed the client on its last release always raced
-// ahead of hostHelper's own decision, closing a connection a live PTY and
-// lifecycle channel were still attached to — reproduced in
-// internal/app's TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpen,
-// where a single git.open, opened and closed, tore down the session's
-// lifecycle channel about 3ms later. So Close is now the caller's business
-// alone; this factory only ever asks the client to answer requests.
-func NewFactory(c *client.Client) git.RepoFactory {
-	return &factory{client: c}
+// NewFactory builds a git.RepoFactory only from the registry's far-helper
+// decision. Repositories borrow the client; closing one never closes a shell
+// or the registry-owned panel lane.
+func NewFactory(lease farhelper.Lease) git.RepoFactory {
+	return &factory{lease: lease}
 }
 
 type factory struct {
-	client *client.Client
+	lease farhelper.Lease
+}
+
+func (f *factory) call(ctx context.Context, service, op string, params, result any) error {
+	if f.lease.Client() == nil || f.lease.Ctx == nil {
+		return &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	if f.lease.Ctx.Err() != nil {
+		return &farhelper.Unavailable{Reason: farhelper.ReasonHelperLost, Action: farhelper.ActionNone}
+	}
+	return f.lease.Client().Call(ctx, service, op, params, result)
 }
 
 // Open sends one git.open operation. The outcome is the domain OpenOutcome
@@ -56,7 +47,7 @@ type factory struct {
 // promises (the caller must register it or close it).
 func (f *factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
 	var res hostsvc.OpenResult
-	if err := f.client.Call(ctx, "git", "open", hostsvc.OpenParams{Cwd: cwd}, &res); err != nil {
+	if err := f.call(ctx, "git", "open", hostsvc.OpenParams{Cwd: cwd}, &res); err != nil {
 		return nil, git.OpenOutcome{}, err
 	}
 	if res.State != git.OpenOK {
@@ -79,7 +70,7 @@ type repo struct {
 
 func (r *repo) Status(ctx context.Context) (git.Status, error) {
 	var st git.Status
-	if err := r.f.client.Call(ctx, "git", "status", hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
+	if err := r.f.call(ctx, "git", "status", hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
 		return git.Status{}, err
 	}
 	return st, nil
@@ -95,7 +86,7 @@ func (r *repo) EnvState() (git.EnvState, string) { return r.envState, r.envReaso
 // back. The backend never sees the bytes beyond the bound.
 func (r *repo) Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error) {
 	var d git.Diff
-	if err := r.f.client.Call(ctx, "git", "diff", hostsvc.DiffParams{BindingID: r.bindingID, Path: path, Side: side, MaxBytes: maxBytes}, &d); err != nil {
+	if err := r.f.call(ctx, "git", "diff", hostsvc.DiffParams{BindingID: r.bindingID, Path: path, Side: side, MaxBytes: maxBytes}, &d); err != nil {
 		return git.Diff{}, err
 	}
 	return d, nil
@@ -105,7 +96,7 @@ func (r *repo) Diff(ctx context.Context, path string, side git.Side, maxBytes in
 // the helper, where the repository is (D9); the client never counts.
 func (r *repo) Log(ctx context.Context, max int) (git.Log, error) {
 	var lg git.Log
-	if err := r.f.client.Call(ctx, "git", "log", hostsvc.LogParams{BindingID: r.bindingID, Max: max}, &lg); err != nil {
+	if err := r.f.call(ctx, "git", "log", hostsvc.LogParams{BindingID: r.bindingID, Max: max}, &lg); err != nil {
 		return git.Log{}, err
 	}
 	return lg, nil
@@ -117,7 +108,7 @@ func (r *repo) Log(ctx context.Context, max int) (git.Log, error) {
 // back, field for field what local returns for the same repository.
 func (r *repo) Stage(ctx context.Context, paths []string) (git.Status, error) {
 	var st git.Status
-	if err := r.f.client.Call(mutationCtx(ctx), "git", "stage",
+	if err := r.f.call(mutationCtx(ctx), "git", "stage",
 		hostsvc.StageParams{BindingID: r.bindingID, Paths: paths}, &st); err != nil {
 		return git.Status{}, classifyRefusal(err)
 	}
@@ -126,7 +117,7 @@ func (r *repo) Stage(ctx context.Context, paths []string) (git.Status, error) {
 
 func (r *repo) Unstage(ctx context.Context, paths []string) (git.Status, error) {
 	var st git.Status
-	if err := r.f.client.Call(mutationCtx(ctx), "git", "unstage",
+	if err := r.f.call(mutationCtx(ctx), "git", "unstage",
 		hostsvc.StageParams{BindingID: r.bindingID, Paths: paths}, &st); err != nil {
 		return git.Status{}, classifyRefusal(err)
 	}
@@ -135,7 +126,7 @@ func (r *repo) Unstage(ctx context.Context, paths []string) (git.Status, error) 
 
 func (r *repo) StageAll(ctx context.Context) (git.Status, error) {
 	var st git.Status
-	if err := r.f.client.Call(mutationCtx(ctx), "git", "stageAll",
+	if err := r.f.call(mutationCtx(ctx), "git", "stageAll",
 		hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
 		return git.Status{}, classifyRefusal(err)
 	}
@@ -144,7 +135,7 @@ func (r *repo) StageAll(ctx context.Context) (git.Status, error) {
 
 func (r *repo) UnstageAll(ctx context.Context) (git.Status, error) {
 	var st git.Status
-	if err := r.f.client.Call(mutationCtx(ctx), "git", "unstageAll",
+	if err := r.f.call(mutationCtx(ctx), "git", "unstageAll",
 		hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
 		return git.Status{}, classifyRefusal(err)
 	}
@@ -158,7 +149,7 @@ func (r *repo) UnstageAll(ctx context.Context) (git.Status, error) {
 // the outcome says so instead of reporting a failure a retry would double.
 func (r *repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
 	var out git.CommitOutcome
-	err := r.f.client.Call(mutationCtx(ctx), "git", "commit",
+	err := r.f.call(mutationCtx(ctx), "git", "commit",
 		hostsvc.CommitParams{BindingID: r.bindingID, Message: msg, Amend: amend}, &out)
 	if err != nil {
 		if errors.Is(err, client.ErrLost) {
@@ -174,7 +165,7 @@ func (r *repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOu
 // an unborn branch's "none" is a domain state inside the result.
 func (r *repo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
 	var hm git.HeadMessage
-	if err := r.f.client.Call(ctx, "git", "headMessage",
+	if err := r.f.call(ctx, "git", "headMessage",
 		hostsvc.BindingParams{BindingID: r.bindingID}, &hm); err != nil {
 		return git.HeadMessage{}, classifyRefusal(err)
 	}
@@ -187,7 +178,7 @@ func (r *repo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
 // an error.
 func (r *repo) RemoteURL(ctx context.Context) (string, error) {
 	var url string
-	if err := r.f.client.Call(ctx, "git", "remoteURL",
+	if err := r.f.call(ctx, "git", "remoteURL",
 		hostsvc.BindingParams{BindingID: r.bindingID}, &url); err != nil {
 		return "", classifyRefusal(err)
 	}
@@ -228,12 +219,8 @@ func (r *repo) DeleteWorktreeBranch(_ context.Context, _, _ string) error {
 	return unserved("worktree.deleteBranch")
 }
 
-// Close holds no exclusive resource of its own: the binding it named lives
-// on the far helper, addressed by bindingID, and the shared client this
-// repo called through belongs to hostHelper (internal/app/helper_git.go),
-// which decides when — and whether — that client actually closes (see
-// NewFactory's own comment). This return is therefore always nil rather
-// than a release this package no longer owns.
+// Close releases no transport: the registry owns the panel client and its
+// serving lifetime, independently of any repository using it.
 func (r *repo) Close() error { return nil }
 
 // mutationCtx strips the caller's cancellation from a mutation's call

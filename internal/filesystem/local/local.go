@@ -1,12 +1,8 @@
-// Package local is the local-machine filesystem provider (spec §5.1). It
-// implements filesystem.Provider with path/filepath rules; the SFTP provider
-// lives in its own package and uses path, because SFTP specifies POSIX-style
-// paths regardless of the OS nocx runs on. filepath must not appear in
-// transport or in code shared by both providers.
+// Package local implements the filesystem provider on the machine that owns
+// the files, using its native path rules.
 package local
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,17 +14,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
 )
-
-// maxReadBytes is the read ceiling of spec §5.1: the effective limit is
-// min(requested, 2 MiB), so the parameter can only lower the ceiling. It is a
-// number rather than a knob because the viewer must never present more than
-// this much of a file; it is a starting number, to be tuned once the panel is
-// in daily use (spec §9).
-const maxReadBytes = 2 << 20 // 2 MiB
 
 // defaultEntryCap is the D14 product limit: a directory with more entries
 // than this is a tooLarge state, not a listing. Total, the deterministic
@@ -47,13 +35,9 @@ const defaultEntryCap = 10_000
 // Starting number (spec §9).
 const defaultSizeCap = 8 << 20 // 8 MiB
 
-// defaultListTimeout is the D14 operational limit for the local provider: an
-// elapsed-time backstop against pathological local filesystems (a hung NFS
-// mount, a misbehaving FUSE filesystem). Unlike SFTP — where ReadDirContext
-// makes enumeration cancellable — a local readdir cannot be interrupted, so
-// the cap is measured after the fact and the result discarded; it cannot
-// preempt a truly hung mount, and that is the honest limit of the local case.
-// Starting number (spec §9).
+// defaultListTimeout is the local listing cap (spec §9). A local readdir
+// may block on the underlying filesystem. The provider checks elapsed time
+// when it returns and discards a result that exceeded the cap.
 const defaultListTimeout = 10 * time.Second
 
 // Option configures a Provider.
@@ -99,6 +83,10 @@ type Provider struct {
 	afterReadDir func() // runs after the readdir, before entry processing
 	beforeEntry  func() // runs before each entry's metadata is read
 	beforeOpen   func() // runs after path resolution, before the open
+	// rename installs a temporary over its target. It is os.Rename except in a
+	// test that makes the rename fail, so "the original bytes survive a failed
+	// install" is asserted by failing one rather than argued from the shape.
+	rename func(oldpath, newpath string) error
 }
 
 // New creates a local provider. Without WithRoot the root is the user's home
@@ -361,10 +349,7 @@ func (p *Provider) Read(ctx context.Context, path string, maxBytes int64) (files
 	if err := checkPath(path); err != nil {
 		return filesystem.Content{}, err
 	}
-	limit := maxBytes
-	if limit <= 0 || limit > maxReadBytes {
-		limit = maxReadBytes
-	}
+	limit := filesystem.ReadLimit(maxBytes)
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return filesystem.Content{}, wrapPathErr("read", path, err)
@@ -404,32 +389,11 @@ func (p *Provider) Read(ctx context.Context, path string, maxBytes int64) (files
 	if truncated {
 		data = data[:int(limit)]
 	}
-	binary := bytes.IndexByte(data, 0) >= 0 // the NUL heuristic of spec §5.1
-	c := filesystem.Content{
-		Path:      path,
-		Canonical: canonical,
-		Size:      int64(len(data)),
-		ModTime:   after.ModTime(),
-		Truncated: truncated,
-		Binary:    binary,
-		Changed:   after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()),
-	}
-	if !binary {
-		c.Text = string(data)
-		if !utf8.Valid(data) {
-			c.Lossy = true
-			c.Text = strings.ToValidUTF8(c.Text, "\uFFFD")
-		}
-	}
-	return c, nil
+	changed := after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime())
+	return filesystem.PreviewContent(path, canonical, data, after.ModTime(), truncated, changed), nil
 }
 
-// Watch is declared by the Provider contract (spec §5.1), but watching is a
-// later worker of the design's sequence (§6 step 5): local watching lands with
-// fsnotify, SFTP polling with the sftp provider. Until then a watch cannot be
-// established honestly — a Watch whose Events never fired would be a silent
-// lie the product could not surface — so the provider refuses with
-// ErrWatchUnavailable.
+// Watch reports that the local provider needs polling.
 func (p *Provider) Watch(ctx context.Context, path string) (filesystem.Watch, error) {
 	return nil, &filesystem.ErrWatchUnavailable{}
 }

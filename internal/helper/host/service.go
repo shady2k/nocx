@@ -24,6 +24,13 @@ type Service interface {
 // ConnectionObserver releases connection-scoped resources after serving ends.
 type ConnectionObserver interface{ ConnectionClosed(*Host) }
 
+// PanelWork is an optional capability a Service implements to learn that a
+// connection has asked for work no spawn explains: a `git` or `fs` request,
+// which is what a pane's panel does on the connection its tab holds. The
+// daemon's connected-idle bound asks whether a client is still on its way to a
+// spawn, and such a client has answered for itself (nocx-oalo1.12.5).
+type PanelWork interface{ ConnectionPanelWork(*Host) }
+
 // CancelPolicy is an optional capability a Service implements to declare
 // operations that REFUSE cancellation (D11): a cancel naming one is
 // answered with ErrCodeCancelRefused and the operation runs to completion,
@@ -101,6 +108,13 @@ type ResponseObserver interface {
 	// holding several deferred starts can tell which one this was, and
 	// delivery is whether anybody was still waiting for it.
 	ResponseWritten(ctx context.Context, op string, result any, delivery AnswerDelivery)
+}
+
+// RefusalObserver lets a service release resources after answering a failed
+// call. RefusalWritten runs after the host has attempted to write the refusal,
+// including when the transport has already closed.
+type RefusalObserver interface {
+	RefusalWritten(ctx context.Context, op string, err error)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

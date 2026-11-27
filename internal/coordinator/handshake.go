@@ -188,7 +188,32 @@ package coordinator
 // against 41 and took 42 for itself; main took 42 first for the embedded
 // integration's wrapper (ADR-0104), so this is the MERGED surface one above it
 // and the golden below is written over the merged tree.
-const ProtocolVersion = 43
+//
+// 44 (nocx-oalo1.13.5): tunnel.open's refusal carries a typed cause. Its error
+// payload gains a required `reason` with one value, `address-in-use`, for the
+// failure this build can act on — a local bind somebody else already holds —
+// and the window answers it by opening the same forward again on a port the OS
+// allocates, exactly once. The schema that describes it,
+// contracts/tunnel.error.schema.json, is part of the surface (ADR-0104), so a
+// 43 window validating the payload against the previous shape refuses one that
+// now conforms: the number moves with the contract.
+// 45 (nocx-a62cl.11, leaf .11.3): the assistant can list a directory and
+// search file contents on the pane's host — `files.list` and `files.search`
+// join the declaration table, so their params schemas are part of the surface
+// and the approval contracts' `tool` enum grows by those two names. A window
+// built against 44 renders an approval for a tool its union cannot name, and
+// the enum is what makes that a compile error there rather than a branch that
+// is never taken; hence the number moves with the contracts. The stage bumps
+// this ONCE and this leaf is where the contracts change: .11.1, .11.2 and
+// .11.4 touch no schema.
+//
+// 46 (nocx-oalo1.13.3): ports methods use the pane ID to reach discovery on
+// its connection. The ports error schema carries a typed refusal, and the
+// discovery result drops the old connection-loss flag and policy-refused
+// state. The window reads forwards from tunnel.list even when discovery is
+// unavailable. An older window sends profile IDs and expects forwards in
+// the discovery result, so the handshake refuses that combination.
+const ProtocolVersion = 46
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

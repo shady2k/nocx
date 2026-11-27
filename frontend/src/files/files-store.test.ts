@@ -18,6 +18,9 @@ import type { FilesPanelServices } from './files-client'
 import { NOT_STARTED } from './test-fixtures'
 import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
+import type { PaneConnection } from '../generated/pane.connection'
+
+type Helper = PaneConnection['helper']
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -35,6 +38,12 @@ const LOCAL_A: ActiveOrigin = {
   host: null,
 }
 
+/** The axis a panel may ask through: the helper serves this connection. */
+const SERVING_AXIS = {
+  paneId: 'pane-2',
+  helper: { state: 'serving', action: 'none' },
+} as const
+
 const SSH_B: ActiveOrigin = {
   paneId: 2,
   sessionId: 'session-b',
@@ -43,6 +52,9 @@ const SSH_B: ActiveOrigin = {
   cwdVerified: false,
   cwdFollow: true,
   host: 'srv-b',
+  // A serving helper is the only axis an SSH tab may ask its host from
+  // (design §5.10): the store's own gate tests hand it other states.
+  connection: SERVING_AXIS,
 }
 
 const OPEN_RESULT = {
@@ -185,7 +197,8 @@ describe('files tree store', () => {
       .mockResolvedValue(
         listOk('C:/', [entry({ name: 'a.txt' }), entry({ name: 'docs', kind: 'dir' })]),
       )
-    const store = shownStore(makeServices({ open, list }))
+    const services = makeServices({ open, list })
+    const store = shownStore(services)
     store.rescope(LOCAL_A)
     await settle()
 
@@ -2374,5 +2387,662 @@ describe('ALX-1043: a hidden panel decides the transition too', () => {
     expect(store.binding()?.bindingId).toBe('bA')
     expect(store.origin()?.paneId).toBe(7)
     expect(store.phase()).toBe('ready')
+  })
+})
+
+// ── The far helper's axis gates the whole panel (design §5.10, C25/C26) ────
+
+describe('the far helper axis gates the Files panel', () => {
+  /** An SSH tab carrying one helper observation. */
+  function tab(helper: Helper, sessionId = 'session-b'): ActiveOrigin {
+    return { ...SSH_B, sessionId, connection: { paneId: 'pane-2', helper } }
+  }
+
+  /** The store's four call sites, held as bare references: asserting through
+   *  the services object is the detachment unbound-method exists to catch. */
+  function spyServices() {
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn().mockResolvedValue(listOk('C:/', []))
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const close = vi.fn().mockResolvedValue({})
+    return { services: makeServices({ open, list, watch, close }), open, list, watch, close }
+  }
+
+  const SERVING: Helper = { state: 'serving', action: 'none' }
+  const RAW: Helper = { state: 'unavailable', reason: 'mode-raw', action: 'host-settings' }
+  const PAUSED: Helper = { state: 'paused', reason: 'connection', action: 'none' }
+  const LOST: Helper = { state: 'unavailable', reason: 'helper-lost', action: 'refresh' }
+
+  it('holds an SSH tab whose observation has not arrived: no files.* call at all', async () => {
+    const { services, open, list, watch } = spyServices()
+    const store = shownStore(services)
+    store.rescope({ ...SSH_B, connection: null })
+    await settle()
+
+    expect(store.axisGate()).toBe('starting')
+    expect(open).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+    expect(watch).not.toHaveBeenCalled()
+    expect(store.binding()).toBeNull()
+  })
+
+  it('asks nothing on a raw host, and still says which gate it is in', async () => {
+    const { services, open, list } = spyServices()
+    const store = shownStore(services)
+    store.rescope(tab(RAW))
+    await settle()
+
+    expect(store.axisGate()).toBe('blocked')
+    expect(open).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+    // A retry the person did not press must not reach the host either: the
+    // header's refresh is the same call site.
+    store.refresh()
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('a newer observation of a state that still does not serve asks nothing again', async () => {
+    const { services, open, close } = spyServices()
+    const store = shownStore(services)
+    store.rescope(tab(RAW))
+    await settle()
+    store.rescope(tab(RAW))
+    store.rescope(tab(PAUSED))
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(close).not.toHaveBeenCalled()
+    expect(store.axisGate()).toBe('blocked')
+  })
+
+  it('leaves a local tab ungated, whatever the connection says', async () => {
+    const { services, open } = spyServices()
+    const store = shownStore(services)
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(store.axisGate()).toBeNull()
+    expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('holds the binding but ends the live instance when the axis stops serving, and keeps the tree', async () => {
+    const list = vi.fn((_bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, []),
+      ),
+    )
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ list, close })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(store.phase()).toBe('ready')
+    nodeRows(store, 'home')
+    // Open a folder by hand: it is what must survive the pause.
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+
+    store.rescope(tab(PAUSED))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+    // THE BINDING IS NOT CLOSED (M2). A helperfs binding is pinned to the
+    // connection, and the connection outlives a pause, a cut and a helper
+    // redial — so closing it here killed every viewer tab of this host for
+    // good. What the hold ends is the live instance: in-flight answers are
+    // superseded, and nothing is asked while the axis is down.
+    expect(store.binding()?.bindingId).toBe('b1')
+    expect(close).not.toHaveBeenCalled()
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    const asks = list.mock.calls.length
+    store.refresh()
+    await settle()
+    expect(list.mock.calls.length).toBe(asks)
+  })
+
+  it('comes back by itself when the axis serves again, re-reads the tree through the held binding, and keeps the open folders', async () => {
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn((bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [
+              entry({ name: 'home', path: '/home', kind: 'dir' }),
+              entry({ name: 'etc', path: '/etc', kind: 'dir' }),
+            ])
+          : listOk(path, [entry({ name: 'inside', path: `${path}/inside` })]),
+      ),
+    )
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ open, list, watch, close })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    const listsBefore = list.mock.calls.length
+
+    store.rescope(tab(LOST))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+
+    // NOBODY PRESSES ANYTHING: the next serving observation is the event.
+    store.rescope(tab(SERVING))
+    await settle()
+
+    expect(store.axisGate()).toBeNull()
+    // ONE binding, not two: the pause never released it, so re-opening would
+    // orphan a handle the host still answers through (M2).
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).not.toHaveBeenCalled()
+    expect(store.binding()?.bindingId).toBe('b1')
+    // The tree was re-read over that binding…
+    expect(list.mock.calls.length).toBeGreaterThan(listsBefore)
+    expect(list.mock.calls[list.mock.calls.length - 1]?.[0]).toBe('b1')
+    // …and the folder the person opened is still open, with its rows.
+    const home = nodeRows(store, 'home')
+    expect(home.expanded).toBe(true)
+    expect(home.children.map((c) => c.name)).toEqual(['inside'])
+    expect(watch).toHaveBeenCalled()
+  })
+
+  it('replaces a held binding that cannot answer the resumed root read, carrying the tree over', async () => {
+    let opened = 0
+    let held = false
+    const open = vi.fn(() => Promise.resolve({ ...OPEN_RESULT, bindingId: `b${++opened}` }))
+    const list = vi.fn((bindingId: string, path: string) =>
+      bindingId === 'b1' && held
+        ? Promise.reject(new Error('filesystem: unknown binding "b1"'))
+        : Promise.resolve(
+            path === '/'
+              ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+              : listOk(path, [entry({ name: 'inside', path: `${path}/inside` })]),
+          ),
+    )
+    const services = makeServices({ open, list })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+
+    store.rescope(tab(PAUSED))
+    await settle()
+    expect(store.binding()?.bindingId).toBe('b1')
+
+    // The return re-reads through b1, which a newer helper session no longer
+    // knows: the store replaces it rather than painting a local failure. The
+    // discriminator is a STATE — the resumed tree's root failing its first
+    // read — because files.* carries no typed reason for a dead binding and
+    // matching the sentence is what the error-text ratchet forbids.
+    held = true
+    store.rescope(tab(SERVING))
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(store.binding()?.bindingId).toBe('b2')
+    expect(store.root()?.children.some((n) => n.name === 'home')).toBe(true)
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+  })
+
+  it.each([
+    { label: 'reports serving immediately', startsBlocked: false },
+    { label: 'starts without a helper observation', startsBlocked: true },
+  ])('keeps open folders when a replacement shell $label', async ({ startsBlocked }) => {
+    const open = vi.fn((sessionId: string) =>
+      Promise.resolve({ ...OPEN_RESULT, bindingId: sessionId }),
+    )
+    const list = vi.fn((bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, [entry({ name: bindingId, path: path + '/' + bindingId })]),
+      ),
+    )
+    const close = vi.fn().mockResolvedValue({})
+    const store = shownStore(makeServices({ open, list, close }))
+    const observed = (helper: Helper, sessionId: string): ActiveOrigin => ({
+      ...tab(helper, sessionId),
+      connection: { paneId: 'pane-2', connectionId: 'connection-b', helper },
+    })
+
+    store.rescope(observed(SERVING, 'original'))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(nodeRows(store, 'home').children.map((child) => child.name)).toEqual(['original'])
+
+    store.rescope(observed(PAUSED, 'original'))
+    store.rescope(null)
+    if (startsBlocked) {
+      store.rescope({ ...observed(PAUSED, 'replacement'), connection: null })
+      expect(store.axisGate()).toBe('starting')
+      store.rescope(observed(PAUSED, 'replacement'))
+      await settle()
+      expect(store.axisGate()).toBe('blocked')
+    }
+    expect(open).toHaveBeenCalledTimes(1)
+
+    store.rescope(observed(SERVING, 'replacement'))
+    store.rescope(observed(SERVING, 'replacement'))
+    await settle()
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(open).toHaveBeenLastCalledWith('replacement', '/', 'background')
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'home').children.map((child) => child.name)).toEqual(['replacement'])
+  })
+
+  describe('a replacement shell while Files is hidden', () => {
+    const original: ActiveOrigin = {
+      ...tab(SERVING, 'original'),
+      connection: { paneId: 'pane-2', connectionId: 'connection-b', helper: SERVING },
+    }
+    const replacement = { ...original, sessionId: 'replacement' }
+    const anotherPane: ActiveOrigin = {
+      ...replacement,
+      paneId: 3,
+      sessionId: 'another-pane',
+      connection: { paneId: 'pane-3', connectionId: 'connection-b', helper: SERVING },
+    }
+    const anotherTab: ActiveOrigin = {
+      ...anotherPane,
+      sessionId: 'another-tab',
+      connection: { paneId: 'pane-3', connectionId: 'connection-c', helper: SERVING },
+    }
+
+    it.each([
+      {
+        label: 'keeps the folders after a duplicate observation',
+        origins: [replacement, replacement],
+        expanded: true,
+      },
+      {
+        label: 'keeps the folders after the first verified cwd',
+        origins: [replacement, { ...replacement, cwd: '/', cwdVerified: true }],
+        expanded: true,
+      },
+      {
+        label: 'starts fresh in another pane on the same connection',
+        origins: [anotherPane, anotherPane],
+        expanded: false,
+      },
+      {
+        label: 'starts fresh when a different tab is selected after the replacement',
+        origins: [replacement, anotherTab],
+        expanded: false,
+      },
+    ])('$label', async ({ origins: [first, latest], expanded }) => {
+      const open = vi.fn((sessionId: string) =>
+        Promise.resolve({ ...OPEN_RESULT, bindingId: sessionId }),
+      )
+      const list = vi.fn((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+            : listOk(path, [entry({ name: bindingId, path: path + '/' + bindingId })]),
+        ),
+      )
+      const store = shownStore(makeServices({ open, list }))
+      store.rescope(original)
+      await settle()
+      store.toggle(nodeRows(store, 'home'))
+      await settle()
+      expect(nodeRows(store, 'home').children.map((child) => child.name)).toEqual(['original'])
+      open.mockClear()
+      list.mockClear()
+
+      store.setVisible(false)
+      store.rescope(null)
+      store.rescope(first)
+      store.rescope(latest)
+      await settle()
+      expect(open).not.toHaveBeenCalled()
+      expect(list).not.toHaveBeenCalled()
+
+      store.setVisible(true)
+      store.setVisible(true)
+      await settle()
+      expect(open).toHaveBeenCalledExactlyOnceWith(latest.sessionId, '/', 'background')
+      expect(store.origin()).toEqual(latest)
+      expect(nodeRows(store, 'home').expanded).toBe(expanded)
+      expect(nodeRows(store, 'home').children.map((child) => child.name)).toEqual(
+        expanded ? [latest.sessionId] : [],
+      )
+    })
+  })
+
+  it('does not replace the binding when the resumed ROOT answers and a child refuses', async () => {
+    // The reopened-binding rule is about the binding, not about every failure:
+    // a directory that cannot be read is a fact about that directory, and
+    // spending a `files.open` on it would be churn on a healthy connection.
+    let refuse = false
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn((_bindingId: string, path: string) => {
+      if (refuse && path === '/home') {
+        return Promise.reject(new Error('filesystem: /home: permission denied'))
+      }
+      return Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, []),
+      )
+    })
+    const services = makeServices({ open, list })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(nodeRows(store, 'home').state).toBe('ok')
+
+    refuse = true
+    store.rescope(tab(PAUSED))
+    await settle()
+    store.rescope(tab(SERVING))
+    await settle()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(store.binding()?.bindingId).toBe('b1')
+    // The refusal is the row's own state, where a person reads it.
+    expect(nodeRows(store, 'home').state).toBe('error')
+  })
+
+  it('asks nothing while hidden across a break, and re-reads the kept folders when it is shown again', async () => {
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn((_bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, [entry({ name: 'inside', path: `${path}/inside` })]),
+      ),
+    )
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ open, list, close })
+    const store = createFilesTreeStore(services)
+    store.setVisible(true)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    const listsWhileVisible = list.mock.calls.length
+
+    store.setVisible(false)
+    store.rescope(tab(PAUSED))
+    await settle()
+    store.rescope(tab(SERVING))
+    await settle()
+
+    // NOTHING ON SCREEN DOES NO WORK: the return is recorded, never paid for.
+    expect(list.mock.calls.length).toBe(listsWhileVisible)
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).not.toHaveBeenCalled()
+
+    store.setVisible(true)
+    await settle()
+    expect(list.mock.calls.length).toBeGreaterThan(listsWhileVisible)
+    expect(store.axisGate()).toBeNull()
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+  })
+
+  // THE RESUME MOVES NO WATCH (ALX-1793 round 2, M-r2). The hold drops the
+  // visibility statement it made, because it was made across a break — and
+  // `files.watch` over a watcher that already exists moves no visibility, so
+  // a resume that only re-read the tree left the host's observer at
+  // `visible: false`: its hour-long timer, no poll, and a file arriving on the
+  // host invisible until somebody pressed Refresh. The published visible edge
+  // is the statement that restarts the poll, and it has to reach the backend
+  // on every path that resumes a kept binding.
+  /** The last visibility statement the panel published for its one binding. */
+  function lastVisible(published: FilesPanelServices['visible']): unknown[] | undefined {
+    const calls = vi.mocked(published).mock.calls
+    return calls[calls.length - 1]
+  }
+
+  /** The served tree every resume test reads back: / → home → inside. */
+  function resumeTreeServices() {
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn((_bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, [entry({ name: 'inside', path: `${path}/inside` })]),
+      ),
+    )
+    const visible = vi.fn<FilesPanelServices['visible']>().mockResolvedValue({})
+    const close = vi.fn().mockResolvedValue({})
+    return { services: makeServices({ open, list, visible, close }), open, list, visible, close }
+  }
+
+  it('publishes the visible edge when the axis returns behind a hidden panel and the panel is shown again', async () => {
+    // P1: the break AND the return both happen while nobody is looking, so
+    // the debt is recorded and paid on show.
+    const { services, open, list, visible, close } = resumeTreeServices()
+    const store = createFilesTreeStore(services)
+    store.setVisible(true)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(store.binding()?.bindingId).toBe('b1')
+
+    store.setVisible(false)
+    await settle()
+    expect(lastVisible(visible)).toEqual(['b1', false, 'background'])
+
+    // NOTHING ON SCREEN DOES NO WORK: no files.* call and no statement either.
+    const asks = list.mock.calls.length
+    store.rescope(tab(PAUSED))
+    await settle()
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).not.toHaveBeenCalled()
+    expect(list.mock.calls.length).toBe(asks)
+    expect(lastVisible(visible)).toEqual(['b1', false, 'background'])
+
+    // Looked at again: the kept tree is re-read over the kept binding…
+    store.setVisible(true)
+    await settle()
+    expect(list.mock.calls.length).toBeGreaterThan(asks)
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    // …and the host is told to run its poll again, or the tree on screen is a
+    // photograph of the moment the connection broke.
+    expect(lastVisible(visible)).toEqual(['b1', true, 'background'])
+  })
+
+  it('publishes the visible edge when the panel was hidden during the pause and returns to serving behind it', async () => {
+    // P2: the hide happens WHILE the axis is down, so the backend holds the
+    // hide; the serving observation then arrives behind the hidden panel.
+    const { services, open, list, visible, close } = resumeTreeServices()
+    const store = createFilesTreeStore(services)
+    store.setVisible(true)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+
+    store.rescope(tab(PAUSED))
+    await settle()
+    store.setVisible(false)
+    await settle()
+    expect(lastVisible(visible)).toEqual(['b1', false, 'background'])
+
+    const asks = list.mock.calls.length
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(list.mock.calls.length).toBe(asks)
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).not.toHaveBeenCalled()
+
+    store.setVisible(true)
+    await settle()
+    expect(list.mock.calls.length).toBeGreaterThan(asks)
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(lastVisible(visible)).toEqual(['b1', true, 'background'])
+  })
+
+  it('publishes the visible edge when the return arrives with the card on screen', async () => {
+    // P3: the panel is shown while the axis is still down — the card is the
+    // whole answer there and nothing is asked — so the return takes the
+    // VISIBLE branch of rescope, not the hidden one.
+    const { services, list, visible } = resumeTreeServices()
+    const store = createFilesTreeStore(services)
+    store.setVisible(true)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+
+    store.setVisible(false)
+    await settle()
+    expect(lastVisible(visible)).toEqual(['b1', false, 'background'])
+
+    store.rescope(tab(PAUSED))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+
+    // Shown while the axis is down: the card, and no statement — the backend
+    // is told the panel is on screen only when there is something to poll.
+    const asks = list.mock.calls.length
+    store.setVisible(true)
+    await settle()
+    expect(list.mock.calls.length).toBe(asks)
+    expect(lastVisible(visible)).toEqual(['b1', false, 'background'])
+
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(list.mock.calls.length).toBeGreaterThan(asks)
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(lastVisible(visible)).toEqual(['b1', true, 'background'])
+  })
+
+  it('a frozen origin of the same session keeps the serving axis, the binding and the tree', async () => {
+    // B1: activating the viewer of an SSH file answers with the tab's frozen
+    // origin (`cwdFollow: false`, no connection). Read at face value that is
+    // `starting`, and the hold it triggered closed the binding the viewer was
+    // reading through — a file that died on a host that was answering.
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn((_bindingId: string, path: string) =>
+      Promise.resolve(
+        path === '/'
+          ? listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])
+          : listOk(path, []),
+      ),
+    )
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ open, list, close })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    store.toggle(nodeRows(store, 'home'))
+    await settle()
+    expect(store.binding()?.bindingId).toBe('b1')
+
+    const frozen = { ...tab(SERVING), paneId: 42, cwdFollow: false }
+    delete (frozen as { connection?: unknown }).connection
+    store.rescope(frozen)
+    await settle()
+
+    expect(store.axisGate()).toBeNull()
+    expect(store.binding()?.bindingId).toBe('b1')
+    expect(close).not.toHaveBeenCalled()
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+
+    // …and going back to the terminal tab it was opened from keeps it too.
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(store.binding()?.bindingId).toBe('b1')
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('a pause seen while a frozen origin is in front still blocks the panel', async () => {
+    // The frozen origin carries the LIVE connection, so a break during the
+    // read reaches the panel — the viewer must not pin the axis at `serving`.
+    const open = vi.fn().mockResolvedValue(OPEN_RESULT)
+    const list = vi.fn().mockResolvedValue(listOk('/', []))
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ open, list, close })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+
+    store.rescope({ ...tab(PAUSED), paneId: 42, cwdFollow: false })
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+    expect(store.binding()?.bindingId).toBe('b1')
+  })
+
+  it('a tab that stops serving while the panel is hidden asks nothing at all', async () => {
+    // The gate is true of a hidden panel too, but the hold costs no RPC: the
+    // binding is kept and the tree waits, because nothing on screen does no
+    // work (ADR-8eej3e66 §9).
+    const { services, open, close, list } = spyServices()
+    const store = createFilesTreeStore(services)
+    store.setVisible(true)
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+    const asks = list.mock.calls.length
+
+    store.setVisible(false)
+    store.rescope(tab(PAUSED))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+    expect(store.binding()?.bindingId).toBe('b1')
+    expect(close).not.toHaveBeenCalled()
+    expect(list.mock.calls.length).toBe(asks)
+
+    // Looking at it again asks nothing while the axis is down.
+    store.setVisible(true)
+    await settle()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(list.mock.calls.length).toBe(asks)
+  })
+
+  it('a files.open still in flight when the axis stops serving cannot revive the binding', async () => {
+    const pending = deferred<typeof OPEN_RESULT>()
+    const open = vi.fn().mockReturnValue(pending.promise)
+    const list = vi.fn().mockResolvedValue(listOk('C:/', []))
+    const close = vi.fn().mockResolvedValue({})
+    const services = makeServices({ open, list, close })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    expect(store.phase()).toBe('opening')
+
+    store.rescope(tab(LOST))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+
+    // The answer lands only now, after the axis stopped serving.
+    pending.resolve({ ...OPEN_RESULT, bindingId: 'late' })
+    await settle()
+
+    expect(store.binding()).toBeNull()
+    expect(list).not.toHaveBeenCalled()
+    // The binding the backend minted is released, never leaked (ALX-1031).
+    expect(close).toHaveBeenCalledWith('late', 'background')
+  })
+
+  it('a different blocked tab resets the tree instead of showing another machine’s rows', async () => {
+    const services = makeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(listOk('/', [entry({ name: 'home', path: '/home', kind: 'dir' })])),
+    })
+    const store = shownStore(services)
+    store.rescope(tab(SERVING))
+    await settle()
+    nodeRows(store, 'home')
+
+    store.rescope(tab(RAW, 'session-other'))
+    await settle()
+    expect(store.axisGate()).toBe('blocked')
+    expect(store.root()).toBeNull()
+    expect(store.rows()).toEqual([])
   })
 })

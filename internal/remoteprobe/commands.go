@@ -14,13 +14,6 @@ import (
 // caller supplies arrives as an ARGUMENT to a fixed script (the completion
 // probe) or is not supplied at all.
 
-// Sentinel is the fixed framing marker the port probes print first and last. A
-// sample without it is rejected WHOLE: a forced command, a login banner or a
-// policy wrapper can prepend text, and we never scan arbitrary stdout for
-// plausible-looking port numbers. Versioned — bump it when the probe protocol
-// changes, so an old parser rejects new output instead of misreading it.
-const Sentinel = "NOCX-PD/1"
-
 // UnameCommand answers the platform probe (D20): the kernel and machine in one
 // line, which the caller maps onto Go's GOOS/GOARCH vocabulary.
 const UnameCommand = "uname -s -m"
@@ -49,57 +42,6 @@ const HomeFallbackCommand = "cd ~ && pwd"
 // exists to prevent. An implementation trims each answer; an empty result from
 // the last command means the question could not be answered.
 var HomeCommands = []string{HomeCommand, HomeFallbackCommand}
-
-// PortProbe names one rung of the port-discovery ladder. The spellings are
-// internal/discovery's own, because the name is what a person sees reported as
-// "which dialect produced this sample".
-type PortProbe string
-
-const (
-	// PortSS is `ss -H -lntp`, the modern default.
-	PortSS PortProbe = "ss"
-	// PortNetstat is `netstat -lntp`, whose flags are verified by the run
-	// itself rather than hoped for.
-	PortNetstat PortProbe = "netstat"
-	// PortBusyboxNetstat is `netstat -ltn`: busybox's, without -p, so process
-	// evidence is unsupported rather than absent.
-	PortBusyboxNetstat PortProbe = "busybox-netstat"
-	// PortLsof is `lsof -nP -iTCP -sTCP:LISTEN`, which exits 1 when nothing
-	// matches — a valid empty sample rather than a failure.
-	PortLsof PortProbe = "lsof"
-	// PortSockstat is the BSD fallback.
-	PortSockstat PortProbe = "sockstat"
-)
-
-// portCommands is the ladder, in selection order, each with the command that
-// runs it. It is a TABLE and not a switch so that "which probes exist" has one
-// spelling that both the helper's params validation and the caller's ladder
-// read.
-//
-// It is PRIVATE, and that is the invariant rather than tidiness: an exported
-// slice is a closed set any caller could edit at runtime, and this one carries
-// the members the helper's `sample-ports` op validates against. The exported
-// surface is the lookup below, which cannot be rewritten from outside.
-var portCommands = []struct {
-	Probe   PortProbe
-	Command string
-}{
-	{PortSS, sentinelPrintf(`LC_ALL=C ss -H -lntp`)},
-	{PortNetstat, sentinelPrintf(`netstat -lntp`)},
-	{PortBusyboxNetstat, sentinelPrintf(`netstat -ltn`)},
-	{PortLsof, sentinelPrintf(`lsof -nP -iTCP -sTCP:LISTEN`)},
-	{PortSockstat, sentinelPrintf(`sockstat -4 -l`)},
-}
-
-// PortCommand answers the fixed command for one port probe.
-func PortCommand(p PortProbe) (string, bool) {
-	for _, e := range portCommands {
-		if e.Probe == p {
-			return e.Command, true
-		}
-	}
-	return "", false
-}
 
 // CommandNamesPhase names which half of the PATH enumeration to run. They are
 // two commands and not one with a flag: the cheap half runs once per session to

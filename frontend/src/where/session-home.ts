@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { FilesOpenResult } from '../generated/files.open'
+import { helperGate, type HelperGatedTab } from '../connection/helper-axis'
 
 /** The source's entire window onto the outside world: one files.open per
  *  session, and the liveness seam that says when a binding died. Both are
@@ -42,8 +43,21 @@ export interface SessionHomeSource {
    *
    * A rejected open is not remembered: the next call tries again, rather
    * than awaiting the same failed promise forever.
+   *
+   * A TAB THE FAR HELPER DOES NOT SERVE HAS NO HOME TO READ (design §5.10,
+   * C25/C26). `tab` is the origin asking — its kind and its axis, verbatim;
+   * when the axis does not serve, the answer is null — "not known", the empty
+   * value `home()` already answers — and NOTHING goes on the wire. Reading a
+   * home is a `files.open`, and the contract has already said this host cannot
+   * be reached: a call it would refuse is work nobody asked for, and one that
+   * could reach the WRONG host is worse (§0).
    */
-  ensure(sessionId: string, cwd?: string | null, cwdVerified?: boolean): Promise<FilesOpenResult>
+  ensure(
+    sessionId: string,
+    cwd?: string | null,
+    cwdVerified?: boolean,
+    tab?: HelperGatedTab | null,
+  ): Promise<FilesOpenResult | null>
   /**
    * Learn when a session's home becomes known, or changes to a different
    * value. Does not replay a value already known at subscribe time — read
@@ -91,9 +105,15 @@ export function createSessionHomeSource(deps: SessionHomeDeps): SessionHomeSourc
     sessionId: string,
     cwd?: string | null,
     cwdVerified?: boolean,
-  ): Promise<FilesOpenResult> {
+    tab?: HelperGatedTab | null,
+  ): Promise<FilesOpenResult | null> {
+    // An SSH tab whose axis does not serve has no home to read: null, and no
+    // files.open. A cached binding is still the answer where one exists — the
+    // question is "which home", and the home a live binding already named does
+    // not stop being true because the helper went away.
     const cached = bindings.get(sessionId)
     if (cached !== undefined) return cached
+    if (tab !== undefined && tab !== null && helperGate(tab) !== null) return Promise.resolve(null)
     const rootPath = cwdVerified === true && cwd !== null && cwd !== undefined ? cwd : undefined
     const pending = deps.openBinding(sessionId, rootPath).then((res) => {
       const home = homeFromRoot(res.root)

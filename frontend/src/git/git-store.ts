@@ -79,9 +79,15 @@
 
 import { createMemo, createSignal, untrack } from 'solid-js'
 import { t } from '../i18n/locale-model'
-import { isNotStartedAnswer, RpcError, TransportUnavailableError } from '../dispatcher'
+import {
+  isNotStartedAnswer,
+  RpcError,
+  rpcRefusalCause,
+  TransportUnavailableError,
+} from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
 import type { ActiveOrigin } from '../pane-content'
+import { helperGate } from '../connection/helper-axis'
 import type { GitPanelServices, GitDiffSide } from './git-client'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitLogResult } from '../generated/git.log'
@@ -296,21 +302,13 @@ interface ScopeCtx {
   epoch: number
 }
 
-/** The typed reason a git error payload carries (contracts/git.error.schema.json),
- *  or null when the payload is not one. Shape first: a bare code is never the
- *  answer, because -32602 is shared by every request-shaped refusal and an
- *  invocation failure (-32603) carries no data at all. */
-function gitErrorReasonOf(data: unknown): GitError['reason'] | null {
-  if (typeof data !== 'object' || data === null) return null
-  return (data as Partial<GitError>).reason ?? null
-}
-
 /** The typed reason a failed git call carried, or null when it carried none.
  *  This is what the panel decides a refusal's sentence by (nocx-oalo1.6.3):
- *  the message rides beside it as prose and decides nothing. */
+ *  the message rides beside it as prose and decides nothing. The shape read
+ *  is the RPC layer's one accessor (dispatcher.ts), shared with the Ports
+ *  panel and the palette's forward. */
 function gitErrorReason(e: unknown): GitError['reason'] | null {
-  if (!(e instanceof RpcError)) return null
-  return gitErrorReasonOf(e.data)
+  return rpcRefusalCause<GitError['reason']>(e)
 }
 
 /** unknownBinding — the wire's -32602 mapped by the git transport from
@@ -330,14 +328,19 @@ function isUnknownBinding(e: unknown): boolean {
   // The discriminator is the schema-declared vocabulary
   // (contracts/git.error.schema.json): only the fixed reason separates an
   // unknown binding from the other five refusals that share the code.
-  return gitErrorReasonOf(e.data) === 'unknown-binding'
+  return rpcRefusalCause<GitError['reason']>(e) === 'unknown-binding'
 }
 
 /** Whether this origin's axis lets git.open be asked at all: a local tab
  *  has no helper and is always allowed, an SSH tab only while the helper
- *  serves (ADR-727g63tr decision 2). */
+ *  serves (ADR-727g63tr decision 2).
+ *
+ *  THE PREDICATE IS NOT THIS MODULE'S (connection/helper-axis.ts): the Files
+ *  panel, the terminal drop, the link opener and the session's home ask the
+ *  same question, and four spellings of one derivation is how two surfaces
+ *  come to disagree about one connection. */
 function axisAllowsOpen(o: ActiveOrigin): boolean {
-  return o.kind !== 'ssh' || o.connection?.helper?.state === 'serving'
+  return helperGate(o) === null
 }
 
 /** Whether this origin may open a repository at all: an axis that serves
@@ -513,12 +516,12 @@ export function createGitStore(
     // THE FAR HELPER GATES AN SSH TAB (ADR-727g63tr decision 2; task
     // .6.3c-1). An observation that has not arrived and a decision that has
     // not finished are the same answer here: nothing to ask yet. Only
-    // `serving` reaches git.open.
-    if (o.kind === 'ssh') {
-      const helper = o.connection?.helper
-      if (helper === undefined || helper.state === 'starting') return 'helperStarting'
-      if (helper.state !== 'serving') return 'helperBlocked'
-    }
+    // `serving` reaches git.open. The predicate is `helperGate`'s, the same
+    // one the Files panel, the drop and the opener ask — spelled once, in
+    // connection/helper-axis.ts.
+    const gate = helperGate(o)
+    if (gate === 'starting') return 'helperStarting'
+    if (gate === 'blocked') return 'helperBlocked'
     if (!o.cwdVerified || o.cwd === null) return 'noCwd'
     const os = openState()
     switch (os) {

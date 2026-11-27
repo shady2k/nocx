@@ -18,11 +18,17 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sessionid"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
 
-type ID string
+// ID is a session's identity. It is an ALIAS rather than a defined type
+// so that a package which only needs to name a session depends on
+// internal/sessionid instead of on this package and, through it, on the
+// whole connection stack (design C24, C30). Every existing session.ID
+// call site keeps compiling without a conversion.
+type ID = sessionid.ID
 
 // InstanceID names one backend instance: minted once per registry (one per
 // backend start), so two instances are never equal and a record from a
@@ -395,13 +401,9 @@ type Session interface {
 	// beat the watcher) it is ExitInterrupted — a teardown is never dressed
 	// up as a shell's own exit.
 	ExitOutcome() (ExitCause, int)
-	// SSHOptions returns the connect options this session's SSH connection
-	// was opened with: exactly what Reg.Open handed to the SSH factory, in
-	// order. Nil for local sessions. The file manager's SFTP lease
-	// (ssh.FSConn) is acquired with these same options so it resolves to
-	// the same destination the shell did (fm-w8, spec D3) — the lease
-	// shares the tab's pooled connection (AD-4) only when the pool keys
-	// agree, and the options are what make them agree.
+	// SSHOptions returns the connect options this session opened with, in
+	// order. They identify the resolved route and credentials. Local
+	// sessions return nil.
 	SSHOptions() []ssh.ConnectOption
 	// HostKeyFingerprint returns the SHA256 fingerprint of the remote
 	// host's public key, as observed and verified when the connection was

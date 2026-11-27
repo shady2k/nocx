@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/discovery"
+	"github.com/shady2k/nocx/internal/portsprobe"
 )
 
 const probeName = "linux-procfs"
@@ -46,39 +46,39 @@ type procOwner struct {
 
 // sockEntry is one parsed LISTEN row before owner resolution.
 type sockEntry struct {
-	family  discovery.AddressFamily
+	family  portsprobe.AddressFamily
 	address string
 	port    int
 	inode   uint64
 }
 
-func listeners(ctx context.Context) ([]discovery.Listener, error) {
-	v4, err := procNet(ctx, "/proc/net/tcp", discovery.FamilyIPv4)
+func listeners(ctx context.Context) ([]portsprobe.Listener, error) {
+	v4, err := procNet(ctx, "/proc/net/tcp", portsprobe.FamilyIPv4)
 	if err != nil {
 		return nil, err
 	}
-	v6, err := procNet(ctx, "/proc/net/tcp6", discovery.FamilyIPv6)
+	v6, err := procNet(ctx, "/proc/net/tcp6", portsprobe.FamilyIPv6)
 	if err != nil {
 		return nil, err
 	}
 	entries := append(v4, v6...)
 	if len(entries) == 0 {
-		return []discovery.Listener{}, nil
+		return []portsprobe.Listener{}, nil
 	}
 
 	owners := socketOwners(ctx, entries)
-	listeners := make([]discovery.Listener, 0, len(entries))
+	listeners := make([]portsprobe.Listener, 0, len(entries))
 	for _, e := range entries {
-		l := discovery.Listener{Family: e.family, Address: e.address, Port: e.port}
+		l := portsprobe.Listener{Family: e.family, Address: e.address, Port: e.port}
 		if o, ok := owners[e.inode]; ok {
-			l.Process = discovery.Process{Evidence: discovery.EvidenceKnown, Name: o.name, PID: o.pid}
+			l.Process = portsprobe.Process{Evidence: portsprobe.EvidenceKnown, Name: o.name, PID: o.pid}
 		} else {
 			// Unmatched: either the owner's fd list was unreadable (EACCES
 			// — you can only walk the processes you own) or the walk budget
 			// ran out. Either way the owner was not visible to this user —
 			// permission-denied, never "unowned", rendered exactly like the
 			// remote path's same evidence.
-			l.Process = discovery.Process{Evidence: discovery.EvidencePermissionDenied}
+			l.Process = portsprobe.Process{Evidence: portsprobe.EvidencePermissionDenied}
 		}
 		listeners = append(listeners, l)
 	}
@@ -90,7 +90,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 // row cap here: the deterministic cap applies AFTER the shared sort (the
 // exported Listeners entry point), so the kept set never depends on /proc
 // enumeration order.
-func procNet(ctx context.Context, path string, family discovery.AddressFamily) ([]sockEntry, error) {
+func procNet(ctx context.Context, path string, family portsprobe.AddressFamily) ([]sockEntry, error) {
 	//nolint:gosec // path is a fixed constant at every call site, or a test's own temp file
 	f, err := os.Open(path)
 	if err != nil {

@@ -42,8 +42,8 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/farhelper"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/filesystem/helperfs"
 	"github.com/shady2k/nocx/internal/filesystem/local"
-	"github.com/shady2k/nocx/internal/filesystem/sftp"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/harness"
@@ -75,7 +75,6 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/toolendpoint"
-	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -1352,25 +1351,10 @@ func New(opts ...Option) (*App, error) {
 	// Profile usage tracker for the sessions.status RPC (nocx-uxs5.4).
 	usageStore := session.NewDocumentUsageStore(docStore)
 	sess = sess.WithProfileUsageTracker(usageStore)
-	// Port discovery (nocx-wzc4.2): cadence owner for discovery, keyed by
-	// profile. *ssh.RealClient satisfies discovery.Connector without an
-	// adapter — the same shape that satisfies tunnel.Connector. The local
-	// machine (nocx-wzc4.8) samples through the native kernel reader,
-	// wired here at the composition root (AD-8) behind the same Provider
-	// seam the remote ladder implements. The cadence timers are named
-	// here, at the composition root (spec §4): one settle sample 1 s after
-	// the connection comes up, prompt hints debounced 1 s, periodic
-	// sampling every 10 s while the panel is visible and nothing is
-	// paused.
-	discoverySched := discovery.NewScheduler(
-		probes, logger,
-		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
-			return nativeports.NewProvider(l)
-		}),
-		discovery.WithSettleDelay(1*time.Second),
-		discovery.WithPromptDebounce(time.Second),
-		discovery.WithSampleInterval(10*time.Second),
-	)
+	// Remote port samples use the same helper registry as Git and Files.
+	discoverySched := discovery.NewScheduler(farHelpers, logger, func(l log.Logger) discovery.LocalProvider {
+		return nativeports.NewProvider(l)
+	})
 	// The remote shell launcher, built here so its bootstrap-outcome sink
 	// can be wired once the server exists (below, beside the other
 	// integration-axis seams). Without that sink the whole closed outcome
@@ -1565,13 +1549,6 @@ func New(opts ...Option) (*App, error) {
 		// forward model was reachable from its own tests and nowhere else
 		// (AGENTS.md check 5).
 		transport.WithTunnelConnector(tunnelChans),
-		// Port discovery (nocx-wzc4.2): the scheduler owns the cadence
-		// (settle sample, prompt debounce, hidden-tab pause, one-in-flight
-		// — spec §4) and acquires its OWN pooled discovery lease per
-		// profile. *ssh.RealClient satisfies discovery.Connector without
-		// an adapter, the same way it satisfies tunnel.Connector. Before
-		// this line the whole discovery package was reachable from its own
-		// tests and nowhere else (AGENTS.md check 5).
 		transport.WithDiscoveryScheduler(discoverySched),
 		// The in-band bootstrap builder (nocx-ynsx): *shellintegration.Impl
 		// satisfies transport.InBandBootstrapper without an adapter — the
@@ -1602,23 +1579,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
 
-		// The file-tree control plane (fm-w8): the binding registry is
-		// constructed here — without this line the whole filesystem
-		// package is reachable from its own tests and nowhere else
-		// (AGENTS.md check 5) — and the provider factory decides which
-		// sessions get which providers. Local sessions get a real local
-		// provider rooted at the caller's verified cwd when one is sent;
-		// remote sessions get the sftp provider over an ssh.FSConn lease
-		// acquired with the session's OWN connect options, so it resolves
-		// to the same destination the shell did (spec D3). The sftp
-		// provider and its lease were the last dead branch of fm-w8: this
-		// factory is the caller that makes the package reachable from
-		// main() (AGENTS.md check 5).
+		// Remote Files follows the far-helper axis of the pane's connection.
 		transport.WithFilesystemRegistry(filesystem.New()),
-		// The lease is this machine's helper's since nocx-50w7p.12: the sftp
-		// channel rides the same pooled connection the pane does, so a terminal
-		// and its Files panel authenticate once (AD-4, plan §3).
-		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
+		transport.WithFilesystemProviderFactory(filesystemProviderFactory(farHelpers, func(paneID, sessionID string) (string, bool) {
+			return localOpener.paneConnections().SessionConnectionID(paneID, sessionID)
+		})),
 		// fs.complete reads the backend's own filesystem and has no binding
 		// to ask, so its failure domain comes from the same local provider's
 		// mount-table answer a local binding's handle gives. Without this the
@@ -2895,45 +2860,39 @@ func New(opts ...Option) (*App, error) {
 
 // ── the file-tree provider factory (fm-w8) ────────────────────────────────
 
-// fsLeaseProvider acquires the SFTP lease a remote provider is built on.
-// *ssh.RealClient satisfies it; the interface exists so the factory is
-// testable against a double without a live connection — the same reason
-// internal/filesystem/sftp declares its own narrow fsConn seam.
-type fsLeaseProvider interface {
-	FSConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.FSConn, error)
-}
-
-// filesystemProviderFactory is the composition root's answer to
-// transport.FilesystemProviderFactory: local sessions get a real local
-// provider rooted at the caller's verified cwd when one is sent; remote
-// sessions get the sftp provider over an ssh.FSConn lease acquired with the
-// session's OWN connect options, so the lease resolves to the same
-// destination the shell did (spec D3, AD-4). The context is deliberately
-// background: the factory has no caller context, and the lease's own
-// hard-timeout lane is the bound that keeps a silent server from hanging
-// files.open.
-// The three D14 bounds, named once, here, rather than as defaults buried in
-// two provider packages that would then be free to disagree. Spec §9 calls
-// them starting numbers to be tuned once the panel is in daily use, and a
-// number nobody can find is a number nobody tunes — so the composition root
-// is where they live and where a reviewer looks for them.
-//
-// The remote values are deliberately not the local ones. An enumeration is a
-// chain of round trips over SFTP, so its time bound is larger; and the entry
-// bound is smaller because the whole directory must be enumerated before any
-// page can be returned, which makes the cost of a huge remote directory a
-// network cost rather than a syscall one.
+// Local Files bounds from the file manager design (§9).
 const (
 	fsLocalEntryCap    = 10_000
 	fsLocalSizeCap     = 8 << 20 // 8 MiB
 	fsLocalListTimeout = 10 * time.Second
-
-	fsRemoteEntryCap    = 5_000
-	fsRemoteSizeCap     = 8 << 20 // 8 MiB
-	fsRemoteListTimeout = 30 * time.Second
 )
 
-func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProviderFactory {
+// filesPaneRegistry checks that a binding's pane still rides the captured
+// connection. The pane's current ID is never used to route an RPC.
+type filesPaneRegistry struct {
+	helperfs.Registry
+	stillBound func(string) bool
+}
+
+func (r filesPaneRegistry) Axis(id string) (farhelper.Status, bool) {
+	if !r.stillBound(id) {
+		return farhelper.Status{State: farhelper.StateUnavailable, Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}, true
+	}
+	return r.Registry.Axis(id)
+}
+
+func (r filesPaneRegistry) Acquire(ctx context.Context, id string) (*farhelper.Lease, error) {
+	if !r.stillBound(id) {
+		return nil, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	lease, err := r.Registry.Acquire(ctx, id)
+	if !r.stillBound(id) {
+		return nil, &farhelper.Unavailable{Reason: farhelper.ReasonConnection, Action: farhelper.ActionNone}
+	}
+	return lease, err
+}
+
+func filesystemProviderFactory(helpers helperfs.Registry, sessionConnection func(paneID, sessionID string) (string, bool)) transport.FilesystemProviderFactory {
 	return func(sess session.Session, rootPath string) (filesystem.Provider, error) {
 		if sess.Kind() != session.KindRemote {
 			localOpts := []local.Option{
@@ -2951,109 +2910,25 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			var p writableProvider = local.New(localOpts...)
 			return p, nil
 		}
-		fs, err := client.FSConn(context.Background(), sess.Host(), sess.SSHOptions()...)
-		if err != nil {
-			return nil, fmt.Errorf("sftp provider for %s: %w", sess.Host(), err)
+		paneID, sessionID := sess.PaneID(), string(sess.ID())
+		if helpers != nil {
+			if id, bound := sessionConnection(paneID, sessionID); bound {
+				registry := filesPaneRegistry{Registry: helpers, stillBound: func(id string) bool {
+					current, bound := sessionConnection(paneID, sessionID)
+					return bound && current == id
+				}}
+				// The binding can expose the axis before any helper is serving.
+				hf := helperfs.New(registry, id, rootPath)
+				return &endpointAttestedProvider{
+					writableProvider: hf,
+					endpointID:       endpointIDFor(sess),
+					axis:             hf.HelperAxis,
+					versioned:        hf.Versioned(),
+				}, nil
+			}
 		}
-		opts := []sftp.Option{
-			sftp.WithEntryCap(fsRemoteEntryCap),
-			sftp.WithSizeCap(fsRemoteSizeCap),
-			sftp.WithListTimeout(fsRemoteListTimeout),
-		}
-		if rootPath != "" {
-			opts = append(opts, sftp.WithRoot(rootPath))
-		}
-		return &endpointAttestedProvider{
-			writableProvider: sftp.New(fsTransferLease{FSConn: fs}, opts...),
-			endpointID:       endpointIDFor(sess),
-		}, nil
+		return nil, &filesystem.ErrUnavailable{Reason: string(farhelper.ReasonConnection), Action: string(farhelper.ActionNone)}
 	}
-}
-
-// fsTransferLease presents an SFTP lease as the two surfaces
-// internal/transfer declares — RemoteFS for the write direction and
-// RemoteReadFS for the read one. It is the one place the two vocabularies meet,
-// and it exists because neither package may know the other: internal/ssh
-// must not import internal/transfer, and internal/transfer deliberately
-// declares its own RemoteFS rather than importing internal/ssh
-// (transfer.go's package doc). The composition root is where a translation
-// between two module boundaries belongs.
-//
-// It translates two things and forwards everything else untouched.
-//
-// The SHAPE: Create returns ssh.FSFile where RemoteFS asks for
-// transfer.RemoteFile — one shape under two names, and Go matches result
-// types by identity, so the conversion has to be a method rather than an
-// assertion.
-//
-// The VOCABULARY: "this server has no posix-rename@openssh.com" arrives as
-// ssh.ErrPosixRenameUnsupported and the sink's fallback keys on
-// transfer.ErrPosixRenameUnsupported. Untranslated, a server without the
-// extension would read as an ordinary promote failure, the temp would be
-// removed and the upload would fail — on every such server, with both
-// packages' tests green, because each fakes its own sentinel. The
-// translation ADDS the transfer vocabulary and keeps the lease's, so a log
-// still says which lease said it.
-//
-// The contract that needs no translation is worth naming too, because it is
-// the other one RemoteFS documents and the compiler cannot check: a missing
-// path must satisfy errors.Is(err, fs.ErrNotExist), which the sink's
-// "nothing to back up" branch keys on. pkg/sftp normalises
-// SSH_FX_NO_SUCH_FILE to os.ErrNotExist (client.go:2237) and fsConn.classify
-// passes an unclassified error through unchanged, so it already holds; this
-// adapter's job there is not to break it. Both directions are asserted in
-// fs_upload_lease_test.go.
-type fsTransferLease struct {
-	ssh.FSConn
-}
-
-func (l fsTransferLease) Create(path string) (transfer.RemoteFile, error) {
-	f, err := l.FSConn.Create(path)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-func (l fsTransferLease) PosixRename(old, new string) error {
-	err := l.FSConn.PosixRename(old, new)
-	if err != nil && errors.Is(err, ssh.ErrPosixRenameUnsupported) {
-		return fmt.Errorf("%w: %w", transfer.ErrPosixRenameUnsupported, err)
-	}
-	return err
-}
-
-// Open translates the READ direction, and it has the same two jobs the
-// write direction has, for the same two reasons.
-//
-// The SHAPE: Open returns ssh.FSReadFile where RemoteReadFS asks for
-// transfer.RemoteReader — one shape under two names, and Go matches result
-// types by identity.
-//
-// The VOCABULARY: "that is a folder, not a file" arrives as
-// ssh.ErrNotRegularFile and the transport's refusal keys on
-// transfer.ErrNotRegular. Untranslated, a person who asked to download a
-// directory would be told the server had gone wrong (-32603) instead of
-// being told what they actually did, with both packages' tests green
-// because each fakes its own sentinel. The translation ADDS the transfer
-// vocabulary and keeps the lease's, so a log still says which lease said
-// it.
-//
-// The contracts that need no translation are worth naming for the same
-// reason the write half names its one: fs.ErrNotExist and fs.ErrPermission
-// already hold, because pkg/sftp normalises SSH_FX_NO_SUCH_FILE and
-// SSH_FX_PERMISSION_DENIED (client.go:2237) and fsConn.classify passes an
-// unclassified error through unchanged. This adapter's job there is not to
-// break it, and fs_upload_lease_test.go asserts both directions.
-func (l fsTransferLease) Open(path string) (transfer.RemoteReader, int64, error) {
-	f, size, err := l.FSConn.Open(path)
-	if err != nil {
-		if errors.Is(err, ssh.ErrNotRegularFile) {
-			return nil, 0, fmt.Errorf("%w: %w", transfer.ErrNotRegular, err)
-		}
-		return nil, 0, err
-	}
-	return f, size, nil
 }
 
 // writableProvider is what the factory builds for EITHER kind of session: a
@@ -3093,9 +2968,32 @@ type writableProvider interface {
 type endpointAttestedProvider struct {
 	writableProvider
 	endpointID string
+	// axis and versioned are the two optional seams the wrapped provider
+	// contributed, carried beside the attestation for the reason the write
+	// and read-stream seams are named on the embedded interface: a wrapper
+	// only ever exposes what it declares, and files.open asserts these on the
+	// value the factory returned. The fields let the wrapper report the
+	// absence of either capability with a false or nil result.
+	axis      func() (filesystem.HelperAxis, bool)
+	versioned filesystem.VersionedFiles
 }
 
 func (p *endpointAttestedProvider) EndpointID() string { return p.endpointID }
+
+// HelperAxis forwards the wrapped provider's live axis and reports whether
+// the provider supplies one.
+func (p *endpointAttestedProvider) HelperAxis() (filesystem.HelperAxis, bool) {
+	if p.axis == nil {
+		return filesystem.HelperAxis{}, false
+	}
+	return p.axis()
+}
+
+// Versioned forwards the wrapped provider's conditional write, or nil when it
+// contributed none. A nil here is the same refusal a missing interface is: the
+// binding then answers *ErrVersionedUnsupported rather than pretending a write
+// was checked against a version.
+func (p *endpointAttestedProvider) Versioned() filesystem.VersionedFiles { return p.versioned }
 
 // ── endpointId v1 (spec §5.1) ─────────────────────────────────────────────
 

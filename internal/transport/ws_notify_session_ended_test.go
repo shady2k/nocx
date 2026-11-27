@@ -368,6 +368,10 @@ func TestSessionClosedByTheUserRaisesNoEvent(t *testing.T) {
 	raiser := &fakeNotifyRaiser{}
 	ws, reg := newSessionEndedServer(t, fake, raiser)
 	sid, conn := openExitSession(t, ws)
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("open left no receiver")
+	}
 
 	got := awaitCloseAndExit(t, conn, sid, 2)
 
@@ -391,11 +395,8 @@ func TestSessionClosedByTheUserRaisesNoEvent(t *testing.T) {
 	if _, err := reg.Get(session.ID(sid)); err == nil {
 		t.Error("registry still holds the session after close")
 	}
-	ws.ringsMu.Lock()
-	left := len(ws.closeRequested)
-	ws.ringsMu.Unlock()
-	if left != 0 {
-		t.Errorf("closeRequested holds %d entries after the exit consumed the marker, want 0", left)
+	if rx.closeRequested.Load() {
+		t.Error("the exit did not consume the close marker")
 	}
 }
 
@@ -414,6 +415,10 @@ func TestSessionEndAskedForOutsideTheServerRaisesNoEvent(t *testing.T) {
 	raiser := &fakeNotifyRaiser{}
 	ws, reg := newSessionEndedServer(t, fake, raiser)
 	sid, conn := openExitSession(t, ws)
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("open left no receiver")
+	}
 
 	// The caller's order, exactly as the composition root performs it: the
 	// ask, then the registry close that wakes monitorExit.
@@ -432,11 +437,8 @@ func TestSessionEndAskedForOutsideTheServerRaisesNoEvent(t *testing.T) {
 	if evs := raiser.captured(); len(evs) != 0 {
 		t.Fatalf("raised %d events for an end that was asked for, want 0: %+v", len(evs), evs)
 	}
-	ws.ringsMu.Lock()
-	left := len(ws.closeRequested)
-	ws.ringsMu.Unlock()
-	if left != 0 {
-		t.Errorf("closeRequested holds %d entries after the exit consumed the ask, want 0", left)
+	if rx.closeRequested.Load() {
+		t.Error("the exit did not consume the close marker")
 	}
 }
 

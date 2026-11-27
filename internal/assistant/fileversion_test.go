@@ -185,11 +185,17 @@ func TestFileVersion_CaptureRefusesAFileOverTheReadCeiling(t *testing.T) {
 	}
 }
 
-func TestFileVersion_AcquireFailureIsVisible(t *testing.T) {
+// An acquire failure is named by the STEP and by the caller's own path, and the
+// provider's sentence is not repeated: an untyped cause may spell a path this
+// caller must not hand to a model (fileversion.go, fileVersionError).
+func TestFileVersion_AcquireFailureNamesTheStepNotTheProvidersText(t *testing.T) {
 	path := writeVersionTestFile(t, "acquire-fails.txt", "content")
 	_, err := CaptureFileVersion(t.Context(), failingFileSource{err: errors.New("binding refused")}, path)
-	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "binding refused") {
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "acquire") {
 		t.Fatalf("CaptureFileVersion error = %v, want a named acquire failure", err)
+	}
+	if strings.Contains(err.Error(), "binding refused") {
+		t.Fatalf("CaptureFileVersion error = %v, want the provider's own text classified rather than quoted", err)
 	}
 }
 

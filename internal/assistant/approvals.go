@@ -69,6 +69,12 @@ type Approval struct {
 	// the model can act on: a file over the read ceiling, a path the provider
 	// refuses, a host the helper cannot reach. Without it the refusal read
 	// "file version binding is missing", which names nothing.
+	//
+	// Its TEXT is the pane's lexical vocabulary and never the provider's: a
+	// capture or verification failure is classified (fileversion.go) so a
+	// canonical path outside the approved area — one a symlink inside it named
+	// — cannot be disclosed to the model. The typed cause stays wrapped for the
+	// guards that classify on it.
 	FileVersionFailure error
 	// ExpansionValues are the expression→value pairs the person was SHOWN
 	// beside the verbatim command (nocx-4h0m7.5). They are a carrier, never

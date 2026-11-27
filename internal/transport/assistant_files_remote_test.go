@@ -17,11 +17,12 @@ package transport
 //
 // # What is real
 //
-// The session registry, the filesystem registry, the provider factory, the two
-// capability operations and the assistant's own binding source (filesFor) are
-// the shipped ones; only the far provider is in memory, because the subject is
-// the ROUTE and not the helper protocol (helperfs and hostsvc have their own
-// fence tests, and e2e/assistant-ssh-files.spec.ts drives the shipped helper).
+// The session registry, the filesystem registry, the two capability operations
+// and the assistant's own binding source (filesFor) are the shipped ones. The
+// provider factory is a test closure — it answers the far provider for this
+// pane only — and the far provider is in memory, because the subject is the
+// ROUTE and not the helper protocol (helperfs and hostsvc have their own fence
+// tests, and e2e/assistant-ssh-files.spec.ts drives the shipped helper).
 
 import (
 	"context"

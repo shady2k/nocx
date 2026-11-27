@@ -183,6 +183,55 @@ func TestMiddlewareApprovalNamesWhyTheEvidenceCouldNotBeCaptured(t *testing.T) {
 	}
 }
 
+// The cause a refusal carries is told in the path the CALL named, and never in
+// the identity the pane resolved.
+//
+// A symlink inside the approved area pointing at a file over the read ceiling
+// OUTSIDE it is the case that makes the difference: the provider's own sentence
+// names the canonical target and the size it observed, and both would reach the
+// model as the detail of `REFUSED` — a path it was never given, and how large a
+// file it is not allowed to read. The lexical name is the one the person
+// answered about, so it is the only one a refusal may repeat.
+func TestMiddlewareApprovalDoesNotDiscloseAPathOutsideTheApprovedArea(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside-the-area.bin")
+	big := make([]byte, filesystem.MaxReadBytes+1024)
+	for i := range big {
+		big[i] = 'x'
+	}
+	if err := os.WriteFile(outsideFile, big, 0o600); err != nil {
+		t.Fatalf("write the file outside the approved area: %v", err)
+	}
+	link := filepath.Join(dir, "inside-link.conf")
+	if err := os.Symlink(outsideFile, link); err != nil {
+		t.Fatalf("link the approved area at the file outside it: %v", err)
+	}
+
+	approvals := NewApprovalStore()
+	mw := middlewareForSeams(t, grant, &fakeLedger{}, approvals, nil, &fakeKnownMaterial{}, "", newLocalFileSource(t))
+	args := fmt.Sprintf(`{"path":%q}`, link)
+
+	proposal, out, err := approveWiringProposal(t, mw, approvals, "files.read", args)
+	if err != nil {
+		t.Fatalf("the refusal returned an error: %v — a refused call is an answer", err)
+	}
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, link) {
+		t.Fatalf("refusal = %q, want a refusal naming the path the call carried (%s)", out, link)
+	}
+	if !strings.Contains(out, "exceeds") {
+		t.Fatalf("refusal = %q, want it to say the file is over the read ceiling", out)
+	}
+	for _, leaked := range []string{filepath.Base(outsideFile), fmt.Sprint(len(big))} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("refusal = %q, want nothing about %q, which is outside the approved area", out, leaked)
+		}
+	}
+	if versions, ok := approvals.ApprovedFileVersions(proposal); !ok || len(versions) != 0 {
+		t.Fatalf("approved versions = %v, %v; a failed capture binds nothing", versions, ok)
+	}
+}
+
 // files.create resolves the name it will occupy the way the editor does — the
 // parent's canonical identity plus the base name — so an absolute but
 // un-normalized path is not refused for a spelling the write itself resolves.

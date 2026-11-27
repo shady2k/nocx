@@ -281,18 +281,57 @@ func TestCommitTransportLossIsIndeterminate(t *testing.T) {
 	}
 }
 
-type blockedStatusService struct {
+type blockedGitService struct {
 	*hostsvc.Service
-	started chan<- struct{}
-	release <-chan struct{}
+	operation string
+	started   chan<- struct{}
+	release   <-chan struct{}
 }
 
-func (s blockedStatusService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
-	if op == "status" {
+func (s blockedGitService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	if op == s.operation {
 		close(s.started)
 		<-s.release
 	}
 	return s.Service.Call(ctx, op, params)
+}
+
+func runGitCallWithTransportLoss(t *testing.T, op string, call func(git.Repo) (git.Status, error)) (git.Status, error) {
+	t.Helper()
+	dir := fixtureRepo(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	conn := newKillableConn(func(in io.Reader, out io.Writer) int {
+		return serveGitHelper(in, out, blockedGitService{
+			Service:   hostsvc.New(localgit.NewFactory()),
+			operation: op,
+			started:   started,
+			release:   release,
+		})
+	})
+	c := dialKillable(t, conn)
+	repo := openHelper(t, c, dir)
+
+	type result struct {
+		status git.Status
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		status, err := call(repo)
+		done <- result{status, err}
+	}()
+	// The helper has received the operation and cannot answer while it is blocked.
+	select {
+	case <-started:
+	case res := <-done:
+		t.Fatalf("%s returned before reaching the helper: status %+v, error %v", op, res.status, res.err)
+	}
+	conn.kill()
+
+	res := <-done
+	return res.status, res.err
 }
 
 // TestReadTransportLossIsOrdinaryFailure is D12's contrast: a READ losing
@@ -300,34 +339,9 @@ func (s blockedStatusService) Call(ctx context.Context, op string, params json.R
 // an indeterminate outcome, never a refusal. The commit's indeterminate is
 // special because a commit cannot be re-run safely; a status read can.
 func TestReadTransportLossIsOrdinaryFailure(t *testing.T) {
-	dir := fixtureRepo(t)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	defer close(release)
-	conn := newKillableConn(func(in io.Reader, out io.Writer) int {
-		return serveGitHelper(in, out, blockedStatusService{
-			Service: hostsvc.New(localgit.NewFactory()),
-			started: started,
-			release: release,
-		})
+	_, err := runGitCallWithTransportLoss(t, "status", func(repo git.Repo) (git.Status, error) {
+		return repo.Status(context.Background())
 	})
-	c := dialKillable(t, conn)
-	repo := openHelper(t, c, dir)
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := repo.Status(context.Background())
-		done <- err
-	}()
-	// The helper received status and cannot reply until the test releases it.
-	select {
-	case <-started:
-	case err := <-done:
-		t.Fatalf("status returned before it reached the helper: %v", err)
-	}
-	conn.kill()
-
-	err := <-done
 	if err == nil {
 		t.Fatal("a lost read must fail")
 	}
@@ -349,14 +363,9 @@ func TestReadTransportLossIsOrdinaryFailure(t *testing.T) {
 // mutation result with a state, and the panel's existing "may have
 // happened" handling covers the rest.
 func TestLostMutationIsNeverARefusalOrSilentSuccess(t *testing.T) {
-	dir := fixtureRepo(t)
-	conn := newKillableConn(helperPeer(t))
-	c := dialKillable(t, conn)
-	repo := openHelper(t, c, dir)
-
-	conn.kill()
-
-	st, err := repo.Stage(context.Background(), []string{"f.txt"})
+	st, err := runGitCallWithTransportLoss(t, "stage", func(repo git.Repo) (git.Status, error) {
+		return repo.Stage(context.Background(), []string{"f.txt"})
+	})
 	if err == nil {
 		t.Fatalf("a lost mutation must not look like a success (status %+v)", st)
 	}

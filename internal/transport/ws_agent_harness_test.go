@@ -401,7 +401,7 @@ func TestAgentHarnessPlacesDelayedToolAtStreamBoundary(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- handler.askHarness(t.Context(), askRunContext{}, assistant.AskParams{
-			RunID: "boundary-run", SessionID: sid, Environment: content.Environment{Kind: content.EnvLocal}, Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: ledger, KnownMaterial: adapterKnownMaterial(h.v), Files: handler.filesFor(session.ID(sid)),
+			RunID: "boundary-run", SessionID: sid, Grant: grant, FreshGrant: func() *content.Grant { return grant }, AttemptLedger: ledger, KnownMaterial: adapterKnownMaterial(h.v), Files: handler.filesFor(session.ID(sid)),
 		}, func(ev agentAskEvent) error {
 			switch string(ev.Kind) {
 			case "tool_started":

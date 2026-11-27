@@ -33,54 +33,19 @@ const (
 // failure must say what is missing.
 var errNoFileBinding = errors.New("no file binding is bound to this run")
 
-// The three file tools act through the pane's OWN file binding: RunContext.Files
+// The five file tools act through the pane's OWN file binding: RunContext.Files
 // is the source each capability acquires a short-lived Handle from, so an SSH
 // pane reads and writes that server's files and a local pane reads this
 // machine's — with one implementation and no path by which the tool could name
 // the other (ADR-anntnxdj §5, stage 10).
 //
-// Two guarantees remain, and both are the constructor declining to construct.
-// A pane that is not this machine is refused by localPaneOnly until the last
-// leaf of the stage (.11.4) removes the stub; a run with no Files source gets no
-// capability at all. Refusing HERE is what makes "the tool cannot exceed what it
-// was given" true by the same mechanism the grant's deadline uses
-// (withinGrantLifetime). A caller that wants the model to READ a refusal
-// composes a guard over the same facts — the tool's name (ReachesLocalDisk) and
-// the run's pane — so the sentence is ours rather than a failure about a
-// constructor.
-var ErrRemoteFileTools = errors.New("nocx's file tools reach this machine's disk only; the remote file tools are coming")
-
-// ReachesLocalDisk reports whether the declaration's capability is the pane's
-// filesystem: files.read, files.list, files.search, files.edit and
-// files.create, which reach whatever disk the pane is on. It is the one answer
-// to "does this tool need the pane to be local", read by the guard that turns
-// a refusal into a sentence — so the two cannot disagree about which tools the
-// fact is about. It goes with localPaneOnly when the last leaf of the stage
-// removes the stub (ADR-anntnxdj stage 8, nocx-a62cl.11.4).
-func ReachesLocalDisk(name string) bool {
-	switch name {
-	case "files.read", "files.list", "files.search", "files.edit", "files.create":
-		return true
-	}
-	return false
-}
-
-// localPaneOnly is why a file tool has no capability on a pane that is not
-// this machine. The zero Environment names no pane and is refused with it: a
-// caller that never said where the run is has not said it is here.
-//
-// It is a STUB with a date, not the design: the capability below already acts
-// through the pane's own binding, so what still keeps an SSH pane out is this
-// sentence rather than a missing route. Two leaves remain before it can go —
-// evidence read through the Handle (.11.2) and list/search over it (.11.3) —
-// and the stub is removed by the leaf that can then describe an SSH pane's
-// files honestly (.11.4).
-func localPaneOnly(tool string, runCtx RunContext) error {
-	if runCtx.Environment.Kind == content.EnvLocal {
-		return nil
-	}
-	return fmt.Errorf("%s: %w", tool, ErrRemoteFileTools)
-}
+// The one guarantee left is the constructor declining to construct: a run with
+// no Files source gets no capability at all. Refusing HERE is what makes "the
+// tool cannot exceed what it was given" true by the same mechanism the grant's
+// deadline uses (withinGrantLifetime). The pane's own host is reached through
+// the binding and nowhere else, so which machine a call acts on is a property
+// of the binding the transport minted for that pane's session — never of the
+// pane's kind, which is why this file no longer asks what it is.
 
 // narrowFilesRead is the files.read row's capability constructor. It receives
 // the resources resolved from this call and keeps only the path identities
@@ -93,7 +58,7 @@ func narrowFilesRead(grant content.Grant, resources []ResourceRef, runCtx RunCon
 // narrowFilesList and narrowFilesSearch are files.list's and files.search's
 // constructors, and they are files.read's: listing a directory and searching
 // its files are reads within the grant's paths, with the same exact-path
-// narrowing and the same refusal on a pane that is not this machine. One
+// narrowing and the same refusal with no binding at all. One
 // constructor, so the three cannot drift into three answers about what a file
 // capability may reach.
 func narrowFilesList(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
@@ -105,9 +70,6 @@ func narrowFilesSearch(grant content.Grant, resources []ResourceRef, runCtx RunC
 }
 
 func narrowFilesQuery(tool string, grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
-	if err := localPaneOnly(tool, runCtx); err != nil {
-		return nil, err
-	}
 	if runCtx.Files == nil {
 		return nil, fmt.Errorf("narrow %s: %w", tool, errNoFileBinding)
 	}
@@ -142,9 +104,6 @@ func filesystemRoots(grant content.Grant, effect content.Effect) []string {
 }
 
 func narrowFilesEdit(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
-	if err := localPaneOnly("files.edit", runCtx); err != nil {
-		return nil, err
-	}
 	if runCtx.Files == nil {
 		return nil, fmt.Errorf("narrow files.edit: %w", errNoFileBinding)
 	}
@@ -153,9 +112,6 @@ func narrowFilesEdit(grant content.Grant, resources []ResourceRef, runCtx RunCon
 }
 
 func narrowFilesCreate(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
-	if err := localPaneOnly("files.create", runCtx); err != nil {
-		return nil, err
-	}
 	if runCtx.Files == nil {
 		return nil, fmt.Errorf("narrow files.create: %w", errNoFileBinding)
 	}

@@ -1,23 +1,27 @@
 package assistant
 
-// A file tool on a pane that is not this machine is REFUSED, and this
-// machine's disk is not touched (ADR-anntnxdj §5, decision 3): the tools act
-// through the pane's own binding — a HandleSource, from which each call takes a
-// short-lived filesystem.Handle and closes it — and agenttools.localPaneOnly
-// refuses a pane that is not local until .11.4. So `files.*` refuse on a
-// non-local pane, say that the remote file tools are coming, and stay declared
-// — the tool list is the cache prefix and it does not move when they arrive.
+// Files on a pane (stage 10, ADR-anntnxdj §5). Which machine a call reaches is
+// the BINDING's fact, not the pane's kind: RunContext.Files is the route the
+// transport mints for the run's session, and the file tools hold nothing else
+// (agenttools.narrow.go). Two things are asserted here, and both are the
+// assistant's own half of the stage:
 //
-// The refusal is a REFUSAL AND NOT A FAULT: the call's own slot carries our
-// sentence, the run continues, and the person is never handed a failure about
-// a constructor. That is why the answer comes from a chain point — the same
-// shape every other refusal has — while the capability constructor refuses
-// too, so no chain can reach this machine's disk through a forgotten link.
+//   - a run WITH a binding reads, edits and creates through it, so the route is
+//     wired to the tools rather than merely present;
+//   - a binding that cannot reach its host answers with the connection's own
+//     helper reason (mode-raw, helper-lost, …), as OUR refusal in the call's
+//     slot rather than as a failure that ends the turn — and the tools that do
+//     not need that host keep working in the same run.
+//
+// That an SSH pane's binding reaches THAT server, and never this machine's
+// disk, is asserted where the binding is minted and used
+// (internal/transport's acceptance test) and end to end in
+// e2e/assistant-ssh-files.spec.ts. Asserting it here would prove only that the
+// tools use whatever source a test handed them.
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,46 +33,23 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 )
 
-// localPaneEnvironment is where a pane on THIS machine is, as the transport
-// derives it (environmentForSession): the kind and the id that rule makes.
-func localPaneEnvironment() content.Environment {
-	return content.Environment{ID: content.EnvironmentIDFor(content.EnvLocal, ""), Kind: content.EnvLocal}
-}
-
-// remotePaneEnvironment is the same derivation for a pane on another machine.
-func remotePaneEnvironment() content.Environment {
-	const endpoint = "deploy@build-01:22"
-	host := endpoint
-	return content.Environment{
-		ID:       content.EnvironmentIDFor(content.EnvSSH, endpoint),
-		Kind:     content.EnvSSH,
-		Endpoint: &host,
-	}
-}
-
-// localRunContext is the run context of a caller whose pane is this machine and
-// whose run carries the pane's file binding — what the file tools' capability
-// tests below and elsewhere assume.
+// localRunContext is the run context of a caller whose run carries a binding to
+// this machine's files — what the file tools' capability tests below and
+// elsewhere assume.
 func localRunContext(t *testing.T) agenttools.RunContext {
 	t.Helper()
-	return agenttools.RunContext{Environment: localPaneEnvironment(), Files: newLocalFileSource(t)}
+	return agenttools.RunContext{Files: newLocalFileSource(t)}
 }
 
-// toolsOn binds the harness's tool entry for one pane, with a real file binding.
-func toolsOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *RunTools {
-	t.Helper()
-	return toolsOnWithFiles(t, grant, pane, newLocalFileSource(t), ledger, watch)
-}
-
-// toolsOnWithFiles is toolsOn with the run's Files source supplied, so a test
-// can hand it a spy and assert what was never acquired.
-func toolsOnWithFiles(t *testing.T, grant content.Grant, pane content.Environment, files filesystem.HandleSource, ledger AttemptLedger, watch *watchedCalls) *RunTools {
+// toolsOnWithFiles binds the harness's tool entry for one run with the Files
+// source supplied, so a test can hand it a spy and assert what it reached.
+func toolsOnWithFiles(t *testing.T, grant content.Grant, files filesystem.HandleSource, ledger AttemptLedger, watch *watchedCalls) *RunTools {
 	t.Helper()
 	owner, _, err := NewClientAndRegistry(nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := BindRunTools(context.Background(), owner, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, Environment: pane, Files: files, AttemptLedger: ledger, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-1", SessionID: "session-1", Attempt: 1, TurnEntryID: "turn-entry"}, func(call ToolCall) error { watch.seen = append(watch.seen, call); return nil })
+	bound, err := BindRunTools(context.Background(), owner, AskParams{Grant: &grant, FreshGrant: func() *content.Grant { return &grant }, Files: files, AttemptLedger: ledger, KnownMaterial: &fakeKnownMaterial{}, RunID: "run-1", SessionID: "session-1", Attempt: 1, TurnEntryID: "turn-entry"}, func(call ToolCall) error { watch.seen = append(watch.seen, call); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,75 +66,11 @@ func invokePaneTool(bound *RunTools, method, callID, args string) (string, error
 	return bound.Dispatch(invocation)
 }
 
-// TestFileToolsRefuseAPaneThatIsNotThisMachine is the criterion: on an SSH
-// pane each of the three refuses, and nothing on this machine is read or
-// changed.
-func TestFileToolsRefuseAPaneThatIsNotThisMachine(t *testing.T) {
-	dir := t.TempDir()
-	readPath := filepath.Join(dir, "notes.txt")
-	const body = "this machine's copy, which the remote pane must never see\n"
-	writeFile(t, readPath, body)
-	editPath := filepath.Join(dir, "edit-me.txt")
-	writeFile(t, editPath, "before\n")
-	created := filepath.Join(dir, "created.txt")
-
-	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
-	ledger := &fakeLedger{}
-	watch := &watchedCalls{}
-	files := &spyFileSource{inner: newLocalFileSource(t)}
-	k := toolsOnWithFiles(t, grant, remotePaneEnvironment(), files, ledger, watch)
-
-	calls := []struct{ method, params string }{
-		{"files.read", fmt.Sprintf(`{"path":%q}`, readPath)},
-		{"files.edit", fmt.Sprintf(`{"path":%q,"revision":"r1","patch":"PUT 1.=1:\n+after"}`, editPath)},
-		{"files.create", fmt.Sprintf(`{"path":%q,"content":"created"}`, created)},
-	}
-	for _, call := range calls {
-		_, err := invokePaneTool(k, call.method, "call-1", call.params)
-		var refusal *DispatchRefusalError
-		if !errors.As(err, &refusal) {
-			t.Fatalf("%s: %v, want a dispatch refusal", call.method, err)
-		}
-		out := refusal.Reason
-		if !strings.Contains(out, "REFUSED") || !strings.Contains(out, call.method) {
-			t.Fatalf("%s on an SSH pane: result = %q, want the refusal naming the tool", call.method, out)
-		}
-		if !strings.Contains(out, "remote file tools are coming") {
-			t.Fatalf("%s on an SSH pane: result = %q, want it to say the remote file tools are coming", call.method, out)
-		}
-		if strings.Contains(out, strings.TrimSpace(body)) {
-			t.Fatalf("%s on an SSH pane: the answer carries this machine's file contents, so the file was read", call.method)
-		}
-	}
-	// The executor never ran: nothing announced a call, and nothing opened an
-	// attempt in the ledger.
-	if len(watch.seen) != 0 {
-		t.Fatalf("announced tool calls = %v, want none — the tools never ran", watch.seen)
-	}
-	if got := ledger.calls(); len(got) != 0 {
-		t.Fatalf("ledger writes = %v, want none — no attempt was opened", got)
-	}
-	// And the pane's binding was never opened: the refusal happened before any
-	// route to a filesystem was taken, not after one was tried.
-	if got := files.acquisitions(); got != 0 {
-		t.Fatalf("file binding acquisitions = %d, want none on a pane that is not this machine", got)
-	}
-	// And the disk is as it was.
-	if got := readFileString(t, readPath); got != body {
-		t.Fatalf("%s = %q, want it unchanged", readPath, got)
-	}
-	if got := readFileString(t, editPath); got != "before\n" {
-		t.Fatalf("%s = %q, want it unchanged", editPath, got)
-	}
-	if _, err := os.Stat(created); !os.IsNotExist(err) {
-		t.Fatalf("%s exists after a refused files.create (err = %v)", created, err)
-	}
-}
-
-// And the paired half: on a pane that IS this machine the three work exactly
-// as they did before, so "refuses a remote pane" cannot be satisfied by a
-// capability that refuses everywhere.
-func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
+// TestFileToolsWorkWithAPaneBinding is the paired half of the no-binding
+// refusal (agenttools.narrow_pane_test.go): with the run's binding present the
+// three tools do their work through it, so "no capability without a binding"
+// cannot be satisfied by a capability that does nothing.
+func TestFileToolsWorkWithAPaneBinding(t *testing.T) {
 	dir := t.TempDir()
 	readPath := filepath.Join(dir, "notes.txt")
 	writeFile(t, readPath, "hello\n")
@@ -161,11 +78,12 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	watch := &watchedCalls{}
-	k := toolsOn(t, grant, localPaneEnvironment(), &fakeLedger{}, watch)
+	files := &spyFileSource{inner: newLocalFileSource(t)}
+	k := toolsOnWithFiles(t, grant, files, &fakeLedger{}, watch)
 
 	out, err := invokePaneTool(k, "files.read", "call-1", fmt.Sprintf(`{"path":%q}`, readPath))
 	if err != nil {
-		t.Fatalf("files.read on a local pane: %v", err)
+		t.Fatalf("files.read: %v", err)
 	}
 	var readResult struct {
 		Revision string `json:"revision"`
@@ -184,7 +102,7 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, invokeErr := invokePaneTool(k, "files.edit", "call-2", string(editParams)); invokeErr != nil {
-		t.Fatalf("files.edit on a local pane: %v", invokeErr)
+		t.Fatalf("files.edit: %v", invokeErr)
 	}
 	if got := readFileString(t, readPath); got != "hello there\n" {
 		t.Fatalf("%s = %q, want the patch applied", readPath, got)
@@ -195,7 +113,7 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, createErr := invokePaneTool(k, "files.create", "call-3", string(createParams)); createErr != nil {
-		t.Fatalf("files.create on a local pane: %v", createErr)
+		t.Fatalf("files.create: %v", createErr)
 	}
 	if got := readFileString(t, created); got != "made\n" {
 		t.Fatalf("%s = %q, want the file created", created, got)
@@ -203,6 +121,75 @@ func TestFileToolsWorkOnAPaneThatIsThisMachine(t *testing.T) {
 	if len(watch.seen) != 3 {
 		t.Fatalf("announced tool calls = %v, want the three calls that ran", watch.seen)
 	}
+	// One binding per call: the route is taken for each operation and closed
+	// again, so a call cannot inherit the previous one's handle.
+	if got := files.acquisitions(); got < 3 {
+		t.Fatalf("file binding acquisitions = %d, want at least one per call", got)
+	}
+}
+
+// TestFilesOnAPaneWhoseHelperIsUnavailableRefuseWithItsReason is the stage's
+// third criterion at the seam a model reads: a binding whose host cannot be
+// reached answers `files.*` with the connection's published reason, as our
+// sentence in the refused call's slot — and the run goes on, so `session.read`
+// in the same run is unaffected.
+func TestFilesOnAPaneWhoseHelperIsUnavailableRefuseWithItsReason(t *testing.T) {
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-a"},
+		{Kind: content.ResourcePath, ID: "/srv/proj"},
+	})
+	ledger := &fakeLedger{}
+	mw := middlewareForSeams(t, grant, ledger, nil, &recordingRequester{body: liveFrameBody("load 1.00", "idle")},
+		&fakeKnownMaterial{}, "", unavailableFileSource{err: &filesystem.ErrUnavailable{
+			Reason: "mode-raw", Action: "host-settings",
+		}})
+
+	out, err := wrappedEndpoint(mw, "files.read", "call-1", `{"path":"/srv/proj/deploy.conf"}`)
+	if err != nil {
+		t.Fatalf("files.read on an unreachable host returned an error: %v — a refusal is an answer, not a fault", err)
+	}
+	if !strings.HasPrefix(out, "REFUSED") || !strings.Contains(out, "files.read") {
+		t.Fatalf("refusal = %q, want nocx's own refusal naming the tool", out)
+	}
+	// The reason and the action are the connection's own, the same tokens the
+	// Files panel names for that host: a model told only "unavailable" would
+	// propose the same call again.
+	for _, want := range []string{"mode-raw", "host-settings", "helper"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal = %q, want it to name %q", out, want)
+		}
+	}
+	// The attempt was opened and closed: the refusal is recorded, not lost.
+	if ledger.started() != 1 {
+		t.Fatalf("ledger opened %d executions, want the refused call's own attempt", ledger.started())
+	}
+	finished := 0
+	for _, call := range ledger.calls() {
+		if strings.HasPrefix(call, "finish:") {
+			finished++
+		}
+	}
+	if finished != 1 {
+		t.Fatalf("ledger finished %d executions, want the refused attempt closed", finished)
+	}
+
+	// And the tools that do not need the host still work: the refusal is about
+	// this route, never about the run.
+	read, readErr := wrappedEndpoint(mw, "session.read", "call-2", `{}`)
+	if readErr != nil {
+		t.Fatalf("session.read in the same run: %v", readErr)
+	}
+	if !strings.Contains(read, "load 1.00") {
+		t.Fatalf("session.read = %q, want the pane's frame", read)
+	}
+}
+
+// unavailableFileSource is a run whose binding cannot reach its host at all —
+// the state helperfs and the provider factory both answer with.
+type unavailableFileSource struct{ err error }
+
+func (s unavailableFileSource) Acquire(context.Context) (filesystem.Handle, func(), error) {
+	return nil, nil, s.err
 }
 
 // readFileString reads a file this test created under t.TempDir.
@@ -214,20 +201,4 @@ func readFileString(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
-}
-
-func kernelOn(t *testing.T, grant content.Grant, pane content.Environment, ledger AttemptLedger, watch *watchedCalls) *effectKernel {
-	t.Helper()
-	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
-	if err != nil {
-		t.Fatalf("Assemble: %v", err)
-	}
-	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "session-1", 1, "turn-entry", nil, Attachments{}, func(call ToolCall) error {
-		watch.seen = append(watch.seen, call)
-		return nil
-	}, toolSeams{paneEnvironment: pane, files: newLocalFileSource(t)})
-	if err != nil {
-		t.Fatalf("newEffectKernel: %v", err)
-	}
-	return k
 }

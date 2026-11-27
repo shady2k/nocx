@@ -170,7 +170,7 @@ func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
 }
 
 func askParamsWith(_ string, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, requester RendererRequester) AskParams {
-	return AskParams{Grant: grant, AttemptLedger: ledger, Approvals: approvals, KnownMaterial: known, Requester: requester, SessionID: "session-a", RunID: "run-1", Attempt: 1, Environment: localPaneEnvironment()}
+	return AskParams{Grant: grant, AttemptLedger: ledger, Approvals: approvals, KnownMaterial: known, Requester: requester, SessionID: "session-a", RunID: "run-1", Attempt: 1}
 }
 
 // askParamsWithFiles is askParamsWith for a test that then RUNS one of the file

@@ -57,11 +57,6 @@ func TestFilesQueryToolsDeclareTheObservationTheyPerform(t *testing.T) {
 		if len(tool.ParamsSchema) == 0 || len(tool.ResultSchema) == 0 {
 			t.Errorf("%s assembled no params or result contract", name)
 		}
-		// The stage's own rule: both are local-disk tools until .11.4 removes
-		// the stub, and the guard that phrases the refusal reads this list.
-		if !ReachesLocalDisk(name) {
-			t.Errorf("%s is not in ReachesLocalDisk before .11.4, so the guard and the constructor disagree", name)
-		}
 	}
 }
 
@@ -84,8 +79,7 @@ func TestFilesQueryToolsNarrowToTheScopedReader(t *testing.T) {
 			t.Fatalf("%s is not in the assembled registry", name)
 		}
 		capability, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: root}}, RunContext{
-			Environment: thisMachine(),
-			Files:       staticFileSource{},
+			Files: staticFileSource{},
 		})
 		if err != nil {
 			t.Fatalf("Narrow %s: %v", name, err)
@@ -93,18 +87,8 @@ func TestFilesQueryToolsNarrowToTheScopedReader(t *testing.T) {
 		if _, ok := capability.(*filesystem.ScopedReader); !ok {
 			t.Fatalf("%s capability is %T, want *filesystem.ScopedReader", name, capability)
 		}
-		// The same constructor refuses a pane that is not this machine: the
-		// stub is removed by one leaf (.11.4), not by one tool at a time.
-		if _, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: root}}, RunContext{
-			Environment: anotherMachine(),
-			Files:       staticFileSource{},
-		}); !errors.Is(err, ErrRemoteFileTools) {
-			t.Fatalf("%s on a remote pane: err = %v, want ErrRemoteFileTools", name, err)
-		}
 		// And it fails closed with no binding at all.
-		if _, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: root}}, RunContext{
-			Environment: thisMachine(),
-		}); err == nil {
+		if _, err := tool.Narrow(grant, []ResourceRef{{Kind: content.ResourcePath, ID: root}}, RunContext{}); err == nil {
 			t.Fatalf("%s built a capability with no file binding", name)
 		}
 	}

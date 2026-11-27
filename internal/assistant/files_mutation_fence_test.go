@@ -90,7 +90,7 @@ func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLe
 	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
 		watch.seen = append(watch.seen, c)
 		return nil
-	}, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
+	}, toolSeams{files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestExecuteFilesMutations_HandTheCapabilityRefusalToTheKernelSeam(t *testin
 			if execErr == nil {
 				t.Fatalf("%s answered its own scope refusal with %q — the fault-or-answer decision belongs to the kernel seam, not the tool", tc.tool, out)
 			}
-			if !capabilityRefusal(execErr) {
+			if reason, _ := capabilityRefusal(execErr); reason != RefusedOutOfScope {
 				t.Fatalf("%s returned %v, which the kernel's one predicate does not recognise as a capability refusal", tc.tool, execErr)
 			}
 			if out != "" {

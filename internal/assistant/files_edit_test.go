@@ -176,7 +176,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	editOut, err := executeFilesEdit(toolTestContext(), editCapability, mustJSON(t, map[string]string{
 		"path": escapeExistingPath, "revision": revision, "patch": "PUT 1.=1:\n+changed",
 	}), toolSeams{})
-	if !capabilityRefusal(err) {
+	if reason, _ := capabilityRefusal(err); reason != RefusedOutOfScope {
 		t.Fatalf("executeFilesEdit(escape) = %q, %v — want the capability refusal the kernel seam classifies", editOut, err)
 	}
 	if editOut != "" {
@@ -203,7 +203,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	escapeOut, err := executeFilesCreate(toolTestContext(), escapeCapability, escapeArgs, toolSeams{})
-	if !capabilityRefusal(err) {
+	if reason, _ := capabilityRefusal(err); reason != RefusedOutOfScope {
 		t.Fatalf("executeFilesCreate(escape) = %q, %v — want the capability refusal the kernel seam classifies", escapeOut, err)
 	}
 	if escapeOut != "" {

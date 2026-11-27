@@ -46,19 +46,14 @@ func mustDirFS(t *testing.T) fs.FS {
 	return fsys
 }
 
-// localPane is the run context of a run whose pane is THIS machine, with the
-// real per-call file binding over a local provider in a package Registry — the
-// shape the transport binds for the assistant, and the same one the Files panel
-// registers in. The admitting adapter derives the environment from the
-// session's own facts (environmentForSession); a context that names no pane is
-// refused on purpose, so a test that expects a capability says where its pane
-// is.
+// localPane is the run context of a run with the real per-call file binding
+// over a local provider in a package Registry — the shape the transport binds
+// for the assistant, and the same one the Files panel registers in. The binding
+// is the whole of "which machine": a context that carries none is refused on
+// purpose, so a test that expects a capability says where its files are.
 func localPane(t *testing.T) RunContext {
 	t.Helper()
-	return RunContext{Environment: content.Environment{
-		ID:   content.EnvironmentIDFor(content.EnvLocal, ""),
-		Kind: content.EnvLocal,
-	}, Files: newTestFileSource(t)}
+	return RunContext{Files: newTestFileSource(t)}
 }
 
 const filesReadSchema = `{

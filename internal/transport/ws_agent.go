@@ -1298,13 +1298,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		SessionSource: h.sessions,
 		Expansions:    h.expansions,
 		Workers:       h.workerStore,
-		// Where this pane is: the environmentForSession value the run's
-		// prompt facts already carry, which is also what the ledger records
-		// for the run — one derivation, read here rather than made again. It
-		// travels so a tool that can only act on this machine refuses a pane
-		// on another one instead of reading the local disk (ADR-anntnxdj §5,
-		// decision 3).
-		Environment: rc.promptFacts.Env,
 		// The pane's own files, bound per CALL rather than per run: every
 		// files.* invocation acquires one short-lived handle, so the registry
 		// holds nothing between calls and nothing after a cancelled one.

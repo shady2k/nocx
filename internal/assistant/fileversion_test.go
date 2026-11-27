@@ -3,8 +3,11 @@ package assistant
 import (
 	"context"
 	"errors"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -309,16 +312,174 @@ func TestApprovalStore_RefusesCapturedBindingWithNoSource(t *testing.T) {
 // sees comes from the pane's binding. This is a source-level ratchet, because
 // the failure it guards is a line of code that compiles and passes every
 // functional test on a local pane — it only misbehaves on somebody else's host.
-func TestFileVersion_HasNoDirectDiskAccess(t *testing.T) {
-	data, err := os.ReadFile("fileversion.go")
+//
+// It reads IMPORTS, not text: a comment mentioning os.Stat( is not the defect
+// (and used to fail this test falsely), while a new file in the package that
+// imports "os" is. The whole package is checked rather than fileversion.go
+// alone, because the reads live in kernel.go and approvals.go as well.
+func TestAssistantReadsNoLocalDiskThroughPackageImports(t *testing.T) {
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("read fileversion.go: %v", err)
+		t.Fatalf("read package dir: %v", err)
 	}
-	for _, forbidden := range []string{`"os"`, "os.Stat(", "os.ReadFile(", "os.Lstat(", "statIdentity", "osFileVersionSource"} {
-		if strings.Contains(string(data), forbidden) {
-			t.Fatalf("fileversion.go still contains %q: approval evidence must come from the pane's Handle, never from this machine's disk", forbidden)
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		checked++
+		fset := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+		if parseErr != nil {
+			t.Fatalf("parse %s: %v", name, parseErr)
+		}
+		for _, imp := range file.Imports {
+			path, unquoteErr := strconv.Unquote(imp.Path.Value)
+			if unquoteErr != nil {
+				t.Fatalf("%s: import %s: %v", name, imp.Path.Value, unquoteErr)
+			}
+			if path == "os" || strings.HasPrefix(path, "os/") || path == "io/ioutil" {
+				t.Errorf("%s imports %q: approval evidence and every file tool act through the pane's Handle, never through this machine's disk", name, path)
+			}
 		}
 	}
+	if checked == 0 {
+		t.Fatal("no non-test files parsed: the ratchet proved nothing")
+	}
+}
+
+// Every step of the re-read can fail AFTER a person has answered — the SSH
+// pane was closed while the question was open, the helper went away, the
+// binding turns out to have no conditional read at all. Each failure must
+// REFUSE: "could not check whether the bytes are still the ones you approved"
+// is never "unchanged", and a test that only ever exercises the successful
+// re-read cannot tell the two implementations apart (AGENTS.md rule 3).
+func TestFileVersion_EveryVerificationFailureRefuses(t *testing.T) {
+	path := writeVersionTestFile(t, "verified-after-answer.txt", "content")
+	approved, err := CaptureFileVersion(t.Context(), newLocalFileSource(t), path)
+	if err != nil {
+		t.Fatalf("CaptureFileVersion: %v", err)
+	}
+	unsupported := &filesystem.ErrVersionedUnsupported{BindingID: "binding-without-a-write-seam"}
+	refused := errors.New("helper went away")
+
+	cases := []struct {
+		name   string
+		source filesystem.HandleSource
+		// typed, when set, must be reachable from the error: the refusal keeps
+		// the cause a caller classifies on (a lost helper is not a changed
+		// file, and the kernel says so in different words).
+		typed func(error) bool
+	}{
+		{
+			name:   "acquire",
+			source: failingFileSource{err: refused},
+		},
+		{
+			name: "canonical",
+			source: handleOverrideSource{inner: newLocalFileSource(t), wrap: func(h filesystem.Handle) filesystem.Handle {
+				return overrideHandle{Handle: h, canonicalErr: refused}
+			}},
+		},
+		{
+			name: "read version",
+			source: handleOverrideSource{inner: newLocalFileSource(t), wrap: func(h filesystem.Handle) filesystem.Handle {
+				return overrideHandle{Handle: h, versioned: func(inner filesystem.VersionedFiles) filesystem.VersionedFiles {
+					return readFailingVersioned{inner: inner, err: refused}
+				}}
+			}},
+		},
+		{
+			name: "no versioned seam",
+			source: handleOverrideSource{inner: newLocalFileSource(t), wrap: func(h filesystem.Handle) filesystem.Handle {
+				return overrideHandle{Handle: h, versionedErr: unsupported}
+			}},
+			typed: func(err error) bool {
+				var missing *filesystem.ErrVersionedUnsupported
+				return errors.As(err, &missing)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := VerifyFileVersion(t.Context(), tc.source, approved)
+			if err == nil {
+				t.Fatalf("verification succeeded although %s failed: the approval would authorise bytes nobody re-read", tc.name)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("error = %v, want it to name %q", err, path)
+			}
+			if tc.typed != nil && !tc.typed(err) {
+				t.Fatalf("error = %v, want the typed cause reachable", err)
+			}
+		})
+	}
+
+	// The paired half: the same verification over an untouched file and an
+	// intact binding succeeds, so "refuses on every failure" cannot be
+	// satisfied by a verifier that refuses everything.
+	if err := VerifyFileVersion(t.Context(), newLocalFileSource(t), approved); err != nil {
+		t.Fatalf("verification of unchanged bytes through an intact binding: %v", err)
+	}
+}
+
+// handleOverrideSource is a real pane binding with one step of the handle made
+// to fail, so a failure lands exactly where the test is about.
+type handleOverrideSource struct {
+	inner filesystem.HandleSource
+	wrap  func(filesystem.Handle) filesystem.Handle
+}
+
+func (s handleOverrideSource) Acquire(ctx context.Context) (filesystem.Handle, func(), error) {
+	handle, release, err := s.inner.Acquire(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.wrap(handle), release, nil
+}
+
+// overrideHandle is one real handle with a step replaced. Every other method
+// is the binding's own, so the test measures the failure and not a fake.
+type overrideHandle struct {
+	filesystem.Handle
+	canonicalErr error
+	versioned    func(filesystem.VersionedFiles) filesystem.VersionedFiles
+	versionedErr error
+}
+
+func (h overrideHandle) Canonical(ctx context.Context, path string) (string, error) {
+	if h.canonicalErr != nil {
+		return "", h.canonicalErr
+	}
+	return h.Handle.Canonical(ctx, path)
+}
+
+func (h overrideHandle) Versioned() (filesystem.VersionedFiles, error) {
+	if h.versionedErr != nil {
+		return nil, h.versionedErr
+	}
+	versioned, err := h.Handle.Versioned()
+	if err != nil || h.versioned == nil {
+		return versioned, err
+	}
+	return h.versioned(versioned), nil
+}
+
+// readFailingVersioned is a conditional-write seam whose read fails while its
+// commit still works: exactly the shape of a helper that answers writes and
+// loses its read channel.
+type readFailingVersioned struct {
+	inner filesystem.VersionedFiles
+	err   error
+}
+
+func (v readFailingVersioned) ReadVersion(context.Context, string, int64) ([]byte, filesystem.Version, error) {
+	return nil, filesystem.Version{}, v.err
+}
+
+func (v readFailingVersioned) Commit(ctx context.Context, path string, data []byte, expect filesystem.Expect) (filesystem.Version, error) {
+	return v.inner.Commit(ctx, path, data, expect)
 }
 
 // failingFileSource is a run whose binding cannot be acquired at all.

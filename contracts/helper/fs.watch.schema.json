@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.watch.schema.json",
+  "title": "HelperFSWatchResult",
+  "description": "Result of the helper fs service's watch op: the digest of the directory as the host observed it when the watch was installed. A caller holding the digest it last listed compares the two, so a change that landed while no subscription existed is still announced — the helper's baseline is now, and it will not announce that change again. The digest is the same computation `fs.list` answers (`filesystem.ComputeRev`), so the two are comparable without a second vocabulary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rev"],
+  "properties": {
+    "rev": {
+      "description": "The digest of the whole, ordered directory at subscription time. Two callers comparing revs are comparing the same value a list would answer.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

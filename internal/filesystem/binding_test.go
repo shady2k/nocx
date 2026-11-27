@@ -521,6 +521,41 @@ func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 	}
 }
 
+func TestWatchSwapClosesNewSubscriptionWhenInstallIsCanceled(t *testing.T) {
+	reg := New()
+	p := newStubProvider()
+	id, err := reg.Register(p, "s1", "", Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Close(id) })
+	h, release, err := reg.Acquire(id, owner("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := h.Watch(t.Context(), []string{"/old"}); err != nil {
+		t.Fatal(err)
+	}
+	gate := p.blockWatch("/new")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := h.Watch(ctx, []string{"/new"})
+		result <- err
+	}()
+	<-gate.entered
+	cancel()
+	close(gate.release)
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Watch after cancellation = %v, want context.Canceled", err)
+	}
+	if !p.watchOf("/new").closed.Load() || p.watchOf("/old").closed.Load() {
+		t.Fatal("cancellation must close the new subscription and keep the old one")
+	}
+}
+
 // TestWatchSwapRetainsUnchangedWatches is the diffing half of the swap
 // (nocx-8hdia.5). files.watch REPLACES the set and the client resends the
 // whole set on every expand and collapse, so rebuilding every watch made a

@@ -115,6 +115,14 @@ type Service struct {
 	strandedMu    sync.Mutex
 	stranded      []proto.FSStrandedTemp
 	strandedPaths map[string]bool
+
+	// watchClock is the timer the watch ladder waits on; watchPolled is the
+	// test seam that observes one poll attempt (watch.go). watchMu guards the
+	// installed watch table.
+	watchClock  Clock
+	watchPolled func(id string)
+	watchMu     sync.Mutex
+	watches     map[string]*hostWatch
 }
 
 // Admission is the daemon's reservation that keeps it serving while a write
@@ -161,6 +169,8 @@ func New(provider *local.Provider, journal JournalConfig, opts ...Option) (*Serv
 		sessions:      map[string]*writeSession{},
 		locks:         newPathLocks(),
 		strandedPaths: map[string]bool{},
+		watchClock:    RealClock{},
+		watches:       map[string]*hostWatch{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -175,14 +185,15 @@ func New(provider *local.Provider, journal JournalConfig, opts ...Option) (*Serv
 func (s *Service) Name() string { return proto.ServiceFS }
 
 // Ops is the closed set of operations this service serves: the five read ops,
-// the four that make one write a session, and the inventory of what an earlier
-// generation could not clean up. An op this generation does not have is one a
-// coordinator learns about at hello, not one it learns about by writing.
+// the four that make one write a session, the inventory of what an earlier
+// generation could not clean up, and the watch pair a panel follows a directory
+// with. An op this generation does not have is one a coordinator learns about
+// at hello, not one it learns about by writing.
 func (s *Service) Ops() []string {
 	return []string{
 		proto.OpRoot, proto.OpStat, proto.OpList, proto.OpCanonical, proto.OpRead,
 		proto.OpWriteOpen, proto.OpWrite, proto.OpWriteCommit, proto.OpWriteAbort,
-		proto.OpInventory,
+		proto.OpInventory, proto.OpWatch, proto.OpUnwatch,
 	}
 }
 
@@ -210,6 +221,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.FSWriteAbortParams{})
 	case proto.OpInventory:
 		return host.SchemaFor(proto.FSInventoryParams{})
+	case proto.OpWatch:
+		return host.SchemaFor(proto.FSWatchParams{})
+	case proto.OpUnwatch:
+		return host.SchemaFor(proto.FSUnwatchParams{})
 	}
 	return nil
 }
@@ -242,6 +257,10 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		return s.writeAbort(ctx, params)
 	case proto.OpInventory:
 		return s.inventory(ctx)
+	case proto.OpWatch:
+		return s.watch(ctx, params)
+	case proto.OpUnwatch:
+		return s.unwatch(ctx, params)
 	}
 	return nil, fmt.Errorf("hostsvc: no op %q", op)
 }

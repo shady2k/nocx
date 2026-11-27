@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/fs.unwatch.schema.json",
+  "title": "HelperFSUnwatchResult",
+  "description": "Result of the helper fs service's unwatch op, and it is deliberately empty: the answer IS the watch's absence. There is no `found` flag because a caller has nothing to do differently — it asked that no watch of that id remain, and after this answer none does. Answering a shape rather than null keeps this result frozen the way every sibling's is.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

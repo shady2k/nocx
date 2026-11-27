@@ -576,6 +576,10 @@ func (s *Service) Close() error {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+	// Watches are this process's timers, not a target's files: they end before
+	// the journal does, and after this no poll goroutine can touch a connection
+	// a later generation owns (watch.go).
+	s.stopAllWatches()
 
 	var firstErr error
 	for _, sess := range s.allSessions() {

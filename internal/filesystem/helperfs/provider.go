@@ -21,9 +21,10 @@ type Registry interface {
 
 // Provider holds a connection identity, not a client or an SSH connection.
 type Provider struct {
-	reg          Registry
-	connectionID string
-	rootPath     string
+	reg             Registry
+	connectionID    string
+	rootPath        string
+	watchRetryClock watchRetryClock
 }
 
 var (
@@ -32,7 +33,7 @@ var (
 )
 
 func New(reg Registry, connectionID, rootPath string) *Provider {
-	return &Provider{reg: reg, connectionID: connectionID, rootPath: rootPath}
+	return &Provider{reg: reg, connectionID: connectionID, rootPath: rootPath, watchRetryClock: watchRetryTimer{}}
 }
 
 // HelperAxis reports the connection's helper axis as the registry holds it
@@ -210,10 +211,6 @@ func (p *Provider) readWhole(ctx context.Context, name string, limit int64) (pro
 	var out proto.FSReadResult
 	err := p.call(ctx, proto.OpRead, name, proto.FSReadParams{Path: name, Offset: 0, Length: limit, Whole: true}, &out)
 	return out, err
-}
-
-func (*Provider) Watch(context.Context, string) (filesystem.Watch, error) {
-	return nil, &filesystem.ErrWatchUnavailable{}
 }
 
 // The registry owns the clients and their lifetimes.

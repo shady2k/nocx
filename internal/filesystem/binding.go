@@ -58,6 +58,20 @@ type Binding struct {
 
 	watchMu sync.Mutex
 	watches map[string]Watch // the binding's watch set, replaced whole (spec §5.2)
+	// signals is the binding's change stream: one path per provider watch that
+	// fired. It is never nil, and a binding whose provider cannot watch simply
+	// never produces a value on it — the capability is decided by Watch's
+	// answer (ErrWatchUnavailable), not by a second flag that could disagree.
+	//
+	// signalsEnd is closed when the binding closes, so a relay blocked on a
+	// full stream exits instead of outliving the binding that reads it.
+	signals    chan string
+	signalsEnd chan struct{}
+	// relays holds the stop channel of each installed watch's relay, keyed by
+	// the same path as watches. A retained watch keeps its relay: the set is
+	// DIFFED, so restarting a relay for a path that never stopped would leave
+	// the old one reading the same channel.
+	relays map[string]chan struct{}
 }
 
 // ID is the binding's opaque identity. It is what every wire call after
@@ -83,6 +97,17 @@ type Handle interface {
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
 	Stat(ctx context.Context, path string) (Stat, error)
 	Watch(ctx context.Context, paths []string) (WatchMode, error)
+	// WatchSignals is the change stream of the binding's current watch set:
+	// one watched path per provider watch that fired. A binding whose provider
+	// has no watch produces nothing on it — Watch answered
+	// ErrWatchUnavailable, which is the one place that capability is decided,
+	// so a consumer reads this channel only for a binding that established a
+	// provider-side watch.
+	//
+	// It takes no use-guard: it hands out a channel the binding owns and
+	// reaches no provider, so a consumer may hold it across the binding's life
+	// exactly as it holds the watcher's own handle.
+	WatchSignals() <-chan string
 	// Canonical resolves a spelled path to the provider's canonical identity
 	// of the object it names — symlinks followed, the provider's own rules
 	// applied. It is the comparison a scope is enforced on, so a capability
@@ -312,6 +337,9 @@ func (r *Registry) Register(p Provider, sessionID sessionid.ID, endpointID strin
 		axis:       caps.Axis,
 		versioned:  caps.Versioned,
 		watches:    make(map[string]Watch),
+		relays:     make(map[string]chan struct{}),
+		signals:    make(chan string),
+		signalsEnd: make(chan struct{}),
 		drained:    make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -457,7 +485,16 @@ func (b *Binding) close() error {
 	b.watchMu.Lock()
 	ws := b.watches
 	b.watches = nil
+	relays := b.relays
+	b.relays = nil
+	close(b.signalsEnd)
 	b.watchMu.Unlock()
+	// Relays stop before the watches they read are closed: a relay blocked on
+	// a stream nobody holds must end here rather than wait for the close to
+	// unblock it.
+	for _, stop := range relays {
+		close(stop)
+	}
 	for _, w := range ws {
 		if err := w.Close(); err != nil {
 			errs = append(errs, err)
@@ -517,6 +554,7 @@ func (b *Binding) swapWatches(ctx context.Context, paths []string) (WatchMode, e
 	// Only what THIS call established, so the failure path can close exactly
 	// that and nothing the caller already had.
 	established := make([]string, 0, len(unique))
+	var installErr error
 	for _, p := range unique {
 		if w, ok := b.watches[p]; ok {
 			fresh[p] = w // retained: same live watch, no window
@@ -524,23 +562,86 @@ func (b *Binding) swapWatches(ctx context.Context, paths []string) (WatchMode, e
 		}
 		w, err := b.provider.Watch(ctx, p)
 		if err != nil {
-			for _, ep := range established {
-				_ = fresh[ep].Close() // never leak a partially established set
-			}
-			return WatchMode{}, err
+			installErr = err
+			break
 		}
 		fresh[p] = w
 		established = append(established, p)
 	}
+	if installErr == nil && len(established) > 0 {
+		// A provider can finish after the caller has fallen back to polling.
+		// Keep the old set and close any new subscriptions in that case.
+		installErr = ctx.Err()
+	}
+	if installErr != nil {
+		for _, p := range established {
+			_ = fresh[p].Close()
+		}
+		return WatchMode{}, installErr
+	}
 	old := b.watches
 	b.watches = fresh
+	for _, p := range established {
+		if b.relays == nil {
+			// close() ran between the drained guard and this swap — it is
+			// bounded, so a provider call that outlived it can land here. The
+			// streams are already ended (signalsEnd is closed), so the watch is
+			// installed for nobody and a relay would return immediately; what
+			// must not happen is a write into the nil map.
+			break
+		}
+		b.relays[p] = b.startRelay(p, fresh[p])
+	}
 	for p, ow := range old {
 		if _, retained := fresh[p]; retained {
 			continue
 		}
+		if stop, ok := b.relays[p]; ok {
+			delete(b.relays, p)
+			close(stop)
+		}
 		_ = ow.Close() // the swap already succeeded; a stale watch's close error cannot change that
 	}
 	return aggregateMode(fresh), nil
+}
+
+// startRelay forwards one installed watch's events onto the binding's change
+// stream, tagging each with the path it came from.
+//
+// IT BLOCKS ON A FULL STREAM AND THAT IS THE SAFE DIRECTION. Dropping a hint
+// would lose a directory's change until something else happened there, and a
+// lost hint is exactly the failure the watch exists to remove; blocking costs
+// one goroutine per watched path, which is the watch's own cost already. It
+// never blocks for longer than the binding lives: the send selects on the
+// binding's end too, so teardown releases a relay that nobody is reading.
+//
+// The events are HINTS (Watch.Events carries no diff), so a path is all the
+// relay has to say and all the consumer needs: it re-lists and compares Rev.
+func (b *Binding) startRelay(path string, w Watch) chan struct{} {
+	stop := make(chan struct{})
+	go func() {
+		events := w.Events()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-b.signalsEnd:
+				return
+			case _, ok := <-events:
+				if !ok {
+					return
+				}
+			}
+			select {
+			case b.signals <- path:
+			case <-stop:
+				return
+			case <-b.signalsEnd:
+				return
+			}
+		}
+	}()
+	return stop
 }
 
 // aggregateMode describes a whole watch set: a degraded watch (polling with
@@ -658,6 +759,10 @@ func (h *handle) DomainKey(path string) Domain {
 	}
 	return Domain{Kind: "binding", ID: h.b.id}
 }
+
+// WatchSignals hands out the binding's change stream (the interface comment
+// says why it takes no guard).
+func (h *handle) WatchSignals() <-chan string { return h.b.signals }
 
 func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {
 	drop, err := h.begin()

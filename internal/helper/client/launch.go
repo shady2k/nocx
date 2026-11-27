@@ -94,6 +94,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		parkedChannels:  make(map[proto.ChannelID][][]byte),
 		parkedEnds:      make(map[proto.ChannelID]parkedEnd),
 		forwards:        make(map[proto.ForwardID]*Forward),
+		fsWatches:       make(map[string]fsHandler),
 		parkedForwards:  make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
 		done:            make(chan struct{}),
 		closed:          make(chan struct{}),

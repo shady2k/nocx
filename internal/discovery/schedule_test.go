@@ -2,12 +2,14 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/farhelper"
+	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/portsprobe"
 )
@@ -69,9 +71,10 @@ func TestSchedulerLocalCadence(t *testing.T) {
 }
 
 type testAxis struct {
-	status farhelper.Status
-	known  bool
-	watch  func(string, farhelper.Status)
+	status  farhelper.Status
+	known   bool
+	watch   func(string, farhelper.Status)
+	acquire func(context.Context) (*farhelper.Lease, error)
 }
 
 func (a *testAxis) Axis(string) (farhelper.Status, bool) { return a.status, a.known }
@@ -80,8 +83,80 @@ func (a *testAxis) Watch(fn func(string, farhelper.Status)) func() {
 	return func() { a.watch = nil }
 }
 
-func (a *testAxis) Acquire(context.Context, string) (*farhelper.Lease, error) {
+func (a *testAxis) Acquire(ctx context.Context, _ string) (*farhelper.Lease, error) {
+	if a.acquire != nil {
+		return a.acquire(ctx)
+	}
 	return nil, &farhelper.Unavailable{Reason: farhelper.ReasonHelperLost}
+}
+
+func TestSchedulerFarSampleErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		err            error
+		leaveServing   bool
+		state          portsprobe.State
+		classification string
+	}{
+		{name: "connection lost", err: client.ErrLost, state: portsprobe.StateAvailable},
+		{
+			name: "deadline exceeded", err: context.DeadlineExceeded,
+			state: portsprobe.StateFailedTransiently, classification: "probe timed out",
+		},
+		{
+			name: "axis leaves serving during a sample", err: context.DeadlineExceeded,
+			leaveServing: true, state: portsprobe.StateAvailable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const id = "connection"
+				entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				axis := &testAxis{
+					known: true, status: farhelper.Status{State: farhelper.StateServing},
+					acquire: func(context.Context) (*farhelper.Lease, error) {
+						close(entered)
+						<-release
+						return nil, fmt.Errorf("far helper sample: %w", tc.err)
+					},
+				}
+				s := NewScheduler(axis, log.NewSlogAdapter(nil), nil)
+				defer func() { _ = s.Close() }()
+				if !s.Activate(id, "example.test") {
+					t.Fatal("serving helper refused a ports target")
+				}
+				s.SetPaused(id, true)
+				lastGood := time.Now().Add(-time.Second)
+				s.mu.Lock()
+				s.targets[id].last = portsprobe.Sample{State: portsprobe.StateAvailable, Probe: "ss"}
+				s.targets[id].lastGood = lastGood
+				s.mu.Unlock()
+
+				go func() {
+					defer close(done)
+					s.SampleNow(t.Context(), id)
+				}()
+				<-entered
+				if tc.leaveServing {
+					axis.status.State = farhelper.StateUnavailable
+					axis.watch(id, axis.status)
+				}
+				close(release)
+				<-done
+
+				got := s.Status(id)
+				if got.Sample.State != tc.state || got.Sample.Classification != tc.classification {
+					t.Fatalf("sample = %+v, want %s (%q)", got.Sample, tc.state, tc.classification)
+				}
+				if tc.state == portsprobe.StateAvailable && got.Sample.Probe != "ss" {
+					t.Fatalf("last good sample was replaced: %+v", got.Sample)
+				}
+				if !got.LastSampleAt.Equal(lastGood) {
+					t.Fatalf("last good sample time = %v, want %v", got.LastSampleAt, lastGood)
+				}
+			})
+		})
+	}
 }
 
 func TestSchedulerTracksTheHelperAxis(t *testing.T) {

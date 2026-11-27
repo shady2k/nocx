@@ -2,7 +2,7 @@ import './style.css'
 import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { decideIntegrationMethod } from './integration-method-decision'
 import { render } from 'solid-js/web'
-import { Show, createSignal, untrack } from 'solid-js'
+import { batch, Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { mountSettingsShortcut } from './settings-shortcut'
@@ -761,9 +761,11 @@ function main(): void {
   // target accessor below is a Solid signal fed by PaneManager's
   // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
   // tab shows this machine's listeners, and a tab with no ports scope
-  // shows the
-  // no-connection state instead of a stale host's ports (nocx-wzc4.8).
+  // shows the no-connection state (nocx-wzc4.8).
   const portsServices = createPortsPanelServices(dispatcher)
+  const [portsIsLocal, setPortsIsLocal] = createSignal(
+    tm.activeTerminalContent()?.sshOptions() === null,
+  )
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(tm.portsTargetId())
   // Why the target is null, when it is null because the pane walked into an
   // environment we cannot enumerate (a hand-typed ssh has no managed
@@ -786,9 +788,12 @@ function main(): void {
   // is in).
   tm.onActiveTabChange = () => applyActiveTabPanel()
   tm.onActivePaneChange = () => {
-    setPortsTargetId(tm.portsTargetId())
-    setPortsUnavailable(tm.portsUnavailableReason())
-    setActiveOrigin(tm.activeOrigin())
+    batch(() => {
+      setPortsTargetId(tm.portsTargetId())
+      setPortsIsLocal(tm.activeTerminalContent()?.sshOptions() === null)
+      setPortsUnavailable(tm.portsUnavailableReason())
+      setActiveOrigin(tm.activeOrigin())
+    })
     rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
@@ -1394,7 +1399,7 @@ function main(): void {
     view: (props) => (
       <PortsPanel
         paneId={props.activePortsPaneId}
-        isLocal={() => props.activeOrigin()?.kind === 'local'}
+        isLocal={portsIsLocal}
         savedProfileId={() => (props.activePortsPaneId() === null ? null : activeProfileId())}
         onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}

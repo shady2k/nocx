@@ -3,7 +3,7 @@ package transport
 // seamSpecs — the seam-backed control methods as constructed types
 // (migration map, "Seam handlers"): connections.test, connections.trustHostKey,
 // dialog.openFile/openDirectory, sshConfig.aliases/path, sessions.status, fs.complete,
-// tunnel.open/stop, ports.status/sample/pause/visible and shell.openUrl. Each
+// tunnel.list/open/stop, ports.status/sample/pause/visible and shell.openUrl. Each
 // handler holds only its seams — the resolver holder, prober, dialog service
 // holder, tunnel ledger, discovery scheduler, url opener holder — and its
 // Responder; never the *WSServer, so a handler cannot reach a store it was
@@ -99,6 +99,10 @@ func (s *WSServer) seamSpecs(sessionGate control.Admission) []methodSpec {
 			h := s.newFsCompleteHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(ctx, req) }
 		}),
+		regResponder(s.work, catalog.OpTunnelList, noParams(), func(r Responder) handlerFunc {
+			h := tunnelHandlers{ledger: ledger, r: r}
+			return func(_ context.Context, req jsonrpcRequest) { h.handleTunnelList(req) }
+		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler
 		// receives the *wsConn per call.
@@ -111,16 +115,16 @@ func (s *WSServer) seamSpecs(sessionGate control.Admission) []methodSpec {
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelStop(req) }
 		}),
 		reg(s.work, catalog.OpPortsStatus, params(validatePortsPaneRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
-			return (portsHandlers{machine: s, ledger: ledger, w: w, r: r}).handlePortsMethod
+			return (portsHandlers{machine: s, w: w, r: r}).handlePortsMethod
 		}),
 		reg(s.work, catalog.OpPortsSample, params(validatePortsPaneRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
-			return (portsHandlers{machine: s, ledger: ledger, w: w, r: r}).handlePortsMethod
+			return (portsHandlers{machine: s, w: w, r: r}).handlePortsMethod
 		}),
 		reg(s.work, catalog.OpPortsPause, params(validatePortsPauseRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
-			return (portsHandlers{machine: s, ledger: ledger, w: w, r: r}).handlePortsMethod
+			return (portsHandlers{machine: s, w: w, r: r}).handlePortsMethod
 		}),
 		reg(s.work, catalog.OpPortsVisible, params(validatePortsPauseRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
-			return (portsHandlers{machine: s, ledger: ledger, w: w, r: r}).handlePortsMethod
+			return (portsHandlers{machine: s, w: w, r: r}).handlePortsMethod
 		}),
 		regResponder(s.work, catalog.OpShellOpenUrl, params(validateShellOpenUrlRaw), func(r Responder) handlerFunc {
 			h := openUrlHandlers{opener: opener, r: r}

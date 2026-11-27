@@ -1,14 +1,7 @@
 package transport
 
-// ports.* — the read path for port discovery and the forwards ledger
-// (spec §9, nocx-wzc4.2). The scheduler (internal/discovery) owns the
-// cadence — when a probe runs — and the transport owns the wire: one
-// ports.status result assembling the discovery state for an authenticated
-// target plus every forward the backend currently tracks. tunnel.open and
-// tunnel.stop stay the only write paths; the panel drives them directly.
-//
-// The result shape is declared once in contracts/ports.status.schema.json;
-// ports.sample returns the same shape (a retry is a fresh status).
+// ports.* reports listening sockets for a pane. The discovery scheduler
+// owns when samples run. The tunnel ledger has its own tunnel.list read.
 
 import (
 	"context"
@@ -79,16 +72,11 @@ type portsDiscovery struct {
 	Visible        bool            `json:"visible"`
 }
 
-// portsStatusResult is the full status for one pane: the discovery state
-// plus every forward the backend tracks for the connection. Forwards include
-// stopped-by-transport records (connection loss) — they stay in the ledger
-// until stopped or the owning tab closes; the panel merges its own
-// user-stopped records on top.
+// portsStatusResult is the discovery status for one pane.
 type portsStatusResult struct {
 	PaneID    string         `json:"paneId"`
 	Host      string         `json:"host"`
 	Discovery portsDiscovery `json:"discovery"`
-	Forwards  []tunnelRecord `json:"forwards"`
 }
 
 // portsDiscoveryFrom projects a scheduler status onto the wire. LastSampleAt
@@ -148,9 +136,9 @@ const (
 
 type portsHandlers struct {
 	machine *WSServer
-	ledger  *tunnelLedger
-	w       *wsConn
-	r       Responder
+
+	w *wsConn
+	r Responder
 }
 
 func (h portsHandlers) handlePortsMethod(ctx context.Context, req jsonrpcRequest) {
@@ -186,12 +174,8 @@ func (h portsHandlers) handlePortsMethod(ctx context.Context, req jsonrpcRequest
 		fallthrough
 	case "ports.status":
 		st := sched.Status(target)
-		forwards := []tunnelRecord{}
-		if target != discovery.LocalTargetID {
-			forwards = h.ledger.forwardRecords()
-		}
 		_ = h.r.TryResult(req.ID, mustMarshal(portsStatusResult{
-			PaneID: p.PaneID, Host: st.Host, Discovery: portsDiscoveryFrom(st), Forwards: forwards,
+			PaneID: p.PaneID, Host: st.Host, Discovery: portsDiscoveryFrom(st),
 		}))
 	case "ports.pause":
 		sched.SetPaused(target, p.Paused)

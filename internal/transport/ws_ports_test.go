@@ -28,14 +28,13 @@ func TestPortsStatus_DTOConformsToContract(t *testing.T) {
 			Listeners:   []portsListener{},
 			ProbesTried: []string{},
 		},
-		Forwards: []tunnelRecord{},
 	}
 	raw, err := json.Marshal(pending)
 	if err != nil {
 		t.Fatal(err)
 	}
 	validateJSON(t, schema, raw, "pending status")
-	if string(raw) != `{"paneId":"pane-1","host":"","discovery":{"state":"pending","listeners":[],"probe":"","probesTried":[],"classification":"","stderr":"","lastSampleAt":null,"paused":false,"visible":false},"forwards":[]}` {
+	if string(raw) != `{"paneId":"pane-1","host":"","discovery":{"state":"pending","listeners":[],"probe":"","probesTried":[],"classification":"","stderr":"","lastSampleAt":null,"paused":false,"visible":false}}` {
 		t.Fatalf("pending status JSON mismatch:\n%s", raw)
 	}
 
@@ -65,32 +64,20 @@ func TestPortsStatus_DTOConformsToContract(t *testing.T) {
 				},
 			},
 		},
-		Forwards: []tunnelRecord{
-			{
-				ID:            "fwd-1",
-				Direction:     "local",
-				RequestedBind: tunnelBind{Host: "127.0.0.1", Port: 6768},
-				ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 6768},
-				Destination:   "host.example:6768",
-				Scope:         "ports:pane-1",
-				State:         "running",
-			},
-		},
 	}
 	raw, err = json.Marshal(populated)
 	if err != nil {
 		t.Fatal(err)
 	}
 	validateJSON(t, schema, raw, "populated status")
-	if string(raw) != `{"paneId":"pane-1","host":"host.example","discovery":{"state":"available","listeners":[{"family":"ipv4","address":"0.0.0.0","port":6768,"process":{"evidence":"known","name":"orca-ide","pid":871}},{"family":"ipv4","address":"0.0.0.0","port":22,"process":{"evidence":"permission-denied","name":"","pid":0}}],"probe":"ss","probesTried":["ss"],"classification":"","stderr":"","lastSampleAt":"2026-08-04T10:00:00Z","paused":false,"visible":false},"forwards":[{"id":"fwd-1","direction":"local","requestedBind":{"host":"127.0.0.1","port":6768},"actualBind":{"host":"127.0.0.1","port":6768},"destination":"host.example:6768","scope":"ports:pane-1","caveat":"","state":"running","stopReason":null,"error":null}]}` {
+	if string(raw) != `{"paneId":"pane-1","host":"host.example","discovery":{"state":"available","listeners":[{"family":"ipv4","address":"0.0.0.0","port":6768,"process":{"evidence":"known","name":"orca-ide","pid":871}},{"family":"ipv4","address":"0.0.0.0","port":22,"process":{"evidence":"permission-denied","name":"","pid":0}}],"probe":"ss","probesTried":["ss"],"classification":"","stderr":"","lastSampleAt":"2026-08-04T10:00:00Z","paused":false,"visible":false}}` {
 		t.Fatalf("populated status JSON mismatch:\n%s", raw)
 	}
 }
 
 func TestPortsSample_DTOConformsToContract(t *testing.T) {
 	// ports.sample returns the same shape as ports.status; the check that
-	// matters is that a nil forward ledger and a nil probe list marshal as
-	// [] never null.
+	// matters is that empty listeners and probe lists marshal as arrays.
 	schema := loadSchema(t, "ports.sample.schema.json")
 	raw, err := json.Marshal(portsStatusResult{
 		PaneID: "pane-1",
@@ -100,13 +87,12 @@ func TestPortsSample_DTOConformsToContract(t *testing.T) {
 			Listeners:      []portsListener{},
 			ProbesTried:    []string{},
 		},
-		Forwards: []tunnelRecord{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	validateJSON(t, schema, raw, "sample result")
-	if string(raw) != `{"paneId":"pane-1","host":"","discovery":{"state":"unavailable","listeners":[],"probe":"","probesTried":[],"classification":"no probe tool usable on this host","stderr":"","lastSampleAt":null,"paused":false,"visible":false},"forwards":[]}` {
+	if string(raw) != `{"paneId":"pane-1","host":"","discovery":{"state":"unavailable","listeners":[],"probe":"","probesTried":[],"classification":"no probe tool usable on this host","stderr":"","lastSampleAt":null,"paused":false,"visible":false}}` {
 		t.Fatalf("sample JSON mismatch:\n%s", raw)
 	}
 }
@@ -196,7 +182,7 @@ func TestPorts_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(pending.Result, &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.PaneID != pane || st.Discovery.State != "pending" || st.Discovery.Listeners == nil || st.Forwards == nil {
+	if st.PaneID != pane || st.Discovery.State != "pending" || st.Discovery.Listeners == nil {
 		t.Fatalf("wrong pending result: %s", pending.Result)
 	}
 	close(release)
@@ -267,7 +253,7 @@ func TestPorts_LocalTarget_OverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.PaneID != pane || st.Host != host || st.Discovery.Probe == "" || len(st.Forwards) != 0 {
+	if st.PaneID != pane || st.Host != host || st.Discovery.Probe == "" {
 		t.Fatalf("wrong local target: %s", reply.Result)
 	}
 	_ = jsonrpcCallWithID(t, conn, "close", map[string]string{"sessionId": sid}, 3)

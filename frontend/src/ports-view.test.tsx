@@ -10,7 +10,7 @@
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { batch, createSignal } from 'solid-js'
 import {
   PortsPanel,
   createPortsFilter,
@@ -44,7 +44,6 @@ const statusFixture = (paneId: string): PortsStatusResult => ({
     paused: false,
     visible: true,
   },
-  forwards: [],
 })
 
 const listenerFixture = (port: number): PortsStatusResult['discovery']['listeners'][number] => ({
@@ -70,6 +69,7 @@ const runningRecord = (over: Partial<TunnelOpenResult> = {}): TunnelOpenResult =
 
 function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelServices {
   return {
+    listForwards: vi.fn().mockResolvedValue({ forwards: [] }),
     status: vi.fn().mockResolvedValue(statusFixture('ssh:p1:1')),
     sample: vi.fn().mockResolvedValue(statusFixture('ssh:p1:1')),
     pause: vi.fn().mockResolvedValue({}),
@@ -153,9 +153,11 @@ async function mountApp(
   const [isLocal, setIsLocal] = createSignal(profileId === null)
   const initialPane = manager.activeTerminalContent()!.backendPaneId
   manager.onActivePaneChange = () => {
-    setPortsTargetId(manager.portsTargetId())
-    setSavedProfile(manager.activeTerminalContent()?.savedProfileId() ?? null)
-    setIsLocal(manager.activeTerminalContent()?.activeOrigin()?.kind === 'local')
+    batch(() => {
+      setPortsTargetId(manager.portsTargetId())
+      setSavedProfile(manager.activeTerminalContent()?.savedProfileId() ?? null)
+      setIsLocal(manager.activeTerminalContent()?.sshOptions() === null)
+    })
   }
 
   const bar = document.createElement('div')

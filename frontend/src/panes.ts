@@ -727,7 +727,7 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * The route identity of this machine, the one backend a tab can be on today.
  *
  * The same vocabulary internal/commandnames.LocalRoute uses, and the same
- * string the notify feed stamps into every occurrence's backendId. It is
+ * string the notify feed stamps into every occurrence's backendId.
  *
  * Exported because the composition root needs it too: a session.focus push
  * carries a session id and nothing else (nocx-jiwq.1), so the backend id it

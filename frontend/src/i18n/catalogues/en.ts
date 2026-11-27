@@ -383,6 +383,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.tabs.setPanel': 'Changing the tab layout',
   'operations.waiting.transport.credit': 'Reading the credit window',
   'operations.waiting.transport.ping': 'Checking the backend is alive',
+  'operations.waiting.tunnel.list': 'Reading the forwards',
   'operations.waiting.tunnel.open': 'Opening the tunnel',
   'operations.waiting.tunnel.stop': 'Opening the tunnel',
   'operations.waiting.uistate.get': 'Reading the window state',
@@ -1729,6 +1730,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ports.nothing.title': 'Nothing is listening',
   'ports.nothing.descHead': 'No listeners observed on',
   'ports.nothing.descTail': '.',
+  'ports.helperUnavailable':
+    "Ports are not available on this connection — nocx's helper is not running there",
   'ports.orphaned.title': 'Orphaned forwards',
   'ports.forwarded': 'Forwarded',
   'ports.paused': 'paused',

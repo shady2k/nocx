@@ -82,8 +82,8 @@ package proto
 // This is 7 rather than 6 because the wire grew the NAMED PROBES and the lease
 // they run on: `lease`, `unlease`, `uname`, `home`,
 // `completion` and `command-names` on the same `ssh` service (nocx-50w7p.9).
-// Seven ops added would each have been answerable as `unknown_op`, and the
-// bump is still taken because of what the SEVEN MEAN: they are the ops by which
+// The added ops would each have been answerable as `unknown_op`. The bump
+// marks a change in where probes run. With these ops,
 // every shell command the coordinator used to compose is now composed by the
 // helper from internal/remoteprobe. A coordinator speaking 6 has no ops to ask
 // these questions with and would fall back to its own dial — which is the state

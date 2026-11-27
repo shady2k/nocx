@@ -301,16 +301,16 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"command":"sort -o /tmp/out /tmp/in"}`),
 		},
 		"ports.pause": {
-			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
+			[]byte(`{"paneId":"pane-1","paused":false}`),
 		},
 		"ports.sample": {
-			[]byte(`{"profileId":"profile-1"}`),
+			[]byte(`{"paneId":"pane-1"}`),
 		},
 		"ports.status": {
-			[]byte(`{"profileId":"profile-1"}`),
+			[]byte(`{"paneId":"pane-1"}`),
 		},
 		"ports.visible": {
-			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
+			[]byte(`{"paneId":"pane-1","visible":true}`),
 		},
 		"profiles.create": {
 			[]byte(`{"name":"profile","type":"ssh","options":{"host":"host.example.com"}}`),
@@ -406,6 +406,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"transport.ping": {
 			[]byte(`{}`),
 		},
+		"tunnel.list": {[]byte(`{}`)},
 		"tunnel.open": {
 			[]byte(`{"profileId":"profile-1","destination":"example.com:22"}`),
 		},
@@ -908,6 +909,8 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			},
 		}[method]...)
 		switch method {
+		case "ports.status", "ports.sample", "ports.pause", "ports.visible":
+			probes = append(probes, []byte(`{"profileId":"profile-1"}`))
 		case "secrets.detect", "vault.resolveLine":
 			// These methods intentionally accept an empty object and use a
 			// tolerant decoder for optional input; malformed JSON values

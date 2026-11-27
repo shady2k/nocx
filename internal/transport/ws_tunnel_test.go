@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -442,5 +443,57 @@ func TestTunnelOpen_NotWired(t *testing.T) {
 	}, 1)
 	if resp.Error == nil {
 		t.Fatal("tunnel.open with no connector wired: expected an error, got a result")
+	}
+}
+
+func TestTunnelList_OverTheWireConformsToContract(t *testing.T) {
+	destination := startEchoTarget(t)
+	h := newReplayHarness(t, []profile.ForwardSpec{
+		{Direction: "local", BindPort: 0, Destination: destination},
+	})
+	schema := loadSchema(t, "tunnel.list.schema.json")
+	reply := vaultCall(t, h.conn, "tunnel.list", map[string]any{}, 1)
+	if reply.Error != nil || string(reply.Result) != `{"forwards":[]}` {
+		t.Fatalf("empty tunnel list: %+v, %s", reply.Error, reply.Result)
+	}
+	validateJSON(t, schema, reply.Result, "empty tunnel list")
+	h.openProfile(t, nil)
+	row := h.waitForTunnels(t, 1)[0]
+	reply = vaultCall(t, h.conn, "tunnel.list", map[string]any{}, 2)
+	if reply.Error != nil {
+		t.Fatalf("tunnel.list: %+v", reply.Error)
+	}
+	validateJSON(t, schema, reply.Result, "replayed forward")
+	var result tunnelListResult
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Forwards) != 1 || result.Forwards[0].ID != row.ID ||
+		result.Forwards[0].Destination != destination || result.Forwards[0].State != "running" {
+		t.Fatalf("tunnel.list did not expose the stored forward: %s", reply.Result)
+	}
+	for _, invalid := range []json.RawMessage{
+		json.RawMessage(`{"paneId":"anything"}`), json.RawMessage(`[]`),
+	} {
+		raw := jsonrpcCallWithID(t, h.conn, "tunnel.list", invalid, 3)
+		var response struct{ Error *jsonrpcErrorObj }
+		if err := json.Unmarshal(raw, &response); err != nil || response.Error == nil || response.Error.Code != -32602 {
+			t.Fatalf("tunnel.list(%s) = %s, want -32602", invalid, raw)
+		}
+	}
+}
+
+func TestTunnelList_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "tunnel.list.schema.json")
+	for _, forwards := range [][]tunnelRecord{
+		{},
+		{{
+			ID: "forward-1", Direction: "local", Destination: "example.test:22",
+			RequestedBind: tunnelBind{Host: "127.0.0.1"},
+			ActualBind:    tunnelBind{Host: "127.0.0.1", Port: 50022},
+			Scope:         "ports:example", State: "running",
+		}},
+	} {
+		validateJSON(t, schema, mustMarshal(tunnelListResult{Forwards: forwards}), "tunnel list result")
 	}
 }

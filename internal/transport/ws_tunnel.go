@@ -20,7 +20,7 @@ import (
 // WithTunnelConnector attaches the connector that acquires an owned pooled
 // SSH connection lease for a forward (spec §7.3). The single implementation
 // is *ssh.RealClient, which satisfies tunnel.Connector without an adapter —
-// the signatures are identical. When not wired, the tunnel.* methods return
+// the signatures are identical. When not wired, tunnel.open returns
 // a JSON-RPC error; the transport never constructs an SSH client itself.
 func WithTunnelConnector(c tunnel.Connector) WSServerOption {
 	return func(s *WSServer) { s.tunnelConnector = c }
@@ -89,10 +89,14 @@ type tunnelBind struct {
 	Port int    `json:"port"`
 }
 
+type tunnelListResult struct {
+	Forwards []tunnelRecord `json:"forwards"`
+}
+
 // tunnelRecord is the full forward record the spec §7 names: direction,
 // requested and actual bind, destination, scope/owner, lifecycle state, stop
 // reason, error — plus the success-time bind caveat only remote (-R)
-// forwards carry. Shared by tunnel.open and tunnel.stop results.
+// forwards carry. Shared by tunnel.open, tunnel.stop and tunnel.list results.
 type tunnelRecord struct {
 	ID            string     `json:"id"`
 	Direction     string     `json:"direction"`
@@ -214,6 +218,10 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, r R
 
 	h.ledger.track(wconn, t)
 	_ = r.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
+}
+
+func (h tunnelHandlers) handleTunnelList(req jsonrpcRequest) {
+	_ = h.r.TryResult(req.ID, mustMarshal(tunnelListResult{Forwards: h.ledger.forwardRecords()}))
 }
 
 // handleTunnelStop stops one forward by its backend id and reports the

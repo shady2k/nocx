@@ -58,7 +58,6 @@ const statusFixture = (): PortsStatusResult => ({
     paused: false,
     visible: true,
   },
-  forwards: [],
 })
 
 const runningRecord = (): TunnelOpenResult => ({
@@ -76,6 +75,7 @@ const runningRecord = (): TunnelOpenResult => ({
 
 function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelServices {
   return {
+    listForwards: vi.fn().mockResolvedValue({ forwards: [] }),
     status: vi.fn<PortsPanelServices['status']>().mockResolvedValue(statusFixture()),
     sample: vi.fn<PortsPanelServices['sample']>().mockResolvedValue(statusFixture()),
     pause: vi.fn<PortsPanelServices['pause']>().mockResolvedValue({}),

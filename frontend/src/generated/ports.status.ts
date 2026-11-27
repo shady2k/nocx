@@ -10,7 +10,7 @@
  */
 
 /**
- * The latest discovery state for the pane and the tracked forwards.
+ * The latest discovery state for the pane.
  */
 export interface PortsStatusResult {
   /**
@@ -89,55 +89,4 @@ export interface PortsStatusResult {
      */
     visible: boolean
   }
-  /**
-   * Every forward the backend currently tracks for the connection, running or stopped-by-transport-loss. Always an array, never null. User-stopped records leave the ledger at stop time — the renderer keeps those on its own side. Always empty for a local pane: there is nothing to forward from the machine you are already on, and the renderer must not offer forwarding actions for it.
-   */
-  forwards: {
-    /**
-     * Backend-assigned tunnel id. The renderer echoes it to tunnel.stop; nothing else can stop a forward.
-     */
-    id: string
-    /**
-     * Forwarding strategy.
-     */
-    direction: 'local' | 'remote' | 'dynamic'
-    /**
-     * The bind the caller asked for. Port 0 means 'allocate' — the usable address is actualBind, never this.
-     */
-    requestedBind: {
-      host: string
-      port: number
-    }
-    /**
-     * The address the listener really holds. Never the requested port when the request was 0.
-     */
-    actualBind: {
-      host: string
-      port: number
-    }
-    /**
-     * Remote target of the forward, host:port, as dialed over the SSH connection.
-     */
-    destination: string
-    /**
-     * Owner label the renderer attached at open.
-     */
-    scope: string
-    /**
-     * Success-time bind caution, empty when none applies. Only remote (-R) forwards set it: the requested bind address is not verified — the server may have bound a different address (GatewayPorts) — so a URL built from this forward may only work on the server. Never an error: the forward is running.
-     */
-    caveat: string
-    /**
-     * Lifecycle state. A tracked record is running, or stopped by transport loss.
-     */
-    state: 'starting' | 'running' | 'stopped'
-    /**
-     * Why the forward stopped. Null while running.
-     */
-    stopReason: 'user' | 'connection lost' | 'error' | null
-    /**
-     * The error behind a stopped forward. Null while running or after a clean user stop.
-     */
-    error: string | null
-  }[]
 }

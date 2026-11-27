@@ -267,6 +267,11 @@ func TestPortsModeRawRefusesWithoutSampling(t *testing.T) {
 	s := newPortsFarStand(t, hostmode.Raw, false)
 	s.open(portsAdHocPane, "")
 	s.assertUnavailable(portsAdHocPane)
+	forwards := s.call("tunnel.list", map[string]any{})
+	if forwards.Error != nil || string(forwards.Result) != `{"forwards":[]}` {
+		t.Fatalf("tunnel.list in Raw mode: %+v, %s", forwards.Error, forwards.Result)
+	}
+
 	if got := s.tools.calls.Load(); got != 0 || s.seams.dials.Load() != 0 {
 		t.Fatalf("raw mode reached the helper: %d probes, %d dials", got, s.seams.dials.Load())
 	}

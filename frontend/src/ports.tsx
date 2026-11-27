@@ -25,8 +25,10 @@
 
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
-import type { Dispatcher } from './dispatcher'
+import { rpcRefusalCause, type Dispatcher } from './dispatcher'
 import { openForwardWithFallback } from './forward-retry'
+import type { PortsError } from './generated/ports.error'
+import type { TunnelListResult } from './generated/tunnel.list'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import type { TunnelStopResult } from './generated/tunnel.stop'
@@ -63,6 +65,7 @@ function splitUnavailableTarget(target: string): {
 
 /** The panel's entire backend surface, so a test can substitute a fake. */
 export interface PortsPanelServices {
+  listForwards(): Promise<TunnelListResult>
   status(paneId: string): Promise<PortsStatusResult>
   sample(paneId: string): Promise<PortsStatusResult>
   pause(paneId: string, paused: boolean): Promise<unknown>
@@ -78,6 +81,7 @@ export function createPortsPanelServices(dispatcher: Dispatcher): PortsPanelServ
     dispatcher.call<T>(method, params)
   const ports = new PortsClient(dispatcher)
   return {
+    listForwards: ports.listForwards.bind(ports),
     status: ports.status.bind(ports),
     sample: ports.sample.bind(ports),
     pause: ports.pause.bind(ports),
@@ -215,6 +219,7 @@ export interface PortsPanelProps {
 type ForwardRecord = TunnelOpenResult | TunnelStopResult
 
 export function PortsPanel(props: PortsPanelProps) {
+  const [helperUnavailable, setHelperUnavailable] = createSignal(false)
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
@@ -239,18 +244,35 @@ export function PortsPanel(props: PortsPanelProps) {
   const isLocal = () => props.isLocal?.() === true
   const savedProfileId = () => props.savedProfileId?.() ?? null
 
-  /** Merge a fresh status: discovery state, cadence flags, and the backend's
-   *  tracked forwards (which include connection-loss stops) on top of the
-   *  panel's own records (which include user stops). */
   const applyStatus = (st: PortsStatusResult): void => {
     setStatus(st)
+    setHelperUnavailable(false)
     setError(null)
     props.pause.sync(st.discovery.paused)
-    setForwards((prev) => {
-      const next = new Map(prev)
-      for (const f of st.forwards) next.set(f.id, f)
-      return next
-    })
+  }
+
+  const applyDiscoveryFailure = (error: unknown): void => {
+    if (rpcRefusalCause<PortsError['reason']>(error) === 'helper-unavailable') {
+      setStatus(null)
+      setHelperUnavailable(true)
+      setError(null)
+      return
+    }
+    setError(error instanceof Error ? error.message : String(error))
+  }
+
+  const refreshForwards = async (pid: string): Promise<void> => {
+    try {
+      const { forwards: records } = await props.services.listForwards()
+      if (paneId() !== pid || isLocal()) return
+      setForwards((prev) => {
+        const next = new Map(prev)
+        for (const record of records) next.set(record.id, record)
+        return next
+      })
+    } catch {
+      // Keep the last ledger so its actions stay available during a read failure.
+    }
   }
 
   // Non-reactive by intent: reads signals, writes state, but must never
@@ -258,9 +280,7 @@ export function PortsPanel(props: PortsPanelProps) {
   // captured per call and a response applies only while the panel is still
   // scoped to it: a late answer for a previous tab must never paint over the
   // current one (nocx-wzc4.7).
-  const refresh = async (): Promise<void> => {
-    const pid = paneId()
-    if (pid === null) return
+  const refreshDiscovery = async (pid: string): Promise<void> => {
     try {
       const st = await props.services.status(pid)
       if (paneId() !== pid) return
@@ -272,8 +292,17 @@ export function PortsPanel(props: PortsPanelProps) {
       }
     } catch (e) {
       if (paneId() !== pid) return
-      setError(e instanceof Error ? e.message : String(e))
+      applyDiscoveryFailure(e)
     }
+  }
+
+  const refresh = async (readDiscovery = true): Promise<void> => {
+    const pid = paneId()
+    if (pid === null) return
+    await Promise.all([
+      readDiscovery ? refreshDiscovery(pid) : undefined,
+      !isLocal() && props.visible() ? refreshForwards(pid) : undefined,
+    ])
   }
 
   // Re-scope: the panel follows the ACTIVE tab. A profile switch discards
@@ -282,6 +311,7 @@ export function PortsPanel(props: PortsPanelProps) {
   createEffect(
     on(paneId, () => {
       setStatus(null)
+      setHelperUnavailable(false)
       setError(null)
       props.pause.reset()
       setForwards(new Map())
@@ -372,7 +402,7 @@ export function PortsPanel(props: PortsPanelProps) {
     // the same interval, and the optimistic toggle flips the flag the moment
     // the header action is pressed (nocx-wzc4.9).
     poll = setInterval(() => {
-      if (!props.pause.paused()) void refresh()
+      void refresh(!props.pause.paused())
     }, POLL_INTERVAL_MS)
     onCleanup(() => clearInterval(poll))
   })
@@ -414,7 +444,7 @@ export function PortsPanel(props: PortsPanelProps) {
       }
       return
     }
-    if (paneId() === pid) await refresh()
+    if (paneId() === pid) await refresh(false)
   }
 
   const stop = async (id: string): Promise<void> => {
@@ -424,7 +454,7 @@ export function PortsPanel(props: PortsPanelProps) {
       const rec = await props.services.stopForward(id)
       if (paneId() !== pid) return
       setForwards((prev) => new Map(prev).set(rec.id, rec))
-      await refresh()
+      await refresh(false)
     } catch (e) {
       if (paneId() === pid) {
         showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
@@ -446,7 +476,7 @@ export function PortsPanel(props: PortsPanelProps) {
       applyStatus(st)
     } catch (e) {
       if (paneId() !== pid) return
-      setError(e instanceof Error ? e.message : String(e))
+      applyDiscoveryFailure(e)
     }
   }
 
@@ -489,6 +519,7 @@ export function PortsPanel(props: PortsPanelProps) {
   const hiddenOwners = (): boolean => listeners().some((l) => l.process.evidence !== 'known')
 
   const loading = (): boolean => {
+    if (helperUnavailable()) return false
     if (st() === undefined) return true
     if (st()?.state !== 'pending') return false
     return isLocal() || !!host()
@@ -687,6 +718,16 @@ export function PortsPanel(props: PortsPanelProps) {
             </div>
           }
         >
+          <Show when={helperUnavailable()}>
+            <Section title={t('ports.detected.title', 'Detected')} divided dense>
+              <p class="ports-note">
+                {t(
+                  'ports.helperUnavailable',
+                  "Ports are not available on this connection — nocx's helper is not running there",
+                )}
+              </p>
+            </Section>
+          </Show>
           {/* A profile with no session yet is not loading — there is nothing
               to wait for until the user opens one. */}
           <Show when={!host() && st()?.state === 'pending' && !isLocal()}>
@@ -695,7 +736,7 @@ export function PortsPanel(props: PortsPanelProps) {
               description="Open an SSH session to this profile first — the ports it listens on will appear here."
             />
           </Show>
-          <Show when={host() || (st()?.state ?? '') !== 'pending'}>
+          <Show when={!helperUnavailable() && (host() || (st()?.state ?? '') !== 'pending')}>
             {/* THE FILTER IS NOT HERE, and that is the change. It used to
                     sit above the sections it governs, which is the right
                     place inside a body and the wrong place full stop: the
@@ -997,136 +1038,6 @@ export function PortsPanel(props: PortsPanelProps) {
                 </Show>
               </Show>
             </Section>
-
-            {/* The forwarding vocabulary exists only off this machine:
-                  local rows offer copy-address, and an orphan section would
-                  be an empty offer of an impossible action (nothing to
-                  forward from the machine you are on, nocx-wzc4.8). The
-                  section itself renders only when it has a row to hold —
-                  an empty section has no subject, and its old "No active
-                  forwards" fallback contradicted a forward shown live on
-                  its own row (W2 revision). */}
-            <Show when={!isLocal() && orphanForwards().length > 0}>
-              {/* ── Orphaned forwards ─────────────────────────────── */}
-              {/* Forwards with no detected row to own them. A running one
-                    is a forward the host no longer reports — still alive,
-                    still stoppable; a self-stopped one is a failure the user
-                    must be able to retry. The Stopped section is deleted: a
-                    stop the user performed is not information, and a detected
-                    port's state lives on its own row (W2). */}
-              <Section title={t('ports.orphaned.title', 'Orphaned forwards')} divided dense>
-                <For each={orphanForwards()}>
-                  {(f) => (
-                    <Show
-                      when={f.state === 'running'}
-                      fallback={
-                        <div
-                          class="ports-row"
-                          data-testid="forwarded-row"
-                          data-state="failed"
-                          title={f.error ?? undefined}
-                        >
-                          <div class="ports-row__main">
-                            <div class="ports-row__text">
-                              <span class="ports-row__addr">{f.destination}</span>
-                              <Badge tone="danger" truncate>
-                                {f.stopReason ?? 'stopped'}
-                              </Badge>
-                            </div>
-                            <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                              {t('ports.retry', 'Retry')}
-                            </Button>
-                          </div>
-                        </div>
-                      }
-                    >
-                      <div class="ports-row" data-testid="forwarded-row" data-state="forwarded">
-                        <div class="ports-row__main">
-                          <div class="ports-row__text">
-                            <span class="ports-row__addr">
-                              {f.actualBind.host}:{f.actualBind.port}
-                            </span>
-                            <span class="ports-row__dest">
-                              <span class="ports-row__arrow" aria-hidden="true">
-                                →{' '}
-                              </span>
-                              {f.destination}
-                            </span>
-                          </div>
-                          <div class="ports-row__actions">
-                            <IconButton
-                              data-testid="ports-copy"
-                              size="xs"
-                              ariaLabel={
-                                t('ports.copy.head', 'Copy') +
-                                ' ' +
-                                f.actualBind.host +
-                                ':' +
-                                f.actualBind.port
-                              }
-                              title={
-                                t('ports.copy.head', 'Copy') +
-                                ' ' +
-                                f.actualBind.host +
-                                ':' +
-                                f.actualBind.port
-                              }
-                              onClick={() =>
-                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <CopyIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-open"
-                              size="xs"
-                              ariaLabel={
-                                t('ports.open.head', 'Open') +
-                                ' ' +
-                                f.actualBind.host +
-                                ':' +
-                                f.actualBind.port
-                              }
-                              title={
-                                t('ports.open.head', 'Open') +
-                                ' ' +
-                                f.actualBind.host +
-                                ':' +
-                                f.actualBind.port
-                              }
-                              onClick={() =>
-                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <ExternalLinkIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-stop"
-                              size="xs"
-                              ariaLabel={
-                                t('ports.stopForward', 'Stop forward') + ' ' + f.destination
-                              }
-                              title={t('ports.stopForward', 'Stop forward') + ' ' + f.destination}
-                              onClick={() => void stop(f.id)}
-                            >
-                              <SquareIcon />
-                            </IconButton>
-                          </div>
-                        </div>
-                        {/* A -R forward whose bind sshd silently replaced
-                               carries Caveat() — render it as the kit's note
-                               (a caveat about the item above it), never as an
-                               error: the forward is running. Empty caveat
-                               renders nothing. */}
-                        <Show when={f.caveat}>
-                          <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
-                        </Show>
-                      </div>
-                    </Show>
-                  )}
-                </For>
-              </Section>
-            </Show>
           </Show>
 
           {/* Only "paused" survives here (nocx-wzc4.10). The sample's age told
@@ -1140,6 +1051,129 @@ export function PortsPanel(props: PortsPanelProps) {
               {t('ports.paused', 'paused')}
             </p>
           </Show>
+        </Show>
+        {/* The forwarding vocabulary exists only off this machine:
+              local rows offer copy-address, and an orphan section would
+              be an empty offer of an impossible action (nothing to
+              forward from the machine you are on, nocx-wzc4.8). The
+              section itself renders only when it has a row to hold —
+              an empty section has no subject, and its old "No active
+              forwards" fallback contradicted a forward shown live on
+              its own row (W2 revision). */}
+        <Show when={!isLocal() && orphanForwards().length > 0}>
+          {/* ── Orphaned forwards ─────────────────────────────── */}
+          {/* Forwards with no detected row to own them. A running one
+                is a forward the host no longer reports — still alive,
+                still stoppable; a self-stopped one is a failure the user
+                must be able to retry. The Stopped section is deleted: a
+                stop the user performed is not information, and a detected
+                port's state lives on its own row (W2). */}
+          <Section title={t('ports.orphaned.title', 'Orphaned forwards')} divided dense>
+            <For each={orphanForwards()}>
+              {(f) => (
+                <Show
+                  when={f.state === 'running'}
+                  fallback={
+                    <div
+                      class="ports-row"
+                      data-testid="forwarded-row"
+                      data-state="failed"
+                      title={f.error ?? undefined}
+                    >
+                      <div class="ports-row__main">
+                        <div class="ports-row__text">
+                          <span class="ports-row__addr">{f.destination}</span>
+                          <Badge tone="danger" truncate>
+                            {f.stopReason ?? 'stopped'}
+                          </Badge>
+                        </div>
+                        <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                          {t('ports.retry', 'Retry')}
+                        </Button>
+                      </div>
+                    </div>
+                  }
+                >
+                  <div class="ports-row" data-testid="forwarded-row" data-state="forwarded">
+                    <div class="ports-row__main">
+                      <div class="ports-row__text">
+                        <span class="ports-row__addr">
+                          {f.actualBind.host}:{f.actualBind.port}
+                        </span>
+                        <span class="ports-row__dest">
+                          <span class="ports-row__arrow" aria-hidden="true">
+                            →{' '}
+                          </span>
+                          {f.destination}
+                        </span>
+                      </div>
+                      <div class="ports-row__actions">
+                        <IconButton
+                          data-testid="ports-copy"
+                          size="xs"
+                          ariaLabel={
+                            t('ports.copy.head', 'Copy') +
+                            ' ' +
+                            f.actualBind.host +
+                            ':' +
+                            f.actualBind.port
+                          }
+                          title={
+                            t('ports.copy.head', 'Copy') +
+                            ' ' +
+                            f.actualBind.host +
+                            ':' +
+                            f.actualBind.port
+                          }
+                          onClick={() => copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
+                        >
+                          <CopyIcon />
+                        </IconButton>
+                        <IconButton
+                          data-testid="ports-open"
+                          size="xs"
+                          ariaLabel={
+                            t('ports.open.head', 'Open') +
+                            ' ' +
+                            f.actualBind.host +
+                            ':' +
+                            f.actualBind.port
+                          }
+                          title={
+                            t('ports.open.head', 'Open') +
+                            ' ' +
+                            f.actualBind.host +
+                            ':' +
+                            f.actualBind.port
+                          }
+                          onClick={() => openAddress(`${f.actualBind.host}:${f.actualBind.port}`)}
+                        >
+                          <ExternalLinkIcon />
+                        </IconButton>
+                        <IconButton
+                          data-testid="ports-stop"
+                          size="xs"
+                          ariaLabel={t('ports.stopForward', 'Stop forward') + ' ' + f.destination}
+                          title={t('ports.stopForward', 'Stop forward') + ' ' + f.destination}
+                          onClick={() => void stop(f.id)}
+                        >
+                          <SquareIcon />
+                        </IconButton>
+                      </div>
+                    </div>
+                    {/* A -R forward whose bind sshd silently replaced
+                           carries Caveat() — render it as the kit's note
+                           (a caveat about the item above it), never as an
+                           error: the forward is running. Empty caveat
+                           renders nothing. */}
+                    <Show when={f.caveat}>
+                      <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
+                    </Show>
+                  </div>
+                </Show>
+              )}
+            </For>
+          </Section>
         </Show>
       </Stack>
     </Show>

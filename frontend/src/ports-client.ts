@@ -1,7 +1,6 @@
-// PortsClient — the ports.* control-plane seam (nocx-wzc4.2). One client,
-// four methods; the panel surface consumes it through PortsPanelServices so
-// tests can substitute a fake without a WebSocket.
+// The Ports panel reads discovery and the forwarding ledger over the control plane.
 
+import type { TunnelListResult } from './generated/tunnel.list'
 import type { Dispatcher } from './dispatcher'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { PortsSampleResult } from './generated/ports.sample'
@@ -11,7 +10,11 @@ import type { PortsVisibleResult } from './generated/ports.visible'
 export class PortsClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** The full status for one pane: discovery state plus tracked forwards. */
+  listForwards(): Promise<TunnelListResult> {
+    return this.dispatcher.call<TunnelListResult>('tunnel.list', {})
+  }
+
+  /** The discovery status for one pane. */
   status(paneId: string): Promise<PortsStatusResult> {
     return this.dispatcher.call<PortsStatusResult>('ports.status', { paneId })
   }

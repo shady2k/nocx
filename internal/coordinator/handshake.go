@@ -206,6 +206,13 @@ package coordinator
 // is never taken; hence the number moves with the contracts. The stage bumps
 // this ONCE and this leaf is where the contracts change: .11.1, .11.2 and
 // .11.4 touch no schema.
+//
+// 46 (nocx-oalo1.13.3): ports methods use the pane ID to reach discovery on
+// its connection. The ports error schema carries a typed refusal, and the
+// discovery result drops the old connection-loss flag and policy-refused
+// state. The window reads forwards from tunnel.list even when discovery is
+// unavailable. An older window sends profile IDs and expects forwards in
+// the discovery result, so the handshake refuses that combination.
 const ProtocolVersion = 46
 
 // RequestHello is the one request this socket answers today. Naming it

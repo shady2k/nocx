@@ -1510,6 +1510,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ports.nothing.title': 'Ничего не слушает',
   'ports.nothing.descHead': 'На',
   'ports.nothing.descTail': ' не замечено слушающих.',
+  'ports.helperUnavailable':
+    'Порты недоступны для этого подключения — на хосте не запущен helper nocx',
   'ports.orphaned.title': 'Осиротевшие пробросы',
   'ports.forwarded': 'Проброшен',
   'ports.paused': 'приостановлен',
@@ -1916,6 +1918,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.tabs.setPanel': 'Меняем раскладку вкладок',
   'operations.waiting.transport.credit': 'Читаем окно кредита',
   'operations.waiting.transport.ping': 'Проверяем, что бэкенд отвечает',
+  'operations.waiting.tunnel.list': 'Читаем пробросы',
   'operations.waiting.tunnel.open': 'Открываем туннель',
   'operations.waiting.tunnel.stop': 'Открываем туннель',
   'operations.waiting.uistate.get': 'Читаем состояние окна',

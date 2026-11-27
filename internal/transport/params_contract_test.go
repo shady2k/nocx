@@ -1014,6 +1014,9 @@ func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
 	}
 	overID := idAtLimit + "x"
 	overName := nameAtLimit + "n"
+	const paneIDLimit = 128
+	paneIDAtLimit := strings.Repeat("p", paneIDLimit)
+	overPaneID := paneIDAtLimit + "p"
 
 	profileParams := func(id, name, group string) map[string]any {
 		return map[string]any{
@@ -1050,15 +1053,15 @@ func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
 		{"groups.impact/delete", map[string]any{"deleteGroupId": idAtLimit}, map[string]any{"deleteGroupId": overID}},
 		{"profiles.moveImpact/profileId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{overID}, "targetGroupId": idAtLimit}},
 		{"profiles.moveImpact/targetGroupId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": overID}},
+		{"ports.status/paneId", map[string]any{"paneId": paneIDAtLimit}, map[string]any{"paneId": overPaneID}},
+		{"ports.sample/paneId", map[string]any{"paneId": paneIDAtLimit}, map[string]any{"paneId": overPaneID}},
+		{"ports.pause/paneId", map[string]any{"paneId": paneIDAtLimit, "paused": true}, map[string]any{"paneId": overPaneID, "paused": true}},
+		{"ports.visible/paneId", map[string]any{"paneId": paneIDAtLimit, "visible": true}, map[string]any{"paneId": overPaneID, "visible": true}},
 		// The seam methods that take a profile id. They validate through
 		// validateProfileID, so they are bounded by the same domain ceiling
 		// the mint guarantees — and their contracts said 256 and 512 until
 		// nocx-ms4xq, which is a length a renderer built to the contract
 		// would have been answered -32602 for.
-		{"ports.status/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
-		{"ports.sample/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
-		{"ports.pause/profileId", map[string]any{"profileId": idAtLimit, "paused": true}, map[string]any{"profileId": overID, "paused": true}},
-		{"ports.visible/profileId", map[string]any{"profileId": idAtLimit, "visible": true}, map[string]any{"profileId": overID, "visible": true}},
 		{"connections.test/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
 		{"tunnel.open/profileId", map[string]any{"profileId": idAtLimit, "destination": "example.com:22"}, map[string]any{"profileId": overID, "destination": "example.com:22"}},
 		{"shell.footprint.uninstall/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},

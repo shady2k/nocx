@@ -554,9 +554,15 @@ test('one port tool on one host: the saved tab and the hand-typed tab both list 
     // other way — so the panel has to be scoped to it.
     await expect(page.locator(TAB).nth(2)).toHaveAttribute('aria-selected', 'true')
 
-    await expect(page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })).toBeVisible({
-      timeout: 90_000,
-    })
+    // A NEW TAB OPENS WITH NO PANEL VIEW, so the sidebar the saved tab left on
+    // Ports is not the hand-typed tab's view: the person opens Ports again, and
+    // only then is the panel scoped to the tab in front.
+    await showSidebarView(page, 'ports')
+    // The panel on the ad-hoc tab answers about the SAME listener: the row is
+    // the host's fact, not the profile's, and the owner is read on this tab too.
+    const adHocRow = page.locator(PORTS_ROW, { hasText: String(FIXTURE_LISTENER_PORT) })
+    await expect(adHocRow).toBeVisible({ timeout: 90_000 })
+    await expect(adHocRow).toContainText('node')
     await expect(page.locator(PORTS_AXIS)).toHaveCount(0)
     // The re-scope shows in the one action that needs a host record: Forward
     // is absent on the hand-typed tab (D14) …
@@ -662,10 +668,11 @@ test('a host with no port tool says so, while Git and Files keep working', async
     // (files-view.tsx), so the axis is read where it IS drawn — the tab head —
     // and the listing is what proves the far side answered: openFilesOnTab has
     // already required the revealed cwd, and the repository's own file is the
-    // entry under it.
+    // entry under it — named by the fixture that committed it, so the entry
+    // asked for is the one the far repository actually holds.
     await openFilesOnTab(page, wired.host.repo.root)
     await expect(page.locator(HEAD)).toHaveAttribute('data-helper', 'serving')
-    await expect(page.locator(FILES_PANEL)).toContainText('base.txt')
+    await expect(page.locator(FILES_PANEL)).toContainText(wired.host.repo.file)
   } finally {
     await unwire(page, wired)
   }

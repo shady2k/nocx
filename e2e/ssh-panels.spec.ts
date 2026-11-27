@@ -98,9 +98,14 @@ import {
 
 const TAB = '.nocx-tab'
 const EDITOR = '.pane.active .nocx-editor-input'
-const HEAD = '[data-testid="connection-head"]'
-const HEAD_TEXT = '[data-testid="connection-head"] .ui-connection-head__text'
-const HEAD_ACTION = '[data-testid="connection-head"] .ui-connection-head__action'
+/** The head of the tab IN FRONT, and only of it: a second SSH tab leaves its own
+ *  head in the DOM with the pane merely inactive, so the unscoped selector is two
+ *  elements and Playwright's strict mode refuses to answer — which is the right
+ *  refusal, because the head being read must belong to the tab being read. Same
+ *  selector as `ssh-foundation.spec.ts` and `ssh-reconnect.spec.ts`. */
+const HEAD = '.pane.active [data-testid="connection-head"]'
+const HEAD_TEXT = `${HEAD} .ui-connection-head__text`
+const HEAD_ACTION = `${HEAD} .ui-connection-head__action`
 const GIT_AXIS = '[data-testid="git-helper-axis"]'
 const FILES_PANEL = '[data-testid="files-panel"]'
 const FILES_AXIS = '[data-testid="files-helper-axis"]'
@@ -284,7 +289,9 @@ async function answerPasswordAskIfPosed(
     await expect(page.locator(TAB)).toHaveCount(tabCount, { timeout: 60_000 })
     // The head belongs to the ACTIVE tab, so the last tab has to be the active
     // one before its head is read: otherwise the third tab's arrival is
-    // confirmed off the second tab's head.
+    // confirmed off the second tab's head. `HEAD` is scoped to the active pane
+    // for the same reason — an unscoped selector is two heads once the second
+    // SSH tab is open, and the refusal would stand in for the wait.
     await expect(page.locator(TAB).nth(tabCount - 1)).toHaveAttribute('aria-selected', 'true', {
       timeout: 60_000,
     })

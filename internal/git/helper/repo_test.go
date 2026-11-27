@@ -161,14 +161,18 @@ func TestHelperRepoStatusMatchesLocal(t *testing.T) {
 func helperPeer(t *testing.T) func(io.Reader, io.Writer) int {
 	t.Helper()
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, "testhash", "instance-1",
-			slog.New(slog.NewTextHandler(io.Discard, nil)))
-		h.Register(hostsvc.New(localgit.NewFactory()))
-		if serveErr := h.Serve(context.Background()); serveErr != nil {
-			return 1
-		}
-		return 0
+		return serveGitHelper(in, out, hostsvc.New(localgit.NewFactory()))
 	}
+}
+
+func serveGitHelper(in io.Reader, out io.Writer, service host.Service) int {
+	h := host.New(in, out, "testhash", "instance-1",
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.Register(service)
+	if serveErr := h.Serve(context.Background()); serveErr != nil {
+		return 1
+	}
+	return 0
 }
 
 // dialHelper brings up a client over the real host serving the real git

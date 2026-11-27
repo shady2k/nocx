@@ -10,6 +10,7 @@ package helper_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/client"
 )
@@ -279,19 +281,53 @@ func TestCommitTransportLossIsIndeterminate(t *testing.T) {
 	}
 }
 
+type blockedStatusService struct {
+	*hostsvc.Service
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s blockedStatusService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	if op == "status" {
+		close(s.started)
+		<-s.release
+	}
+	return s.Service.Call(ctx, op, params)
+}
+
 // TestReadTransportLossIsOrdinaryFailure is D12's contrast: a READ losing
 // the transport is an ordinary failure — an error wrapping ErrLost, never
 // an indeterminate outcome, never a refusal. The commit's indeterminate is
 // special because a commit cannot be re-run safely; a status read can.
 func TestReadTransportLossIsOrdinaryFailure(t *testing.T) {
 	dir := fixtureRepo(t)
-	conn := newKillableConn(helperPeer(t))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	conn := newKillableConn(func(in io.Reader, out io.Writer) int {
+		return serveGitHelper(in, out, blockedStatusService{
+			Service: hostsvc.New(localgit.NewFactory()),
+			started: started,
+			release: release,
+		})
+	})
 	c := dialKillable(t, conn)
 	repo := openHelper(t, c, dir)
 
+	done := make(chan error, 1)
+	go func() {
+		_, err := repo.Status(context.Background())
+		done <- err
+	}()
+	// The helper received status and cannot reply until the test releases it.
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("status returned before it reached the helper: %v", err)
+	}
 	conn.kill()
 
-	_, err := repo.Status(context.Background())
+	err := <-done
 	if err == nil {
 		t.Fatal("a lost read must fail")
 	}

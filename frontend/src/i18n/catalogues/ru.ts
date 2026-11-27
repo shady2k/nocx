@@ -39,6 +39,9 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'settings.worktrees.idleDays.label': 'Удалять неиспользуемые рабочие деревья после',
   'settings.worktrees.idleDays.description':
     'Рабочее дерево, созданное nocx и не использовавшееся так долго, удаляется ежедневной очисткой. Уходит только чек-аут: ветка и все коммиты остаются. Дерево с незакоммиченными изменениями не удаляется никогда.',
+  'settings.sessions.idleDays.label': 'Завершать сеансы без присмотра после',
+  'settings.sessions.idleDays.description':
+    'Завершает сеанс, если ни одно окно nocx не подключалось к нему так долго, даже если программа ещё работает. День — это 24 часа. Применяется только к вновь открытым сеансам.',
   'settings.history.retentionDays.label': 'Хранить историю',
   'settings.history.retentionDays.description':
     'Как долго хранится завершённая команда. Более старые команды удаляются из nocx — удаление не является безопасным стиранием, удалённые строки могут оставаться в свободном месте файла базы данных.',
@@ -164,22 +167,21 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.label': 'Работа, кажется, завершена',
   'notify.kind.paneWorkFinished.description':
     'nocx сделал вывод из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину.',
-
-  // ── Mechanism samples ───────────────────────────────────────────────────
-  // A plain string.
-  'i18n.sample.greeting': 'С возвращением',
-  // The former deliberate gap, minted when the catalogue turned complete at
-  // stage 3's close: the English-fallback order is proven by the
-  // call-site-literal test in locale-model.test.ts, not by a catalogue hole.
-  'i18n.sample.untranslated': 'This key has no Russian translation yet',
-  // A plural object: Russian needs one/few/many (1 команда / 2 команды /
-  // 5 команд), resolved with Intl.PluralRules('ru').
-  'i18n.sample.commandCount': {
-    one: '{count} команда',
-    few: '{count} команды',
-    many: '{count} команд',
-    other: '{count} команды',
+  // Доставка, которую центр уведомлений не смог выполнить. Предложения собраны
+  // из сегментов с ключами; причина после «could not deliver it» — текст
+  // бэкенда и остаётся английским (ADR-nswp57x0).
+  'notify.delivery.failed.title': 'Не доставлено',
+  'notify.delivery.failed.titleSeparator': ': ',
+  'notify.delivery.failed.body': '{channel} не смог доставить уведомление',
+  'notify.delivery.failed.causeSeparator': ': ',
+  'notify.delivery.more': {
+    one: 'ещё {count} уведомление',
+    few: 'ещё {count} уведомления',
+    many: 'ещё {count} уведомлений',
+    other: 'ещё {count} уведомления',
   },
+  'notify.delivery.more.separator': ' — ',
+
   // ── Kit chrome, passed as props from the surfaces (kit never imports i18n)
   'ui.collision.title': 'Файл уже существует',
   'ui.collision.overwrite': 'Перезаписать',
@@ -194,7 +196,25 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     other: 'Применить к {count} оставшимся файлам',
   },
   'ui.toast.dismiss': 'Закрыть уведомление',
+  'ui.toast.browserOpenFailed':
+    'Не удалось открыть браузер. Повторите попытку или откройте заметки о выпуске в браузере вручную.',
   'ui.connection.status': 'Состояние подключения',
+  'ui.connection.retry': 'Повторить',
+  'ui.collection.actions': 'Действия с коллекцией',
+  'ui.completion.listbox': 'подсказки',
+  'ui.secrets.listbox': 'секреты хранилища',
+  'ui.completion.source.command': 'команда',
+  'ui.completion.source.history': 'история',
+  'ui.completion.source.path': 'путь',
+  'ui.completion.source.host': 'хост',
+  'ui.completion.source.snippet': 'сниппет',
+  'ui.completion.source.function': 'функция',
+  'ui.watch.polling': 'Опрос',
+  'ui.rowList.remove': 'Удалить',
+  'ui.dialog.closeAria': 'Закрыть диалог',
+  'ui.dialog.closeTitle': 'Закрыть',
+  'ui.confirm.ok': 'OK',
+  'ui.confirm.cancel': 'Отмена',
   'ui.fileReadout.factsAria': 'Что это за файл',
   'ui.fileReadout.legendTitle': 'Подсвеченные ниже строки совпали со статическим сканом',
   'ui.fileReadout.legendTail':
@@ -835,88 +855,98 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'pw.ok': 'OK',
   'pw.cancel': 'Отмена',
   // ── Go-minted, no call site: sections, sentinel-zero sentences and the notifications routing family (internal/settings, internal/notify, internal/app) ──
-  'notifications.route.blockFinished.banner': 'Команда завершена → Баннер ОС',
-  'notifications.route.blockFinished.banner.description':
-    'Собственный реестр блоков nocx записал завершение команды. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.blockFinished.toast': 'Команда завершена → Тост в приложении',
-  'notifications.route.blockFinished.toast.description':
-    'Собственный реестр блоков nocx записал завершение команды. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.blockFinished': 'Команда завершена → Центр уведомлений',
-  'notifications.centre.blockFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.sessionEnded.banner': 'Сеанс завершён → Баннер ОС',
-  'notifications.route.sessionEnded.banner.description':
-    'Собственный реестр сеансов nocx записал завершение сеанса. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.sessionEnded.toast': 'Сеанс завершён → Тост в приложении',
-  'notifications.route.sessionEnded.toast.description':
-    'Собственный реестр сеансов nocx записал завершение сеанса. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.sessionEnded': 'Сеанс завершён → Центр уведомлений',
-  'notifications.centre.sessionEnded.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.transferFinished.banner': 'Передача файла завершена → Баннер ОС',
-  'notifications.route.transferFinished.banner.description':
-    'Собственный реестр передач nocx записал, что закачка или загрузка дошла до конца. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.transferFinished.toast': 'Передача файла завершена → Тост в приложении',
-  'notifications.route.transferFinished.toast.description':
-    'Собственный реестр передач nocx записал, что закачка или загрузка дошла до конца. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.transferFinished': 'Передача файла завершена → Центр уведомлений',
-  'notifications.centre.transferFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.programNotify.banner': 'Запрос уведомления от программы → Баннер ОС',
-  'notifications.route.programNotify.banner.description':
-    'Программа напечатала OSC 9 или OSC 777, чтобы попросить уведомление. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.programNotify.toast': 'Запрос уведомления от программы → Тост в приложении',
-  'notifications.route.programNotify.toast.description':
-    'Программа напечатала OSC 9 или OSC 777, чтобы попросить уведомление. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.programNotify': 'Запрос уведомления от программы → Центр уведомлений',
-  'notifications.centre.programNotify.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.bell.banner': 'Терминальный звонок → Баннер ОС',
-  'notifications.route.bell.banner.description':
-    'Программа напечатала BEL. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.bell.toast': 'Терминальный звонок → Тост в приложении',
-  'notifications.route.bell.toast.description':
-    'Программа напечатала BEL. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.bell': 'Терминальный звонок → Центр уведомлений',
-  'notifications.centre.bell.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.coordinatorStalled.banner':
-    'Координатор не читает своих workers → Баннер ОС',
-  'notifications.route.coordinatorStalled.banner.description':
-    'nocx писал координатору о почте его workers, и координатор не прочитал, либо координатор заблокирован на своём экране, пока его workers живы. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.coordinatorStalled.toast':
-    'Координатор не читает своих workers → Тост в приложении',
-  'notifications.route.coordinatorStalled.toast.description':
-    'nocx писал координатору о почте его workers, и координатор не прочитал, либо координатор заблокирован на своём экране, пока его workers живы. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.coordinatorStalled':
-    'Координатор не читает своих workers → Центр уведомлений',
-  'notifications.centre.coordinatorStalled.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.paneWorkFinished.banner': 'Работа, похоже, завершилась → Баннер ОС',
-  'notifications.route.paneWorkFinished.banner.description':
-    'nocx вывел из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину. Когда включено, доходит до баннер уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.paneWorkFinished.toast': 'Работа, похоже, завершилась → Тост в приложении',
-  'notifications.route.paneWorkFinished.toast.description':
-    'nocx вывел из заголовка панели, что её работа завершилась. Это вывод, поэтому он никогда не покидает эту машину. Когда включено, доходит до пропадающее сообщение в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.paneWorkFinished': 'Работа, похоже, завершилась → Центр уведомлений',
-  'notifications.centre.paneWorkFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.debounceSeconds.label': 'Схлопывать повторы за',
-  'notifications.debounceSeconds.description':
-    'После отправки уведомления дальнейшие того же вида от той же вкладки придерживаются на это время и приходят одной сводкой со числом. Первое уведомление не задерживается никогда — это объём всплеска, схлопывающегося за ним, а не ожидание перед ним. Изменение действует со следующего всплеска: уже идущее схлопывание сохраняет начатую длину.',
+  'settings.notifications.route.blockFinished.banner.label': 'Команда завершена → Баннер ОС',
+  'settings.notifications.route.blockFinished.banner.description':
+    'Журнал блоков nocx записал, что команда завершилась. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.blockFinished.toast.label': 'Команда завершена → Тост в приложении',
+  'settings.notifications.route.blockFinished.toast.description':
+    'Журнал блоков nocx записал, что команда завершилась. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.blockFinished.label': 'Команда завершена → Центр уведомлений',
+  'settings.notifications.centre.blockFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.sessionEnded.banner.label': 'Сеанс завершён → Баннер ОС',
+  'settings.notifications.route.sessionEnded.banner.description':
+    'Реестр сеансов nocx записал, что сеанс завершился. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.sessionEnded.toast.label': 'Сеанс завершён → Тост в приложении',
+  'settings.notifications.route.sessionEnded.toast.description':
+    'Реестр сеансов nocx записал, что сеанс завершился. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.sessionEnded.label': 'Сеанс завершён → Центр уведомлений',
+  'settings.notifications.centre.sessionEnded.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.transferFinished.banner.label':
+    'Передача файла завершена → Баннер ОС',
+  'settings.notifications.route.transferFinished.banner.description':
+    'Реестр передач nocx записал, что загрузка или выгрузка дошла до конца. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.transferFinished.toast.label':
+    'Передача файла завершена → Тост в приложении',
+  'settings.notifications.route.transferFinished.toast.description':
+    'Реестр передач nocx записал, что загрузка или выгрузка дошла до конца. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.transferFinished.label':
+    'Передача файла завершена → Центр уведомлений',
+  'settings.notifications.centre.transferFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.programNotify.banner.label':
+    'Запрос уведомления от программы → Баннер ОС',
+  'settings.notifications.route.programNotify.banner.description':
+    'Программа напечатала OSC 9 или OSC 777, чтобы запросить уведомление. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.programNotify.toast.label':
+    'Запрос уведомления от программы → Тост в приложении',
+  'settings.notifications.route.programNotify.toast.description':
+    'Программа напечатала OSC 9 или OSC 777, чтобы запросить уведомление. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.programNotify.label':
+    'Запрос уведомления от программы → Центр уведомлений',
+  'settings.notifications.centre.programNotify.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.bell.banner.label': 'Звонок терминала → Баннер ОС',
+  'settings.notifications.route.bell.banner.description':
+    'Программа напечатала BEL. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.bell.toast.label': 'Звонок терминала → Тост в приложении',
+  'settings.notifications.route.bell.toast.description':
+    'Программа напечатала BEL. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.bell.label': 'Звонок терминала → Центр уведомлений',
+  'settings.notifications.centre.bell.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.coordinatorStalled.banner.label':
+    'Координатор не читает своих рабочих → Баннер ОС',
+  'settings.notifications.route.coordinatorStalled.banner.description':
+    'nocx написал координатору о почте его рабочих, и координатор её не прочитал, либо координатор заблокирован на своём экране, пока его рабочие активны. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.coordinatorStalled.toast.label':
+    'Координатор не читает своих рабочих → Тост в приложении',
+  'settings.notifications.route.coordinatorStalled.toast.description':
+    'nocx написал координатору о почте его рабочих, и координатор её не прочитал, либо координатор заблокирован на своём экране, пока его рабочие активны. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.coordinatorStalled.label':
+    'Координатор не читает своих рабочих → Центр уведомлений',
+  'settings.notifications.centre.coordinatorStalled.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.route.paneWorkFinished.banner.label':
+    'Работа, кажется, завершена → Баннер ОС',
+  'settings.notifications.route.paneWorkFinished.banner.description':
+    'nocx по заголовку панели вывел, что её работа завершилась. Это вывод, поэтому он никогда не покидает этот компьютер. Когда включено, доходит до баннера уведомлений рабочего стола. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.route.paneWorkFinished.toast.label':
+    'Работа, кажется, завершена → Тост в приложении',
+  'settings.notifications.route.paneWorkFinished.toast.description':
+    'nocx по заголовку панели вывел, что её работа завершилась. Это вывод, поэтому он никогда не покидает этот компьютер. Когда включено, доходит до короткого сообщения в окне nocx. Если у вида выключены все каналы, он не доходит ни до одного канала — он всё равно записывается в центр уведомлений.',
+  'settings.notifications.centre.paneWorkFinished.label':
+    'Работа, кажется, завершена → Центр уведомлений',
+  'settings.notifications.centre.paneWorkFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторный показ возвращает то, что ещё хранит лента.',
+  'settings.notifications.debounceSeconds.label': 'Объединять повторы за',
+  'settings.notifications.debounceSeconds.description':
+    'После отправки уведомления следующие уведомления того же вида из той же вкладки задерживаются на это время и приходят одной сводкой с числом их прибывших. Первое уведомление никогда не задерживается — это то, сколько пачки схлопывается за ним, а не ожидание перед ним. Изменение действует на следующую пачку: уже схлопывающаяся сохраняет длину, с которой началась.',
   'settings.section.answers': 'Ответы',
   'settings.section.clipboard': 'Буфер обмена',
   'settings.section.history': 'История',
   'settings.section.instructions': 'Инструкции',
   'settings.section.interface': 'Интерфейс',
+  'settings.section.notifications': 'Уведомления',
   'settings.section.pets': 'Питомцы',
+  'settings.section.sessions': 'Сеансы',
   'settings.section.terminal': 'Терминал',
   'settings.section.updates': 'Обновления',
   'settings.section.worktrees': 'Рабочие деревья',
-  'settings.section.notifications': 'Уведомления',
   'settings.history.retentionDays.zeroLabel': 'Не отключать автоматически',
   'settings.worktrees.idleDays.zeroLabel': 'Не удалять автоматически',
-  'settings.history.diskCeilingMiB.zeroLabel': 'Хранить до лимита места',
+  'settings.sessions.idleDays.zeroLabel': 'Никогда не завершать сеансы без присмотра',
   'settings.terminal.scrollbackLines.zeroLabel': 'Без прокрутки — только текущий экран',
 
   // ── API workbench (frontend/src/api/*) ──
@@ -977,6 +1007,14 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'api.env.edit.head': 'Изменить окружение ',
   'api.secret.insert': 'Вставить секрет…',
   'api.delete.ellipsis': 'Удалить…',
+  'api.confirm.delete': 'Удалить',
+  'ui.confirm.delete': 'Удалить',
+  'ui.confirm.paste': 'Вставить',
+  'ui.confirm.pasteMultiline': 'Вставить многострочный текст?',
+  'api.confirm.discardAndClose': 'Отменить изменения и закрыть',
+  'backup.confirm.replace': 'Заменить',
+  'backup.confirm.merge': 'Объединить',
+  'api.confirm.discardAndImport': 'Отменить изменения и импортировать',
   'api.path.copyAbsolute': 'Копировать полный путь',
   'api.folder.newEllipsis': 'Новая папка…',
   'api.request.close': 'Закрыть запрос',
@@ -1218,6 +1256,12 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'notes.search.aria': 'Поиск по заметкам',
   'notes.panel.title': 'Заметки',
   'notes.delete.failedHead': 'Не удалось удалить заметку:',
+  'notes.saveFailed': '«{title}» не удалось сохранить: {message}',
+  'notes.delete.aria': 'Удалить {name}',
+  'notes.delete.confirm': 'Удалить «{name}»?',
+  'notes.retry': 'Повторить',
+  'notes.nomatch.desc': 'Ни в одной заметке нет «{query}».',
+  'notes.new.button': '+ Новая заметка',
   'notes.empty.title': 'Заметок ещё нет',
   'notes.empty.desc': 'Записывайте, не покидая терминал — ⌥⌘N.',
   'notes.nomatch.title': 'Ничего не найдено',
@@ -1225,6 +1269,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'notes.create.failedHead': 'Не удалось создать заметку:',
   'snippets.saved.head': 'Сохранено «',
   'snippets.deleted.head': 'Удалено «',
+  'snippets.delete.confirm': 'Удалить «{title}»?',
   'snippets.delete.failedHead': 'Не удалось удалить «',
   'snippets.reorder.failedHead': 'Не удалось изменить порядок:',
   'snippets.loading.title': 'Чтение сниппетов',
@@ -1475,6 +1520,11 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'settings.fallback.rules.body': 'Редактирование правил агентов недоступно в этом окне.',
   'settings.fallback.calibrate.body': 'Калибровка агента недоступна в этом окне.',
   'settings.reset.title': 'Сбросить к значению по умолчанию',
+  'settings.saveFailed': 'Не удалось сохранить «{name}»: {reason}',
+  'settings.resetFailed': 'Не удалось сбросить «{name}»: {reason}',
+  'settings.clearFailed': 'Не удалось очистить «{name}»: {reason}',
+  'settings.secret.replace': 'Заменить',
+  'settings.secret.clear': 'Очистить',
   'settings.title': 'Настройки',
   'settings.search.ph': 'Поиск настроек…',
   'settings.search.aria': 'Поиск настроек',
@@ -1521,6 +1571,13 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ports.copy': 'Копировать',
   'ports.copy.head': 'Копировать',
   'ports.open.head': 'Открыть',
+  'ports.forwarding': 'Пробрасывается {destination} на {host}:{port}',
+  'ports.cannotSee.title': 'Не удаётся увидеть порты на {target}',
+  'ports.cannotSee.desc':
+    'Вы открыли эту оболочку вручную, поэтому у nocx нет собственного подключения к ней и он не может узнать, что слушает порты. Откройте этот хост как подключение, чтобы увидеть его порты.',
+  'ports.noConnection.sshFirst':
+    'Сначала откройте SSH-сеанс для этого профиля — здесь появятся порты, которые он слушает.',
+  'ports.openAsConnection': 'Открыть как подключение',
   'tabs.pinned': 'Закреплена',
   'tabs.saveAsConnection': 'Сохранить как подключение',
   'tabs.close': 'Закрыть вкладку',
@@ -1582,6 +1639,13 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'backup.omissions.head': 'Пропущено:',
   'backup.choose.buttonLabel': 'Выберите файл копии…',
   'backup.discarded': 'Копия отменена — сохранение прервано.',
+  'backup.failed': 'Копия не создана: {message}',
+  'backup.readFailed': 'Не удалось прочитать файл копии: {reason}',
+  'backup.previewFailed': 'Не удалось просмотреть копию: {reason}',
+  'backup.restoreFailed': 'Восстановление не удалось: {message}',
+  'backup.omissions.credentialBindings': 'Удалено привязок учётных данных подключений: {count}',
+  'backup.omissions.groupCredentialBindings': 'Удалено привязок учётных данных групп: {count}',
+  'backup.omissions.groupDefaultKeys': 'Ключи по умолчанию групп не включены в копию: {count}',
   'notify.chrome.host': 'Хост',
   'notify.chrome.session': 'Сеанс',
   'notify.chrome.kind': 'Тип',
@@ -1634,6 +1698,24 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'update.details.copy': 'Копировать сведения',
   'update.details.copied': 'Сведения об обновлении скопированы',
   'update.details.copyFailed': 'Не удалось скопировать сведения об обновлении: {error}',
+  'update.failure.download':
+    'Не удалось загрузить обновление. Проверьте подключение и повторите попытку.',
+  'update.failure.verify':
+    'Не удалось проверить обновление. Проверьте наличие обновлений и загрузите его снова.',
+  'update.failure.unpack':
+    'Не удалось распаковать обновление. Проверьте свободное место и повторите попытку.',
+  'update.failure.replace':
+    'Не удалось заменить приложение. Разрешите запись в папку приложения и повторите попытку.',
+  'update.failure.notInstalled':
+    'Эту копию nocx нельзя обновить здесь. Установите последний выпуск в папку, в которую можно писать, и повторите попытку.',
+  'update.failure.blocked':
+    'Обновление заблокировано: {path} не принадлежит nocx. Переместите или удалите его и повторите попытку.',
+  'update.failure.generic':
+    'Обновление не удалось завершить. Повторите попытку или установите последний выпуск вручную.',
+  'update.failure.devBuild':
+    'это сборка для разработки; самообновление недоступно — запустите выпускную сборку или используйте менеджер пакетов, которым установлен nocx',
+  'update.failure.appImage':
+    'это не распространяемая сборка AppImage — скачайте AppImage со страницы релизов или используйте менеджер пакетов, которым установлен nocx',
   'tabs.notRemembered': 'Вкладки не сохраняются — хранилище раскладки недоступно',
   'ws.unavailable': 'Рабочие пространства недоступны — хранилище раскладки не читается',
   'ws.rename': 'Переименовать рабочее пространство…',
@@ -1649,6 +1731,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'ops.row.waitingServer': 'Ожидание сервера',
   'ops.cancel.aria': 'Отмена',
   'ops.progress.aria': 'прогресс',
+  'ops.row.progressOf': '{title}: прогресс',
+  'ops.row.cancelOf': 'Отменить: {title}',
   'reconnect.reconnecting': 'Переподключение',
   'reconnect.attach': 'Переподключиться',
   'reconnect.attaching': 'Подключение',
@@ -1677,11 +1761,20 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'kit.folderPicker.contents': 'Содержимое папки',
   'kit.folderPicker.empty': 'Папка пуста',
   'kit.folderPicker.cannotOpen': 'Не удалось открыть',
+  'kit.folderPicker.goLabel': 'Открыть',
+  'kit.folderPicker.pathPlaceholder': '/путь/к/папке',
+  'kit.folderPicker.cannotOpenPath': 'Не удалось открыть {path}',
   'kit.fileReadout.notText': 'Файл не является текстом',
   'kit.fileReadout.tooLarge': 'Файл больше бюджета чтения',
   'kit.fileReadout.readFailed': 'Файл не прочитан',
   'kit.fileReadout.what.aria': 'Что это за файл',
   'kit.fileReadout.scanNotice': 'Подсвеченные строки совпали со статическим сканированием',
+  'kit.fileReadout.notTextDesc':
+    'Его байты нельзя показать строками, поэтому здесь нечего читать. Файл на диске остался прежним — это факт о файле, а не отказ в запросе.',
+  'kit.fileReadout.tooLargeDesc':
+    'Бюджет — {size}, чтение на этом останавливается. Файл на диске остался прежним; ограничено чтение, а не файл.',
+  'kit.fileReadout.scanDesc':
+    '{words}. Совпадение подсвечено там, где оно находится, в самих байтах — это свидетельство для чтения, а не отказ, и ничего не изменилось оттого, что шаблон совпал. Строки, которых шаблон не коснулся, ничем не подтверждены.',
   'kit.personMessage.aria': 'ваше сообщение, пока писался ответ',
   'kit.personMessage.queued': 'спросим, когда закончится этот ответ',
   'kit.personMessage.label': 'Вы',
@@ -1690,6 +1783,12 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'footprint.removed.files': 'файлов на',
   'footprint.kept.head': 'изменённые файлы оставлены:',
   'footprint.uninstall.failedHead': 'Не удалось удалить:',
+  'footprint.confirm.uninstall': 'Удалить',
+  'footprint.confirm.uninstallShell':
+    'Убрать интеграцию оболочки nocx из {identity}? Удаляются только файлы из манифеста, которые не менялись; изменённые файлы остаются, и об этом сообщается.',
+  'footprint.confirm.uninstallHelper':
+    'Удалить удалённого помощника из {identity}? Всё дерево {path} удаляется, все активные сеансы через помощника завершаются, согласие для этой машины отзывается. Это нельзя отменить.',
+  'panes.confirm.closeWorkspace': 'Закрыть рабочее пространство',
   'footprint.title': 'Состояние хостов',
   'footprint.desc':
     'nocx устанавливает shell-интеграцию на удалённый хост автоматически. Здесь то, что она записала, где и когда была видна в последний раз — чтобы показать это, подключение не устанавливается. Удалить может только сохранённое подключение к хосту.',
@@ -1965,4 +2064,642 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Проверить настройки агента',
   'editor.chip.agent': 'Отвечает агент {agent}. Открыть настройки агента.',
   'editor.chip.agentModel': 'Отвечает модель {model}. Открыть настройки агента.',
+  // Russian for the keys the russian-ui landing left untranslated (nocx-dej6.3.9).
+  'api.auth.password': 'Пароль',
+  'api.auth.token': 'Токен',
+  'api.folder.empty.collection': 'Эта коллекция пуста',
+  'api.folder.empty.folder': 'Эта папка пуста',
+  'api.folder.new': 'Новая папка',
+  'api.folder.newIn': 'Новая папка в {place}',
+  'api.folder.variablesMalformed':
+    'Исправьте .variables.json в этой папке в редакторе, прежде чем эта страница сможет его изменить.',
+  'api.import.storeMany': {
+    one: 'Сохранить {count} секретную переменную в хранилище — в файле остаётся имя, значение не сохраняется',
+    few: 'Сохранить {count} секретные переменные в хранилище — в файлах остаются имена, значения не сохраняются',
+    many: 'Сохранить {count} секретных переменных в хранилище — в файлах остаются имена, значения не сохраняются',
+    other:
+      'Сохранить {count} секретных переменных в хранилище — в файлах остаются имена, значения не сохраняются',
+  },
+  'api.import.storeOne':
+    'Сохранить {name} в хранилище — в файле остаётся имя, значение не сохраняется',
+  'api.move.crossCollection': 'Запрос можно переместить только внутри его коллекции.',
+  'api.run.stopped': 'Остановлено',
+  'api.send.chooseFirst': 'Сначала выберите запрос из коллекции',
+  'api.send.savesThenSends': 'Сохраняет этот запрос и затем отправляет его',
+  'api.send.sends': 'Отправить этот запрос',
+  'api.send.stops': 'Останавливает выполняющийся запуск',
+  'api.variable.addNewEnv': 'Добавить {name} в новое окружение',
+  'api.variable.addToEnv': 'Добавить {name} в {env}',
+  'app.displaced.named':
+    '«{name}» теперь открыто в другом окне — это окно больше не подключено к нему',
+  'app.displaced.unnamed': 'Панель теперь открыта в другом окне — эта больше не подключена к нему',
+  'app.reconnect.failed.many': {
+    one: 'Не удалось заново открыть {count} подключение — его вкладка всё ещё здесь',
+    few: 'Не удалось заново открыть {count} подключения — их вкладки всё ещё здесь',
+    many: 'Не удалось заново открыть {count} подключений — их вкладки всё ещё здесь',
+    other: 'Не удалось заново открыть {count} подключений — их вкладки всё ещё здесь',
+  },
+  'app.reconnect.failed.one': 'Не удалось переподключиться к {host} — его вкладка всё ещё здесь',
+  'app.subagents.hide': {
+    one: 'Скрыть {count} субагента',
+    few: 'Скрыть {count} субагента',
+    many: 'Скрыть {count} субагентов',
+    other: 'Скрыть {count} субагентов',
+  },
+  'app.subagents.show': {
+    one: 'Показать {count} субагента',
+    few: 'Показать {count} субагента',
+    many: 'Показать {count} субагентов',
+    other: 'Показать {count} субагентов',
+  },
+  'approval.group.allow': 'Разрешить это действие',
+  'approval.group.refuse': 'Отклонить это действие',
+  'composer.grant.aria': 'отмечено для вопроса · {count}{spoken}',
+  'composer.grant.chip': 'отмечено для вопроса · {count}{automatic}',
+  'composer.grant.frozenSpoken': ' · замороженный экран прикреплён автоматически',
+  'composer.grant.mark': 'Отметьте блоки, чтобы включить их в вопрос',
+  'composer.grant.open': 'Открыть отмеченные блоки — отмечено для вопроса · {count}{spoken}',
+  'composer.target.aria': 'Enter передаёт ввод в {word}. Нажмите, чтобы выбрать.',
+  'connection.backendRestarted': 'Бэкенд перезапустился, и эта оболочка утрачена',
+  'connection.sessionInterrupted': 'Подключение к сессии прервано.',
+  'connections.auth.mode.agent': 'Агент',
+  'connections.auth.mode.auto': 'Авто',
+  'connections.auth.mode.keyboardInteractive': 'Интерактивная аутентификация',
+  'connections.auth.mode.password': 'Пароль',
+  'connections.auth.mode.publicKey': 'Открытый ключ',
+  'connections.hostKey.changed': 'Ключ хоста изменился',
+  'connections.hostKey.choose': 'Выберите способ подключения nocx',
+  'connections.hostKey.unknown': 'Неизвестный ключ хоста',
+  'connections.import.sshConfigPath': 'Конфиг SSH ({path})',
+  'connections.probe.accepted': 'Принято',
+  'connections.probe.hostKeyChanged': 'Ключ хоста изменился',
+  'connections.probe.hostKeyUnknown': 'Неизвестный ключ хоста',
+  'connections.probe.needsInteractive': 'Нужна интерактивная аутентификация',
+  'connections.probe.rejected': 'Отклонено',
+  'connections.probe.unreachable': 'Недоступно',
+  'editor.chip.endpoint': 'Отвечает через {endpoint}. Открыть эндпоинты.',
+  'editor.chip.model': 'Отвечает модель {model}. Открыть роли.',
+  'editor.chip.opensSettings': '{text}. Открывает настройки.',
+  'footprint.nothingInstalled': 'На {where} ничего не установлено',
+  'footprint.removed': 'Вспомогательный файл удалён с {where}',
+  'frame.frozen.aria': 'Замороженный кадр терминала',
+  'frame.frozen.text': 'Экран заморожен на время вашего вопроса',
+  'frame.frozen.title': 'Терминал продолжает работать; это закреплённый снимок его экрана.',
+  'git.notRepo.desc.path': '{cwd} находится не внутри git-репозитория.',
+  'git.notRepo.desc.shell': 'Оболочка находится не внутри git-репозитория.',
+  'git.refusal.conflicted': 'Изменение не выполнено: сначала разрешите конфликт слияния.',
+  'git.refusal.disconnected': 'Изменение не выполнено — подключение потеряно.',
+  'git.refusal.gitUnavailable': 'Изменение не выполнено — git недоступен.',
+  'git.refusal.nothingStaged': 'Нечего коммитить — сначала добавьте файл в индекс.',
+  'git.refusal.nothingToAmend': 'В этой ветке пока нет коммита для исправления.',
+  'git.refusal.reason': 'Изменение не выполнено ({reason}).',
+  'git.refusal.repositoryGone':
+    'Изменение не выполнено — репозиторий этого представления больше недоступен.',
+  'kit.blockReceipt.aria': 'сохранить обнаруженный секрет',
+  'kit.blockReceipt.dismiss': 'Отклонить',
+  'kit.blockReceipt.dismissAria': 'не сохранять этот {kind}',
+  'kit.blockReceipt.nameFor': 'имя в хранилище для {kind}',
+  'kit.blockReceipt.save': {
+    one: 'Сохранить {count}',
+    few: 'Сохранить {count}',
+    many: 'Сохранить {count}',
+    other: 'Сохранить {count}',
+  },
+  'kit.codeBlock.copied': 'Скопировано',
+  'kit.codeBlock.copiedToast': 'Код скопирован',
+  'kit.codeBlock.copy': 'Копировать код',
+  'kit.codeBlock.failedToast': 'Не удалось скопировать код',
+  'kit.secretChip.damaged': '{name}: эти байты больше не являются секретом — {damage}',
+  'kit.secretChip.resolved': 'секрет из хранилища: {name}',
+  'kit.secretChip.unresolved':
+    'скрытый секрет — выберите актуальное значение, чтобы выполнить эту команду',
+  'pane.failedToStart': 'Не удалось запустить терминал:\n\n{error}',
+  'panes.unreconciled.desc': 'Их сессия может всё ещё работать: {reasons}',
+  'panes.unreconciled.title': {
+    one: '{count} команда на этой вкладке: она не выполняется и не завершена',
+    few: '{count} команды на этой вкладке: они не выполняются и не завершены',
+    many: '{count} команд на этой вкладке: они не выполняются и не завершены',
+    other: '{count} команд на этой вкладке: они не выполняются и не завершены',
+  },
+  'password.hide': 'Скрыть пароль',
+  'password.show': 'Показать пароль',
+  'perms.stopped.answers': {
+    one: 'Остановлено {count} ответ',
+    few: 'Остановлено {count} ответа',
+    many: 'Остановлено {count} ответов',
+    other: 'Остановлено {count} ответов',
+  },
+  'perms.stopped.finishedFirst': {
+    one: '{count} уже завершился сам',
+    few: '{count} уже завершились сами',
+    many: '{count} уже завершились сами',
+    other: '{count} уже завершились сами',
+  },
+  'perms.stopped.thatUsingIt': 'которые его использовали.',
+  'perms.writer.allow': 'Разрешить команду',
+  'perms.writer.refuse': 'Написать отказ',
+  'ports.failed.disconnected': 'Не удалось прочитать порты — подключение потеряно.',
+  'ports.failed.invalid': 'Не удалось прочитать порты — запрос был некорректным.',
+  'ports.failed.reason': 'Не удалось прочитать порты ({reason}).',
+  'ports.failed.unavailable': 'Не удалось прочитать порты — обнаружение портов недоступно.',
+  'recall.coverage.oldest': 'самая старая запись: {when}',
+  'recall.empty.desc': 'команды, которые вы запустите, появятся здесь',
+  'recall.empty.noMatch': 'нет совпадений для «{filter}»',
+  'recall.empty.noMatch.desc': 'Backspace — очистить фильтр',
+  'recall.empty.title': 'истории пока нет',
+  'recall.panel.title': 'история',
+  'recall.source.sessionOnly': 'только эта сессия',
+  'recall.source.unavailable': 'не сохраняется',
+  'recall.time.days': {
+    one: '{count} день назад',
+    few: '{count} дня назад',
+    many: '{count} дней назад',
+    other: '{count} дня назад',
+  },
+  'recall.time.hours': {
+    one: '{count} час назад',
+    few: '{count} часа назад',
+    many: '{count} часов назад',
+    other: '{count} часа назад',
+  },
+  'recall.time.justNow': 'только что',
+  'recall.time.minutes': {
+    one: '{count} минуту назад',
+    few: '{count} минуты назад',
+    many: '{count} минут назад',
+    other: '{count} минуты назад',
+  },
+  'recall.time.months': {
+    one: '{count} месяц назад',
+    few: '{count} месяца назад',
+    many: '{count} месяцев назад',
+    other: '{count} месяца назад',
+  },
+  'recall.time.running': 'выполняется',
+  'recall.time.weeks': {
+    one: '{count} неделю назад',
+    few: '{count} недели назад',
+    many: '{count} недель назад',
+    other: '{count} недели назад',
+  },
+  'reconnect.fate.host':
+    'Переподключение открывает НОВУЮ оболочку на том же адресе — всё, что старая оболочка могла запустить, может продолжать работать на {host}.',
+  'reconnect.fate.local':
+    'Переподключение открывает НОВУЮ оболочку. Прежняя сессия завершена; всё, что она запустила как отдельный процесс, может продолжать работать.',
+  'reconnect.notAttached': 'Эта сессия не подключена',
+  'reconnect.restoring': 'Восстановление сессии…',
+  'reconnect.spent': 'Автоматические попытки исчерпаны.',
+  'reconnect.staysAbove': 'То, что было выведено, остаётся выше.',
+  'roles.asDefault': 'По умолчанию',
+  'scrollback.answeredBy': 'ответ от {model}',
+  'scrollback.askAboutBlock': 'Спросить об этом блоке',
+  'scrollback.block.aria': 'Блок: {kind}',
+  'scrollback.block.aria.named': 'Блок: {kind}, {label}',
+  'scrollback.cut.cap': {
+    one: 'Ранний вывод не сохранён: лимит размера этой сессии отбросил {count} строку здесь.',
+    few: 'Ранний вывод не сохранён: лимит размера этой сессии отбросил {count} строки здесь.',
+    many: 'Ранний вывод не сохранён: лимит размера этой сессии отбросил {count} строк здесь.',
+    other: 'Ранний вывод не сохранён: лимит размера этой сессии отбросил {count} строк здесь.',
+  },
+  'scrollback.cut.rows': {
+    one: '{count} строка раннего вывода не сохранена здесь.',
+    few: '{count} строки раннего вывода не сохранены здесь.',
+    many: '{count} строк раннего вывода не сохранены здесь.',
+    other: '{count} строк раннего вывода не сохранены здесь.',
+  },
+  'scrollback.doNotWrap': 'Не переносить',
+  'scrollback.emptyCommand': '(пусто)',
+  'scrollback.evicted': 'Вывод больше не хранится',
+  'scrollback.newShell': 'Новая оболочка — та, что выше, утрачена',
+  'scrollback.notRecorded': 'не записано',
+  'scrollback.previousSession': 'Предыдущая сессия',
+  'scrollback.succeeded': 'Успешно',
+  'scrollback.unmark': 'Снять отметку',
+  'scrollback.wrapLines': 'Переносить строки',
+  'shellintegration.publish.title': 'Интеграция оболочки не скопирована',
+  'snippets.edit.title': 'Изменить сниппет: {name}',
+  'snippets.new.title': 'Новый сниппет',
+  'tabs.aria': 'Вкладки терминала',
+  'tabs.duplicate': 'Дублировать',
+  'tabs.pin': 'Закрепить',
+  'tabs.unpin': 'Открепить',
+  'terminal.input.refused': 'Ввод отклонён ({error}). Оставшийся ввод в очереди отброшен.',
+  'terminal.input.uncertain':
+    'Ввод мог не дойти до оболочки. Он не будет отправлен повторно. Оставшийся ввод в очереди отброшен; проверьте оболочку перед отправкой следующей команды.',
+  'terminal.output.aria': 'Вывод терминала',
+  'update.link.releaseNotes': 'Что нового',
+  'update.link.whatChanged': 'Что изменилось',
+  'vault.copied': 'Скопировано',
+  'vault.protection.sealed.desc':
+    'Сохранённые пароли и парольные фразы ключей остаются зашифрованными, пока вы не разблокируете хранилище. Подключения, которым это нужно, будут запрашивать его.',
+  'vault.protection.uninitialized.desc':
+    'nocx хранит пароли и парольные фразы ключей, которые вы сохраняете для подключений. Настройте защиту, чтобы начать хранить их в зашифрованном виде.',
+  'vault.protection.unlocked.title': 'Хранилище разблокировано',
+  'vault.provider.notAnswering': 'Не отвечает: {reason}',
+  'vault.provider.ready': '{store} доступно и отвечает.',
+  'vault.recovery.copy': 'Скопировать код восстановления',
+  'vault.unlistedSecret': 'Недоступный секрет',
+
+  // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
+  'terminal.font.loadFailed': 'Не удалось загрузить Nordwand Mono. Текущий шрифт не изменён.',
+  'testSupport.hello.greeting': 'Привет, {name}!',
+  'api.timing.waiting': 'ожидание',
+  'api.timing.download': 'загрузка',
+  'api.timing.total': 'всего',
+  'api.move.rootOf': 'Корень: {collection}',
+  'api.move.title': 'Переместить {name}…',
+  'api.pane.placeholder.collection': 'orders-api',
+  'api.pane.placeholder.folderPath': '/work/acme-api',
+  'api.pane.placeholder.folder': 'отчёты',
+  'api.pane.noEnvironment': 'Нет окружения',
+  'api.env.field.name': 'Имя',
+  'api.env.field.value': 'Значение',
+  'api.env.field.nameDesc':
+    'Так будет называться окружение в выборе рядом с кнопкой «Отправить» — это имя внутри файла, а не имя файла.',
+  'api.env.field.namePlaceholder': 'Production',
+  'api.env.field.varPlaceholder': 'baseUrl',
+  'api.env.field.valuePlaceholder': 'https://api.example.com',
+  'api.folder.field.send': 'Отправка',
+  'api.folder.field.varPlaceholder': 'baseUrl',
+  'api.folder.field.valuePlaceholder': 'https://api.example.com',
+  'api.import.submit': 'Импортировать',
+  'api.import.routeDirect': 'Напрямую',
+  'api.import.curl.convert': 'Преобразовать в запрос',
+  'api.import.curl.desc':
+    'Разбирается, но не выполняется — за этим полем нет оболочки. Оно заполняет форму, заменяя то, что там открыто; ничего не записывается, пока запрос не сохранён. Запрос с несохранёнными изменениями не заменяется без вопроса.',
+  'api.runs.tab.body': 'Тело',
+  'api.runs.tab.raw': 'Исходно',
+  'api.runs.wire.request': '── запрос ──',
+  'api.runs.wire.connection': '── соединение ──',
+  'api.runs.wire.certificateChain': '── цепочка сертификатов ──',
+  'api.runs.wire.response': '── ответ ──',
+  'api.runs.certificate': 'Сертификат {count}',
+  'api.form.body.none': 'Нет',
+  'api.form.body.json': 'JSON',
+  'api.form.body.raw': 'Исходный',
+  'api.form.body.form': 'Форма',
+  'api.form.body.file': 'Файл из коллекции',
+  'api.form.auth.none': 'Нет',
+  'api.form.auth.bearer': 'Bearer',
+  'api.form.auth.basic': 'Basic',
+  'api.form.auth.apikey': 'Ключ API',
+  'api.form.field.send': 'Отправить',
+  'api.form.field.scope': 'Область',
+  'api.form.field.from': 'Откуда',
+  'api.form.field.status': 'Статус',
+  'api.form.idle': 'Выберите запрос из коллекции или импортируйте строку curl — он появится здесь.',
+  'api.form.filePathHint':
+    'Путь ВНУТРИ коллекции, который читается при отправке по правилам путей дескриптора.',
+  'terminal.input.stopped':
+    'Это подключение перестало принимать ввод — нажатия клавиш отбрасываются.',
+  'terminal.assistant.nativeInput':
+    'Включён собственный ввод — включите редактор команд, чтобы спросить ассистента.',
+  'terminal.assistant.runningBlocked':
+    'Команда выполняется. Можно спросить о ней ассистента, но новую команду поверх неё запустить нельзя.',
+  'terminal.secrets.savedPartial':
+    '{name} сохранён, но перезапись истории ещё не выполнена — повторите, чтобы завершить.',
+  'terminal.secrets.storedName': 'Секрет {name} сохранён в хранилище.',
+  'terminal.secrets.dismissedSession':
+    'Отменено — этот ключ больше не будет предлагаться в этом сеансе.',
+  'terminal.secrets.unknownNames': {
+    one: 'Неизвестный секрет: {names}. Команда не отправлена.',
+    few: 'Неизвестных секрета: {names}. Команда не отправлена.',
+    many: 'Неизвестных секретов: {names}. Команда не отправлена.',
+    other: 'Неизвестных секретов: {names}. Команда не отправлена.',
+  },
+  'terminal.secrets.sealedRun':
+    'Хранилище заблокировано. Разблокируйте его и запустите команду снова.',
+  'terminal.connection.dismissedFor':
+    'Отменено — {dest} больше не будет предлагаться как подключение.',
+  'terminal.connection.savedName': 'Подключение «{name}» сохранено.',
+  'terminal.connection.saveError': 'Не удалось сохранить подключение: {error}',
+  'scrollback.chrome.running': 'Выполняется',
+  'scrollback.chrome.blockActions': 'Действия блока',
+  'scrollback.chrome.copyRefused': 'Сохранённый ответ недоступен, поэтому ничего не скопировано.',
+  'scrollback.chrome.stop': 'Остановить',
+  'scrollback.chrome.copyCommand': 'Копировать команду',
+  'scrollback.chrome.copyOutput': 'Копировать вывод',
+  'scrollback.chrome.copyAll': 'Копировать всё',
+  'scrollback.chrome.interrupt': 'Прервать',
+  'scrollback.chrome.interruptTitle': 'Прервать (Ctrl+C) — управление фокусом: Alt+F10',
+  'scrollback.chrome.copying': 'Копирование…',
+  'api.dialog.create': 'Создать',
+  'api.dialog.open': 'Открыть',
+  'api.dialog.createFolder': 'Создать папку',
+  'api.table.addVariable': 'Добавить переменную',
+  'api.table.addParameter': 'Добавить параметр',
+  'api.table.addHeader': 'Добавить заголовок',
+  'api.table.emptyEnvVariables':
+    'Переменных пока нет. URL, записанный в {{baseUrl}}, разрешается через одну из них.',
+  'api.table.emptyFolderVariables': 'В этой папке переменные не объявлены.',
+  'api.table.emptyQueryParameters': 'Параметров запроса нет.',
+  'api.table.emptyRequestVariables': 'Переменных нет в действующей области этого запроса.',
+  'api.table.emptyHeaders': 'Заголовков нет.',
+  'scrollback.disclosure.reasoning': 'Рассуждение',
+  'scrollback.disclosure.toolResult': 'Отправлено и возвращено',
+  // ── Clipboard banner (banner.tsx) ───────────────────────────────────────
+  'banner.clipboard.message':
+    'Терминальная программа попыталась записать что-то в буфер обмена. Это отключено по умолчанию из соображений безопасности, чтобы защититься от вредоносного ПО.',
+  'banner.clipboard.allow': 'Разрешить запись в буфер обмена',
+  'banner.clipboard.suppress': 'Больше не показывать',
+  'banner.clipboard.dismiss': 'Закрыть',
+  // ── Approval prompt literals (agent-approval-prompt.tsx) ────────────────
+  'approval.allowOnce': 'Разрешить один раз',
+  'approval.denyOnce': 'Отклонить один раз',
+  'approval.askingTool.withArgs': 'Ассистент просит вызвать',
+  'approval.askingTool.argsTail': 'с такими аргументами:',
+  'approval.askingTool.plain': 'Ассистент просит вызвать',
+  'approval.arguments.aria': 'Аргументы: {tool}',
+  'approval.expanded.lead':
+    'С переменными, как их сейчас читает шелл. Это то, что означает команда, а не то, что отправляется: строка выше — то, что выполняется, ровно как написано:',
+  'approval.facts.aria': 'Что сделает {tool}',
+  'approval.blockArg.aria': 'Аргумент {name} у {tool}',
+  'approval.scripts.lead':
+    'А что сейчас содержат эти файлы. Это чтение, а не то, что отправляется: команда выше — то, что выполняется, ровно как написано, а файл может измениться между этим вопросом и моментом запуска.',
+  'approval.script.aria': 'Что сейчас содержит {path}',
+  'approval.findings.lead': 'Что найдено и где — сам материал здесь не показывается:',
+  'approval.covers.body':
+    'Одобрение относится только к этому вызову: он не выполнялся, и ни один последующий вызов в этом ответе тоже. Это не гарантирует, что терминал не затронут: разрешённый ранее вызов в этой пачке мог уже выполниться.',
+  'approval.standing.lead':
+    'Ответ в этой сессии действует до конца этой терминальной сессии; перезапуск шелла начинает новую, и вопрос появится снова. Ответ «всегда» — постоянное разрешение для {rule}, во всех сессиях, начиная с этого момента; его можно изменить на странице «Разрешения ассистента».',
+  // ── Agent ask, checkouts, connections, endpoint, editor, chip, recall ──
+  'agentAsk.managePermissions': 'Управлять разрешениями',
+  'agentAsk.undo': 'Отменить',
+  'checkouts.unavailable.title': 'Неиспользуемые рабочие копии не очищаются',
+  'checkouts.unavailable.noRecord':
+    'Хранилище, в котором nocx помнит созданные им рабочие копии, не открылось, поэтому ни одна копия не оценивается и ни одна не удаляется.',
+  'checkouts.unavailable.recordWrites':
+    'Журнал созданных nocx рабочих копий отказался принять запись, поэтому времена последнего использования в нём нельзя считать надёжными, и ничего не удаляется по возрасту, пока бэкенд не перезапустится.',
+  'checkouts.unavailable.unknown': 'Очистка не может работать, и эта сборка не знает почему.',
+  'connections.group.empty':
+    'Здесь пока нет подключений. Чтобы переместить сюда подключение, выберите эту группу в его редакторе.',
+  'connections.inherit.placeholder': '— Не задано (наследуется) —',
+  'endpoint.noServer.message': 'Не удалось связаться с desktop-бэкендом.',
+  'endpoint.noServer.remedy': 'Повторите попытку, когда бэкенд будет доступен.',
+  'editor.runCommand.aria': 'Выполнить команду',
+  'editor.sendQuestion.aria': 'Спросить',
+  'editor.hint.run': 'выполнить',
+  'editor.hint.ask': 'спросить',
+  'editor.hint.newline': 'новая строка',
+  'editor.switch.shell': 'Выполнить',
+  'editor.switch.agent': 'Спросить',
+  'markAffordance.forQuestion.aria': '{label} для вопроса',
+  'workspaceChip.title': 'Рабочее пространство: {name}',
+  'recall.panel.aria': 'история команд',
+  'recall.search.placeholder': 'поиск по истории',
+  'recall.search.aria': 'поиск по истории',
+  'integration.handshake-timeout.description':
+    'Ваша оболочка не ответила nocx вовремя, поэтому эта вкладка — простой терминал.',
+  'integration.startup-did-not-return.description':
+    'Интеграция оболочки nocx так и не ответила изнутри вашей оболочки, поэтому эта вкладка — простой терминал.',
+  'integration.unsupported-shell.description':
+    'Для этой оболочки у nocx нет интеграции, поэтому эта вкладка — простой терминал.',
+  'integration.no-secure-temp.description':
+    'nocx не смог создать приватный временный файл для этой сессии, поэтому интеграция не установлена.',
+  'integration.session-unavailable.description':
+    'Это подключение не открыло для nocx собственной сессии, поэтому эта вкладка — простой терминал.',
+  'integration.pty-unavailable.description':
+    'Это подключение не даёт nocx терминала, поэтому интерактивной оболочки для интеграции здесь нет.',
+  'integration.host-key-unconfirmed.description':
+    'Ключ хоста не подтверждён, поэтому интеграция оболочки не доставлена.',
+  'integration.unknown.description':
+    'nocx не смог настроить интеграцию оболочки для этой сессии и не может сказать почему.',
+  // ── History status sentences ──
+  'history.unavailable.title': 'Команды не сохраняются',
+  'history.unavailable.noKey':
+    'Ключ, которым шифруется база истории, не удалось прочитать, поэтому ничего не сохраняется.',
+  'history.unavailable.invalidBudget':
+    'Ограничения размера ниже не удалось применить, поэтому хранилище не открыто и ничего не сохраняется.',
+  'history.unavailable.openFailed': 'База истории не открылась, поэтому ничего не сохраняется.',
+  'history.unavailable.writeFailed':
+    'База истории отказывается принимать записи, поэтому команды выполняются, но не сохраняются.',
+  'history.unavailable.unknown': 'Ничего не сохраняется.',
+  'history.detached.title': 'Сессии продолжают работать, только пока открыто окно',
+  'history.detached.causeOutputOff': 'Вывод команд не сохраняется',
+  'history.detached.causeHistoryOff': 'История отключена',
+  'history.detached.body':
+    '{cause}, поэтому некуда записать то, что сессия выводит, пока её окно закрыто. Такая сессия приостанавливается, когда заполняется буфер вывода, и продолжает работу, когда окно снова открывают. Ничего из напечатанного не теряется.',
+  // ── Integration notice and status ──
+  'integration.copy.copied': 'Скопировано',
+  'integration.copy.failed': 'Не удалось скопировать в буфер обмена',
+  'integration.toolbar.aria': 'Интеграция оболочки',
+  'integration.notice.dontShowShell': 'Не показывать для этой оболочки',
+  'integration.notice.dismiss.aria': 'Закрыть',
+  'integration.notice.copy': 'Копировать',
+  'integration.notice.learnMore': 'Подробнее',
+  'integration.notice.close': 'Закрыть',
+  'integration.commands.aria': 'Команды для выполнения',
+  'integration.about.title': 'Об интеграции оболочки',
+  'integration.notIntegrated.title': 'Не интегрировано',
+  'integration.channel-lost.title': 'Интеграция потеряна',
+  'integration.channel-lost.description':
+    'nocx потерял канал связи с этой оболочкой, поэтому вкладка теперь простой терминал.',
+  'integration.remote-command.description':
+    'Это подключение запускает настроенную команду вместо оболочки, поэтому интегрировать здесь нечего.',
+  'integration.command-too-long.description':
+    'nocx не стал отправлять собственную стартовую команду на этот хост, потому что она длиннее допустимого в nocx, поэтому вкладка остаётся простым терминалом.',
+  'integration.fish.detected': 'Обнаружен Fish {version}.',
+  'integration.fish.unavailable': 'Версия Fish неизвестна.',
+  'hostKey.cancel': 'Отмена',
+  'hostKey.agent.title': 'Разрешить этому агенту пользоваться инструментами nocx?',
+  'hostKey.agent.lead': 'Если вы разрешите, этот агент',
+  'hostKey.agent.launches': 'и запускаемые им команды',
+  'hostKey.agent.deny': 'Отклонить',
+  'hostKey.agent.allowed.aria': 'Что будет разрешено',
+  'hostKey.method.aria': 'Способ интеграции',
+  'hostKey.method.raw.label': 'Без интеграции',
+  'hostKey.method.script.label': 'Скрипт',
+  'hostKey.method.helper.label': 'Помощник',
+  'hostKey.fingerprint.label': 'Отпечаток',
+  'hostKey.fingerprint.offered': 'Предложенный отпечаток',
+  'tabs.menu.rename': 'Переименовать…',
+  'tabs.menu.close': 'Закрыть',
+  'tabs.menu.quickConnect': 'Быстрое подключение…',
+  'tabs.menu.insertSecret': 'Вставить секрет…',
+  'tabs.menu.snippets': 'Сниппеты…',
+  'tabs.menu.newNote': 'Новая заметка',
+  'tabs.menu.newWorkspace': 'Новое рабочее пространство…',
+  'tabs.newTab.aria': 'Новая вкладка',
+  'tabs.more.aria': 'Ещё',
+  'tabs.showAll.aria': 'Показать все рабочие пространства',
+  'tabs.filter.placeholder': 'Фильтровать вкладки…',
+  'tabs.filter.aria': 'Фильтр вкладок',
+  'tabs.closeWorkspace.aria': 'Закрыть рабочее пространство',
+  'tabs.closeWorkspace.named': 'Закрыть рабочее пространство {name}',
+  'tabs.workspace.title': 'Рабочее пространство: {name}',
+  'tabs.resizeStrip.aria': 'Изменить ширину полосы вкладок',
+  'toolSurface.unavailable.title': 'Инструменты рабочего агента недоступны',
+  'toolSurface.unavailable.body':
+    'Поверхность инструментов рабочего агента nocx недоступна: {reason}.',
+  'toolSurface.unavailable.noAnswer': 'эндпоинт не ответил',
+  'toolSurface.dismiss.aria': 'Закрыть',
+  'nameColour.cancel': 'Отмена',
+  'nameColour.name': 'Название',
+  'nameColour.newWorkspace': 'Новое рабочее пространство',
+  'nameColour.renameWorkspace': 'Переименовать рабочее пространство',
+  'nameColour.renameTab': 'Переименовать вкладку',
+  'recovery.enableEditor': 'Включить редактор команд',
+  'recovery.restoreEditor': 'Восстановить редактор команд',
+  'sessionSignal.attemptClosed': 'Команда завершилась раньше, чем остановка до неё дошла.',
+  'sessionSignal.unsupported':
+    'Эта команда выполняется на хосте, который nocx не может остановить отсюда.',
+  'sessionSignal.undelivered':
+    'nocx не смог доставить остановку команде. Команда может всё ещё выполняться — нажмите «Остановить» ещё раз.',
+  'sessionSignal.unknown': 'nocx не смог остановить команду ({reason})',
+  'fileViewer.reload.label': 'Перечитать',
+  'fileViewer.reload.reason': 'Перечитать файл с диска',
+  'fileViewer.reload.retryReason': 'Попробовать прочитать файл снова',
+  'fileViewer.unavailable.gone':
+    'Терминал или подключение, которое предоставляло этот файл, уже недоступно',
+  'fileViewer.unavailable.back': 'Источник снова доступен — перечитайте файл',
+  'workspaceColour.grey': 'Серый',
+  'workspaceColour.blue': 'Синий',
+  'workspaceColour.cyan': 'Голубой',
+  'workspaceColour.green': 'Зелёный',
+  'workspaceColour.yellow': 'Жёлтый',
+  'workspaceColour.orange': 'Оранжевый',
+  'workspaceColour.red': 'Красный',
+  'workspaceColour.pink': 'Розовый',
+  'workspaceColour.purple': 'Фиолетовый',
+  'main.ports.label': 'Порты: {state}',
+  'main.forward.started': 'Перенаправление {destination} на {host}:{port}',
+  'main.copied': 'Скопировано «{title}» в буфер обмена.',
+  'main.hostKey.untrusted': 'Не удалось довериться ключу хоста: {message}',
+  'main.decision.failed': 'Не удалось записать решение: {message}',
+  'main.updateState.unreadable':
+    'nocx не смог прочитать состояние обновлений при этом запуске — откройте «Настройки» и проверьте там, если вы ждёте новый релиз.',
+  'panes.openTab.failed': 'Не удалось открыть вкладку: {message}',
+  'panes.connection.saved': 'Сохранено «{host}» как подключение',
+  'panes.save.failed': 'Не удалось сохранить: {message}',
+  'panes.connection.opened': 'Открыто «{host}» как подключение',
+  'panes.connect.failed': 'Не удалось подключиться к {host}: {message}',
+  'panes.createWorkspace.failed': 'Не удалось создать рабочее пространство: {message}',
+  // ── Host-key dialog labels and sentences ──
+  'grant.dismissAll': 'Снять все',
+  'grant.dismissMark.aria': 'Снять эту отметку',
+  'grant.panel.aria': 'отмечено для вопроса',
+  'hostKey.agent.denyBody':
+    'Если вы откажете, агент всё равно запустится — без инструментов nocx, и его панель об этом скажет. Ответ запоминается только для этого агента.',
+  'hostKey.agent.powers':
+    'могут запускать других агентов в новых вкладках, наблюдать за их работой и останавливать их. Они не могут читать ваши секреты, обращаться к другой машине или менять что-либо ещё на этой машине.',
+  'hostKey.changed.body':
+    'Ключ хоста, который предлагает этот сервер, отличается от того, что nocx видел раньше. Это может значить, что ключ хоста был пересоздан, а может — что это соединение перехватывают. Не продолжайте, если не уверены, что это та же машина. Принятие заменяет старый ключ: он перестаёт быть доверенным.',
+  'hostKey.firstTime.body':
+    'nocx впервые видит этот хост. Если вы доверяете этой машине, примите её ключ — он будет сохранён в ~/.ssh/known_hosts.',
+  'hostKey.method.helper.title':
+    'Развернуть помощник nocx — панель Git и всё, что требует больше, чем оболочка.',
+  'hostKey.method.raw.title': 'Без интеграции — простой терминал, на хост ничего не записывается.',
+  'hostKey.method.script.title':
+    'Скрипты оболочки, которые поставляет nocx: блоки команд, автодополнение, без скомпилированного файла.',
+  // ── Integration reason sentences, first set ──
+  'integration.bootstrap-interrupted.description':
+    'Подключение оборвалось, пока nocx ещё настраивал эту сессию.',
+  'integration.bootstrap-out-of-order.description':
+    'Ответ пришёл не в свою очередь во время настройки nocx, поэтому nocx его отверг и остановился.',
+  'integration.bootstrap-protocol.description':
+    'То, что ответило nocx при настройке, не было протоколом nocx, поэтому nocx остановился и не стал действовать по нему.',
+  'integration.bootstrap-timeout.description':
+    'Удалённый хост ответил nocx один раз, а затем не завершил настройку вовремя.',
+  'integration.capability-fd-unavailable.description':
+    'Удалённый хост не смог открыть закрытое место для ключа nocx этой сессии, поэтому nocx никакого ключа не передал.',
+  'integration.capability-unlink-failed.description':
+    'Удалённый хост не смог сделать ключ nocx безымянным перед записью, поэтому nocx ничего не записал.',
+  'integration.capability-write-failed.description':
+    'Удалённый хост не смог сохранить ключ nocx для этой сессии, поэтому у сессии нет собственного канала связи.',
+  'integration.channel-unavailable.description':
+    'Это подключение не даёт nocx собственного канала к оболочке, поэтому эта вкладка — простой терминал.',
+  // ── Integration reason sentences, second set ──
+  'integration.exec-refused.description':
+    'Это подключение не стало запускать строку, которой nocx открывает оболочку, поэтому оно открыло вашу оболочку обычным способом.',
+  'integration.exec-substituted.description':
+    'Это подключение всегда выполняет одну фиксированную команду, о чём бы его ни просили, поэтому интегрировать здесь нечего.',
+  'integration.generation-unavailable.description':
+    'На этом хосте нет копии интеграции оболочки nocx для запуска. Следующее подключение установит её и повторит попытку.',
+  'integration.loader-termios-unavailable.description':
+    'nocx не смог перевести терминал в состояние, нужное для настройки, поэтому вернул терминал без изменений.',
+  'integration.publish-unavailable.description':
+    'nocx не смог скопировать свою интеграцию оболочки на этот хост, поэтому запускать там было нечего.',
+  'integration.receiver-unready.description':
+    'На удалённом хосте никто не ответил на настройку nocx, поэтому эта вкладка — простой терминал.',
+  'integration.secret-malformed.description':
+    'Удалённый хост не распознал ключ nocx для этой сессии, поэтому у сессии нет собственного канала связи.',
+  'integration.secret-not-for-this-session.description':
+    'Ключ, дошедший до удалённого хоста, был адресован другой сессии, поэтому удалённый хост его отверг.',
+  'integration.secret-too-large.description':
+    'Ключ nocx для этой сессии был больше, чем nocx позволяет себе отправить, поэтому он не был отправлен.',
+  // ── Integration stage sentences and notices ──
+  'integration.stage-digest-mismatch.description':
+    'Настройка nocx пришла на удалённый хост не в том виде, в каком была отправлена, поэтому nocx её не выполнил.',
+  'integration.stage-digest-unavailable.description':
+    'Удалённый хост не может проверить, что настройка nocx пришла целой, а nocx не запускает настройку, которую не может проверить.',
+  'integration.stage-fd-unavailable.description':
+    'Удалённый хост не смог передать проверенную настройку nocx оболочке, поэтому ничего из неё не выполнилось.',
+  'integration.stage-source-failed.description':
+    'Настройка nocx выполнилась на удалённом хосте и вернула управление вместо того, чтобы запустить вашу оболочку.',
+  'integration.stage-too-large.description':
+    'Настройка nocx была больше, чем nocx позволяет себе отправить, поэтому не отправлено ничего.',
+  'integration.unsupported-fish-startup.description':
+    'nocx не смог проверить эту схему запуска Fish по проверенному префиксу Fish 4.9.3, поэтому эта вкладка — простой терминал.',
+  'ipc.reattach.unavailable':
+    'Не удалось переподключиться к этой сессии. Завершение оболочки не подтверждено; повторите попытку с той же сессией.',
+  'ops.empty.description':
+    'Загрузки и другая фоновая работа появляются здесь, пока выполняются, и остаются ненадолго после завершения.',
+  'publish.dismiss.aria': 'Закрыть',
+  'unreconciled.dismiss.aria': 'Закрыть',
+  // ── nocx-dej6.3.16: copy the widened checker found (api, assistant, host-key, sidebar) ──
+  'api.collection.new.submit': 'Создать',
+  'api.collection.new.fieldLabel': 'Имя',
+  'api.collection.new.fieldDescription':
+    'Имя, а не путь — папка создаётся там, где nocx хранит коллекции.',
+  'api.folder.new.fieldLabel': 'Имя',
+  'api.folder.new.fieldDescription':
+    'Одна папка — одно имя, не путь. Папка внутри этой создаётся заново из её собственной строки.',
+  'api.folder.new.submit': 'Создать',
+  'api.collection.fieldLabel.folder': 'Папка коллекции',
+  'api.import.pickFile': 'Или выберите файл',
+  'api.runs.status.aria': 'HTTP-статус {status}',
+  'api.commitNote.variables':
+    'Значение, привязанное к переменной, остаётся в хранилище: файл содержит имя, но никогда не значение.',
+  'connections.group.keyPath.none': '— Не задано (наследуется) —',
+  'keymat.pickFile': 'Выбрать файл…',
+  'nameColour.submit.create': 'Создать',
+  'nameColour.submit.save': 'Сохранить',
+  'secrets.filter.aria': 'Фильтр секретов',
+  'snippets.filter.aria': 'Фильтр сниппетов',
+  'sidebar.updateStatus.aria': 'Статус обновления',
+  'assistant.scope.session': 'терминальный сеанс',
+  'assistant.scope.environment': 'окружение {id}',
+  'assistant.scope.credential': 'учётные данные {id}',
+  'assistant.answer.yours': 'Ваш ответ',
+  'assistant.fact.covers': 'Охватывает',
+  'assistant.fact.placesApplies': 'Где это применяется',
+  'assistant.fact.provenance': 'Откуда это взялось',
+  'assistant.fact.givenWhile': 'Дано, пока команда делала',
+  'assistant.fact.placeTouched': 'Место, которого коснулись',
+  'assistant.fact.forgetting': 'Забыть',
+  'assistant.fact.callsChanged': 'Вызовы, которые это меняет',
+  'assistant.fact.stillUsing': 'Всё ещё использует это',
+  'assistant.fact.wouldAllow': 'Это разрешит',
+  'assistant.fact.wouldNotAllow': 'Это не разрешит',
+  'assistant.fact.readAs': 'nocx понимает это как',
+  'hostKey.fact.agent': 'Агент',
+  'hostKey.fact.machine': 'Машина',
+  'hostKey.fact.fingerprint': 'Отпечаток',
+  'hostKey.fact.appliesTo': 'Относится к',
+  'hostKey.fact.lasts': 'Действует',
+  'hostKey.fact.noMachine': 'машина, которую nocx не смог назвать',
+  'api.tree.emptyRow': 'Пусто',
+  'api.folder.meta.empty': 'Пусто',
+  'api.folder.meta.items': {
+    one: '{count} элемент',
+    few: '{count} элемента',
+    many: '{count} элементов',
+    other: '{count} элемента',
+  },
+  'agentAccess.row.meta':
+    'На {machine} · Каждая вкладка в рабочем пространстве {workspace} · {digest}',
+  'assistant.placesOnly': 'Только в {places}.',
+  'footprint.row.meta.agent':
+    '{path} · протокол {protocol} · скрипты {scripts} · последний раз виден {seen}',
+  'footprint.row.meta.helper': '{path} · хеш {hash}… · установлен {installed}',
 }

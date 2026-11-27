@@ -37,6 +37,8 @@ function occurrence(sessionId: string): Occurrence {
     at: '2026-08-22T10:00:00Z',
     title: 'Local session was interrupted',
     body: '',
+    titleSegments: [],
+    bodySegments: [],
     kind: 'session.ended',
     level: 'warning',
     count: 1,

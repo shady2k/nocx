@@ -30,7 +30,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.ui.language.description':
     'The language nocx speaks in its own screens — settings, prompts and notices. Terminal output is never translated.',
   'settings.ui.language.option.en': 'English',
-  'settings.ui.language.option.ru': 'Русский',
+  'settings.ui.language.option.ru': 'Russian',
 
   // ── Settings declarations (Go: internal/settings/settings.go) ───────────
   // Order follows the declaration sites in settings.go.
@@ -40,6 +40,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'settings.worktrees.idleDays.label': 'Remove unused worker checkouts after',
   'settings.worktrees.idleDays.description':
     'A worker checkout nocx created that nothing has used for this long is removed by the daily sweep. Only the checkout goes — its branch and every commit on it stay — and one holding uncommitted work is never removed.',
+  'settings.sessions.idleDays.label': 'End unattended sessions after',
+  'settings.sessions.idleDays.description':
+    'Ends a session after no nocx window has been attached for this long, even if a program is running. A day is 24 hours. Applies only to newly opened sessions.',
   'settings.history.retentionDays.label': 'Keep history for',
   'settings.history.retentionDays.description':
     "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space.",
@@ -164,26 +167,18 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'notify.kind.paneWorkFinished.label': 'Work seems to have finished',
   'notify.kind.paneWorkFinished.description':
     "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine.",
-
-  // ── Mechanism samples ───────────────────────────────────────────────────
-  // A plain string: the base case every translated surface will use.
-  'i18n.sample.greeting': 'Welcome back',
-  // A plural object: `Intl.PluralRules` picks the form for the count. The
-  // label names the mechanism itself, so the sample is self-describing in
-  // whichever locale is active.
-  'i18n.sample.commandCount': {
-    one: '{count} command',
-    other: '{count} commands',
+  // A delivery the notification centre could not make. The sentences are
+  // composed from keyed segments in the feed; the cause after "could not
+  // deliver it" is backend prose and stays raw English (ADR-nswp57x0).
+  'notify.delivery.failed.title': 'Not delivered',
+  'notify.delivery.failed.titleSeparator': ': ',
+  'notify.delivery.failed.body': '{channel} could not deliver it',
+  'notify.delivery.failed.causeSeparator': ': ',
+  'notify.delivery.more': {
+    one: '{count} more notification',
+    other: '{count} more notifications',
   },
-  // Deliberately absent from ru: proves the visible-English fallback at
-  // runtime (design story 2) and emits the parity fixture's warning shape.
-  'i18n.sample.untranslated': 'This key has no Russian translation yet',
-  // Deliberately absent from ru too, and a plural: the fallback path must
-  // still fill {count}, whichever catalogue the entry came out of.
-  'i18n.sample.onlyEnglishPlural': {
-    one: '{count} English-only thing',
-    other: '{count} English-only things',
-  },
+  'notify.delivery.more.separator': ' — ',
 
   // ── Operations → the catalogue's waiting sentences ──────────────────────
   // Go: internal/operation/catalog, one `waiting` sentence per method, and the
@@ -424,6 +419,24 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ui.collision.applyMany': 'Apply to the {count} remaining files',
   'ui.toast.dismiss': 'Dismiss notification',
   'ui.connection.status': 'Connection status',
+  'ui.connection.retry': 'Retry',
+  'ui.collection.actions': 'Collection actions',
+  'ui.completion.listbox': 'completions',
+  'ui.secrets.listbox': 'vault secrets',
+  'ui.completion.source.command': 'command',
+  'ui.completion.source.history': 'history',
+  'ui.completion.source.path': 'path',
+  'ui.completion.source.host': 'host',
+  'ui.completion.source.snippet': 'snippet',
+  'ui.completion.source.function': 'function',
+  'ui.watch.polling': 'Polling',
+  'ui.rowList.remove': 'Remove',
+  'ui.dialog.closeAria': 'Close dialog',
+  'ui.dialog.closeTitle': 'Close',
+  'ui.confirm.ok': 'OK',
+  'ui.confirm.cancel': 'Cancel',
+  'ui.toast.browserOpenFailed':
+    'The browser could not be opened. Try again or open the release notes in your browser.',
   'ui.fileReadout.factsAria': 'What this file is',
   'ui.fileReadout.legendTitle': 'Highlighted lines below matched a static scan',
   'ui.fileReadout.legendTail':
@@ -1048,88 +1061,98 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'pw.cancel': 'Cancel',
 
   // ── Go-minted, no call site: sections, sentinel-zero sentences and the notifications routing family (internal/settings, internal/notify, internal/app) ──
-  'notifications.route.blockFinished.banner': 'Command finished → OS banner',
-  'notifications.route.blockFinished.banner.description':
-    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.blockFinished.toast': 'Command finished → In-app toast',
-  'notifications.route.blockFinished.toast.description':
-    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.blockFinished': 'Command finished → Центр уведомлений',
-  'notifications.centre.blockFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.sessionEnded.banner': 'Session ended → OS banner',
-  'notifications.route.sessionEnded.banner.description':
-    "nocx's own session registry recorded that a session ended. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.sessionEnded.toast': 'Session ended → In-app toast',
-  'notifications.route.sessionEnded.toast.description':
-    "nocx's own session registry recorded that a session ended. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.sessionEnded': 'Session ended → Центр уведомлений',
-  'notifications.centre.sessionEnded.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.transferFinished.banner': 'File transfer finished → OS banner',
-  'notifications.route.transferFinished.banner.description':
-    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.transferFinished.toast': 'File transfer finished → In-app toast',
-  'notifications.route.transferFinished.toast.description':
-    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.transferFinished': 'File transfer finished → Центр уведомлений',
-  'notifications.centre.transferFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.programNotify.banner': 'Program notification request → OS banner',
-  'notifications.route.programNotify.banner.description':
-    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.programNotify.toast': 'Program notification request → In-app toast',
-  'notifications.route.programNotify.toast.description':
-    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.programNotify': 'Program notification request → Центр уведомлений',
-  'notifications.centre.programNotify.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.bell.banner': 'Terminal bell → OS banner',
-  'notifications.route.bell.banner.description':
-    'A program printed BEL. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.route.bell.toast': 'Terminal bell → In-app toast',
-  'notifications.route.bell.toast.description':
-    'A program printed BEL. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
-  'notifications.centre.bell': 'Terminal bell → Центр уведомлений',
-  'notifications.centre.bell.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.coordinatorStalled.banner':
+  'settings.notifications.route.blockFinished.banner.label': 'Command finished → OS banner',
+  'settings.notifications.route.blockFinished.banner.description':
+    "nocx's own block ledger recorded that a command finished. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.blockFinished.toast.label': 'Command finished → In-app toast',
+  'settings.notifications.route.blockFinished.toast.description':
+    "nocx's own block ledger recorded that a command finished. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.sessionEnded.banner.label': 'Session ended → OS banner',
+  'settings.notifications.route.sessionEnded.banner.description':
+    "nocx's own session registry recorded that a session ended. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.sessionEnded.toast.label': 'Session ended → In-app toast',
+  'settings.notifications.route.sessionEnded.toast.description':
+    "nocx's own session registry recorded that a session ended. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.transferFinished.banner.label':
+    'File transfer finished → OS banner',
+  'settings.notifications.route.transferFinished.banner.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.transferFinished.toast.label':
+    'File transfer finished → In-app toast',
+  'settings.notifications.route.transferFinished.toast.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.programNotify.banner.label':
+    'Program notification request → OS banner',
+  'settings.notifications.route.programNotify.banner.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.programNotify.toast.label':
+    'Program notification request → In-app toast',
+  'settings.notifications.route.programNotify.toast.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.bell.banner.label': 'Terminal bell → OS banner',
+  'settings.notifications.route.bell.banner.description':
+    'A program printed BEL. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.bell.toast.label': 'Terminal bell → In-app toast',
+  'settings.notifications.route.bell.toast.description':
+    'A program printed BEL. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.',
+  'settings.notifications.route.coordinatorStalled.banner.label':
     'A coordinator is not reading its workers → OS banner',
-  'notifications.route.coordinatorStalled.banner.description':
-    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.coordinatorStalled.toast':
+  'settings.notifications.route.coordinatorStalled.banner.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.coordinatorStalled.toast.label':
     'A coordinator is not reading its workers → In-app toast',
-  'notifications.route.coordinatorStalled.toast.description':
-    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.coordinatorStalled':
-    'A coordinator is not reading its workers → Центр уведомлений',
-  'notifications.centre.coordinatorStalled.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.route.paneWorkFinished.banner': 'Work seems to have finished → OS banner',
-  'notifications.route.paneWorkFinished.banner.description':
-    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.route.paneWorkFinished.toast': 'Work seems to have finished → In-app toast',
-  'notifications.route.paneWorkFinished.toast.description':
-    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  'notifications.centre.paneWorkFinished': 'Work seems to have finished → Центр уведомлений',
-  'notifications.centre.paneWorkFinished.description':
-    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
-  'notifications.debounceSeconds.label': 'Collapse repeats for',
-  'notifications.debounceSeconds.description':
+  'settings.notifications.route.coordinatorStalled.toast.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.paneWorkFinished.banner.label':
+    'Work seems to have finished → OS banner',
+  'settings.notifications.route.paneWorkFinished.banner.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches the desktop notification banner. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.route.paneWorkFinished.toast.label':
+    'Work seems to have finished → In-app toast',
+  'settings.notifications.route.paneWorkFinished.toast.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. When on, it reaches a transient message in the nocx window. With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre.",
+  'settings.notifications.centre.blockFinished.label': 'Command finished → Notification centre',
+  'settings.notifications.centre.blockFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.sessionEnded.label': 'Session ended → Notification centre',
+  'settings.notifications.centre.sessionEnded.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.transferFinished.label':
+    'File transfer finished → Notification centre',
+  'settings.notifications.centre.transferFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.programNotify.label':
+    'Program notification request → Notification centre',
+  'settings.notifications.centre.programNotify.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.bell.label': 'Terminal bell → Notification centre',
+  'settings.notifications.centre.bell.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.coordinatorStalled.label':
+    'A coordinator is not reading its workers → Notification centre',
+  'settings.notifications.centre.coordinatorStalled.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.centre.paneWorkFinished.label':
+    'Work seems to have finished → Notification centre',
+  'settings.notifications.centre.paneWorkFinished.description':
+    'The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.',
+  'settings.notifications.debounceSeconds.label': 'Collapse repeats for',
+  'settings.notifications.debounceSeconds.description':
     'After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.',
   'settings.section.answers': 'Answers',
   'settings.section.clipboard': 'Clipboard',
   'settings.section.history': 'History',
   'settings.section.instructions': 'Instructions',
   'settings.section.interface': 'Interface',
+  'settings.section.notifications': 'Notifications',
   'settings.section.pets': 'Pets',
+  'settings.section.sessions': 'Sessions',
   'settings.section.terminal': 'Terminal',
   'settings.section.updates': 'Updates',
   'settings.section.worktrees': 'Worktrees',
-  'settings.section.notifications': 'Notifications',
   'settings.history.retentionDays.zeroLabel': 'Never switched off automatically',
   'settings.worktrees.idleDays.zeroLabel': 'Never removed automatically',
-  'settings.history.diskCeilingMiB.zeroLabel': 'Kept until the size limit is reached',
+  'settings.sessions.idleDays.zeroLabel': 'Never end unattended sessions',
   'settings.terminal.scrollbackLines.zeroLabel': 'No scrollback — only the current screen',
 
   // ── API workbench (frontend/src/api/*) ──
@@ -1190,6 +1213,14 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'api.env.edit.head': 'Edit ',
   'api.secret.insert': 'Insert a secret…',
   'api.delete.ellipsis': 'Delete…',
+  'ui.confirm.delete': 'Delete',
+  'ui.confirm.paste': 'Paste',
+  'ui.confirm.pasteMultiline': 'Paste multi-line text?',
+  'api.confirm.delete': 'Delete',
+  'api.confirm.discardAndClose': 'Discard and close',
+  'backup.confirm.replace': 'Replace',
+  'backup.confirm.merge': 'Merge',
+  'api.confirm.discardAndImport': 'Discard and import',
   'api.path.copyAbsolute': 'Copy Absolute Path',
   'api.folder.newEllipsis': 'New folder…',
   'api.request.close': 'Close request',
@@ -1438,12 +1469,19 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'notes.search.aria': 'Search notes',
   'notes.panel.title': 'Notes',
   'notes.delete.failedHead': 'Could not delete the note:',
+  'notes.saveFailed': '"{title}" could not be saved: {message}',
+  'notes.delete.aria': 'Delete {name}',
+  'notes.delete.confirm': 'Delete "{name}"?',
+  'notes.retry': 'Retry',
+  'notes.nomatch.desc': 'No note contains "{query}".',
+  'notes.new.button': '+ New note',
   'notes.empty.title': 'No notes yet',
   'notes.empty.desc': 'Write something down without leaving the terminal — ⌥⌘N.',
   'notes.nomatch.title': 'Nothing matches',
   'notes.create.failedHead': 'Could not create a note:',
   'snippets.saved.head': 'Saved "',
   'snippets.deleted.head': 'Deleted "',
+  'snippets.delete.confirm': 'Delete "{title}"?',
   'snippets.delete.failedHead': 'Could not delete "',
   'snippets.reorder.failedHead': 'Could not reorder:',
   'snippets.loading.title': 'Loading snippets',
@@ -1695,6 +1733,11 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     'Editing the rules nocx reads your agents with is not available in this window.',
   'settings.fallback.calibrate.body': 'Calibrating an agent is not available in this window.',
   'settings.reset.title': 'Reset to default',
+  'settings.saveFailed': 'Could not save "{name}": {reason}',
+  'settings.resetFailed': 'Could not reset "{name}": {reason}',
+  'settings.clearFailed': 'Could not clear "{name}": {reason}',
+  'settings.secret.replace': 'Replace',
+  'settings.secret.clear': 'Clear',
   'settings.title': 'Settings',
   'settings.search.ph': 'Search settings…',
   'settings.search.aria': 'Search settings',
@@ -1741,6 +1784,13 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ports.copy': 'Copy',
   'ports.copy.head': 'Copy',
   'ports.open.head': 'Open',
+  'ports.forwarding': 'Forwarding {destination} on {host}:{port}',
+  'ports.cannotSee.title': 'Cannot see the ports on {target}',
+  'ports.cannotSee.desc':
+    'You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports.',
+  'ports.noConnection.sshFirst':
+    'Open an SSH session to this profile first — the ports it listens on will appear here.',
+  'ports.openAsConnection': 'Open as connection',
   'tabs.pinned': 'Pinned',
   'tabs.saveAsConnection': 'Save as connection',
   'tabs.close': 'Close tab',
@@ -1802,6 +1852,13 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'backup.omissions.head': 'Omissions:',
   'backup.choose.buttonLabel': 'Choose backup file…',
   'backup.discarded': 'Backup discarded — save was cancelled.',
+  'backup.failed': 'Backup failed: {message}',
+  'backup.readFailed': 'Could not read the backup file: {reason}',
+  'backup.previewFailed': 'Could not preview the backup: {reason}',
+  'backup.restoreFailed': 'Restore failed: {message}',
+  'backup.omissions.credentialBindings': '{count} connection credential binding(s) removed',
+  'backup.omissions.groupCredentialBindings': '{count} group credential binding(s) removed',
+  'backup.omissions.groupDefaultKeys': '{count} group default key(s) omitted from backup',
   'notify.chrome.host': 'Host',
   'notify.chrome.session': 'Session',
   'notify.chrome.kind': 'Kind',
@@ -1866,6 +1923,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'ops.row.waitingServer': 'Waiting for the server',
   'ops.cancel.aria': 'Cancel',
   'ops.progress.aria': 'progress',
+  'ops.row.progressOf': '{title} progress',
+  'ops.row.cancelOf': 'Cancel {title}',
   'reconnect.reconnecting': 'Reconnecting',
   'reconnect.attach': 'Reconnect',
   'reconnect.attaching': 'Attaching',
@@ -1889,16 +1948,31 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'kit.folderPicker.contents': 'Folder contents',
   'kit.folderPicker.empty': 'This folder is empty',
   'kit.folderPicker.cannotOpen': 'Cannot open',
+  'kit.folderPicker.goLabel': 'Go',
+  'kit.folderPicker.pathPlaceholder': '/path/to/folder',
+  'kit.folderPicker.cannotOpenPath': 'Cannot open {path}',
   'kit.fileReadout.notText': 'This file is not text',
   'kit.fileReadout.tooLarge': 'This file is larger than the read budget',
   'kit.fileReadout.readFailed': 'This file could not be read',
   'kit.fileReadout.what.aria': 'What this file is',
   'kit.fileReadout.scanNotice': 'Highlighted lines below matched a static scan',
+  'kit.fileReadout.notTextDesc':
+    'Its bytes are not something that can be shown as lines, so there is nothing here to read. The file is on disk exactly as it was — this is a fact about the file, not a refusal of the request.',
+  'kit.fileReadout.tooLargeDesc':
+    'The budget is {size}, and the read stops there. The file is on disk exactly as it was; what is bounded is the reading, not the file.',
+  'kit.fileReadout.scanDesc':
+    '{words}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.',
   'footprint.read.failedHead': 'Could not read the remote footprint:',
   'footprint.removed.head': 'Removed',
   'footprint.removed.files': 'file(s) from',
   'footprint.kept.head': 'modified file(s) kept:',
   'footprint.uninstall.failedHead': 'Uninstall failed:',
+  'footprint.confirm.uninstall': 'Uninstall',
+  'footprint.confirm.uninstallShell':
+    "Remove nocx's shell integration from {identity}? Only manifest-owned, unmodified files are removed; anything you changed stays and is reported.",
+  'footprint.confirm.uninstallHelper':
+    'Remove the remote helper from {identity}? The whole {path} tree is removed, every live helper-hosted session is ended, and consent for this machine is revoked. This cannot be undone.',
+  'panes.confirm.closeWorkspace': 'Close workspace',
   'footprint.title': 'Remote footprint',
   'footprint.desc':
     'nocx installs shell integration on a remote host automatically. This is what it wrote, where, and when it was last seen — no connection is made to show it. Only a saved connection to the host can remove it.',
@@ -2145,6 +2219,23 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'update.downloading.figure': '{percent}% · {done} of {total} MB',
   'update.link.releaseNotes': 'Release notes',
   'update.link.whatChanged': 'What changed',
+  'update.failure.download':
+    'The update could not be downloaded. Check your connection and try again.',
+  'update.failure.verify':
+    'The update could not be verified. Check for updates and download it again.',
+  'update.failure.unpack': 'The update could not be unpacked. Check free space and try again.',
+  'update.failure.replace':
+    'The update could not replace the app. Allow writes to the app’s folder and try again.',
+  'update.failure.notInstalled':
+    'This copy of nocx cannot be updated here. Install the latest release in a folder you can write to, then try again.',
+  'update.failure.blocked':
+    'The update is blocked by {path}, which is not nocx’s own. Move or remove it, then try again.',
+  'update.failure.generic':
+    'The update could not finish. Try again, or install the latest release manually.',
+  'update.failure.devBuild':
+    'this is a development build; self-update is not available — run a release build, or use the package manager that installed nocx',
+  'update.failure.appImage':
+    'this is not a distributed AppImage build — download the AppImage from the releases page, or use the package manager that installed nocx',
   'vault.copied': 'Copied',
   'vault.protection.sealed.desc':
     'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.',
@@ -2171,4 +2262,415 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.status.manage': 'Check agent settings',
   'editor.chip.agent': 'Answers with {agent}. Open agent settings.',
   'editor.chip.agentModel': 'Answers with the model {model}. Open agent settings.',
+
+  // ── Minted for nocx-dej6.3.13: font toast, test-support fixture ────────
+  'terminal.font.loadFailed': 'Nordwand Mono could not be loaded. The current font is unchanged.',
+  'testSupport.hello.greeting': 'Hello, {name}!',
+  'api.timing.waiting': 'waiting',
+  'api.timing.download': 'download',
+  'api.timing.total': 'total',
+  'api.move.rootOf': 'Root of {collection}',
+  'api.move.title': 'Move {name} to…',
+  'api.pane.placeholder.collection': 'orders-api',
+  'api.pane.placeholder.folderPath': '/work/acme-api',
+  'api.pane.placeholder.folder': 'reports',
+  'api.pane.noEnvironment': 'No environment',
+  'api.env.field.name': 'Name',
+  'api.env.field.value': 'Value',
+  'api.env.field.nameDesc':
+    "What the picker beside Send will call it — the name in the file, not the file's name.",
+  'api.env.field.namePlaceholder': 'Production',
+  'api.env.field.varPlaceholder': 'baseUrl',
+  'api.env.field.valuePlaceholder': 'https://api.example.com',
+  'api.folder.field.send': 'Send',
+  'api.folder.field.varPlaceholder': 'baseUrl',
+  'api.folder.field.valuePlaceholder': 'https://api.example.com',
+  'api.import.submit': 'Import',
+  'api.import.routeDirect': 'Direct',
+  'api.import.curl.convert': 'Convert to a request',
+  'api.import.curl.desc':
+    'Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.',
+  'api.runs.tab.body': 'Body',
+  'api.runs.tab.raw': 'Raw',
+  'api.runs.wire.request': '── request ──',
+  'api.runs.wire.connection': '── connection ──',
+  'api.runs.wire.certificateChain': '── certificate chain ──',
+  'api.runs.wire.response': '── response ──',
+  'api.runs.certificate': 'Certificate {count}',
+  'api.form.body.none': 'None',
+  'api.form.body.json': 'JSON',
+  'api.form.body.raw': 'Raw',
+  'api.form.body.form': 'Form',
+  'api.form.body.file': 'From a file in the collection',
+  'api.form.auth.none': 'None',
+  'api.form.auth.bearer': 'Bearer',
+  'api.form.auth.basic': 'Basic',
+  'api.form.auth.apikey': 'API key',
+  'api.form.field.send': 'Send',
+  'api.form.field.scope': 'Scope',
+  'api.form.field.from': 'From',
+  'api.form.field.status': 'Status',
+  'api.form.idle':
+    'Choose a request from a collection, or import a curl line, and it appears here.',
+  'api.form.filePathHint':
+    "A path WITHIN the collection, read on send under the handle's path rules.",
+  'terminal.input.stopped':
+    'This connection has stopped accepting input — keystrokes are being dropped.',
+  'terminal.assistant.nativeInput':
+    'Native input is active — enable command editor to ask the assistant.',
+  'terminal.assistant.runningBlocked':
+    'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
+  'terminal.secrets.savedPartial':
+    '{name} saved, but the history rewrite is still owed — retry to finish it.',
+  'terminal.secrets.storedName': 'Stored {name} in the vault.',
+  'terminal.secrets.dismissedSession':
+    'Dismissed — this key will not be offered again in this session.',
+  'terminal.secrets.unknownNames': {
+    one: 'Unknown secret: {names}. The command was not sent.',
+    other: 'Unknown secrets: {names}. The command was not sent.',
+  },
+  'terminal.secrets.sealedRun': 'The vault is locked. Unlock it and run the command again.',
+  'terminal.connection.dismissedFor':
+    'Dismissed — {dest} will not be offered again as a connection.',
+  'terminal.connection.savedName': 'Saved "{name}" as a connection.',
+  'terminal.connection.saveError': 'Could not save connection: {error}',
+  'scrollback.chrome.running': 'Running',
+  'scrollback.chrome.blockActions': 'Block actions',
+  'scrollback.chrome.copyRefused': 'The stored answer is not available, so nothing was copied.',
+  'scrollback.chrome.stop': 'Stop',
+  'scrollback.chrome.copyCommand': 'Copy command',
+  'scrollback.chrome.copyOutput': 'Copy output',
+  'scrollback.chrome.copyAll': 'Copy all',
+  'scrollback.chrome.interrupt': 'Interrupt',
+  'scrollback.chrome.interruptTitle': 'Interrupt (Ctrl+C) — focus controls: Alt+F10',
+  'scrollback.chrome.copying': 'Copying…',
+  'api.dialog.create': 'Create',
+  'api.dialog.open': 'Open',
+  'api.dialog.createFolder': 'Create folder',
+  'api.table.addVariable': 'Add variable',
+  'api.table.addParameter': 'Add parameter',
+  'api.table.addHeader': 'Add header',
+  'api.table.emptyEnvVariables':
+    'No variables yet. A URL written in {{baseUrl}} resolves against one of these.',
+  'api.table.emptyFolderVariables': 'No variables declared in this folder.',
+  'api.table.emptyQueryParameters': 'No query parameters.',
+  'api.table.emptyRequestVariables': "No variables in this request's effective scope.",
+  'api.table.emptyHeaders': 'No headers.',
+  'scrollback.disclosure.reasoning': 'Thinking',
+  'scrollback.disclosure.toolResult': 'Sent and returned',
+  // ── Clipboard banner (banner.tsx) ───────────────────────────────────────
+  'banner.clipboard.message':
+    'A terminal program tried to write to your clipboard. This is disabled by default for security reasons, to protect against malicious software.',
+  'banner.clipboard.allow': 'Allow clipboard writes',
+  'banner.clipboard.suppress': "Don't show again",
+  'banner.clipboard.dismiss': 'Dismiss',
+  // ── Approval prompt literals (agent-approval-prompt.tsx) ────────────────
+  'approval.allowOnce': 'Allow once',
+  'approval.denyOnce': 'Deny once',
+  'approval.askingTool.withArgs': 'The assistant is asking to call',
+  'approval.askingTool.argsTail': 'with these arguments:',
+  'approval.askingTool.plain': 'The assistant is asking to call',
+  'approval.arguments.aria': 'Arguments of {tool}',
+  'approval.expanded.lead':
+    'With its variables as the shell reads them now. This is what the command means, not what is sent — the line above is what runs, exactly as written:',
+  'approval.facts.aria': 'What {tool} would do',
+  'approval.blockArg.aria': 'The {name} argument of {tool}',
+  'approval.scripts.lead':
+    'And what those files hold right now. This is a reading, not what is sent — the command above is what runs, exactly as written, and a file can change between this question and the moment it runs.',
+  'approval.script.aria': 'What {path} holds right now',
+  'approval.findings.lead': 'What was found, and where — never the material itself:',
+  'approval.covers.body':
+    'Approving covers this call: it has not run, and no call after it in this response will. It does not promise the terminal is untouched — a permitted call earlier in this batch may already have run.',
+  'approval.standing.lead':
+    'An answer in this session lasts until this terminal session ends; restarting the shell starts a new one and the question comes back. An answer of always is a standing answer for {rule}, in every session, from now on, which you can change on the Assistant permissions page.',
+  // ── History-status sentences (history-status.ts) ────────────────────────
+  'history.unavailable.title': 'Commands are not being kept',
+  'history.unavailable.noKey':
+    'The key that encrypts the history database could not be read, so nothing is being stored.',
+  'history.unavailable.invalidBudget':
+    'The size limits below could not be applied, so the store was not opened and nothing is being stored.',
+  'history.unavailable.openFailed':
+    'The history database could not be opened, so nothing is being stored.',
+  'history.unavailable.writeFailed':
+    'The history database is refusing writes, so commands are running but not being kept.',
+  'history.unavailable.unknown': 'Nothing is being stored.',
+  'history.detached.title': 'Sessions keep running only while a window is open',
+  'history.detached.causeOutputOff': 'Command output is not being kept',
+  'history.detached.causeHistoryOff': 'History is turned off',
+  'history.detached.body':
+    '{cause}, so there is nowhere to write what a session prints while its window is closed. Such a session pauses once its output buffer fills and continues when a window is opened on it again. Nothing it printed is lost.',
+  // ── Checkout-sweep sentences (checkouts-status.ts) ──────────────────────
+  'checkouts.unavailable.title': 'Unused worker checkouts are not being cleaned up',
+  'checkouts.unavailable.noRecord':
+    'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.',
+  'checkouts.unavailable.recordWrites':
+    'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.',
+  'checkouts.unavailable.unknown': 'The sweep cannot run, and this build does not know why.',
+  // ── Tab strip chrome (tab-strip.tsx) ────────────────────────────────────
+  'tabs.menu.rename': 'Rename…',
+  'tabs.menu.close': 'Close',
+  'tabs.menu.quickConnect': 'Quick connect…',
+  'tabs.menu.insertSecret': 'Insert a secret…',
+  'tabs.menu.snippets': 'Snippets…',
+  'tabs.menu.newNote': 'New note',
+  'tabs.menu.newWorkspace': 'New workspace…',
+  'tabs.newTab.aria': 'New tab',
+  'tabs.more.aria': 'More',
+  'tabs.showAll.aria': 'Show all workspaces',
+  'tabs.filter.placeholder': 'Filter tabs…',
+  'tabs.filter.aria': 'Filter tabs',
+  'tabs.closeWorkspace.aria': 'Close workspace',
+  'tabs.closeWorkspace.named': 'Close workspace {name}',
+  'tabs.workspace.title': 'Workspace: {name}',
+  'tabs.resizeStrip.aria': 'Resize the tab strip',
+  // ── Grant panel chrome (grant.ts) ───────────────────────────────────────
+  'grant.panel.aria': 'marked for the question',
+  'grant.dismissAll': 'Dismiss all',
+  'grant.dismissMark.aria': 'Dismiss this mark',
+  // ── Host-key and agent-approval dialogs (host-key-dialog.tsx) ───────────
+  'hostKey.firstTime.body':
+    'This is the first time nocx has met this host. If you trust this machine, accept its key — it will be saved to ~/.ssh/known_hosts.',
+  'hostKey.changed.body':
+    'The host key offered by this server differs from the one nocx has seen before. That can mean the host’s key was regenerated — or that someone is intercepting this connection. Do not continue unless you are sure this is the same machine. Accepting replaces the old key: it stops being trusted.',
+  'hostKey.fingerprint.offered': 'Offered fingerprint',
+  'hostKey.fingerprint.label': 'Fingerprint',
+  'hostKey.method.aria': 'Integration method',
+  'hostKey.method.raw.label': 'Raw',
+  'hostKey.method.raw.title': 'No integration — a plain terminal, nothing written to the host.',
+  'hostKey.method.script.label': 'Script',
+  'hostKey.method.script.title':
+    'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
+  'hostKey.method.helper.label': 'Helper',
+  'hostKey.method.helper.title':
+    'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
+  'hostKey.cancel': 'Cancel',
+  'hostKey.agent.title': "Allow this agent to use nocx's tools?",
+  'hostKey.agent.lead': 'If you allow it, this agent',
+  'hostKey.agent.launches': 'and commands it launches',
+  'hostKey.agent.powers':
+    'can start other agents in new tabs, watch what they are doing, and stop them. They cannot read your secrets, reach another machine, or change anything else on this one.',
+  'hostKey.agent.allowed.aria': 'What is being allowed',
+  'hostKey.agent.denyBody':
+    "If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer is remembered for this agent alone.",
+  'hostKey.agent.deny': 'Deny',
+  // ── Shell-integration notice (integration/notice.tsx) ───────────────────
+  'integration.copy.copied': 'Copied',
+  'integration.copy.failed': 'Could not copy to the clipboard',
+  'integration.toolbar.aria': 'Shell integration',
+  'integration.notice.dontShowShell': "Don't show again for this shell",
+  'integration.notice.dismiss.aria': 'Dismiss',
+  'integration.notice.copy': 'Copy',
+  'integration.notice.learnMore': 'Learn more',
+  'integration.notice.close': 'Close',
+  'integration.commands.aria': 'Commands to run',
+  'integration.about.title': 'About shell integration',
+  // ── Connections list and editor (connections.tsx) ───────────────────────
+  'connections.group.empty':
+    'No connections here yet — pick this group in a connection’s editor to move it in.',
+  'connections.inherit.placeholder': '— Not set (inherit) —',
+  // ── Recovery labels (capability.ts) ─────────────────────────────────────
+  'recovery.enableEditor': 'Enable command editor',
+  'recovery.restoreEditor': 'Restore command editor',
+  // ── Worker tool surface notice (tool-surface-notice.tsx) ────────────────
+  'toolSurface.unavailable.title': 'Worker tools unavailable',
+  'toolSurface.unavailable.body': 'The nocx worker tool surface is unavailable: {reason}.',
+  'toolSurface.unavailable.noAnswer': 'the endpoint did not answer',
+  'toolSurface.dismiss.aria': 'Dismiss',
+  // ── Name-and-colour dialog (name-colour-dialog.tsx) ─────────────────────
+  'nameColour.cancel': 'Cancel',
+  'nameColour.name': 'Name',
+  'nameColour.newWorkspace': 'New workspace',
+  'nameColour.renameWorkspace': 'Rename workspace',
+  'nameColour.renameTab': 'Rename tab',
+  // ── Notices' dismiss labels (publish-notice.tsx, unreconciled-notice.tsx)
+  'publish.dismiss.aria': 'Dismiss',
+  'unreconciled.dismiss.aria': 'Dismiss',
+  // ── Shell-integration degrade sentences (integration/status.ts) ─────────
+  'integration.notIntegrated.title': 'Not integrated',
+  'integration.channel-lost.title': 'Integration lost',
+  'integration.channel-lost.description':
+    'nocx lost its channel to this shell, so this tab is now a plain terminal.',
+  'integration.remote-command.description':
+    'This connection runs a configured command instead of a shell, so there is nothing to integrate.',
+  'integration.command-too-long.description':
+    'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+  'integration.fish.detected': 'Detected Fish {version}.',
+  'integration.fish.unavailable': 'Fish version is unavailable.',
+  'integration.handshake-timeout.description':
+    'Your shell did not answer nocx in time, so this tab is a plain terminal.',
+  'integration.startup-did-not-return.description':
+    'nocx’s shell integration never answered from inside your shell, so this tab is a plain terminal.',
+  'integration.unsupported-shell.description':
+    'nocx has no integration for this shell, so this tab is a plain terminal.',
+  'integration.unsupported-fish-startup.description':
+    'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
+  'integration.no-secure-temp.description':
+    'nocx could not create a private temporary file for this session, so integration was not installed.',
+  'integration.session-unavailable.description':
+    'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
+  'integration.pty-unavailable.description':
+    'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
+  'integration.exec-refused.description':
+    'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
+  'integration.exec-substituted.description':
+    'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
+  'integration.host-key-unconfirmed.description':
+    'The host key was not confirmed, so shell integration was not delivered.',
+  'integration.publish-unavailable.description':
+    'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
+  'integration.loader-termios-unavailable.description':
+    'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
+  'integration.bootstrap-interrupted.description':
+    'The connection ended while nocx was still setting this session up.',
+  'integration.bootstrap-protocol.description':
+    'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
+  'integration.bootstrap-timeout.description':
+    'The far host answered nocx once and then did not finish the setup in time.',
+  'integration.bootstrap-out-of-order.description':
+    'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
+  'integration.receiver-unready.description':
+    'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
+  'integration.stage-too-large.description':
+    'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
+  'integration.stage-digest-unavailable.description':
+    'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
+  'integration.stage-digest-mismatch.description':
+    'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
+  'integration.stage-fd-unavailable.description':
+    'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
+  'integration.stage-source-failed.description':
+    'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
+  'integration.secret-too-large.description':
+    'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
+  'integration.secret-malformed.description':
+    'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
+  'integration.secret-not-for-this-session.description':
+    'The key that reached the far host was addressed to a different session, so the far host refused it.',
+  'integration.capability-fd-unavailable.description':
+    'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
+  'integration.capability-unlink-failed.description':
+    'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
+  'integration.capability-write-failed.description':
+    'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
+  'integration.generation-unavailable.description':
+    'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
+  'integration.channel-unavailable.description':
+    'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
+  'integration.unknown.description':
+    'nocx could not set up shell integration for this session, and cannot say why.',
+  // ── Agent ask, editor submit and mark affordance (agent-ask.ts, editor.ts, mark-affordance.tsx) ──
+  'agentAsk.undo': 'Undo',
+  'agentAsk.managePermissions': 'Manage permissions',
+  'editor.runCommand.aria': 'Run command',
+  'editor.sendQuestion.aria': 'Send question',
+  'editor.hint.run': 'run',
+  'editor.hint.ask': 'ask',
+  'editor.hint.newline': 'newline',
+  'editor.switch.shell': 'Run',
+  'editor.switch.agent': 'Ask',
+  'markAffordance.forQuestion.aria': '{label} for the question',
+  // ── Desktop endpoint failure (endpoint-desktop.ts) ─────────────────────
+  'endpoint.noServer.message': 'The desktop backend could not be reached.',
+  'endpoint.noServer.remedy': 'Retry when the backend is available.',
+  // ── Workspace chip and command-history recall (workspace-chip.tsx, recall.ts) ──
+  'workspaceChip.title': 'Workspace: {name}',
+  'recall.panel.aria': 'command history',
+  'recall.search.placeholder': 'search history',
+  'recall.search.aria': 'search history',
+  // ── Undelivered stop notice (session-signal-undelivered.ts) ────────────
+  'sessionSignal.attemptClosed': 'The command had ended before the stop could reach it.',
+  'sessionSignal.unsupported': 'This command is running on a host nocx cannot signal from here.',
+  'sessionSignal.undelivered':
+    'nocx could not deliver the stop to the command. The command may still be running — press Stop again to reach it.',
+  'sessionSignal.unknown': 'nocx could not stop the command ({reason})',
+  // ── Session reattach and operations empty state (ipc.ts, operations-view.tsx) ──
+  'ipc.reattach.unavailable':
+    'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+  'ops.empty.description':
+    'Uploads and other background work appear here while they run, and stay for a while after they finish.',
+  // ── Pane and connection toasts (panes.ts) ──────────────────────────────
+  'panes.openTab.failed': 'Could not open a tab: {message}',
+  'panes.connection.saved': 'Saved "{host}" as a connection',
+  'panes.save.failed': 'Could not save: {message}',
+  'panes.connection.opened': 'Opened "{host}" as a connection',
+  'panes.connect.failed': 'Could not connect to {host}: {message}',
+  'panes.createWorkspace.failed': 'Could not create the workspace: {message}',
+  // ── App-level toasts and the ports row (main.tsx) ──────────────────────
+  'main.ports.label': 'Ports: {state}',
+  'main.forward.started': 'Forwarding {destination} on {host}:{port}',
+  'main.copied': 'Copied "{title}" to the clipboard.',
+  'main.hostKey.untrusted': 'Could not trust the host key: {message}',
+  'main.decision.failed': 'Could not record the decision: {message}',
+  'main.updateState.unreadable':
+    'nocx could not read the update state this launch — open Settings and check there if you expect a new release.',
+  // ── Workspace colour names (layout/workspace-colours.ts) ──────────────
+  'workspaceColour.grey': 'Grey',
+  'workspaceColour.blue': 'Blue',
+  'workspaceColour.cyan': 'Cyan',
+  'workspaceColour.green': 'Green',
+  'workspaceColour.yellow': 'Yellow',
+  'workspaceColour.orange': 'Orange',
+  'workspaceColour.red': 'Red',
+  'workspaceColour.pink': 'Pink',
+  'workspaceColour.purple': 'Purple',
+  // ── File viewer reload action (file-viewer-content.tsx) ─────────────────
+  'fileViewer.reload.label': 'Reload',
+  'fileViewer.reload.reason': 'Re-read the file from disk',
+  'fileViewer.reload.retryReason': 'Try reading the file again',
+  'fileViewer.unavailable.gone': 'The terminal or connection that provided this file is gone',
+  'fileViewer.unavailable.back': 'The source is back — re-read the file',
+  // ── nocx-dej6.3.16: copy the widened checker found (api, assistant, host-key, sidebar) ──
+  'api.collection.new.submit': 'Create',
+  'api.collection.new.fieldLabel': 'Name',
+  'api.collection.new.fieldDescription':
+    'A name, not a path — the folder is made where nocx keeps collections.',
+  'api.folder.new.fieldLabel': 'Name',
+  'api.folder.new.fieldDescription':
+    'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.',
+  'api.folder.new.submit': 'Create',
+  'api.collection.fieldLabel.folder': 'Collection folder',
+  'api.import.pickFile': 'Or select a file',
+  'api.runs.status.aria': 'HTTP status {status}',
+  'api.commitNote.variables':
+    'A value bound to a variable stays in the vault: the file carries the name, never the value.',
+  'connections.group.keyPath.none': '— Not set (inherit) —',
+  'keymat.pickFile': 'Choose file…',
+  'nameColour.submit.create': 'Create',
+  'nameColour.submit.save': 'Save',
+  'secrets.filter.aria': 'Filter secrets',
+  'snippets.filter.aria': 'Filter snippets',
+  'sidebar.updateStatus.aria': 'Update status',
+  'assistant.scope.session': 'a terminal session',
+  'assistant.scope.environment': 'the {id} environment',
+  'assistant.scope.credential': 'the {id} credential',
+  'assistant.answer.yours': 'Your answer',
+  'assistant.fact.covers': 'It covers',
+  'assistant.fact.placesApplies': 'Places it applies in',
+  'assistant.fact.provenance': 'Where it came from',
+  'assistant.fact.givenWhile': 'Given while the command was doing',
+  'assistant.fact.placeTouched': 'The place it touched',
+  'assistant.fact.forgetting': 'Forgetting',
+  'assistant.fact.callsChanged': 'The calls this changes',
+  'assistant.fact.stillUsing': 'Still using this',
+  'assistant.fact.wouldAllow': 'It would allow',
+  'assistant.fact.wouldNotAllow': 'It would not allow',
+  'assistant.fact.readAs': 'nocx read this as',
+  'hostKey.fact.agent': 'Agent',
+  'hostKey.fact.machine': 'Machine',
+  'hostKey.fact.fingerprint': 'Fingerprint',
+  'hostKey.fact.appliesTo': 'Applies to',
+  'hostKey.fact.lasts': 'Lasts',
+  'hostKey.fact.noMachine': 'a machine nocx could not name',
+  'api.tree.emptyRow': 'Empty',
+  'api.folder.meta.empty': 'Empty',
+  'api.folder.meta.items': {
+    one: '{count} item',
+    few: '{count} items',
+    many: '{count} items',
+    other: '{count} items',
+  },
+  'agentAccess.row.meta': 'On {machine} · Every tab in the {workspace} workspace · {digest}',
+  'assistant.placesOnly': 'Only in {places}.',
+  'footprint.row.meta.agent': '{path} · protocol {protocol} · scripts {scripts} · last seen {seen}',
+  'footprint.row.meta.helper': '{path} · hash {hash}… · installed {installed}',
 }

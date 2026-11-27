@@ -12,6 +12,7 @@
 import {
   SecretPicker,
   type SecretPickerDoor,
+  type SecretPickerLabels,
   type SecretPickerSource,
   type SecretPickerStoreOffer,
 } from './secret-picker'
@@ -46,6 +47,8 @@ export interface SecretPickerFieldController {
 
 export function createSecretPickerField(opts: {
   source: SecretPickerSource
+  /** The picker's words, built by the caller (kit-labels.ts). */
+  labels: SecretPickerLabels
   value: () => string
   onChange: (next: string, caret: number) => void
   /** The field's own element, read afresh each time the panel is placed.
@@ -172,6 +175,7 @@ export function createSecretPickerField(opts: {
       onError: opts.source.onError,
       onDismiss: onPickerDismiss,
     },
+    opts.labels,
     // The panel lives on the body; the anchor is how it finds its way back
     // to the field it belongs to (see `anchor` above).
     ...(opts.anchor !== undefined ? [{ anchor: opts.anchor }] : []),

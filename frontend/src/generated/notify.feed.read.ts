@@ -10,6 +10,20 @@
  */
 
 /**
+ * One piece of a composed sentence. A keyed segment names a catalogue entry and its scalar params, which are data (a count, a channel id), never display text. A text segment is verbatim, untranslated text: a program's own words or backend error prose.
+ */
+export type Segment =
+  | {
+      key: string
+      params?: {
+        [k: string]: string | number
+      }
+    }
+  | {
+      text: string
+    }
+
+/**
  * Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0047 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.
  */
 export interface NotifyFeedRead {
@@ -44,6 +58,14 @@ export interface Occurrence {
    * Untrusted presentation data, same guarantees as title. Empty when the source had none.
    */
   body: string
+  /**
+   * The title as an ordered list of catalogue segments, for a sentence nocx composed. The renderer joins the translated segments in order; an empty list means the raw title is the whole sentence.
+   */
+  titleSegments: Segment[]
+  /**
+   * The body as an ordered list of catalogue segments, same rules as titleSegments.
+   */
+  bodySegments: Segment[]
   /**
    * The event kind, stamped by the source adapter from the method invoked — never carried on the wire inbound.
    */

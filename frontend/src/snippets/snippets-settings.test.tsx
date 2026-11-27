@@ -287,7 +287,7 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     await waitForRows(container, 1)
 
     fireEvent.click(container.querySelector('[aria-label="Delete one"]')!)
-    clickButton(findConfirmDialog('Delete "one"?')!, 'OK')
+    clickButton(findConfirmDialog('Delete "one"?')!, 'Delete')
     await vi.waitFor(() => {
       expect(spies.remove).toHaveBeenCalledWith('a')
     })

@@ -96,6 +96,33 @@ describe('must stay silent', () => {
     expect(scanSource('s.tsx', 'export const A = () => <p>&mdash;</p>')).toEqual([])
   })
 
+  it('a literal on each prop widened at nocx-dej6.3.16', () => {
+    const hits = scanSource(
+      's.tsx',
+      'export const A = () => <Foo submitLabel="Create" addLabel="Add" emptyLabel="Nothing yet" accessibleName="Status" />',
+    )
+    expect(hits.map((h) => h.context)).toEqual([
+      'attr:submitLabel',
+      'attr:addLabel',
+      'attr:emptyLabel',
+      'attr:accessibleName',
+    ])
+  })
+
+  it('a literal summary and a copy-bearing name property', () => {
+    const hits = scanSource(
+      's.ts',
+      "createDisclosure({ kind: 'tool-result', summary: 'Sent and returned' })\nconst row = { name: 'Empty' }",
+    )
+    expect(hits.map((h) => h.context)).toEqual(['prop:summary', 'prop:name'])
+  })
+
+  it('a name property holding an identifier is not copy', () => {
+    expect(
+      scanSource('s.ts', "const g = { name: 'lock' }\nconst e = { name: 'RpcError' }"),
+    ).toEqual([])
+  })
+
   it('a non-text attribute name', () => {
     expect(
       scanSource('s.tsx', 'export const A = () => <b data-kind="row" class="x">{v}</b>'),

@@ -204,14 +204,22 @@ const LEVEL_ICON: Record<ToastLevel, Component> = {
  * region is announced as its contents change, which is one announcement per toast
  * instead of one per re-render of the list.
  */
+/** The words the host draws itself: the dismiss control's name, and the
+ *  failure a link raises when the browser refuses it. The caller builds them. */
+export interface ToastHostLabels {
+  dismiss: string
+  browserOpenFailed: string
+}
+
 /** Platform capability injected at the shell root. The kit never imports a
  * transport, and calls the opener synchronously to preserve browser gestures. */
 export interface ToastHostProps {
+  labels: ToastHostLabels
   openUrl?: (url: string) => Promise<void>
   onOpenUrlError?: (error: unknown) => void
 }
 
-export function ToastHost(props: ToastHostProps = {}) {
+export function ToastHost(props: ToastHostProps) {
   onCleanup(clearToasts)
   // Rendered into the topmost open overlay when there is one, and into the body
   // otherwise. A modal `<dialog>` lives in the browser's top layer, which is
@@ -236,8 +244,7 @@ function renderHost(props: ToastHostProps) {
       props.onOpenUrlError?.(error)
       showToast({
         level: 'danger',
-        message:
-          'The browser could not be opened. Try again or open the release notes in your browser.',
+        message: props.labels.browserOpenFailed,
       })
     }
     try {
@@ -310,7 +317,7 @@ function renderHost(props: ToastHostProps) {
             </Show>
             <IconButton
               size="xs"
-              ariaLabel="Dismiss notification"
+              ariaLabel={props.labels.dismiss}
               onClick={() => dismissToast(toast.id)}
             >
               <CloseIcon />

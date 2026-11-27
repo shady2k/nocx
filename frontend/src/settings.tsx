@@ -1133,7 +1133,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
         const decl = declarations().find((d) => d.key === key)
         showToast({
           level: 'danger',
-          message: `Could not save "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(outcome.error)}`,
+          message: t('settings.saveFailed', 'Could not save "{name}": {reason}', {
+            name: decl ? declLabel(decl) : key,
+            reason: settingSaveErrorSentence(outcome.error),
+          }),
         })
       }
     }
@@ -1160,7 +1163,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not reset "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
+        message: t('settings.resetFailed', 'Could not reset "{name}": {reason}', {
+          name: decl ? declLabel(decl) : key,
+          reason: settingSaveErrorSentence(message),
+        }),
       })
     }
   }
@@ -1176,7 +1182,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not save "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
+        message: t('settings.saveFailed', 'Could not save "{name}": {reason}', {
+          name: decl ? declLabel(decl) : key,
+          reason: settingSaveErrorSentence(message),
+        }),
       })
     }
   }
@@ -1192,7 +1201,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not clear "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
+        message: t('settings.clearFailed', 'Could not clear "{name}": {reason}', {
+          name: decl ? declLabel(decl) : key,
+          reason: settingSaveErrorSentence(message),
+        }),
       })
     }
   }
@@ -1745,10 +1757,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
                     void saveSecret(decl.key, value)
                   }}
                 >
-                  Replace
+                  {t('settings.secret.replace', 'Replace')}
                 </Button>
                 <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
-                  Clear
+                  {t('settings.secret.clear', 'Clear')}
                 </Button>
               </div>
             </Show>

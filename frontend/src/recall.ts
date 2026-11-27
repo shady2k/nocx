@@ -380,7 +380,7 @@ export class RecallOverlay {
     this.panel = new FloatingPanel({
       variant: 'recall',
       role: 'dialog',
-      ariaLabel: 'command history',
+      ariaLabel: '',
     })
     this.root = this.panel.root
   }
@@ -919,8 +919,8 @@ export class RecallOverlay {
     search.className = 'ui-floating-panel__search'
     const field = createSearchFieldDisplay({
       value: s.name === 'loading' ? '' : s.filter,
-      placeholder: 'search history',
-      ariaLabel: 'search history',
+      placeholder: t('recall.search.placeholder', 'search history'),
+      ariaLabel: t('recall.search.aria', 'search history'),
     })
     search.appendChild(field)
     if (s.name !== 'loading' && s.query.coverage !== null) {
@@ -976,6 +976,7 @@ export class RecallOverlay {
     // The loading and empty states fill the shared list with the kit's
     // empty state (the panel's list is the scroll owner, so the message
     // scrolls with the panel, not under it).
+    this.panel.root.setAttribute('aria-label', t('recall.panel.aria', 'command history'))
     this.panel.show({
       rows,
       selectedIndex: Math.max(selected, 0),

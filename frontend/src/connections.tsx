@@ -24,6 +24,7 @@ import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
 import { EditableRowList } from './ui/row-list'
 import { Dialog, showConfirm } from './ui/dialog'
+import { confirmLabels } from './i18n/kit-labels'
 import { Radio } from './ui/radio'
 import { Section } from './ui/section'
 import { Stack } from './ui/stack'
@@ -1382,7 +1383,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={gv(key) as string}
                 onChange={(v) => setG(key, v || '')}
                 options={jumpOptions()}
-                placeholder="&mdash; Not set (inherit) &mdash;"
+                placeholder={t('connections.inherit.placeholder', '— Not set (inherit) —')}
               />
             </div>
           </Field>
@@ -1535,7 +1536,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   }}
                   pathValue={groupKeyPathValue()}
                   onPathChange={(v) => handleGroupKeyPathChange(v || undefined)}
-                  pathPlaceholder="— Not set (inherit) —"
+                  pathPlaceholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
                   materialValue={groupKeyText()}
                   onMaterialChange={(v) => {
                     setGroupKeyText(v)
@@ -2596,8 +2597,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (
       !(await showConfirm(
         `${t('connections.editor.deleteConfirmHead', 'Delete')} "${profile.name}"?`,
-        t('connections.editor.deleteConfirmOk', 'Delete'),
-        t('connections.common.cancel', 'Cancel'),
+        confirmLabels(
+          t('connections.editor.deleteConfirmOk', 'Delete'),
+          t('connections.common.cancel', 'Cancel'),
+        ),
       ))
     )
       return
@@ -2777,8 +2780,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         <Show when={!collapsed()}>
           <Show when={gp.length === 0 && node.children.length === 0}>
             <p class="cm-group-empty">
-              No connections here yet — pick this group in a connection&rsquo;s editor to move it
-              in.
+              {t(
+                'connections.group.empty',
+                'No connections here yet — pick this group in a connection’s editor to move it in.',
+              )}
             </p>
           </Show>
           <For each={gp}>{(p) => renderRow(p)}</For>
@@ -3273,6 +3278,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     removeLabel={(i) =>
                       `${t('connections.forward.removeHead', 'Remove forward')} ${i + 1}`
                     }
+                    removeTitle={t('ui.rowList.remove', 'Remove')}
                     onRemove={removeForward}
                     onAdd={addForward}
                     renderRow={(row, i) => renderForwardRow(row, i)}
@@ -3309,6 +3315,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     <div class="cm-root">
       <CollectionView
         searchValue={searchQuery()}
+        actionsLabel={t('ui.collection.actions', 'Collection actions')}
         onSearch={setSearchQuery}
         searchPlaceholder={t('connections.list.searchPlaceholder', 'Filter connections')}
         searchLabel={t('connections.list.searchPlaceholder', 'Filter connections')}
@@ -3380,6 +3387,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(profile) => (
           <Dialog
             open={dialogOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => {
               const owner = opening
               if (owner) closeEditor(owner)
@@ -3467,6 +3476,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       {/* Quick-connect Dialog — creation starts from one field */}
       <Dialog
         open={quickConnectOpen()}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={closeQuickConnect}
         title={t('connections.quick.title', 'New Connection')}
         size="lg"
@@ -3503,6 +3514,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       {/* Import Dialog — bringing connections in from elsewhere */}
       <Dialog
         open={importOpen()}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={closeImportDialog}
         title={t('connections.import.title', 'Import Connections')}
         size="lg"
@@ -3588,6 +3601,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(preview) => (
           <Dialog
             open={previewOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closePreview}
             title={t('connections.preview.title', 'Tabby Import Preview')}
             size="lg"
@@ -3710,6 +3725,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         {(group) => (
           <Dialog
             open={groupDialogOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={closeGroupEditor}
             // The live draft name, not the stored one: the title is where the
             // group's identity stays readable once the user is two sections
@@ -3752,6 +3769,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <Show when={deleteConfirmOpen()}>
         <Dialog
           open={deleteConfirmOpen()}
+          closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+          closeTitle={t('ui.dialog.closeTitle', 'Close')}
           onClose={cancelDeleteGroup}
           // Which group. A confirmation that does not name what it is about to
           // destroy is asking the user to remember which row they clicked.

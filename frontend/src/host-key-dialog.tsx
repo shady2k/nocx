@@ -54,24 +54,6 @@ function changeMethodLater(profileId: string | undefined): string {
  *  (the server tier, nocx-xn63t.2.1) adds one entry here. */
 export type IntegrationMethod = 'raw' | 'script' | 'helper'
 
-const METHOD_OPTIONS: { value: IntegrationMethod; label: string; title: string }[] = [
-  {
-    value: 'raw',
-    label: 'Raw',
-    title: 'No integration — a plain terminal, nothing written to the host.',
-  },
-  {
-    value: 'script',
-    label: 'Script',
-    title: 'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
-  },
-  {
-    value: 'helper',
-    label: 'Helper',
-    title: 'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
-  },
-]
-
 interface HostKeyDialogProps {
   /** null when this ask is about the method alone — the key is already
    *  trusted, so there is nothing here to show or accept about it. */
@@ -115,6 +97,8 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
   return (
     <Dialog
       open
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onClose}
       title={title()}
       footer={
@@ -151,7 +135,7 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
             </Button>
           </Show>
           <Button variant="default" disabled={props.busy} onClick={props.onClose} autofocus>
-            Cancel
+            {t('hostKey.cancel', 'Cancel')}
           </Button>
         </>
       }
@@ -164,16 +148,18 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
                 when={evidence.changed}
                 fallback={
                   <p>
-                    This is the first time nocx has met this host. If you trust this machine, accept
-                    its key — it will be saved to ~/.ssh/known_hosts.
+                    {t(
+                      'hostKey.firstTime.body',
+                      'This is the first time nocx has met this host. If you trust this machine, accept its key — it will be saved to ~/.ssh/known_hosts.',
+                    )}
                   </p>
                 }
               >
                 <p>
-                  The host key offered by this server differs from the one nocx has seen before.
-                  That can mean the host&rsquo;s key was regenerated — or that someone is
-                  intercepting this connection. Do not continue unless you are sure this is the same
-                  machine. Accepting replaces the old key: it stops being trusted.
+                  {t(
+                    'hostKey.changed.body',
+                    'The host key offered by this server differs from the one nocx has seen before. That can mean the host’s key was regenerated — or that someone is intercepting this connection. Do not continue unless you are sure this is the same machine. Accepting replaces the old key: it stops being trusted.',
+                  )}
                 </p>
               </Show>
               <p>
@@ -182,7 +168,8 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
               </p>
               <Show when={evidence.changed}>
                 <p>
-                  Offered fingerprint: <code>{evidence.fingerprint}</code>
+                  {t('hostKey.fingerprint.offered', 'Offered fingerprint')}:{' '}
+                  <code>{evidence.fingerprint}</code>
                 </p>
               </Show>
             </>
@@ -198,8 +185,33 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
                 )}
               </p>
               <SegmentedControl
-                ariaLabel="Integration method"
-                options={METHOD_OPTIONS}
+                ariaLabel={t('hostKey.method.aria', 'Integration method')}
+                options={[
+                  {
+                    value: 'raw',
+                    label: t('hostKey.method.raw.label', 'Raw'),
+                    title: t(
+                      'hostKey.method.raw.title',
+                      'No integration — a plain terminal, nothing written to the host.',
+                    ),
+                  },
+                  {
+                    value: 'script',
+                    label: t('hostKey.method.script.label', 'Script'),
+                    title: t(
+                      'hostKey.method.script.title',
+                      'The shell scripts nocx ships — command blocks, completions, no compiled binary.',
+                    ),
+                  },
+                  {
+                    value: 'helper',
+                    label: t('hostKey.method.helper.label', 'Helper'),
+                    title: t(
+                      'hostKey.method.helper.title',
+                      'Deploy the nocx helper — the Git panel and everything that needs more than a shell.',
+                    ),
+                  },
+                ]}
                 value={method()}
                 onChange={(v) => setMethod(v as IntegrationMethod)}
                 disabled={props.busy}
@@ -212,7 +224,7 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
                 {changeMethodLater(ask.profileId)}
               </p>
               <p>
-                Fingerprint: <code>{ask.fingerprint}</code>
+                {t('hostKey.fingerprint.label', 'Fingerprint')}: <code>{ask.fingerprint}</code>
               </p>
             </>
           )}
@@ -274,8 +286,10 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
   return (
     <Dialog
       open
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={() => props.onDecide(false)}
-      title="Allow this agent to use nocx's tools?"
+      title={t('hostKey.agent.title', "Allow this agent to use nocx's tools?")}
       footer={
         <>
           <Button variant="primary" disabled={props.busy} onClick={() => props.onDecide(true)}>
@@ -287,24 +301,29 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
             onClick={() => props.onDecide(false)}
             autofocus
           >
-            Deny
+            {t('hostKey.agent.deny', 'Deny')}
           </Button>
         </>
       }
     >
       <Stack>
         <p>
-          If you allow it, this agent <strong>and commands it launches</strong> can start other
-          agents in new tabs, watch what they are doing, and stop them. They cannot read your
-          secrets, reach another machine, or change anything else on this one.
+          {t('hostKey.agent.lead', 'If you allow it, this agent')}{' '}
+          <strong>{t('hostKey.agent.launches', 'and commands it launches')}</strong>{' '}
+          {t(
+            'hostKey.agent.powers',
+            'can start other agents in new tabs, watch what they are doing, and stop them. They cannot read your secrets, reach another machine, or change anything else on this one.',
+          )}
         </p>
         <FactList
-          ariaLabel="What is being allowed"
+          ariaLabel={t('hostKey.agent.allowed.aria', 'What is being allowed')}
           facts={[
-            { name: 'Agent', value: props.executable },
+            { name: t('hostKey.fact.agent', 'Agent'), value: props.executable },
             {
-              name: 'Machine',
-              value: props.machine ? machineLabel(props.machine) : 'a machine nocx could not name',
+              name: t('hostKey.fact.machine', 'Machine'),
+              value: props.machine
+                ? machineLabel(props.machine)
+                : t('hostKey.fact.noMachine', 'a machine nocx could not name'),
               // THREE cases and not two: an ask with no machine is not an ask
               // about this machine. A note that fell through to the local
               // wording would describe a place the wire never named, which is
@@ -316,25 +335,27 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
                   : 'The agent runs on this machine. Your answer is remembered for this machine alone.',
             },
             {
-              name: 'Fingerprint',
+              name: t('hostKey.fact.fingerprint', 'Fingerprint'),
               value: props.digest,
               note: 'The answer is remembered against these bytes, so a replaced program is asked about again.',
             },
             {
-              name: 'Applies to',
+              name: t('hostKey.fact.appliesTo', 'Applies to'),
               value: `Every tab in the ${props.workspace} workspace`,
               note: 'Not only this tab: the same agent started anywhere in this workspace is allowed without asking again.',
             },
             {
-              name: 'Lasts',
+              name: t('hostKey.fact.lasts', 'Lasts'),
               value: 'Until you undo it in Settings → Agent access',
               note: 'The answer survives a restart. Undoing it there means the next start of this agent asks again.',
             },
           ]}
         />
         <p>
-          If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer
-          is remembered for this agent alone.
+          {t(
+            'hostKey.agent.denyBody',
+            "If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer is remembered for this agent alone.",
+          )}
         </p>
       </Stack>
     </Dialog>

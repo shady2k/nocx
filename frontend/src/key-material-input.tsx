@@ -253,7 +253,7 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
               )
             }}
             ariaLabel={t('keymat.file.aria', 'Choose private key file')}
-            buttonLabel="Choose file…"
+            buttonLabel={t('keymat.pickFile', 'Choose file…')}
           />
         </Field>
       </Show>

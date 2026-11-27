@@ -59,9 +59,10 @@ import { TreeEmpty } from '../ui/tree-empty'
 import { TreeRow } from '../ui/tree-row'
 import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
-import { t } from '../i18n/locale-model'
+import { t, tPlural } from '../i18n/locale-model'
 import {
   contentsOf,
   directoryOf,
@@ -969,7 +970,7 @@ export function ApiPane(props: ApiPaneProps) {
   const commitNote = (lead: string): string => {
     const header = pastedCredential()
     if (header === '') {
-      return `${lead} A value bound to a variable stays in the vault: the file carries the name, never the value.`
+      return `${lead} ${t('api.commitNote.variables', 'A value bound to a variable stays in the vault: the file carries the name, never the value.')}`
     }
     return (
       `${lead} A value bound to a variable stays in the vault — but the request you have open ` +
@@ -1427,7 +1428,10 @@ export function ApiPane(props: ApiPaneProps) {
         // A folder's line says whether going in is worth it. "Empty" rather
         // than "0 items", because that is the word the tree uses for the
         // same state one column to the left.
-        meta: count === 0 ? 'Empty' : count === 1 ? '1 item' : `${count} items`,
+        meta:
+          count === 0
+            ? t('api.folder.meta.empty', 'Empty')
+            : tPlural('api.folder.meta.items', count, '{count} items'),
         folder: true,
       }
     })
@@ -2786,7 +2790,7 @@ export function ApiPane(props: ApiPaneProps) {
     // tree they may not have committed. The question NAMES what goes.
     void showConfirm(
       `Delete ${target.name}? The file is removed from the collection folder.`,
-      'Delete',
+      confirmLabels(t('api.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
     ).then((yes) => {
       if (yes) void store.deleteRequest(target.handle, target.relPath)
     })
@@ -2873,7 +2877,13 @@ export function ApiPane(props: ApiPaneProps) {
       void store.closeRequest().then(() => setView('folder'))
       return
     }
-    void showConfirm(question, 'Discard and close', 'Cancel').then((yes) => {
+    void showConfirm(
+      question,
+      confirmLabels(
+        t('api.confirm.discardAndClose', 'Discard and close'),
+        t('ui.confirm.cancel', 'Cancel'),
+      ),
+    ).then((yes) => {
       if (!yes) return
       void store.closeRequest().then(() => setView('folder'))
     })
@@ -2927,7 +2937,7 @@ export function ApiPane(props: ApiPaneProps) {
         // sure" is a question about nothing.
         void showConfirm(
           `Delete ${target.name}? The file is removed from the collection folder.`,
-          'Delete',
+          confirmLabels(t('api.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
         ).then((yes) => {
           if (yes) void store.deleteRequest(target.handle, target.relPath)
         })
@@ -3167,13 +3177,16 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={naming()}
           title={t('api.collection.new.title', 'New collection')}
-          submitLabel="Create"
+          submitLabel={t('api.collection.new.submit', 'Create')}
           fieldId="api-new-collection-name"
-          fieldLabel="Name"
+          fieldLabel={t('api.collection.new.fieldLabel', 'Name')}
           fieldDescription={commitNote(
-            'A name, not a path — the folder is made where nocx keeps collections.',
+            t(
+              'api.collection.new.fieldDescription',
+              'A name, not a path — the folder is made where nocx keeps collections.',
+            ),
           )}
-          placeholder="orders-api"
+          placeholder={t('api.pane.placeholder.collection', 'orders-api')}
           value={name()}
           onInput={setName}
           error={nameRefused()}
@@ -3184,11 +3197,11 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={opening()}
           title={t('api.collection.open.title', 'Open a collection folder')}
-          submitLabel="Open"
+          submitLabel={t('api.dialog.open', 'Open')}
           fieldId="api-collection-path"
-          fieldLabel="Collection folder"
+          fieldLabel={t('api.collection.fieldLabel.folder', 'Collection folder')}
           fieldDescription={commitNote('The folder you place.')}
-          placeholder="/work/acme-api"
+          placeholder={t('api.pane.placeholder.folderPath', '/work/acme-api')}
           value={folderPath()}
           onInput={setFolderPath}
           error={pathRefused()}
@@ -3207,11 +3220,14 @@ export function ApiPane(props: ApiPaneProps) {
         <CollectionDialog
           open={foldering()}
           title={folderAskTitle()}
-          submitLabel="Create folder"
+          submitLabel={t('api.dialog.createFolder', 'Create folder')}
           fieldId="api-new-folder-name"
-          fieldLabel="Name"
-          fieldDescription="One folder, one name — not a path. A folder inside this one is made by asking again from its own row."
-          placeholder="reports"
+          fieldLabel={t('api.folder.new.fieldLabel', 'Name')}
+          fieldDescription={t(
+            'api.folder.new.fieldDescription',
+            'One folder, one name — not a path. A folder inside this one is made by asking again from its own row.',
+          )}
+          placeholder={t('api.pane.placeholder.folder', 'reports')}
           value={folderName()}
           onInput={setFolderName}
           error={folderRefused()}
@@ -3364,6 +3380,7 @@ export function ApiPane(props: ApiPaneProps) {
                 mode={store.watchMode()}
                 reason={store.watchDegradedReason()}
                 local
+                pollingLabel={t('ui.watch.polling', 'Polling')}
               />
               <IconButton
                 id="api-new-collection"
@@ -3677,7 +3694,7 @@ export function ApiPane(props: ApiPaneProps) {
                   selected={store.activeEnvironment() === ''}
                   onClick={() => store.setEnvironment('')}
                 >
-                  No environment
+                  {t('api.pane.noEnvironment', 'No environment')}
                 </Button>
               </Show>
             </div>

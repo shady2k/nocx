@@ -95,6 +95,8 @@ export interface EditableRowListProps<T> {
   addLabel?: string
   /** Accessible name for one row's remove control, e.g. "Remove forward 2". */
   removeLabel?: (index: number) => string
+  /** The tooltip word on every row's remove control. */
+  removeTitle: string
   /** Shown above the add control when there are no rows. */
   emptyLabel?: string
   /**
@@ -115,8 +117,8 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
   const remove = (i: number): JSX.Element => (
     <IconButton
       size="sm"
-      title="Remove"
-      ariaLabel={props.removeLabel?.(i) ?? `Remove row ${i + 1}`}
+      title={props.removeTitle}
+      ariaLabel={props.removeLabel?.(i) ?? props.removeTitle}
       disabled={props.disabled === true}
       onClick={() => props.onRemove?.(i)}
     >

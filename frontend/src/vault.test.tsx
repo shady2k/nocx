@@ -16,6 +16,7 @@ import {
 import { ToastHost, clearToasts } from './ui/toast'
 import type { VaultClient, VaultResetPreview, VaultResetResult } from './vault-client'
 import { RpcError } from './dispatcher'
+import { toastHostLabels } from './i18n/kit-labels'
 
 // ── jsdom patch: native <dialog> showModal/close are unsupported ──────
 // jsdom 29 does not implement HTMLDialogElement.prototype.showModal.
@@ -808,7 +809,7 @@ describe('UnlockDialog', () => {
           vaultStatus={BASE_STATUS}
           onUnsealed={onUnsealed}
         />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
 
@@ -871,7 +872,7 @@ describe('UnlockDialog', () => {
           vaultClient={client}
           vaultStatus={BASE_STATUS}
         />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
 
@@ -1697,7 +1698,7 @@ describe('VaultSection', () => {
     render(() => (
       <>
         <VaultSection vaultClient={client} vaultController={ctrl} />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
     return { client, ctrl }
@@ -1891,7 +1892,7 @@ describe('ResetVaultDialog', () => {
     render(() => (
       <>
         <ResetVaultDialog open={true} onClose={vi.fn()} onReset={onReset} vaultClient={m.client} />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
     await vi.waitFor(() => expect(m.resetPreview).toHaveBeenCalled())
@@ -2014,7 +2015,7 @@ describe('copying a one-time recovery code', () => {
     render(() => (
       <>
         <SetupDialog open={true} onClose={vi.fn()} onSetupComplete={vi.fn()} vaultClient={client} />
-        <ToastHost />
+        <ToastHost labels={toastHostLabels()} />
       </>
     ))
     fireEvent.input(screen.getByLabelText('Master passphrase'), {

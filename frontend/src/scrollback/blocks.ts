@@ -587,7 +587,10 @@ export function toolCallExpansion(
   args: Record<string, unknown>,
   read: ToolResultSource,
 ): HTMLElement {
-  const note = createDisclosure({ kind: 'tool-result', summary: 'Sent and returned' })
+  const note = createDisclosure({
+    kind: 'tool-result',
+    summary: t('scrollback.disclosure.toolResult', 'Sent and returned'),
+  })
   let sent: string
   try {
     sent = JSON.stringify(args, null, 2) ?? '{}'
@@ -1009,8 +1012,12 @@ function createHeader(
     // before Stop/the ⋮, the moment elapsed actually crosses the floor —
     // this header starts, and a block built with no ticker attached stays,
     // bare "Running".
-    right.appendChild(createSpinner({ label: 'Running', size: 'sm' }))
-    right.appendChild(createMeta(['Running'], { tone: 'accent', size: 'terminal' }))
+    right.appendChild(
+      createSpinner({ label: t('scrollback.chrome.running', 'Running'), size: 'sm' }),
+    )
+    right.appendChild(
+      createMeta([t('scrollback.chrome.running', 'Running')], { tone: 'accent', size: 'terminal' }),
+    )
   } else if (status === 'waiting' && rules.statusChips) {
     // The kind's own in-progress vocabulary: the ask block says it is
     // thinking until the first delta lands, and the answer lifecycle removes
@@ -1310,7 +1317,7 @@ function buildOverflowMenu(
 
   const btn = createIconButton({
     size: blockEl.classList.contains('cmd-block-running') ? 'sm' : 'xs',
-    ariaLabel: 'Block actions',
+    ariaLabel: t('scrollback.chrome.blockActions', 'Block actions'),
     icon: () => iconElement(MoreIcon),
     // `data-block-actions` is the ⋮'s OWN identity — the one element every
     // "find the block-actions button" caller (placeHeaderChip here, a dozen
@@ -1357,7 +1364,10 @@ function buildOverflowMenu(
   const refuseCopy = (): void => {
     showToast({
       level: 'warning',
-      message: 'The stored answer is not available, so nothing was copied.',
+      message: t(
+        'scrollback.chrome.copyRefused',
+        'The stored answer is not available, so nothing was copied.',
+      ),
     })
   }
 
@@ -1392,7 +1402,7 @@ function buildOverflowMenu(
     if (running && running.isActive(blockEl)) {
       list.push({
         id: 'stop',
-        label: 'Stop',
+        label: t('scrollback.chrome.stop', 'Stop'),
         icon: SquareIcon,
         onSelect: () => {
           if (running.isActive(blockEl)) running.stop()
@@ -1401,7 +1411,7 @@ function buildOverflowMenu(
     }
     list.push({
       id: 'copy-command',
-      label: 'Copy command',
+      label: t('scrollback.chrome.copyCommand', 'Copy command'),
       icon: CopyIcon,
       onSelect: () => clipboardFallback(intent()),
     })
@@ -1409,9 +1419,9 @@ function buildOverflowMenu(
       list.push(
         {
           id: 'copy-output',
-          label: 'Copy output',
+          label: t('scrollback.chrome.copyOutput', 'Copy output'),
           icon: CopyIcon,
-          busyLabel: 'Copying…',
+          busyLabel: t('scrollback.chrome.copying', 'Copying…'),
           onSelect: async () => {
             const stored = await storedAnswer()
             if (stored === null) refuseCopy()
@@ -1420,9 +1430,9 @@ function buildOverflowMenu(
         },
         {
           id: 'copy-all',
-          label: 'Copy all',
+          label: t('scrollback.chrome.copyAll', 'Copy all'),
           icon: CopyIcon,
-          busyLabel: 'Copying…',
+          busyLabel: t('scrollback.chrome.copying', 'Copying…'),
           // The same source as Copy output, deliberately: two items on one block
           // reading one thing from two places is how they start to disagree.
           onSelect: async () => {
@@ -1439,13 +1449,13 @@ function buildOverflowMenu(
       list.push(
         {
           id: 'copy-output',
-          label: 'Copy output',
+          label: t('scrollback.chrome.copyOutput', 'Copy output'),
           icon: CopyIcon,
           onSelect: () => clipboardFallback(outputAsText()),
         },
         {
           id: 'copy-all',
-          label: 'Copy all',
+          label: t('scrollback.chrome.copyAll', 'Copy all'),
           icon: CopyIcon,
           onSelect: () => clipboardFallback(`${intent()}\n${outputAsText()}`),
         },
@@ -1874,8 +1884,11 @@ export function createRunningBlock(
     if (running.interrupt) {
       const interrupt = createIconButton({
         size: 'sm',
-        ariaLabel: 'Interrupt',
-        title: 'Interrupt (Ctrl+C) — focus controls: Alt+F10',
+        ariaLabel: t('scrollback.chrome.interrupt', 'Interrupt'),
+        title: t(
+          'scrollback.chrome.interruptTitle',
+          'Interrupt (Ctrl+C) — focus controls: Alt+F10',
+        ),
         icon: () => iconElement(PauseIcon),
         attrs: { 'data-block-control': 'interrupt', 'data-control': 'interrupt' },
         onClick: (e) => {
@@ -1890,8 +1903,8 @@ export function createRunningBlock(
     }
     const stop = createIconButton({
       size: 'sm',
-      ariaLabel: 'Stop',
-      title: 'Stop',
+      ariaLabel: t('scrollback.chrome.stop', 'Stop'),
+      title: t('scrollback.chrome.stop', 'Stop'),
       icon: () => iconElement(SquareIcon),
       attrs: { 'data-block-control': 'stop', 'data-control': 'stop' },
       onClick: (e) => {
@@ -3945,7 +3958,7 @@ export class BlockManager {
           // already on screen — this is the other half of the same rule.
           reasoningNote = createDisclosure({
             kind: 'reasoning',
-            summary: 'Thinking',
+            summary: t('scrollback.disclosure.reasoning', 'Thinking'),
             expanded: reasoningStartsExpanded(),
           })
           // INTO THE OPEN RUN OF PROSE when there is one, so the note lands

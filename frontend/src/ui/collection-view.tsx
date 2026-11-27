@@ -11,13 +11,15 @@ export interface CollectionViewProps {
   hasItems: boolean
   empty: JSX.Element
   children: JSX.Element
+  /** The toolbar's accessible name. */
+  actionsLabel: string
 }
 
 /** Shared searchable manager surface used by Connections and Credentials. */
 export function CollectionView(props: CollectionViewProps) {
   return (
     <div class="ui-collection-view">
-      <Toolbar ariaLabel="Collection actions">
+      <Toolbar ariaLabel={props.actionsLabel}>
         <div class="ui-collection-view__search">
           <SearchField
             value={props.searchValue}

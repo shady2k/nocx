@@ -52,6 +52,7 @@ import { IconButton } from '../ui/icon-button'
 import { CloseIcon } from '../ui/icons'
 import { MarkerList, type MarkerListItem } from '../ui/marker-list'
 import { Stack } from '../ui/stack'
+import { t } from '../i18n/locale-model'
 import { StatusCard } from '../ui/status-card'
 import { Toolbar } from '../ui/toolbar'
 import { showToast } from '../ui/toast'
@@ -132,8 +133,12 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
 
   const copySnippet = (snippet: string) => {
     props.copy(snippet).then(
-      () => showToast({ level: 'success', message: 'Copied' }),
-      () => showToast({ level: 'danger', message: 'Could not copy to the clipboard' }),
+      () => showToast({ level: 'success', message: t('integration.copy.copied', 'Copied') }),
+      () =>
+        showToast({
+          level: 'danger',
+          message: t('integration.copy.failed', 'Could not copy to the clipboard'),
+        }),
     )
   }
 
@@ -146,7 +151,7 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
             title={m.title}
             description={m.description}
             action={
-              <Toolbar ariaLabel="Shell integration">
+              <Toolbar ariaLabel={t('integration.toolbar.aria', 'Shell integration')}>
                 {/* The one action this card exists for: the remedy when
                     there is one, and what nocx knows when there is not. */}
                 <Button variant="primary" onClick={() => setOpen(true)}>
@@ -161,10 +166,14 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
                     props.onSuppressShell()
                   }}
                 >
-                  Don't show again for this shell
+                  {t('integration.notice.dontShowShell', "Don't show again for this shell")}
                 </Button>
                 {/* And this one answers only the card in front of the user. */}
-                <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
+                <IconButton
+                  ariaLabel={t('integration.notice.dismiss.aria', 'Dismiss')}
+                  size="sm"
+                  onClick={() => props.onDismiss()}
+                >
                   <CloseIcon />
                 </IconButton>
               </Toolbar>
@@ -179,16 +188,24 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
               the same fact look like two. */}
           <Dialog
             open={open()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => setOpen(false)}
             title={openLabel(m)}
             footer={
               <>
                 <Show when={m.fix} keyed>
-                  {(fix) => <Button onClick={() => copySnippet(fix.snippet)}>Copy</Button>}
+                  {(fix) => (
+                    <Button onClick={() => copySnippet(fix.snippet)}>
+                      {t('integration.notice.copy', 'Copy')}
+                    </Button>
+                  )}
                 </Show>
-                <Button onClick={() => setAboutOpen(true)}>Learn more</Button>
+                <Button onClick={() => setAboutOpen(true)}>
+                  {t('integration.notice.learnMore', 'Learn more')}
+                </Button>
                 <Button variant="primary" onClick={() => setOpen(false)}>
-                  Close
+                  {t('integration.notice.close', 'Close')}
                 </Button>
               </>
             }
@@ -198,7 +215,9 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
                 {(fix) => (
                   <>
                     <p>{fix.lead}</p>
-                    <CodeBlock ariaLabel="Commands to run">{fix.snippet}</CodeBlock>
+                    <CodeBlock ariaLabel={t('integration.commands.aria', 'Commands to run')}>
+                      {fix.snippet}
+                    </CodeBlock>
                   </>
                 )}
               </Show>
@@ -207,11 +226,13 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
           </Dialog>
           <Dialog
             open={aboutOpen()}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={() => setAboutOpen(false)}
-            title="About shell integration"
+            title={t('integration.about.title', 'About shell integration')}
             footer={
               <Button variant="primary" onClick={() => setAboutOpen(false)}>
-                Close
+                {t('integration.notice.close', 'Close')}
               </Button>
             }
           >

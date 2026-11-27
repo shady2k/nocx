@@ -241,6 +241,7 @@ was left alone.
 | sr71cdyt | 2026-11-14 | [The harness keeps process identity until group signals finish](sr71cdyt-harness-keeps-process-identity-until-group-signals-finish.md) | Accepted |
 | 4khgzeyp | 2026-11-14 | [An agent process lives for its conversation, and the agent ends its turn](4khgzeyp-an-agent-process-lives-for-its-conversation-and-the-agent-ends-its-turn.md) | Accepted; supersedes parts of ADR-anntnxdj |
 | 727g63tr | 2026-11-16 | [The far helper is a fact of the connection, and panels reach the host only through it](727g63tr-the-far-helper-is-a-fact-of-the-connection-and-panels-reach-the-host-only-through-it.md) | Accepted (`nocx-oalo1.6.1`; owner decisions of 2026-11-16; supersedes part of ADR-0069 and of ADR-0068's first paragraph, extends ADR-akhhb098 and ADR-ba6xet1b) |
+| 3myzaab2 | 2026-11-25 | [Delivery sentences travel as keyed segments, beside the raw text](3myzaab2-delivery-sentences-travel-as-keyed-segments.md) | Accepted (`nocx-dej6.3.11`; applies ADR-nswp57x0 to the feed occurrence; supersedes nothing) |
 
 ## Adding one
 

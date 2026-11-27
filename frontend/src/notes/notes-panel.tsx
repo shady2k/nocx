@@ -27,6 +27,7 @@ import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { TrashIcon } from '../ui/icons'
 import { showConfirm } from '../ui/dialog'
+import { confirmLabels } from '../i18n/kit-labels'
 import { showToast } from '../ui/toast'
 import { log } from '../log'
 import { t } from '../i18n/locale-model'
@@ -75,7 +76,13 @@ export function NotesPanel(props: NotesPanelProps) {
   }
 
   const remove = async (row: NoteRow): Promise<void> => {
-    if (!(await showConfirm(`Delete "${nameOf(row)}"?`))) return
+    if (
+      !(await showConfirm(
+        t('notes.delete.confirm', 'Delete "{name}"?', { name: nameOf(row) }),
+        confirmLabels(t('ui.confirm.delete', 'Delete'), t('ui.confirm.cancel', 'Cancel')),
+      ))
+    )
+      return
     try {
       await props.store.remove(row.id)
     } catch (err) {
@@ -107,7 +114,7 @@ export function NotesPanel(props: NotesPanelProps) {
                     )}
                     action={
                       <Button variant="primary" onClick={() => props.onCreate()}>
-                        + New note
+                        {t('notes.new.button', '+ New note')}
                       </Button>
                     }
                   />
@@ -115,7 +122,9 @@ export function NotesPanel(props: NotesPanelProps) {
               >
                 <EmptyState
                   title={t('notes.nomatch.title', 'Nothing matches')}
-                  description={`No note contains "${props.query().trim()}".`}
+                  description={t('notes.nomatch.desc', 'No note contains "{query}".', {
+                    query: props.query().trim(),
+                  })}
                 />
               </Show>
             }
@@ -127,7 +136,7 @@ export function NotesPanel(props: NotesPanelProps) {
               }
               action={
                 <Button variant="default" onClick={() => void props.store.refresh()}>
-                  Retry
+                  {t('notes.retry', 'Retry')}
                 </Button>
               }
             />
@@ -146,7 +155,7 @@ export function NotesPanel(props: NotesPanelProps) {
                 actions={
                   <IconButton
                     size="sm"
-                    ariaLabel={`Delete ${nameOf(row)}`}
+                    ariaLabel={t('notes.delete.aria', 'Delete {name}', { name: nameOf(row) })}
                     onClick={() => void remove(row)}
                   >
                     <TrashIcon />

@@ -143,7 +143,7 @@ field confirms rather than doing nothing. It is opt-in: Enter must not fire a
 destructive confirmation, and a dialog whose body is a message has nothing to submit.
 
 Two imperative helpers are built on it, and a surface uses them rather than assembling
-its own modal: **`showConfirm(message, ok, cancel)`** answers `true`/`false`, and
+its own modal: **`showConfirm(message, labels)`**, where `labels` is the `confirmLabels(ok, cancel)` the caller builds from `i18n/kit-labels.ts`, answers `true`/`false`, and
 **`showPrompt(title, label, initial)`** asks for ONE line and answers the string — or
 `null` when the user cancelled. Null and `''` are different answers on purpose: clearing
 a tab's name is a real operation, so its caller must be able to tell "cleared" from

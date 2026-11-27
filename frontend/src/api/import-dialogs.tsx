@@ -246,6 +246,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
     <Dialog
       open={props.open}
       title={t('api.import.collection.title', 'Import collection')}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
@@ -254,7 +256,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
             {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
-            Import
+            {t('api.import.submit', 'Import')}
           </Button>
         </>
       }
@@ -308,7 +310,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
               )
             }
             options={props.connections.map((c) => ({ value: c.id, label: c.name }))}
-            placeholder="Direct"
+            placeholder={t('api.import.routeDirect', 'Direct')}
             placeholderValue=""
           />
         </Field>
@@ -345,7 +347,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         target={API_IMPORT_DROP_TARGET}
         sessionId={props.dropSession}
         hint={t('api.import.dropHint', 'Drop a Postman export here to import it')}
-        pickLabel="Or select a file"
+        pickLabel={t('api.import.pickFile', 'Or select a file')}
         // What the browser picker offers. Postman exports are JSON documents
         // or ZIP archives (design §10, Postman v2.1), and this bounds the
         // PICKER only — a drop can carry anything, which the backend refuses
@@ -575,6 +577,8 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
     <Dialog
       open={props.open}
       title={t('api.import.curl.title', 'Import a curl command')}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
@@ -583,7 +587,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
             {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
-            Convert to a request
+            {t('api.import.curl.convert', 'Convert to a request')}
           </Button>
         </>
       }
@@ -591,7 +595,10 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
       <TextField
         id="api-import-curl"
         label={t('api.import.curl.lineLabel', 'curl command line')}
-        description="Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking."
+        description={t(
+          'api.import.curl.desc',
+          'Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking.',
+        )}
         multiline
         value={props.value}
         error={refusal()}

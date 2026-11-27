@@ -846,7 +846,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ariaLabel={answerAriaLabel('Allow', 'once')}
                 onClick={() => props.onDecide(true, 'once')}
               >
-                Allow once
+                {t('approval.allowOnce', 'Allow once')}
               </Button>
               <Button
                 variant="danger"
@@ -855,7 +855,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ariaLabel={answerAriaLabel('Deny', 'once')}
                 onClick={() => props.onDecide(false, 'once')}
               >
-                Deny once
+                {t('approval.denyOnce', 'Deny once')}
               </Button>
             </>
           }
@@ -911,11 +911,15 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           fallback={
             <>
               <p>
-                The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
+                {t('approval.askingTool.withArgs', 'The assistant is asking to call')}{' '}
+                <strong>{ask().tool}</strong>{' '}
+                {t('approval.askingTool.argsTail', 'with these arguments:')}
               </p>
               <CodeBlock
                 copy={{ ...codeBlockCopyWords(), write: props.copy! }}
-                ariaLabel={`Arguments of ${ask().tool}`}
+                ariaLabel={t('approval.arguments.aria', 'Arguments of {tool}', {
+                  tool: ask().tool,
+                })}
               >
                 {ask().arguments}
               </CodeBlock>
@@ -926,7 +930,8 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             when={proposedCommand()}
             fallback={
               <p>
-                The assistant is asking to call <strong>{ask().tool}</strong>.
+                {t('approval.askingTool.plain', 'The assistant is asking to call')}{' '}
+                <strong>{ask().tool}</strong>.
               </p>
             }
           >
@@ -953,8 +958,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                   {(expanded) => (
                     <>
                       <p>
-                        With its variables as the shell reads them now. This is what the command
-                        means, not what is sent — the line above is what runs, exactly as written:
+                        {t(
+                          'approval.expanded.lead',
+                          'With its variables as the shell reads them now. This is what the command means, not what is sent — the line above is what runs, exactly as written:',
+                        )}
                       </p>
                       <CodeBlock
                         copy={{ ...codeBlockCopyWords(), write: props.copy! }}
@@ -975,7 +982,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             )}
           </Show>
         </Show>
-        <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
+        <FactList
+          facts={facts()}
+          ariaLabel={t('approval.facts.aria', 'What {tool} would do', { tool: ask().tool })}
+        />
         {/*
           The arguments the fact list could not state, in the model's order,
           BESIDE the rows rather than inside them (nocx-m40iw). A body of
@@ -991,7 +1001,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             <CodeBlock
               copy={{ ...codeBlockCopyWords(), write: props.copy! }}
               label={block.name}
-              ariaLabel={`The ${block.name} argument of ${ask().tool}`}
+              ariaLabel={t('approval.blockArg.aria', 'The {name} argument of {tool}', {
+                name: block.name,
+                tool: ask().tool,
+              })}
             >
               {block.value}
             </CodeBlock>
@@ -1011,9 +1024,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         */}
         <Show when={scripts().length > 0}>
           <p>
-            And what those files hold right now. This is a reading, not what is sent — the command
-            above is what runs, exactly as written, and a file can change between this question and
-            the moment it runs.
+            {t(
+              'approval.scripts.lead',
+              'And what those files hold right now. This is a reading, not what is sent — the command above is what runs, exactly as written, and a file can change between this question and the moment it runs.',
+            )}
           </p>
           <For each={scripts()}>
             {(reading) => (
@@ -1026,7 +1040,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                   { name: 'path', value: reading.path },
                   { name: 'verb', value: SCRIPT_VERB_WORDS[reading.verb] },
                 ]}
-                ariaLabel={`What ${reading.path} holds right now`}
+                ariaLabel={t('approval.script.aria', 'What {path} holds right now', {
+                  path: reading.path,
+                })}
                 outcome={scriptOutcome(reading)}
                 labels={fileReadoutLabels()}
               />
@@ -1035,7 +1051,12 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         </Show>
         <Show when={(ask().findings?.length ?? 0) > 0}>
           <Stack gap="loose">
-            <p>What was found, and where — never the material itself:</p>
+            <p>
+              {t(
+                'approval.findings.lead',
+                'What was found, and where — never the material itself:',
+              )}
+            </p>
             <For each={ask().findings}>
               {(f) => (
                 <p>
@@ -1053,9 +1074,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           </Stack>
         </Show>
         <p>
-          Approving covers this call: it has not run, and no call after it in this response will. It
-          does not promise the terminal is untouched — a permitted call earlier in this batch may
-          already have run.
+          {t(
+            'approval.covers.body',
+            'Approving covers this call: it has not run, and no call after it in this response will. It does not promise the terminal is untouched — a permitted call earlier in this batch may already have run.',
+          )}
         </p>
         <Show when={wideningRefused() !== ''}>
           {/*
@@ -1069,10 +1091,11 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         </Show>
         <Show when={ask().reason === 'policy' && ask().standing.available}>
           <p>
-            An answer in this session lasts until this terminal session ends; restarting the shell
-            starts a new one and the question comes back. An answer of always is a standing answer
-            for {ask().standing.rule || effectLabel()}, in every session, from now on, which you can
-            change on the Assistant permissions page.
+            {t(
+              'approval.standing.lead',
+              'An answer in this session lasts until this terminal session ends; restarting the shell starts a new one and the question comes back. An answer of always is a standing answer for {rule}, in every session, from now on, which you can change on the Assistant permissions page.',
+              { rule: ask().standing.rule || effectLabel() },
+            )}
           </p>
         </Show>
       </Stack>

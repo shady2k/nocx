@@ -5,6 +5,7 @@ import { createSignal, type Component } from 'solid-js'
 import { mountSidebar, type SidebarAction, type SidebarViewDescriptor } from './sidebar'
 import { createUpdateController } from './update-controller'
 import { ToastHost } from './ui/toast'
+import { toastHostLabels } from './i18n/kit-labels'
 
 const TestIcon: Component = () => <svg data-test-icon="1" />
 const TestView: Component = () => <div>Updates test view</div>
@@ -71,7 +72,7 @@ describe('activity bar update indicator', () => {
     const [available] = createSignal(true)
     const controller = createUpdateController({ apply: vi.fn() })
     controller.showAvailable('2.0.0', 'https://example.com/releases/2.0.0')
-    render(() => <ToastHost />)
+    render(() => <ToastHost labels={toastHostLabels()} />)
     mountSidebar(bar, panel, views, [settings], null, undefined, undefined, undefined, {
       title: () => 'Update available',
       icon: TestIcon,

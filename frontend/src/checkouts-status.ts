@@ -17,6 +17,7 @@
 // reads it when it renders, which is how a runtime raise arrives.
 
 import type { WSClient } from './ipc'
+import { t } from './i18n/locale-model'
 
 // The wire type is GENERATED from contracts/checkouts.status.schema.json
 // (npm run contracts) and re-exported here so callers import it from the
@@ -45,22 +46,29 @@ export function checkoutsUnavailableSentence(
   let description: string
   switch (status.reason) {
     case 'noRecord':
-      description =
-        'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.'
+      description = t(
+        'checkouts.unavailable.noRecord',
+        'The store that remembers nocx-made checkouts could not be opened, so no checkout is judged and none is ever removed.',
+      )
       break
     case 'recordWrites':
-      description =
-        'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.'
+      description = t(
+        'checkouts.unavailable.recordWrites',
+        'The record of nocx-made checkouts refused a write, so the last-used times it holds cannot be trusted and nothing is aged out until the backend restarts.',
+      )
       break
     default:
       // The enum is closed on the wire, and this is the honest fallback if a
       // newer backend names a reason this build does not know: say the fact
       // without inventing a why.
-      description = 'The sweep cannot run, and this build does not know why.'
+      description = t(
+        'checkouts.unavailable.unknown',
+        'The sweep cannot run, and this build does not know why.',
+      )
   }
   const detail = status.detail ? ` (${status.detail})` : ''
   return {
-    title: 'Unused worker checkouts are not being cleaned up',
+    title: t('checkouts.unavailable.title', 'Unused worker checkouts are not being cleaned up'),
     description: description + detail,
   }
 }

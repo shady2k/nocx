@@ -12,6 +12,7 @@ describe('CollectionView', () => {
     const onSearch = vi.fn()
     const { container } = render(() => (
       <CollectionView
+        actionsLabel="Collection actions"
         searchValue=""
         onSearch={onSearch}
         searchPlaceholder="Filter things"
@@ -33,6 +34,7 @@ describe('CollectionView', () => {
   it('renders the supplied empty state without a list body', () => {
     const { container } = render(() => (
       <CollectionView
+        actionsLabel="Collection actions"
         searchValue=""
         onSearch={() => undefined}
         searchPlaceholder="Filter things"

@@ -5,6 +5,7 @@ import { LockIcon } from '../ui/icons'
 import { TextField, type TextFieldMark, type TextFieldProps } from '../ui/text-field'
 import type { SecretEntry, SecretPickerSource } from '../ui/secret-picker'
 import { t } from '../i18n/locale-model'
+import { secretPickerLabels } from '../i18n/kit-labels'
 
 export type { SecretEntry } from '../ui/secret-picker'
 
@@ -81,6 +82,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
       ? null
       : createSecretPickerField({
           source,
+          labels: secretPickerLabels(),
           // The panel is mounted on the body and would otherwise have no idea
           // where this field is; handing the input back is what puts the
           // panel beside it instead of above the top of the window

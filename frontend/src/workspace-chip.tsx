@@ -2,6 +2,7 @@ import { Show } from 'solid-js'
 import { Button } from './ui/button'
 import type { GroupAttention } from './layout/workspace-colour'
 import type { WorkspaceColour } from './layout/workspace-colours'
+import { t } from './i18n/locale-model'
 
 /**
  * WorkspaceChip — a workspace as a SEGMENT OF THE TAB ROW, not as a mode of
@@ -78,7 +79,7 @@ export function WorkspaceChip(props: WorkspaceChipProps) {
         // This is still the current workspace in a set of navigation choices;
         // the dedicated Button variant changes only its Edge-style paint.
         selected={props.expanded}
-        title={`Workspace: ${props.name}`}
+        title={t('workspaceChip.title', 'Workspace: {name}', { name: props.name })}
         onClick={() => props.onActivate()}
         onContextMenu={(e: MouseEvent) => {
           e.preventDefault()

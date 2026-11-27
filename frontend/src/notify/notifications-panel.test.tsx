@@ -23,6 +23,8 @@ function occurrence(over: Partial<Occurrence> = {}): Occurrence {
     at: '2026-08-22T10:00:00Z',
     title: 'build finished',
     body: '',
+    titleSegments: [],
+    bodySegments: [],
     kind: 'block.finished',
     level: 'success',
     count: 1,

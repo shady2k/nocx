@@ -147,6 +147,8 @@ export function mountSnippetAskDialog(
         {(s) => (
           <Dialog
             open={true}
+            closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+            closeTitle={t('ui.dialog.closeTitle', 'Close')}
             onClose={close}
             onSubmit={() => void submit()}
             title={s.title}

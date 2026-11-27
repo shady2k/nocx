@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OperationRow } from './operation-row'
+import { operationRowLabels } from '../i18n/kit-labels'
 import type { OperationPhase } from './operation'
 import { formatTimestamp } from './format-time'
 
@@ -15,6 +16,7 @@ function row(container: HTMLElement): HTMLElement {
 }
 
 const RUNNING = {
+  labels: operationRowLabels(),
   kind: 'upload' as const,
   title: 'notes.txt',
   destination: '/srv/data',

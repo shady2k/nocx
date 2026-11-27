@@ -317,16 +317,24 @@ func (f *Feed) RecordDeliveryFailure(ev Event, channel string, cause error) Occu
 		channel = "an unnamed channel"
 	}
 	title := "Not delivered"
+	titleSegments := []Segment{{Key: "notify.delivery.failed.title"}}
 	if ev.Title != "" {
 		title += ": " + ev.Title
+		titleSegments = append(titleSegments, Segment{Key: "notify.delivery.failed.titleSeparator"}, Segment{Text: ev.Title})
 	}
 	return f.Add(Event{
-		SessionID: ev.SessionID,
-		Title:     title,
-		Body:      fmt.Sprintf("%s could not deliver it: %v", channel, cause),
-		Kind:      ev.Kind,
-		Trust:     TrustAttested,
-		Level:     LevelWarning,
+		SessionID:     ev.SessionID,
+		Title:         title,
+		Body:          fmt.Sprintf("%s could not deliver it: %v", channel, cause),
+		TitleSegments: titleSegments,
+		BodySegments: []Segment{
+			{Key: "notify.delivery.failed.body", Params: map[string]string{"channel": channel}},
+			{Key: "notify.delivery.failed.causeSeparator"},
+			{Text: fmt.Sprint(cause)},
+		},
+		Kind:  ev.Kind,
+		Trust: TrustAttested,
+		Level: LevelWarning,
 		// The instant is the FAILURE's, not the event's: the delivery it
 		// reports on may have been accepted a whole debounce window earlier.
 		At:          f.clock.Now(),

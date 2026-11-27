@@ -32,22 +32,23 @@ export type WorkspaceColour =
 
 export interface WorkspaceColourChoice {
   readonly key: WorkspaceColour
-  /** What the picker's accessible name says. A colour word rather than a
-   *  token role: the user is choosing a colour, and roles are the kit's
-   *  vocabulary, not theirs. */
-  readonly label: string
+  /** The catalogue key for what the picker's accessible name says. A colour
+   *  word rather than a token role: the user is choosing a colour, and roles
+   *  are the kit's vocabulary, not theirs. Resolved at render, where the
+   *  English fallback is supplied, never when this table loads. */
+  readonly labelKey: string
 }
 
 export const WORKSPACE_COLOURS: readonly WorkspaceColourChoice[] = [
-  { key: 'grey', label: 'Grey' },
-  { key: 'blue', label: 'Blue' },
-  { key: 'cyan', label: 'Cyan' },
-  { key: 'green', label: 'Green' },
-  { key: 'yellow', label: 'Yellow' },
-  { key: 'orange', label: 'Orange' },
-  { key: 'red', label: 'Red' },
-  { key: 'pink', label: 'Pink' },
-  { key: 'purple', label: 'Purple' },
+  { key: 'grey', labelKey: 'workspaceColour.grey' },
+  { key: 'blue', labelKey: 'workspaceColour.blue' },
+  { key: 'cyan', labelKey: 'workspaceColour.cyan' },
+  { key: 'green', labelKey: 'workspaceColour.green' },
+  { key: 'yellow', labelKey: 'workspaceColour.yellow' },
+  { key: 'orange', labelKey: 'workspaceColour.orange' },
+  { key: 'red', labelKey: 'workspaceColour.red' },
+  { key: 'pink', labelKey: 'workspaceColour.pink' },
+  { key: 'purple', labelKey: 'workspaceColour.purple' },
 ]
 
 /** Whether a stored value is one this renderer can draw.

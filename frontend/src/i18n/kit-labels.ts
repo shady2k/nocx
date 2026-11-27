@@ -16,6 +16,12 @@ import type { BlockReceiptLabels } from '../ui/block-receipt'
 import type { PersonMessageLabels } from '../ui/person-message'
 import type { FileReadoutLabels } from '../ui/file-readout'
 import type { FolderPickerLabels } from '../ui/folder-picker'
+import type { ConfirmLabels } from '../ui/dialog'
+import type { ToastHostLabels } from '../ui/toast'
+import type { OperationRowLabels } from '../ui/operation-row'
+import type { ConnectionOverlayLabels } from '../ui/connection-overlay'
+import type { CompletionDropdownLabels } from '../ui/completion-dropdown'
+import type { SecretPickerLabels } from '../ui/secret-picker'
 
 export const collisionLabels = (): CollisionLabels => ({
   title: t('kit.collision.title', 'File already exists'),
@@ -26,6 +32,69 @@ export const collisionLabels = (): CollisionLabels => ({
   applyOne: t('ui.collision.applyOne', 'Apply to the 1 remaining file'),
   applyMany: (count: number) =>
     tPlural('ui.collision.applyMany', count, 'Apply to the {count} remaining files'),
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
+})
+
+/** The words of a confirm: its two buttons (the caller's own) and the close
+ *  control's, which every confirm shares. Built when the dialog opens. */
+export const confirmLabels = (ok: string, cancel: string): ConfirmLabels => ({
+  ok,
+  cancel,
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
+})
+
+/** The words the toast host draws itself (ui/toast.tsx). */
+export const toastHostLabels = (): ToastHostLabels => ({
+  dismiss: t('ui.toast.dismiss', 'Dismiss notification'),
+  browserOpenFailed: t(
+    'ui.toast.browserOpenFailed',
+    'The browser could not be opened. Try again or open the release notes in your browser.',
+  ),
+})
+
+/** The words an operation row draws (ui/operation-row.tsx). The two names
+ *  are functions so the title is read at render, not captured here. */
+export const operationRowLabels = (): OperationRowLabels => ({
+  queued: t('ops.queued', 'Queued'),
+  progressOf: (title) => t('ops.row.progressOf', '{title} progress', { title }),
+  cancelOf: (title) => t('ops.row.cancelOf', 'Cancel {title}', { title }),
+})
+
+/** The words the connection overlay draws (ui/connection-overlay.tsx). */
+export const connectionOverlayLabels = (): ConnectionOverlayLabels => ({
+  status: t('ui.connection.status', 'Connection status'),
+  retry: t('ui.connection.retry', 'Retry'),
+})
+
+/** The words the completion dropdown draws (ui/completion-dropdown.ts): its
+ *  listbox name, and each row's source badge. */
+export const completionDropdownLabels = (): CompletionDropdownLabels => ({
+  listbox: t('ui.completion.listbox', 'completions'),
+  source: (source) => {
+    switch (source) {
+      case 'command':
+        return t('ui.completion.source.command', 'command')
+      case 'history':
+        return t('ui.completion.source.history', 'history')
+      case 'path':
+        return t('ui.completion.source.path', 'path')
+      case 'host':
+        return t('ui.completion.source.host', 'host')
+      case 'snippet':
+        return t('ui.completion.source.snippet', 'snippet')
+      case 'function':
+        return t('ui.completion.source.function', 'function')
+      default:
+        return undefined
+    }
+  },
+})
+
+/** The words the secret picker draws (ui/secret-picker.ts). */
+export const secretPickerLabels = (): SecretPickerLabels => ({
+  listbox: t('ui.secrets.listbox', 'vault secrets'),
 })
 
 export const fileReadoutLabels = (): FileReadoutLabels => ({
@@ -34,6 +103,22 @@ export const fileReadoutLabels = (): FileReadoutLabels => ({
   tooLarge: t('kit.fileReadout.tooLarge', 'This file is larger than the read budget'),
   readFailed: t('kit.fileReadout.readFailed', 'This file could not be read'),
   scanNotice: t('kit.fileReadout.scanNotice', 'Highlighted lines below matched a static scan'),
+  notTextDesc: t(
+    'kit.fileReadout.notTextDesc',
+    'Its bytes are not something that can be shown as lines, so there is nothing here to read. The file is on disk exactly as it was — this is a fact about the file, not a refusal of the request.',
+  ),
+  tooLargeDesc: (size) =>
+    t(
+      'kit.fileReadout.tooLargeDesc',
+      'The budget is {size}, and the read stops there. The file is on disk exactly as it was; what is bounded is the reading, not the file.',
+      { size },
+    ),
+  scanDesc: (words) =>
+    t(
+      'kit.fileReadout.scanDesc',
+      '{words}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.',
+      { words },
+    ),
 })
 
 /** The WORDS one copy control says — CodeBlock's header button
@@ -85,4 +170,9 @@ export const folderPickerLabels = (): FolderPickerLabels => ({
   upOne: t('kit.folderPicker.upOne', 'Up one level'),
   contents: t('kit.folderPicker.contents', 'Folder contents'),
   empty: t('kit.folderPicker.empty', 'This folder is empty'),
+  go: t('kit.folderPicker.goLabel', 'Go'),
+  closeAria: t('ui.dialog.closeAria', 'Close dialog'),
+  closeTitle: t('ui.dialog.closeTitle', 'Close'),
+  pathPlaceholder: t('kit.folderPicker.pathPlaceholder', '/path/to/folder'),
+  cannotOpenPath: (path) => t('kit.folderPicker.cannotOpenPath', 'Cannot open {path}', { path }),
 })

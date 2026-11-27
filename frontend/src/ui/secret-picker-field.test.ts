@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { createSecretPickerField, type SecretPickerFieldController } from './secret-picker-field'
 import type { SecretPickerSource, SecretEntry } from './secret-picker'
+import { secretPickerLabels } from '../i18n/kit-labels'
 
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 5; i++) await Promise.resolve()
@@ -44,6 +45,7 @@ function setup(
   })
   const controller = createSecretPickerField({
     source,
+    labels: secretPickerLabels(),
     value: () => value.current,
     onChange,
   })
@@ -699,6 +701,7 @@ describe('the panel is placed against the field (nocx-vzdna)', () => {
     const value = { current: '' }
     const controller = createSecretPickerField({
       source,
+      labels: secretPickerLabels(),
       value: () => value.current,
       onChange: vi.fn(),
       anchor: () => field,

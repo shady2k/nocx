@@ -875,6 +875,8 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
     >
       <Dialog
         open={props.open}
+        closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+        closeTitle={t('ui.dialog.closeTitle', 'Close')}
         onClose={() => {
           reset()
           props.onClose()
@@ -979,6 +981,8 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
   return (
     <Dialog
       open={props.open}
+      closeAria={t('ui.dialog.closeAria', 'Close dialog')}
+      closeTitle={t('ui.dialog.closeTitle', 'Close')}
       onClose={() => {
         reset()
         props.onClose()

@@ -57,6 +57,13 @@ export interface ConnectionOverlayProps {
   onHidden?: () => void
   /** Minimum visible time from first mount, in ms. */
   minimumVisibleMs?: number
+  /** The words the overlay draws: its accessible name and its one action. */
+  labels: ConnectionOverlayLabels
+}
+
+export interface ConnectionOverlayLabels {
+  status: string
+  retry: string
 }
 
 /** A state the overlay can actually draw. `online` is the absence of one. */
@@ -113,6 +120,7 @@ function ConnectionOverlayView(props: {
   exiting: Accessor<boolean>
   recovering: Accessor<boolean>
   remainingMs: Accessor<number>
+  labels: ConnectionOverlayLabels
   onRetry: () => void
 }) {
   const host = createModalHost({
@@ -141,7 +149,7 @@ function ConnectionOverlayView(props: {
       onMouseDown={host.onMouseDown}
       role="alertdialog"
       aria-live="assertive"
-      aria-label="Connection status"
+      aria-label={props.labels.status}
     >
       <div class="ui-connection-overlay__content">
         <div class="ui-connection-overlay__mark">
@@ -173,7 +181,7 @@ function ConnectionOverlayView(props: {
           data-available={canRetry(props.state()) ? 'true' : 'false'}
         >
           <Button onClick={() => props.onRetry()} variant="primary">
-            Retry
+            {props.labels.retry}
           </Button>
         </div>
       </div>
@@ -324,6 +332,7 @@ function ConnectionOverlay(props: ConnectionOverlayProps) {
       exiting={exiting}
       recovering={recovering}
       remainingMs={remainingMs}
+      labels={props.labels}
       onRetry={props.onRetry}
     />
   )

@@ -216,11 +216,19 @@ export function FolderView(props: FolderViewProps) {
           <EditableRowList
             variant="table"
             ariaLabel={t('api.folder.vars.aria', 'Folder variables')}
-            columns={[{ label: 'Send', labelHidden: true }, { label: 'Name' }, { label: 'Value' }]}
+            columns={[
+              { label: t('api.folder.field.send', 'Send'), labelHidden: true },
+              { label: t('api.env.field.name', 'Name') },
+              { label: t('api.env.field.value', 'Value') },
+            ]}
             rows={rows()}
-            addLabel="Add variable"
-            emptyLabel="No variables declared in this folder."
+            addLabel={t('api.table.addVariable', 'Add variable')}
+            emptyLabel={t(
+              'api.table.emptyFolderVariables',
+              'No variables declared in this folder.',
+            )}
             removeLabel={(i) => `Remove variable ${i + 1}`}
+            removeTitle={t('ui.rowList.remove', 'Remove')}
             renderRow={(row, i) => (
               <>
                 <td>
@@ -234,7 +242,7 @@ export function FolderView(props: FolderViewProps) {
                   <TextField
                     id={`api-folder-var-name-${i}`}
                     ariaLabel={`${t('api.folder.var.nameAriaHead', 'Variable')} ${i + 1}${t('api.folder.var.nameAriaTail', ' name')}`}
-                    placeholder="baseUrl"
+                    placeholder={t('api.folder.field.varPlaceholder', 'baseUrl')}
                     value={row().name}
                     onInput={(value) => patchRow(i, { name: value })}
                   />
@@ -243,7 +251,7 @@ export function FolderView(props: FolderViewProps) {
                   <SecretTextField
                     id={`api-folder-var-value-${i}`}
                     ariaLabel={`${t('api.folder.var.valueAriaHead', 'Value')} ${i + 1}${t('api.folder.var.valueAriaTail', ' value')}`}
-                    placeholder="https://api.example.com"
+                    placeholder={t('api.folder.field.valuePlaceholder', 'https://api.example.com')}
                     value={row().value}
                     onInput={(value) => patchRow(i, { value })}
                     source={props.secretSource}

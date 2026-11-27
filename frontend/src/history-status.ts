@@ -39,6 +39,7 @@ import type { OutputRecording, OutputRecordingSource } from './integration/statu
 // schema (contracts/README.md).
 export type { HistoryStatus } from './generated/history.status'
 import type { HistoryStatus } from './generated/history.status'
+import { t } from './i18n/locale-model'
 
 /** The two lines of the notice: what is true, and why. */
 export interface HistoryUnavailableSentence {
@@ -65,27 +66,36 @@ export function historyUnavailableSentence(
   let description: string
   switch (status.reason) {
     case 'noKey':
-      description =
-        'The key that encrypts the history database could not be read, so nothing is being stored.'
+      description = t(
+        'history.unavailable.noKey',
+        'The key that encrypts the history database could not be read, so nothing is being stored.',
+      )
       break
     case 'invalidBudget':
-      description =
-        'The size limits below could not be applied, so the store was not opened and nothing is being stored.'
+      description = t(
+        'history.unavailable.invalidBudget',
+        'The size limits below could not be applied, so the store was not opened and nothing is being stored.',
+      )
       break
     case 'openFailed':
-      description = 'The history database could not be opened, so nothing is being stored.'
+      description = t(
+        'history.unavailable.openFailed',
+        'The history database could not be opened, so nothing is being stored.',
+      )
       break
     case 'writeFailed':
       // The only reason that can end without a restart, and the sentence says
       // so: the person can stop reading and come back to a working feature.
-      description =
-        'The history database is refusing writes, so commands are running but not being kept.'
+      description = t(
+        'history.unavailable.writeFailed',
+        'The history database is refusing writes, so commands are running but not being kept.',
+      )
       break
     default:
       // A reason this build does not know — a newer backend, or a degrade
       // raised without one. Saying less is still honest; saying nothing
       // would put the settings back in charge of a feature that is down.
-      description = 'Nothing is being stored.'
+      description = t('history.unavailable.unknown', 'Nothing is being stored.')
   }
   if (status.detail !== null && status.detail !== '') {
     description += ` (${status.detail})`
@@ -93,7 +103,7 @@ export function historyUnavailableSentence(
   return {
     // The state, in the terms the settings under it are written in: those
     // controls all say "keep", so this says what is not being kept.
-    title: 'Commands are not being kept',
+    title: t('history.unavailable.title', 'Commands are not being kept'),
     description,
   }
 }
@@ -139,17 +149,18 @@ export function detachedOutputSentence(
   if (status === null || status.detachedOutput.recorded) return null
   const cause =
     status.detachedOutput.reason === 'outputOff'
-      ? 'Command output is not being kept'
-      : 'History is turned off'
+      ? t('history.detached.causeOutputOff', 'Command output is not being kept')
+      : t('history.detached.causeHistoryOff', 'History is turned off')
   return {
     // Said in the terms the person is in: they are looking at switches about
     // keeping things, and this is the one consequence of those switches that
     // is not about keeping things at all.
-    title: 'Sessions keep running only while a window is open',
-    description:
-      `${cause}, so there is nowhere to write what a session prints while its window is closed. ` +
-      'Such a session pauses once its output buffer fills and continues when a window is opened on it again. ' +
-      'Nothing it printed is lost.',
+    title: t('history.detached.title', 'Sessions keep running only while a window is open'),
+    description: t(
+      'history.detached.body',
+      '{cause}, so there is nowhere to write what a session prints while its window is closed. Such a session pauses once its output buffer fills and continues when a window is opened on it again. Nothing it printed is lost.',
+      { cause },
+    ),
   }
 }
 

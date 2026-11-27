@@ -347,6 +347,7 @@ func (p *Policy) deliverSummary(s *stream) {
 	}
 	ev := s.opening
 	ev.Title = fmt.Sprintf("%d more %s", s.suppressed, noun)
+	ev.TitleSegments = []Segment{{Key: "notify.delivery.more", Params: map[string]string{"count": fmt.Sprint(s.suppressed)}}}
 	// The body carries the newest held-back event's content IN FULL — its
 	// title and its body, joined — never half of it. Dropping the title when
 	// a body exists loses exactly the kind of message this delivery exists
@@ -355,10 +356,13 @@ func (p *Policy) deliverSummary(s *stream) {
 	// A bodyless message falls back to its title, so a banner never says
 	// only the count.
 	ev.Body = s.last.Body
+	ev.BodySegments = []Segment{{Text: s.last.Body}}
 	if ev.Body == "" {
 		ev.Body = s.last.Title
+		ev.BodySegments = []Segment{{Text: s.last.Title}}
 	} else if s.last.Title != "" {
 		ev.Body = s.last.Title + " — " + ev.Body
+		ev.BodySegments = []Segment{{Text: s.last.Title}, {Key: "notify.delivery.more.separator"}, {Text: s.last.Body}}
 	}
 	p.deliver(ev)
 }

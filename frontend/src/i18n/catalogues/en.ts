@@ -692,7 +692,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.fieldHost': 'Host',
   'connections.editor.fieldPort': 'Port',
   'connections.editor.fieldGroup': 'Group',
-  'connections.editor.noGroup': '&mdash; No group &mdash;',
+  'connections.editor.noGroup': '— No group —',
   'connections.editor.privateKey': 'Private Key',
   'connections.editor.nameRequired': 'Name is required',
   'connections.editor.hostRequired': 'Host is required',
@@ -702,7 +702,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.fieldKeepaliveInterval': 'Keepalive interval (ms)',
   'connections.editor.fieldReadyTimeout': 'Ready timeout (ms)',
   'connections.editor.fieldJumpServer': 'Jump server',
-  'connections.editor.none': '&mdash; None &mdash;',
+  'connections.editor.none': '— None —',
   'connections.editor.fieldPortDiscovery': 'Port discovery',
   // The integration method is the HOST's (ADR-727g63tr decision 1). The mockup
   // (docs/design/ssh-foundation/host-integration-method.html) is where these
@@ -723,7 +723,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.methodReadFailedHead': "Could not read this machine's method:",
   'connections.editor.methodNotSavedHead': 'Not saved:',
   'connections.editor.methodRetry': 'Retry',
-  'connections.editor.inherited': '&mdash; Inherited &mdash;',
+  'connections.editor.inherited': '— Inherited —',
   'connections.editor.helperHint':
     'The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.',
   'connections.editor.fieldAgentForward': 'Agent forward',

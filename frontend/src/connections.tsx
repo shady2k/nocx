@@ -3007,7 +3007,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                           }
                         }}
                         options={groupOptions()}
-                        placeholder={t('connections.editor.noGroup', '&mdash; No group &mdash;')}
+                        placeholder={t('connections.editor.noGroup', '— No group —')}
                       />
                     </Field>
                   </Show>
@@ -3165,7 +3165,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         value={fvStr('jumpHost')}
                         onChange={(v) => setOption('jumpHost', v || undefined)}
                         options={jumpOptions()}
-                        placeholder={t('connections.editor.none', '&mdash; None &mdash;')}
+                        placeholder={t('connections.editor.none', '— None —')}
                       />
                     </div>
                   </Field>
@@ -3178,7 +3178,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         value={fvStr('portDiscovery')}
                         onChange={(v) => setOption('portDiscovery', v || undefined)}
                         options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
-                        placeholder={t('connections.editor.inherited', '&mdash; Inherited &mdash;')}
+                        placeholder={t('connections.editor.inherited', '— Inherited —')}
                       />
                     </div>
                   </Field>

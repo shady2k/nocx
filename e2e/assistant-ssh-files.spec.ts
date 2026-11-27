@@ -51,6 +51,7 @@ import {
   standalone as base,
   appReadyForInput,
   bindEndpoint,
+  ensureAssistantVault,
   promptReady,
   VaultBackend,
   type BackendEndpoint,
@@ -195,6 +196,8 @@ async function permitReadsAndOneWrite(page: Page): Promise<void> {
  *  panes (e2e/ssh-panels.spec.ts:259). */
 async function openPane(page: Page, profileName: string, method: 'raw' | 'helper'): Promise<void> {
   await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), method)
+  const tabs = page.locator(TAB)
+  const beforeTabs = await tabs.count()
   await page.keyboard.press('Control+Shift+P')
   const search = page.locator(QUICK_CONNECT_SEARCH)
   await expect(search).toBeVisible({ timeout: 30_000 })
@@ -203,7 +206,7 @@ async function openPane(page: Page, profileName: string, method: 'raw' | 'helper
     timeout: 30_000,
   })
   await page.keyboard.press('Enter')
-  await expect(page.locator(TAB)).toHaveCount(2, { timeout: 120_000 })
+  await expect(tabs).toHaveCount(beforeTabs + 1, { timeout: 120_000 })
 }
 
 /** Open a pane to the fixture host in Helper mode and wait for its editor. */
@@ -235,6 +238,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator(TAB)).toHaveCount(1)
   await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, 'disposable-ssh-assistant-passphrase')
+  await page.locator(TAB).first().click()
 }
 
 function answerBlock(page: Page, question: string) {

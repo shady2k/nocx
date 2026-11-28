@@ -117,6 +117,16 @@ func (a *askRecorder) asked() []string {
 // the helper must ask its coordinator about rather than one it can trust.
 func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver, extra ...*pwSSHServer) *filesStand {
 	t.Helper()
+	return startFilesStandWith(t, srv, secrets, nil, extra...)
+}
+
+// startFilesStandWith is the same stand with the coordinator's observation
+// callback, for a test that drives the pane's connection state through the
+// panedriver: the events a real coordinator receives are the ones a
+// pane.connection is rendered from, and a test that presses a pane's Reconnect
+// has to have them.
+func startFilesStandWith(t *testing.T, srv *pwSSHServer, secrets credential.Resolver, onEvent func(string, proto.ConnectionStateEvent), extra ...*pwSSHServer) *filesStand {
+	t.Helper()
 	logger := discardLogger(t)
 	// The ssh client takes the harness's own logging seam (internal/log), the
 	// same adapter app.go builds beside it.
@@ -175,11 +185,12 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 
 	prompts := &helperPrompt{log: logger}
 	peer, err := helperclient.Dial(ctx, helperclient.Config{
-		Exec:        helperclient.NewSocketConn(coordEnd),
-		ExpectHash:  filesFixtureGenera,
-		SentinelTTL: 5 * time.Second,
-		Reverse:     helperReverseHandlers(rc, secrets, prompts, nil, logger),
-		Log:         logger,
+		Exec:              helperclient.NewSocketConn(coordEnd),
+		ExpectHash:        filesFixtureGenera,
+		SentinelTTL:       5 * time.Second,
+		OnConnectionEvent: onEvent,
+		Reverse:           helperReverseHandlers(rc, secrets, prompts, nil, logger),
+		Log:               logger,
 	})
 	if err != nil {
 		t.Fatalf("helperclient.Dial: %v", err)

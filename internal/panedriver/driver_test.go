@@ -784,3 +784,114 @@ func TestRefreshRefusesAStaleEpoch(t *testing.T) {
 		t.Fatalf("a stale press asked the source to refresh %v", got)
 	}
 }
+
+func endedReleased(seq uint64) proto.ConnectionStateEvent {
+	return proto.ConnectionStateEvent{
+		ConnectionID: "conn-a", Seq: seq, State: proto.ConnectionEnded,
+		Cause: "released", StateMs: 40,
+	}
+}
+
+// TestAReleasedConnectionOffersThePanesOwnOpenAgain is the first SSH
+// connection a person makes to a host whose helper use is undecided
+// (nocx-oalo1.25).
+//
+// The open refuses to answer the helper question itself, releases its
+// probe-only connection and asks the person. The pane is bound to that
+// connection, so the last holder letting go is a state it draws — and only a
+// press on it can finish the job. A press that CLAIMED the connection could
+// never work: nothing holds it, so the supervisor refuses every claim. So the
+// offer says what it does (Reopens), and the press runs the pane's own open run
+// again — the one an answered question takes.
+func TestAReleasedConnectionOffersThePanesOwnOpenAgain(t *testing.T) {
+	d, out := newDriver(t)
+	actions := make(chan string, 4)
+	d.SetAction(func(_ context.Context, pane string, _ uint64) error {
+		actions <- pane
+		return nil
+	})
+	apply(d, endedReleased(1))
+	generation := d.Bind("pane-1", "conn-a")
+
+	snap := out.last()
+	if snap.Reconnect == nil {
+		t.Fatal("the pane is offered nothing after its connection was released")
+	}
+	if !snap.Reconnect.Reopens {
+		t.Fatalf("the offer claims a connection nobody holds: %+v", snap.Reconnect)
+	}
+	if err := d.RequestReopen(context.Background(), "pane-1", snap.ConnectionEpoch); err != nil {
+		t.Fatalf("pressing the offer: %v", err)
+	}
+	waittest.WaitFor(t, "the pane's open run", func() bool { return len(actions) == 1 })
+	if got := <-actions; got != "pane-1" {
+		t.Fatalf("reopened pane %q", got)
+	}
+	if generation == 0 {
+		t.Fatal("the binding has no generation")
+	}
+}
+
+// TestAReleasedConnectionIsNotReopenedWithAnOlderEpoch is the refusal that
+// keeps a press from acting on a state the person is no longer looking at.
+func TestAReleasedConnectionIsNotReopenedWithAnOlderEpoch(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, endedReleased(1))
+	d.Bind("pane-1", "conn-a")
+	epoch := out.last().ConnectionEpoch
+	apply(d, endedReleased(2))
+	if err := d.RequestReopen(context.Background(), "pane-1", epoch); !errors.Is(err, panedriver.ErrStaleEpoch) {
+		t.Fatalf("press with a superseded epoch = %v, want ErrStaleEpoch", err)
+	}
+}
+
+// TestAWorkingConnectionThatEndedIsNotReopened is the other end: only an ended
+// connection with nobody left to claim it reopens the pane. A connected one has
+// a transport of its own, and its press is a claim the supervisor answers.
+func TestAWorkingConnectionThatEndedIsNotReopened(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, connected(1, 0))
+	d.Bind("pane-1", "conn-a")
+	if err := d.RequestReopen(context.Background(), "pane-1", out.last().ConnectionEpoch); !errors.Is(err, panedriver.ErrNoOffer) {
+		t.Fatalf("press on a connected pane = %v, want ErrNoOffer", err)
+	}
+}
+
+// TestARefusedShellKeepsItsIdentityAcrossRebindsAndMovesForANewOne
+// (nocx-oalo1.25, ALX-2085 findings 1 and 2).
+//
+// A pane keeps its last refusal on every observation until a replacement shell
+// is adopted, which is deliberate: the way out must stay on screen while the
+// retry is in flight. So a rebind republishes the SAME refusal under a new
+// epoch, and a surface that asked the person a question about it must be able
+// to see that this is the same question. The sequence is that answer: it does
+// not move for a republication, and it moves for a refusal the driver was told
+// about after the first one.
+func TestARefusedShellKeepsItsIdentityAcrossRebindsAndMovesForANewOne(t *testing.T) {
+	d, out := newDriver(t)
+	apply(d, connected(1, 0))
+	first := d.Bind("pane-1", "conn-a")
+	d.ShellFailed(context.Background(), "pane-1", first, -32001, "the method is not decided", map[string]any{"helperAsk": true})
+	refused := out.last()
+	if refused.ShellFailure == nil || refused.ShellFailure.Sequence != 1 {
+		t.Fatalf("first refusal = %+v, want sequence 1", refused.ShellFailure)
+	}
+
+	// The press binds the pane again: same refusal, new epoch — the frame the
+	// renderer met as a second question.
+	second := d.Bind("pane-1", "conn-a")
+	again := out.last()
+	if again.ShellFailure == nil || again.ShellFailure.Sequence != 1 {
+		t.Fatalf("a rebind reported %+v, want the same refusal (sequence 1)", again.ShellFailure)
+	}
+	if again.ConnectionEpoch == refused.ConnectionEpoch {
+		t.Fatalf("the epoch did not move (%d), so this test would not prove anything about it", again.ConnectionEpoch)
+	}
+
+	// The retried open fails with the same words. That is a NEW refusal: the
+	// person must be asked again, and only an identity that counts can say so.
+	d.ShellFailed(context.Background(), "pane-1", second, -32001, "the method is not decided", map[string]any{"helperAsk": true})
+	if got := out.last().ShellFailure; got == nil || got.Sequence != 2 {
+		t.Fatalf("second refusal = %+v, want sequence 2", got)
+	}
+}

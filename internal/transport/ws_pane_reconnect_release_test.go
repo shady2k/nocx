@@ -56,7 +56,7 @@ func (*reconnectProbePolicy) PaneClosed(string) {}
 
 func (*reconnectProbePolicy) ShellFailed(context.Context, string, uint64, int, string, any) {}
 
-func (p *reconnectProbePolicy) RequestShellRetry(context.Context, string, uint64) error {
+func (p *reconnectProbePolicy) RequestReopen(context.Context, string, uint64) error {
 	return p.retryErr
 }
 
@@ -106,7 +106,7 @@ func (reconnectProbeOpenService) Close(session.ID) error { return nil }
 func (reconnectProbeOpenService) EndSession(session.ID) error { return nil }
 
 // TestPaneReconnectReleasesItsGuardBeforeAnswering pins the ordering on every
-// branch that takes the guard: a refused shell retry, a refused open and a
+// branch that takes the guard: a refused reopen, a refused open and a
 // successful registration. The reply must find the pane free, because the
 // client may press again as soon as it reads it.
 func TestPaneReconnectReleasesItsGuardBeforeAnswering(t *testing.T) {
@@ -114,18 +114,18 @@ func TestPaneReconnectReleasesItsGuardBeforeAnswering(t *testing.T) {
 	const epoch = 7
 
 	for _, tt := range []struct {
-		name         string
-		shellFailure bool
-		retryErr     error
-		openErr      error
-		helperErr    error
-		want         string
+		name      string
+		reopen    bool
+		retryErr  error
+		openErr   error
+		helperErr error
+		want      string
 	}{
 		{
-			name:         "refused shell retry",
-			shellFailure: true,
-			retryErr:     refuse(-32001, "the vault is sealed"),
-			want:         "error",
+			name:     "refused reopen",
+			reopen:   true,
+			retryErr: refuse(-32001, "the vault is sealed"),
+			want:     "error",
 		},
 		{
 			name:    "refused open",
@@ -146,13 +146,13 @@ func TestPaneReconnectReleasesItsGuardBeforeAnswering(t *testing.T) {
 			ws.paneMu.Lock()
 			rec := ws.paneRecords[paneID]
 			rec.offer = true
-			rec.shellFailure = tt.shellFailure
+			rec.reopen = tt.reopen
 			if ws.paneEpochs == nil {
 				ws.paneEpochs = make(map[string]uint64)
 			}
 			ws.paneEpochs[paneID] = epoch
 			ws.paneMu.Unlock()
-			if tt.shellFailure {
+			if tt.reopen {
 				ws.paneConnectionPolicy = &reconnectProbePolicy{retryErr: tt.retryErr}
 			}
 			ws.opener = &sessionOpener{

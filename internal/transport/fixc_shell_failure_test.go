@@ -78,10 +78,10 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 		shells := s.Transport.PlainShells
 		p := PaneConnection{Generation: s.Generation, PaneID: s.PaneID, ConnectionID: s.ConnectionID, ConnectionEpoch: s.ConnectionEpoch, InstanceID: s.InstanceID, SessionID: s.SessionID, Helper: PaneConnectionHelper{State: "serving", Action: "none"}, Transport: PaneConnectionTransport{State: s.Transport.State, StateMs: s.Transport.StateMs, PlainShells: &shells}, Attempt: PaneConnectionAttempt{Shown: "none", Candidate: "none"}, ObservedAt: "2026-11-14T11:00:00Z"}
 		if s.Reconnect != nil {
-			p.Reconnect = &PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
+			p.Reconnect = &PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells, ReopensPane: s.Reconnect.Reopens}
 		}
 		if s.ShellFailure != nil {
-			p.ShellFailure = &PaneShellFailure{Code: s.ShellFailure.Code, Message: s.ShellFailure.Message, Data: s.ShellFailure.Data}
+			p.ShellFailure = &PaneShellFailure{Code: s.ShellFailure.Code, Message: s.ShellFailure.Message, Data: s.ShellFailure.Data, Sequence: s.ShellFailure.Sequence}
 		}
 		ws.PublishPaneConnection(p)
 	})

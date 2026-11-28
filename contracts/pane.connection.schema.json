@@ -334,14 +334,19 @@
       ]
     },
     "shellFailure": {
-      "description": "The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted.",
+      "description": "The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": ["code", "message", "sequence"],
       "properties": {
         "code": { "type": "integer" },
         "message": { "type": "string" },
-        "data": {}
+        "data": {},
+        "sequence": {
+          "description": "Which refusal this is, counting from 1 for the pane's binding. Two frames carrying the same sequence are the same refusal however many epochs apart they were published.",
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "quality": {

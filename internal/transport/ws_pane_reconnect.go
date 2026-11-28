@@ -23,10 +23,10 @@ type PaneConnectionPolicy interface {
 	PaneClosed(paneID string)
 }
 
-// paneShellPolicy is the pane action owner's failure and retry boundary.
+// paneShellPolicy is the pane action owner's failure and reopen boundary.
 type paneShellPolicy interface {
 	ShellFailed(context.Context, string, uint64, int, string, any)
-	RequestShellRetry(context.Context, string, uint64) error
+	RequestReopen(context.Context, string, uint64) error
 }
 
 // WithPaneConnectionPolicy wires the connection policy's notices.
@@ -233,7 +233,7 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	h.machine.paneMu.Lock()
 	rec := h.machine.paneRecords[params.PaneID]
 	var sequence uint64
-	var shellOnly bool
+	var reopen bool
 	var refusal string
 	switch {
 	case rec == nil || rec.wconn != h.w:
@@ -245,7 +245,7 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	case rec.busy:
 		refusal = "a reconnect is already running for this pane"
 	default:
-		shellOnly = rec.shellFailure
+		reopen = rec.reopen
 		rec.busy = true
 		rec.registering = make(chan struct{})
 		sequence = rec.connectionSequence
@@ -275,14 +275,14 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		h.machine.paneMu.Unlock()
 	}
 	defer release()
-	if shellOnly {
+	if reopen {
 		policy, ok := h.machine.paneConnectionPolicy.(paneShellPolicy)
 		if !ok {
 			release()
 			(openHandlers{}).answerOpenFailure(ctx, h.r, req, refuse(-32603, "Shell retry is unavailable (no pane driver wired)"))
 			return
 		}
-		if err := policy.RequestShellRetry(rec.ctx, params.PaneID, params.ConnectionEpoch); err != nil {
+		if err := policy.RequestReopen(rec.ctx, params.PaneID, params.ConnectionEpoch); err != nil {
 			release()
 			(openHandlers{}).answerOpenFailure(ctx, h.r, req, err)
 			return

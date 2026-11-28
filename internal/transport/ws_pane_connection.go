@@ -33,10 +33,19 @@ package transport
 import "context"
 
 // PaneShellFailure carries the same actionable refusal as the open RPC.
+//
+// Sequence is the refusal's own identity, minted by the pane driver and
+// monotonic per pane (nocx-oalo1.25). The refusal is REPUBLISHED on every
+// observation until a replacement shell is adopted — a rebind during the retry
+// keeps it, deliberately, because the way out must stay on screen while the
+// retry is in flight — so an epoch cannot say whether a read is looking at the
+// same refusal or a new one. The sequence can, and the renderer asks its method
+// question once per sequence.
 type PaneShellFailure struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
+	Code     int    `json:"code"`
+	Message  string `json:"message"`
+	Data     any    `json:"data,omitempty"`
+	Sequence uint64 `json:"sequence"`
 }
 
 // PaneConnection is the wire payload, declared once
@@ -112,8 +121,16 @@ type PaneConnectionAttempt struct {
 // plain shells, hops included (design §5.4: "it asks first, naming how many
 // plain shells end"). Zero is a real answer: a pane whose connection carries
 // only helper-owned work ends nothing a person was using.
+//
+// ReopensPane is NOT on the wire: it is the composition root's copy of the
+// driver's answer to what the press IS, and the decide belongs there
+// (panedriver.Reconnect). A press either claims the connection's transport or
+// runs the pane's own open again; the transport routes it and decides nothing,
+// so a second reading of the same question cannot disagree with the button the
+// person was shown.
 type PaneConnectionReconnect struct {
-	EndsShells int `json:"endsShells"`
+	EndsShells  int  `json:"endsShells"`
+	ReopensPane bool `json:"-"`
 }
 
 // paneRecord is what the backend keeps about one pane it opened: who is told
@@ -133,8 +150,12 @@ type paneRecord struct {
 	// offer is the last published answer to "may this person press Reconnect".
 	// The RPC refuses unless an offer stands, and it is the SAME value the
 	// renderer was told, so the button and the call cannot disagree.
-	offer        bool
-	shellFailure bool
+	offer bool
+	// reopen is what the standing offer's press does: the pane's own open run
+	// again rather than a claim on the connection's transport. Like offer, it is
+	// the value the person was shown, taken from the observation that offered
+	// the button.
+	reopen bool
 	// connectionID is the connection the newest observation named, kept so a
 	// press answered after the frame can say which connection it acted on.
 	connectionID string
@@ -319,7 +340,7 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 		rec.offer = p.Reconnect != nil
 		rec.connectionID = p.ConnectionID
 		rec.helperRefresh = helperRefreshOffered(p.Helper)
-		rec.shellFailure = p.ShellFailure != nil && p.Transport.State == "connected"
+		rec.reopen = p.Reconnect != nil && p.Reconnect.ReopensPane
 		rec.connectionSequence = p.ConnectionSequence
 	}
 	s.paneMu.Unlock()

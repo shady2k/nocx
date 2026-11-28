@@ -199,11 +199,12 @@ function parseHelper(value: unknown): boolean {
 function parseShellFailure(value: unknown): boolean {
   if (value === undefined) return true
   if (!isRecord(value)) return false
-  if (!onlyKeys(value, ['code', 'message', 'data'])) return false
+  if (!onlyKeys(value, ['code', 'message', 'data', 'sequence'])) return false
   return (
     typeof value.code === 'number' &&
     Number.isSafeInteger(value.code) &&
-    typeof value.message === 'string'
+    typeof value.message === 'string' &&
+    isPositiveInteger(value.sequence)
   )
 }
 

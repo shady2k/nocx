@@ -155,12 +155,16 @@ export type PaneConnection = {
         stateMs: number
       }
   /**
-   * The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted.
+   * The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25).
    */
   shellFailure?: {
     code: number
     message: string
     data?: unknown
+    /**
+     * Which refusal this is, counting from 1 for the pane's binding. Two frames carrying the same sequence are the same refusal however many epochs apart they were published.
+     */
+    sequence: number
   }
   /**
    * The newest round-trip measurement and its grade, exactly as session.liveness carries them. ABSENT when nothing measured one: an unanswered probe has no duration, and absent and zero are the same statement — no measurement, never instant. slow is the backend's grade with hysteresis; a reader holding only the milliseconds cannot reproduce it.

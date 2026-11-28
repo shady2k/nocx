@@ -178,7 +178,7 @@ describe('the connection head', () => {
       'pane.connection',
       observation({
         transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-        shellFailure: { code: -32603, message: 'the shell could not start' },
+        shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
         reconnect: { endsShells: 0 },
       }),
     )
@@ -315,7 +315,7 @@ describe('the connection head', () => {
       'pane.connection',
       observation({
         transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-        shellFailure: { code: -32603, message: 'the shell could not start' },
+        shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
         reconnect: { endsShells: 0 },
         helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
       }),

@@ -402,7 +402,7 @@ func TestShellRetryContractKeepsFailureSeparateFromConnection(t *testing.T) {
 	if validateJSONErr(schema, raw) == nil {
 		t.Fatal("healthy connection offered reconnect without shell failure")
 	}
-	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault", Data: map[string]any{"reason": "vault-sealed"}}
+	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault", Data: map[string]any{"reason": "vault-sealed"}, Sequence: 1}
 	raw, _ = json.Marshal(p)
 	validateJSON(t, schema, raw, "connected shell refusal")
 	p.Reconnect.EndsShells = 1
@@ -412,7 +412,7 @@ func TestShellRetryContractKeepsFailureSeparateFromConnection(t *testing.T) {
 	}
 	// A pane-local refusal may persist across a subsequent transport loss.
 	p = paneConnectionStates()["failed"]
-	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault"}
+	p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault", Sequence: 1}
 	raw, _ = json.Marshal(p)
 	validateJSON(t, schema, raw, "retained shell refusal after transport failure")
 }
@@ -423,7 +423,7 @@ func TestShellFailureContractRejectsStrandedOrAdoptedPane(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			p := paneConnectionStates()[state]
 			p.SessionID = ""
-			p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault"}
+			p.ShellFailure = &PaneShellFailure{Code: -32001, Message: "Unlock the vault", Sequence: 1}
 			if state == "connected" {
 				raw, _ := json.Marshal(p)
 				if validateJSONErr(schema, raw) == nil {

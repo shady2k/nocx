@@ -18,10 +18,15 @@
          WebSocket to any loopback port can already reach every one of them.
          Without it the upload never leaves the renderer at all: the page is
          vite's origin and the backend is not, so the POST is blocked by
-         connect-src before CORS is even asked. -->
+         connect-src before CORS is even asked. frame-ancestors is deliberately
+         absent: a document may not deliver that directive from <meta> (CSP
+         Level 3 §2.3.1) — WebKit ignores it and logs the refusal on every
+         load (nocx-ifn4a) — so the desktop shell sends it as a response
+         header from desktopAssetOptions().Middleware in main.go. Nothing else
+         may be framed, and this element cannot say so. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; font-src 'self' data:; form-action 'none'; base-uri 'none'; object-src 'none'"
     />
     <title>nocx</title>
   </head>

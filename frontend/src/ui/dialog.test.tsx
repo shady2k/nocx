@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { render, fireEvent, cleanup } from '@solidjs/testing-library'
+import { createSignal } from 'solid-js'
 import { Dialog, showConfirm, type DialogProps } from './dialog'
 import {
   pushOverlay,
@@ -442,19 +443,44 @@ describe('Dialog panel height animation', () => {
   // jsdom has no layout and ResizeObserver is stubbed to never fire, so we
   // capture the callback the component registers and drive it by hand, with
   // getBoundingClientRect stubbed to report the heights a browser would.
+  //
+  // The stub also tracks WHICH elements are under observation, because the
+  // engine's own report is the assertion that matters here: WebKit raises
+  // "ResizeObserver loop completed with undelivered notifications" when a
+  // callback changes the size of an element it is still observing, and the
+  // native acceptance run recorded exactly that message on this dialog's
+  // step transitions (nocx-ifn4a). Every height assertion in this file passed
+  // while the panel was observed through its own animation.
   let roCallback: (() => void) | null = null
+  let observed: Element[]
+  let observationLog: string[]
 
   beforeEach(() => {
     roCallback = null
+    observed = []
+    observationLog = []
     ;(globalThis as Record<string, unknown>).ResizeObserver = class {
       constructor(cb: () => void) {
         roCallback = cb
       }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
+      observe(target: Element) {
+        observationLog.push('observe')
+        if (!observed.includes(target)) observed.push(target)
+      }
+      unobserve(target: Element) {
+        observationLog.push('unobserve')
+        observed = observed.filter((item) => item !== target)
+      }
+      disconnect() {
+        observationLog.push('disconnect')
+        observed = []
+      }
     }
   })
+
+  function isObserved(panel: HTMLElement) {
+    return observed.includes(panel)
+  }
 
   function subject(overrides?: Partial<DialogProps>) {
     const props: DialogProps = {
@@ -561,6 +587,108 @@ describe('Dialog panel height animation', () => {
     stubPanelHeight(panel, 300)
     fireResize()
     expect(panel.style.height).toBe('300px')
+  })
+
+  // The browser's own report, not an inference: the panel must not be under
+  // observation while this component is changing its height, and must be
+  // again once the height is released back to auto.
+  it('stops observing the panel before pinning its height and observes it again on release', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    expect(isObserved(panel)).toBe(true)
+
+    stubPanelHeight(panel, 400)
+    fireResize()
+    // The pin, the forced reflow and the target height are size changes of
+    // the observed element inside its own callback.
+    expect(panel.hasAttribute('data-animating')).toBe(true)
+    expect(isObserved(panel)).toBe(false)
+
+    endTransition(panel)
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+    expect(isObserved(panel)).toBe(true)
+  })
+
+  it('measures content that changed while the panel was pinned once the transition ends', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(panel.style.height).toBe('400px')
+
+    // A section switch lands during the 180ms: the panel is still pinned to
+    // 400, so the transition settles there. The natural height is now 500 and
+    // nothing has measured it while observation was suspended.
+    endTransition(panel)
+    stubPanelHeight(panel, 500)
+    fireResize()
+    expect(panel.style.height).toBe('500px')
+  })
+
+  it('restores observation when the height transition is cancelled', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(isObserved(panel)).toBe(false)
+
+    const ev = new Event('transitioncancel', { bubbles: true })
+    Object.defineProperty(ev, 'propertyName', { value: 'height' })
+    fireEvent(panel, ev)
+    expect(panel.style.height).toBe('')
+    expect(isObserved(panel)).toBe(true)
+  })
+
+  // Closing mid-transition cancels the transition without a transitionend, so
+  // this is the path that would otherwise leave the panel unobserved for the
+  // rest of the component's life — and the next open would never measure.
+  it('measures again after a dialog closed mid-transition is reopened', () => {
+    const [open, setOpen] = createSignal(true)
+    const { container } = render(() => (
+      <Dialog open={open()} onClose={() => setOpen(false)} title="Test Dialog">
+        Dialog body content
+      </Dialog>
+    ))
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 300)
+    fireResize()
+    stubPanelHeight(panel, 360)
+    fireResize()
+    expect(panel.hasAttribute('data-animating')).toBe(true)
+
+    setOpen(false)
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+    expect(isObserved(panel)).toBe(true)
+
+    setOpen(true)
+    // A fresh open settles at the natural height without animating; what
+    // matters is that the panel is measured again at all from here on.
+    stubPanelHeight(panel, 420)
+    fireResize()
+    expect(panel.style.height).toBe('')
+
+    stubPanelHeight(panel, 480)
+    fireResize()
+    expect(panel.style.height).toBe('480px')
+  })
+
+  it('drops the observation on unmount and never re-arms it', () => {
+    const { container, unmount } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    expect(isObserved(panel)).toBe(true)
+
+    unmount()
+    expect(isObserved(panel)).toBe(false)
+    // The release unmount performs must not re-observe a disposed observer.
+    expect(observationLog[observationLog.length - 1]).toBe('disconnect')
   })
 
   it('does not animate under prefers-reduced-motion', () => {

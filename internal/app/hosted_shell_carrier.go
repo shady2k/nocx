@@ -536,6 +536,18 @@ const farToolTeardownTimeout = 10 * time.Second
 // out the production budget.
 var farHelperAnswerTimeout = remoteShellSetupTimeout
 
+// unacceptedSessionRollback runs the ONE close an open owes a session it
+// spawned and then failed before adoption. Its context is deliberately
+// INDEPENDENT of the open's cancellation: the ordinary reason an attach or an
+// adopt failed is that the open was cancelled (shutdown, a closed pane, a lost
+// renderer), and a close sent under that same context is a close the helper
+// never receives. The timeout is the existing answer budget, so a helper that
+// has stopped answering cannot hold the rollback — or the shutdown waiting on
+// it — beyond one answer.
+func unacceptedSessionRollback(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), farHelperAnswerTimeout)
+}
+
 // farHelperAnswerError says WHICH answer never came when the bound above is
 // what ended the wait. Every other failure keeps its own error: a refusal, a
 // lost connection and a bad request are the far side's answers and already
@@ -1094,9 +1106,18 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		// A HELPER THAT DID NOT ANSWER THE ATTACH WILL NOT ANSWER THE CLOSE.
 		// Asking anyway would hold the failure for another budget; the
 		// connection ending is what releases the session to the helper's own
-		// unclaimed-session sweep (D1).
+		// unclaimed-session sweep (D1). A CANCELLED OPEN is different: the
+		// helper is answering, and the session is this open's only chance to
+		// name it. The rollback therefore runs on its own bounded context and
+		// says so if the close itself is refused.
 		if !errors.Is(err, context.DeadlineExceeded) {
-			_ = c.CloseSession(ctx, entry.HostSessionID)
+			rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+			cerr := c.CloseSession(rollbackCtx, entry.HostSessionID)
+			cancelRollback()
+			if cerr != nil {
+				r.log.Warn("far pane: the unaccepted session could not be closed; the helper's unclaimed-session sweep is the remaining bound",
+					"session", entry.HostSessionID.Session, "host", cfg.Host, "error", cerr)
+			}
 		}
 		return transport.HostedSessionOpen{}, true, farHelperAnswerError("attach", err)
 	}
@@ -1135,7 +1156,13 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		stopBlockRows()
 		_ = attached.Close()
 		endLifecycleLeg("open-rollback:adopt")
-		_ = c.CloseSession(ctx, entry.HostSessionID)
+		rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+		cerr := c.CloseSession(rollbackCtx, entry.HostSessionID)
+		cancelRollback()
+		if cerr != nil {
+			r.log.Warn("far pane: the unaccepted session could not be closed after a failed adoption",
+				"session", entry.HostSessionID.Session, "host", cfg.Host, "error", cerr)
+		}
 		return transport.HostedSessionOpen{}, true, err
 	}
 	bindBlockEndToSession(sess, attached, r.blockRows, sid, stopBlockRows)

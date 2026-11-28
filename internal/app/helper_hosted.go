@@ -336,7 +336,24 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	endSpawn(err)
 	if err != nil {
 		abortLifecycleNow("open-rollback:attach")
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
+		// THE SESSION THIS SPAWN MADE HAS NO OTHER NAME, AND THE HELPER IS
+		// ANSWERING. A cancelled open is the ordinary case here (shutdown, a
+		// closed pane, a lost renderer), so the close must not inherit that
+		// cancellation. Neither may a CALLER's deadline skip it: this helper is
+		// on this machine and is answering, and a delivered spawn answer
+		// assigned this coordinator both the id and the duty to close it
+		// (ADR-02kc8c1j). Reading DeadlineExceeded as "the helper did not
+		// answer" is the far route's rule and stays there, where a helper that
+		// never answered the attach will not answer the close. The close is
+		// bounded by the existing answer budget, and a refused one is reported
+		// rather than swallowed.
+		rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+		cerr := h.client.CloseSession(rollbackCtx, entry.HostSessionID)
+		cancelRollback()
+		if cerr != nil {
+			log.From(ctx).Warn("local pane: the unaccepted session could not be closed; the helper's unclaimed-session sweep is the remaining bound",
+				"session", entry.HostSessionID.Session, "error", cerr)
+		}
 		return hostedSpawnResult{}, err
 	}
 	if cursor != nil {
@@ -382,7 +399,13 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		stopBlockRows()
 		_ = attached.Close()
 		abortLifecycleNow("open-rollback:adopt")
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
+		rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+		cerr := h.client.CloseSession(rollbackCtx, entry.HostSessionID)
+		cancelRollback()
+		if cerr != nil {
+			log.From(ctx).Warn("local pane: the unaccepted session could not be closed after a failed adoption",
+				"session", entry.HostSessionID.Session, "error", cerr)
+		}
 		return hostedSpawnResult{}, err
 	}
 	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)

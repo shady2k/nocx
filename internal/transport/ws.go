@@ -111,6 +111,14 @@ type sessionRx struct {
 	// a person holding a key against a stuck channel would otherwise
 	// raise a hundred of them.
 	inputStalled atomic.Bool
+	// incarnation names the SESSION this receiver belongs to, and it is the
+	// fence teardown turns on (nocx-oalo1.7.2, AD-9): a re-attachment adopts
+	// the same session id under a new epoch, so an old incarnation's
+	// monitorExit that arrives late must not take the NEW receiver — or
+	// anything else keyed by that id — down with it. Guarded by ringsMu, like
+	// the map this rx lives in.
+	incarnation    session.Identity
+	hasIncarnation bool
 }
 
 const maxPendingSessionEffects = 64
@@ -1017,6 +1025,10 @@ type WSServer struct {
 	// helperSessionOpener selects the execution-host-owned PTY for remote
 	// opens when the existing helper resolver permits it.
 	helperSessionOpener HelperSessionOpener
+	// paneShellReattacher takes a pane's far-helper shell back after a
+	// transport loss (design §5.4, C16). Bound late by the composition root —
+	// SetPaneShellReattacher — because it adopts through this server.
+	paneShellReattacher PaneShellReattacher
 	// opener is the one path a session comes into existence by, shared
 	// between the `open` handler and the backend's own callers
 	// (nocx-dkawo.6). It is built where the method set is assembled, because
@@ -1057,8 +1069,10 @@ type WSServer struct {
 	rx      map[session.ID]*sessionRx
 	stopped bool
 	// unanswered tracks sessions returned by the dial of a renderer open,
-	// through answer acceptance or removal by that open's end owner.
-	unanswered map[session.ID]session.Identity
+	// through answer acceptance or removal by that open's end owner. Each
+	// record says whether the open MADE the shell or TOOK IT BACK: only a
+	// shell this open made is an unaccepted open's to end (design §5.4, C16).
+	unanswered map[session.ID]openAdoption
 	// sessionRecorders.Add shares the stopped fence under ringsMu; the group
 	// outlives rx removal so Stop drains recorders for ended sessions too.
 	sessionRecorders sync.WaitGroup
@@ -2017,7 +2031,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		},
 		rx:                         make(map[session.ID]*sessionRx),
 		closing:                    make(map[session.ID]struct{}),
-		unanswered:                 make(map[session.ID]session.Identity),
+		unanswered:                 make(map[session.ID]openAdoption),
 		conns:                      make(map[*wsConn]struct{}),
 		outboundBudget:             outbound.NewBudget(outboundBudgetBytes),
 		tunnels:                    make(map[string]*tunnel.Tunnel),
@@ -2610,7 +2624,30 @@ func (s *WSServer) getOrCreateRx(sess session.Session) *sessionRx {
 	if s.stopped || !s.canClaimCloseLocked(sess) {
 		return nil
 	}
-	return s.createRxLocked(sess.ID(), 0)
+	rx := s.createRxLocked(sess.ID(), 0)
+	// THE RECEIVER BELONGS TO THIS INCARNATION from here (nocx-oalo1.7.2).
+	// A re-adopted session id may already have an older ring under it — the
+	// previous incarnation's, still being torn down — and the newer session
+	// is the one that owns the id now.
+	if rx != nil {
+		rx.bindIncarnation(sess.Identity())
+	}
+	return rx
+}
+
+// bindIncarnation records which session incarnation owns this receiver. Called
+// under ringsMu by both routes that put a session into a ring: a fresh open and
+// a re-attachment.
+func (rx *sessionRx) bindIncarnation(identity session.Identity) {
+	rx.incarnation = identity
+	rx.hasIncarnation = true
+}
+
+// sameIncarnation reports whether this receiver belongs to the session
+// incarnation given. An unbound receiver answers true: nothing has claimed it,
+// so nobody may be refused by it.
+func (rx *sessionRx) sameIncarnation(identity session.Identity) bool {
+	return !rx.hasIncarnation || rx.incarnation == identity
 }
 
 // getOrCreateRxAt reserves the receiver before a readoption has registered
@@ -2720,6 +2757,29 @@ func (s *WSServer) removeRx(id session.ID) *sessionRx {
 	return rx
 }
 
+// removeRxFor is removeRx for a TEARDOWN OWNER that must not touch an id a
+// newer incarnation has taken (nocx-oalo1.7.2, AD-9).
+//
+// The three answers are different facts and the caller acts differently on
+// each:
+//
+//	(rx, true)   ours: the receiver was this incarnation's and is removed
+//	(nil, false) the id holds no receiver — another closer removed it
+//	(nil, true)  a NEWER incarnation's receiver holds the id: leave it alone
+func (s *WSServer) removeRxFor(id session.ID, identity session.Identity) (*sessionRx, bool) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	rx, ok := s.rx[id]
+	if !ok {
+		return nil, false
+	}
+	if !rx.sameIncarnation(identity) {
+		return nil, true
+	}
+	delete(s.rx, id)
+	return rx, true
+}
+
 // NoteCloseRequested records that the end of this session was ASKED for by
 // something that is not this server's own close handler: the composition
 // root's worker closer, which ends a participant by ending its session on the
@@ -2776,21 +2836,58 @@ func (s *WSServer) releaseClose(id session.ID) {
 	delete(s.closing, id)
 	if pending, ok := s.unanswered[id]; ok {
 		current, err := s.registry.Get(id)
-		if err != nil || !pending.SameIncarnation(id, current) {
+		if err != nil || !pending.identity.SameIncarnation(id, current) {
 			delete(s.unanswered, id)
 		}
 	}
 }
 
+// openAdoption is what one open's dial answered, as the rollback needs it: the
+// incarnation that was adopted, and whether the shell existed BEFORE this open.
+//
+// THE TWO ROLLBACKS ARE DIFFERENT ACTS (design §5.4, C16). A shell this open
+// spawned is ended when nobody accepts the open — no registry entry and no
+// pane can name it, so nothing else ever will. A shell this open TOOK BACK ran
+// Since before the open began, the helper holds it, and ending it here would
+// kill a process the reconnect exists to preserve: the rollback detaches the
+// temporary attachment and leaves the shell where a later reconnect can find
+// it again.
+type openAdoption struct {
+	identity  session.Identity
+	takenBack bool
+}
+
 // trackUnanswered starts when the dial returns an adopted session, before
-// the binding write or any renderer setup can hold up the open.
-func (s *WSServer) trackUnanswered(sess session.Session) {
+// the binding write or any renderer setup can hold up the open. takenBack is
+// the opener's own answer: the session was re-attached, not spawned.
+func (s *WSServer) trackUnanswered(sess session.Session, takenBack bool) {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
 	id := sess.ID()
 	current, err := s.registry.Get(id)
 	if err == nil && sess.Identity().SameIncarnation(id, current) {
-		s.unanswered[id] = sess.Identity()
+		s.unanswered[id] = openAdoption{identity: sess.Identity(), takenBack: takenBack}
+	}
+}
+
+// rollBackAdoption is the one undo an unaccepted open owns, and which verb it
+// is depends on where the shell came from (see openAdoption).
+func (s *WSServer) rollBackAdoption(sess session.Session, takenBack bool) {
+	if sess == nil {
+		return
+	}
+	if takenBack {
+		// DETACH, NOT END: the shell was running before this open and stays
+		// running for the next attempt. Reg.Close is the detach verb
+		// (nocx-isjh4) and a helper-hosted channel answers it by letting go of
+		// the subscriber, never by asking the helper to end the process.
+		if err := s.registry.Close(sess.ID()); err != nil {
+			s.log.Warn("detaching the shell a refused reconnect took back", "session_id", string(sess.ID()), "error", err)
+		}
+		return
+	}
+	if err := s.registry.EndSession(sess.ID()); err != nil {
+		s.log.Warn("ending the session an unaccepted open made", "session_id", string(sess.ID()), "error", err)
 	}
 }
 
@@ -2819,17 +2916,19 @@ func (s *WSServer) stopSession(sess session.Session) {
 	id := sess.ID()
 	s.ringsMu.Lock()
 	claimed := s.claimCloseLocked(sess)
-	identity, pending := s.unanswered[id]
+	adoption, pending := s.unanswered[id]
 	s.ringsMu.Unlock()
 	if !claimed {
 		return
 	}
 	defer s.releaseClose(id)
 	s.closeLane(id)
-	if pending && identity.SameIncarnation(id, sess) {
-		if err := s.registry.EndSession(id); err != nil {
-			s.log.Warn("ending unanswered session at shutdown", "session_id", id, "error", err)
-		}
+	if pending && adoption.identity.SameIncarnation(id, sess) {
+		// THE SHELL'S OWN HISTORY DECIDES THE VERB (design §5.4, C16): an
+		// unaccepted shell this open spawned is ended, an unaccepted
+		// RE-ATTACHMENT is only let go, because the process predates the open
+		// and a later coordinator can still take it back.
+		s.rollBackAdoption(sess, adoption.takenBack)
 		// Stop already closes rings and releases files and git below. No
 		// monitor was started for an unanswered open.
 		s.removeRx(id)
@@ -4711,6 +4810,26 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		_ = finish()
 	}
 
+	// THE ID'S OWNER MAY HAVE MOVED ON (nocx-oalo1.7.2, AD-9). A
+	// re-attachment adopts the SAME session id under a new epoch, and it can
+	// begin in the interval between the registry entry this monitor just
+	// retired and the receiver it is about to remove. When that has happened,
+	// every fact below keyed by this id — the receiver, the connection state,
+	// the lanes, the hold records, the files and git bindings — belongs to the
+	// new incarnation, and deleting them here would tear down a live pane from
+	// its predecessor's teardown.
+	//
+	// The claim is the receiver itself, taken under the ring lock that
+	// admission also uses, so "is it still mine" and "remove it" are one step.
+	claimed, present := s.removeRxFor(sess.ID(), sess.Identity())
+	if present && claimed == nil {
+		// A newer incarnation's receiver holds the id. This monitor's own ring
+		// is the only thing still its own — the session it was made for is
+		// over — so it is closed and nothing else is touched.
+		rx.ring.close()
+		return
+	}
+
 	// The pane's observation closes here, because everything below this line
 	// tears down the things a frame could still be about. A session that is
 	// done can produce no further frame, which is what the AD-6 amendment
@@ -4730,11 +4849,11 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		state.remove(sess.ID())
 	}
 	rx.ring.close()
-	// The claim on the binding teardown (removeRx). On an explicit close the
-	// handler's closeSession is running the same teardown on its own
-	// goroutine; exactly one of us may delete the bindings, because deleting
-	// them is also the one chance to announce them.
-	owns := s.removeRx(sess.ID()) != nil
+	// The claim on the binding teardown is the receiver removal above. On an
+	// explicit close the handler's closeSession is running the same teardown on
+	// its own goroutine; exactly one of us may delete the bindings, because
+	// deleting them is also the one chance to announce them.
+	owns := claimed != nil
 
 	// The two responsibilities this path used to drop. closeSession has had
 	// both since it was written; monitorExit is the OTHER teardown owner and
@@ -4796,6 +4915,16 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// the whole point of the raise: a session that ended while nothing was
 	// attached is exactly the one the bell exists to remember.
 	cause, status := sess.ExitOutcome()
+
+	// A SHELL THE HELPER SAID HAD ENDED IS NOT ONE A RECONNECT MAY ASK ABOUT
+	// (design §5.4, C16). The helper has answered the only question a
+	// re-attachment could put to it, so the pane forgets the shell here and
+	// the reconnect that follows opens a replacement rather than asking after
+	// a process it was told is gone. A LOST carrier says nothing of the kind
+	// — that is the case this record exists for — and leaves it standing.
+	if cause == session.ExitExited {
+		s.forgetHostedShell(sess)
+	}
 
 	// Was this end the user's own doing? Read-and-cleared here, and read
 	// unconditionally so the marker never outlives the session it names

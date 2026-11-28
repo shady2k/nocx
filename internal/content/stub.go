@@ -258,6 +258,16 @@ func (s *ledgerStub) ApplyLifecycleFrame(ctx context.Context, sessionID string, 
 	return apply(ctx)
 }
 
+func (s *ledgerStub) SessionRoute(_ context.Context, sessionID string) (*SessionRoute, bool, error) {
+	s.log.Info("content stub: LedgerRepository.SessionRoute", "id", sessionID)
+	return nil, false, nil
+}
+
+func (s *ledgerStub) LifecycleCursor(ctx context.Context, sessionID string) (uint64, bool, error) {
+	s.log.Info("content stub: LedgerRepository.LifecycleCursor", "id", sessionID)
+	return 0, false, nil
+}
+
 func (s *ledgerStub) LifecycleReconciled(ctx context.Context, sessionID string) error {
 	s.log.Info("content stub: LedgerRepository.LifecycleReconciled", "id", sessionID)
 	return nil

@@ -199,12 +199,16 @@ function parseHelper(value: unknown): boolean {
 function parseShellFailure(value: unknown): boolean {
   if (value === undefined) return true
   if (!isRecord(value)) return false
-  if (!onlyKeys(value, ['code', 'message', 'data', 'sequence'])) return false
+  if (!onlyKeys(value, ['code', 'message', 'data', 'sequence', 'retryable'])) return false
   return (
     typeof value.code === 'number' &&
     Number.isSafeInteger(value.code) &&
     typeof value.message === 'string' &&
-    isPositiveInteger(value.sequence)
+    isPositiveInteger(value.sequence) &&
+    // REQUIRED BY THE CONTRACT (protocol 48): a refusal a surface cannot tell
+    // a wait from an answer by would either offer a button for a wait or hide
+    // one for an answer, and both are wrong about the same fact.
+    typeof value.retryable === 'boolean'
   )
 }
 

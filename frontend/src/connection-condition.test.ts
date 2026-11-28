@@ -64,7 +64,7 @@ describe('connectionCondition', () => {
     const failedShell = observation(
       { state: 'connected', stateMs: 10, plainShells: 0 },
       {
-        shellFailure: { code: 1, sequence: 1, message: 'no shell' },
+        shellFailure: { code: 1, sequence: 1, message: 'no shell', retryable: false },
         reconnect: { endsShells: 0 },
       },
     )

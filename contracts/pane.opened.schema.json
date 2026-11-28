@@ -5,7 +5,7 @@
   "description": "An owned replacement open answer. Queued before any session frames.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["paneId", "generation", "open"],
+  "required": ["paneId", "generation", "newShell", "replayFrom", "open"],
   "properties": {
     "paneId": {
       "type": "string",
@@ -14,6 +14,15 @@
     "generation": {
       "type": "integer",
       "minimum": 1
+    },
+    "newShell": {
+      "description": "Whether this replacement is a SECOND shell beside the one the pane had (design §5.4). true means the previous shell was confirmed gone — the helper answered an inventory that did not hold it, or the pane never had a helper-held shell — and a new one was opened, so the renderer draws the divider that says what the old shell started may still be running. false means the coordinator took the running shell BACK: same host session id, same process, nothing ended, and no divider. It is deliberately not derivable from the session id: both answers can carry a fresh id, and only this one says whether the old shell might still be alive. A helper that could not be asked produces neither — the open is refused and the pane keeps waiting (C16).",
+      "type": "boolean"
+    },
+    "replayFrom": {
+      "description": "Where this pane's output stream begins (AD-9). A freshly opened shell answers 0: nothing was ever produced for it. A shell taken back after a transport loss answers the offset this machine's recording of that same session resumes at, and the ring on the backend starts there too, so the renderer adopts this as its cursor and both sides count from the same byte. It is not derivable from the session id: a re-attachment keeps the id and still resumes at a nonzero offset, and a replacement starts its own fresh stream. Omitting it, or sending 0 for a re-attachment, would make the renderer acknowledge bytes the backend never sends.",
+      "type": "integer",
+      "minimum": 0
     },
     "open": {
       "$ref": "open.schema.json"

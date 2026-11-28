@@ -177,6 +177,16 @@ type PendingSession struct {
 	PaneID        string
 	ProfileID     string
 	HelperCommand string
+	// Route is the complete route back to the host, as the open that spawned
+	// this session resolved it (design §5.4). Nil when the binding recorded
+	// none, which is the honest answer for a row written before routes were
+	// persisted and for a session whose open never resolved a destination.
+	//
+	// IT IS WHAT AN UNSAVED ROUTE NEEDS. ProfileID alone was enough while a
+	// re-adoption demanded a saved connection; a typed host has no profile,
+	// and without the route its session was declared unreachable by every
+	// later coordinator.
+	Route *SessionRoute
 	// Fingerprint is the execution machine's host public-key fingerprint,
 	// the consent key. Re-adoption re-asks the consent decision with it
 	// rather than assuming a decision made in a previous run still stands.

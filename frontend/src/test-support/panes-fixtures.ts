@@ -886,6 +886,11 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
           client._fireNotification('pane.opened', {
             paneId,
             generation: epoch,
+            // This fixture's reconnect always answers a NEW session id, which
+            // is the replacement half of design §5.4: the shell the pane had
+            // is gone, so the divider is drawn.
+            newShell: true,
+            replayFrom: 0,
             open: { ...replacement, instanceId: backendInstance ?? 'test-instance' },
           })
           return { paneId, registered: true } as never

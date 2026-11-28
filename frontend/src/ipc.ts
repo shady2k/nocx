@@ -1059,6 +1059,24 @@ export class WSClient {
       if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
         return
       }
+      // A DELAYED END OF A PREVIOUS INCARNATION IS NOT THIS SESSION'S
+      // (nocx-3oupk, AD-7). The epoch is the backend's own word for which
+      // session object died, and a re-attachment gives the same id a new one:
+      // the old shell's exit can arrive AFTER the pane has taken its shell
+      // back, and applying it would re-block a session that is alive and
+      // typing. Refused here, once, for every consumer.
+      if (
+        state !== undefined &&
+        ((typeof raw.instanceId === 'string' && raw.instanceId !== state.instanceId) ||
+          (typeof raw.sessionEpoch === 'number' && raw.sessionEpoch !== state.sessionEpoch))
+      ) {
+        log.debug('nocx: dropped a delayed exit from another incarnation', {
+          sessionId: sid,
+          staleEpoch: raw.sessionEpoch,
+          currentEpoch: state.sessionEpoch,
+        })
+        return
+      }
       // THE CAUSE IS THE BACKEND'S WORD, DELIVERED AS IT ARRIVED (design
       // §5.6: "exit keeps ownership of 'this session ended'"). The renderer
       // used to MINT `interrupted` for every cause it did not recognise —
@@ -1511,8 +1529,15 @@ export class WSClient {
    * through. Opening lives there because ADR-ba6xet1b makes the renderer's
    * connection module the one place that may ask for a shell.
    */
-  adoptOpen(result: OpenResult, reported: SessionSize): SessionHandle {
-    return this._registerHandle(result, reported)
+  adoptOpen(
+    result: OpenResult,
+    reported: SessionSize,
+    /** What a `pane.opened` says beyond the ack (design §5.4, AD-9). A
+     *  re-attachment keeps the session id and so lands on the record this
+     *  client already holds; these two tell that record how to come back. */
+    reopened: { takenBack?: boolean; replayFrom?: number } = {},
+  ): SessionHandle {
+    return this._registerHandle(result, reported, reopened)
   }
 
   /** The backend instance this client currently knows, or null before an ack
@@ -1525,7 +1550,11 @@ export class WSClient {
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
    *  local, profile SSH, direct-host SSH — carries the resolved launch
    *  policy and the refusal reason alongside the id and cwd. */
-  private _registerHandle(result: OpenResult, reported: SessionSize): SessionHandle {
+  private _registerHandle(
+    result: OpenResult,
+    reported: SessionSize,
+    reopened: { takenBack?: boolean; replayFrom?: number } = {},
+  ): SessionHandle {
     const sid = result?.sessionId
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
@@ -1537,7 +1566,13 @@ export class WSClient {
     if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
       throw new Error(`nocx: invalid session identity from server: ${sid}`)
     }
-    this._registerSession(sid, { instanceId, sessionEpoch }, 0, reported)
+    this._registerSession(
+      sid,
+      { instanceId, sessionEpoch },
+      reopened.replayFrom ?? 0,
+      reported,
+      reopened.takenBack === true,
+    )
     return new SessionHandle(
       this,
       sid,
@@ -1561,6 +1596,7 @@ export class WSClient {
     identity: { instanceId: string; sessionEpoch: number },
     offset: number,
     reported: SessionSize | null = null,
+    takenBack = false,
   ): void {
     this.backendInstance = identity.instanceId
     // Re-registration updates identity in place without discarding callbacks
@@ -1575,6 +1611,23 @@ export class WSClient {
       existing.sessionEpoch = identity.sessionEpoch
       existing.offset = offset
       existing.reported = reported
+      if (takenBack) {
+        // THE SAME SHELL CAME BACK, SO THE RECORD COMES BACK WITH IT
+        // (design §5.4, C16). An interrupted session's record is left
+        // BLOCKED on purpose: a lost channel proves nothing about the shell,
+        // so no screen frame and no keystroke may touch it until a backend
+        // says the shell is there again. A re-attachment is that answer — the
+        // same host session, a new epoch — and the two locks the interrupt
+        // set are exactly what has to be lifted, or the pane stays a
+        // read-only grey rectangle over a live shell (the field report this
+        // row of the review came from). A REPLACEMENT is a different session
+        // id and never reaches here, so nothing about the divider changes.
+        existing.protocolBlocked = false
+        // A failed attach attempt belonged to the incarnation that died;
+        // reusing its promise would make the rebind wait on nothing.
+        existing.attachAttempt = null
+        this._setAttachment(existing, { kind: 'attached' })
+      }
       return
     }
     this.sessions.set(sessionId, {

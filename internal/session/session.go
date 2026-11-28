@@ -196,6 +196,17 @@ type Config struct {
 	// It is recorded rather than derived, unlike the workspace beside it —
 	// see the note on Session.PaneID.
 	PaneID string
+	// Options are the connection options this session rides, for a caller
+	// that holds them AS OPTIONS rather than as a Remote config — a
+	// re-attachment, whose route is the carrier's own option list and whose
+	// ConnectConfig nobody kept. When set they are used as they are, and
+	// Remote is not consulted for them.
+	//
+	// It is not a second spelling of Remote: a fresh open builds a
+	// ConnectConfig because that is what the resolver answers, and this is
+	// the same list after the one conversion that turns a config into it.
+	// A caller with a config leaves this empty.
+	Options []ssh.ConnectOption
 }
 
 // clientSize is the geometry this config reports, as one value. One reader
@@ -667,7 +678,9 @@ func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session
 	eff := effectiveSize(cfg.clientSize())
 	epoch := r.epochCounter.Add(1)
 	var opts []ssh.ConnectOption
-	if cfg.Remote != nil {
+	if len(cfg.Options) > 0 {
+		opts = cfg.Options
+	} else if cfg.Remote != nil {
 		opts = sshOptionsFromConfig(cfg.Remote)
 	}
 	// The carried opened-at wins when a re-adoption supplies it; a fresh

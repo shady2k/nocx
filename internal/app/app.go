@@ -2159,6 +2159,28 @@ func New(opts ...Option) (*App, error) {
 		opener: localOpener, logPath: logFilePath,
 	}))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// A DROPPED SSH CONNECTION COMES BACK INTO THE SAME SHELL, when a far
+	// helper still holds it (design §5.4, C16). The transport asks before it
+	// ends or spawns anything; this is the answer, and it is bound late
+	// because it adopts THROUGH the transport it is bound to.
+	//
+	// The cursor reader is the same ledger both hosted routes already keep
+	// their cursors in, so a re-attached leg resumes where the dead one
+	// stopped instead of replaying a window this coordinator already applied.
+	paneReattach := &paneShellReattacher{
+		registry: helperReg,
+		opener:   localOpener,
+		// The pass is the restart path's own step, wired with the local route
+		// so a shell THIS machine's helper holds can be asked about and taken
+		// back too. Its route resolver is bound below, once it exists.
+		pass: &readoptPass{
+			registry: helperReg, adopter: tp, local: localOpener,
+			publishScreen: tp.PublishScreenFrame, publishEffect: tp.PublishSessionEffect, blockRows: tp,
+		},
+		bindings: contentDB.Ledger(),
+		timeout:  readoptAttemptTimeout,
+	}
+	tp.SetPaneShellReattacher(paneReattach)
 	// The screen plane's transport half, bound here because the opener was
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
@@ -2785,6 +2807,7 @@ func New(opts ...Option) (*App, error) {
 	// this pass has always needed.
 	sessionReconciler := contentDB.Reconcile()
 	sessionRoutes := hostRouteResolver(resolver)
+	paneReattach.pass.routes = sessionRoutes
 
 	app := &App{
 		lifecycleStopping:       lifecycleStopping,

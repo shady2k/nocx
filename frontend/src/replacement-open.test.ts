@@ -84,7 +84,13 @@ it('binds replacement open facts and the immediately following frame through the
     ws.deliverText({
       jsonrpc: '2.0',
       method: 'pane.opened',
-      params: { paneId: 'pane-wire', generation, open: open(sessionId) },
+      params: {
+        paneId: 'pane-wire',
+        generation,
+        newShell: true,
+        replayFrom: 0,
+        open: open(sessionId),
+      },
     })
   opened(second, 2)
   const frame: SessionFrame = {

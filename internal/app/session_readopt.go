@@ -298,7 +298,15 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	// keep answering `noInventory` for every local session, which is the
 	// false "may still be running" this bead was filed to end.
 	if isLocalBinding(p) {
-		return rp.readoptLocal(ctx, p)
+		inv, _, err := rp.readoptLocal(ctx, p)
+		// A REFUSED ATTACH IS A LIVE SESSION (the daemon just said so). The
+		// error is the pane's own refusal to take it; a verdict is a different
+		// question, and answering `unknown` here would say a shell that
+		// answered is unreachable.
+		if err != nil && !errors.Is(err, errLocalReattachRefused) {
+			return inv, err
+		}
+		return inv, nil
 	}
 	if rp.registry == nil || rp.routes == nil || rp.adopter == nil {
 		return nil, nil
@@ -319,32 +327,26 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	// generation from a host, is exactly what nocx-k6p18.15's ordering exists
 	// to forbid: it turns one helper's truthful "I do not hold that" about
 	// somebody else's id into a deletion of live work.
+	//
+	// A SAVED CONNECTION IS NO LONGER THE ONLY ROUTE (design §5.4). The
+	// binding carries the complete route its open resolved, so a typed host —
+	// one no profile names — is asked again by the same host and the same
+	// account. Without it every unsaved session was declared unreachable by
+	// the first coordinator that restarted.
 	if p.SessionID == "" || p.Generation == "" || p.Host == "" ||
-		p.ProfileID == "" || p.HelperCommand == "" || p.PaneID == "" {
+		p.HelperCommand == "" || p.PaneID == "" ||
+		(p.ProfileID == "" && p.Route == nil) {
 		return nil, nil
 	}
 
-	host, cfg, err := rp.routes.Resolve(p.ProfileID)
+	_, cfg, err := rp.routeFor(p)
 	if err != nil {
 		// A sealed vault arrives here, and it is the one cause on the
 		// unreconciled list a person clears in one gesture. causeFor already
 		// classifies it; this only has to not swallow it.
-		return nil, fmt.Errorf("resolve the connection this session was opened on: %w", err)
-	}
-	if cfg == nil {
-		return nil, errors.New("the connection this session was opened on resolved to nothing")
+		return nil, err
 	}
 	opts := session.SSHOptionsFromConfig(cfg)
-	// THE ROUTE MUST STILL LEAD WHERE IT LED. A saved connection is editable:
-	// the host or the user behind one profile id can be changed between two
-	// runs, and asking THAT machine about this session's id would be asking a
-	// stranger about somebody else's id space. Refused as unreachable, which
-	// is what it is — the machine this session is on was not asked at all.
-	if account := accountFromOptions(opts); host != p.Host || account != p.Account {
-		return nil, fmt.Errorf(
-			"the saved connection now resolves to %s@%s and this session is on %s@%s, so its host was not asked",
-			account, host, p.Account, p.Host)
-	}
 	// CONSENT IS RE-ASKED, never assumed to have survived. Opening a helper
 	// channel to a machine is the act consent governs (ADR-0034, ADR-0068),
 	// and a person who withdrew it between two runs must not have one
@@ -454,7 +456,7 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		return inv, nil
 	}
 
-	if err := rp.readopt(ctx, p, session.Config{
+	if _, err := rp.readopt(ctx, p, session.Config{
 		Kind: session.KindRemote, Host: p.Host,
 		// The cwd is the HELPER's, read off the launch record it has kept
 		// since the shell started. The alternative is the pane's stored
@@ -489,6 +491,88 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	return inv, nil
 }
 
+// routeFor answers the host and connect configuration a binding's route
+// resolves to today, and refuses a route that no longer leads where it led.
+//
+// TWO ROUTES, ONE CHECK (design §5.4). A saved connection is resolved by its
+// profile id, and the profile is EDITABLE: the host, the port or the account
+// behind one id can change between the open and the re-adoption, and asking
+// THAT machine about this session's id space would be asking a stranger about
+// somebody else's ids. A typed host has no profile at all: its route is the
+// one the binding recorded, and the only thing that can move is the host's own
+// ssh configuration, which is the same reference the person's `ssh` uses.
+//
+// The refusal is the point in both cases, and it names the fact rather than a
+// verdict: "now resolves to X and this session is on Y, so its host was not
+// asked" is true even when the shell is long gone, and the caller states it as
+// the shell being out of reach.
+func (rp *readoptPass) routeFor(p content.PendingSession) (string, *ssh.ConnectConfig, error) {
+	if p.ProfileID == "" {
+		// A ROUTE WITH NO PROFILE. Its facts are the binding's own; the
+		// identity is whatever `ssh` offers for that host, resolved again
+		// exactly as the typed open resolved it.
+		route := p.Route
+		if route == nil || route.Host == "" {
+			return "", nil, errors.New("this session has no route recorded, so no host can be asked about it")
+		}
+		return route.Host, &ssh.ConnectConfig{
+			User:     route.User,
+			Port:     route.Port,
+			JumpHost: route.JumpHost,
+			JumpPort: route.JumpPort,
+			JumpUser: route.JumpUser,
+		}, nil
+	}
+	if rp.routes == nil {
+		return "", nil, fmt.Errorf("resolve the connection this session was opened on: no route resolver is wired")
+	}
+	host, cfg, err := rp.routes.Resolve(p.ProfileID)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve the connection this session was opened on: %w", err)
+	}
+	if cfg == nil {
+		return "", nil, errors.New("the connection this session was opened on resolved to nothing")
+	}
+	// THE ROUTE MUST STILL LEAD WHERE IT LED. Host and account are compared to
+	// the binding, and the port to the route the binding recorded — a profile
+	// edited from port 22 to 2222 is a different endpoint on the same
+	// hostname, and it is exactly the edit a host-only comparison lets through.
+	if host != p.Host || cfg.User != p.Account {
+		return "", nil, fmt.Errorf(
+			"re-adopt the session on %s: the saved connection now resolves to %s@%s, and this session is on %s@%s — refusing to adopt it against a destination nobody recorded, so its host was not asked",
+			p.Host, cfg.User, host, p.Account, p.Host)
+	}
+	if p.Route != nil && (p.Route.Port != 0 || cfg.Port != 0) && effectiveSSHPort(cfg.Port) != effectiveSSHPort(p.Route.Port) {
+		return "", nil, fmt.Errorf(
+			"the saved connection now resolves to port %d and this session was opened on port %d, so its host was not asked",
+			effectiveSSHPort(cfg.Port), effectiveSSHPort(p.Route.Port))
+	}
+	if p.Route != nil && (cfg.JumpHost != p.Route.JumpHost ||
+		(p.Route.JumpHost != "" && (effectiveSSHPort(cfg.JumpPort) != effectiveSSHPort(p.Route.JumpPort) ||
+			(p.Route.JumpUser != "" && cfg.JumpUser != "" && cfg.JumpUser != p.Route.JumpUser)))) {
+		return "", nil, fmt.Errorf(
+			"the saved connection now resolves through jump %q and this session was opened through %q, so its host was not asked",
+			cfg.JumpHost, p.Route.JumpHost)
+	}
+	return host, cfg, nil
+}
+
+// errLocalReattachRefused marks the one local failure that is NOT a failed ask:
+// the daemon answered and holds the session, but this coordinator could not
+// take it (another nocx holds its keyboard, the attach was refused). The
+// verdict is `live` — the shell exists — and a PANE's reconnect must refuse
+// rather than replace, so the two callers read this one fact differently.
+var errLocalReattachRefused = errors.New("this coordinator could not take the session back")
+
+// readoptTook is what a successful local re-adoption produced: the session it
+// adopted, and the config the registry adopted it under. The cold path needs
+// neither (it has already decided what the session is); a PANE's reconnect
+// needs both, because the open that follows builds its answer from them.
+type readoptTook struct {
+	Open   transport.HostedSessionOpen
+	Config session.Config
+}
+
 // readoptLocal is the local half of the same step: ask this machine's daemon
 // the ONE question, and — when it still holds the session — take it back.
 //
@@ -513,11 +597,15 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 // daemon has just said the shell is there. The verdict is `live` — the session
 // exists; this coordinator merely could not take it — and the warn line says
 // why the pane will show up as a new shell instead.
-func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSession) (sessionInventory, error) {
+// THE ADOPTED OPEN IS RETURNED BESIDE THE INVENTORY (nocx-oalo1.7.2): the
+// reconnect path takes a shell back for a PANE, and a verdict alone would leave
+// it with a session nobody can attach. The cold path ignores the second value;
+// both are consequences of the ONE answer this function captured.
+func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSession) (sessionInventory, *readoptTook, error) {
 	if rp.local == nil {
 		// No local route is wired. The caller's own `noInventory` stands, and
 		// the session is not deleted on the strength of a missing collaborator.
-		return nil, nil
+		return nil, nil, nil
 	}
 	bound := rp.timeout
 	if bound <= 0 {
@@ -532,14 +620,14 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 	defer cancel()
 	asked, err := rp.local.LocalSessions(ctx, p.Generation)
 	if err != nil {
-		return nil, fmt.Errorf("ask this machine's helper what it holds: %w", err)
+		return nil, nil, fmt.Errorf("ask this machine's helper what it holds: %w", err)
 	}
 	if asked == nil {
 		// No route was recorded for this binding. Nobody may be asked, which
 		// is the answer that stood before the local route existed. A daemon
 		// that ANSWERED with an empty list is a different thing and is judged
 		// `absent` below, which is why the two are not the same value.
-		return nil, nil
+		return nil, nil, nil
 	}
 	// THE ANSWER IS CAPTURED, not re-asked — the same rule and the same type
 	// the remote half uses, because the verdict and the re-adoption must be
@@ -574,7 +662,7 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// no transport to adopt into. Both answer with the inventory and
 		// nothing else: the ask released its own connection, so there is
 		// nothing here that could be left holding a socket.
-		return inv, nil
+		return inv, nil, nil
 	}
 	// THE CONFIG CARRIES THE DESTINATION, WHICH IS NOT ALWAYS LOCAL
 	// (nocx-50w7p.5). Being routed here says the CARRIER is this machine's
@@ -600,35 +688,17 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// A remote destination, carried locally. Its remote half resolves the
 		// way the remote route resolves one, because the registry adopts a
 		// KindRemote session against a ConnectConfig.
-		if rp.routes == nil {
-			return nil, fmt.Errorf("re-adopt the session on %s: no route resolver is wired", p.Host)
-		}
-		host, resolved, rerr := rp.routes.Resolve(p.ProfileID)
+		host, resolved, rerr := rp.routeFor(p)
 		if rerr != nil {
-			return nil, fmt.Errorf("resolve the connection this session was opened on: %w", rerr)
-		}
-		// THE RESOLVED DESTINATION MUST BE THE ONE THE BINDING NAMES. A profile
-		// edited between two runs resolves to a different host, and adopting
-		// the pane against it would bind this session to a machine nobody
-		// recorded — the inference nocx-k6p18.15 exists to forbid. The remote
-		// route checks the same pair before it opens consent or a channel, and
-		// a local carrier is no reason to trust the resolver more.
-		if host != p.Host {
-			return nil, fmt.Errorf(
-				"re-adopt the session on %s: the saved connection now resolves to %s — refusing to adopt it against a destination nobody recorded",
-				p.Host, host)
-		}
-		if resolved != nil && p.Account != "" && resolved.User != p.Account {
-			return nil, fmt.Errorf(
-				"re-adopt the session on %s: the saved connection now resolves to account %q and the binding names %q — refusing to adopt it against a destination nobody recorded",
-				p.Host, resolved.User, p.Account)
+			return nil, nil, rerr
 		}
 		cfg.Kind = session.KindRemote
 		cfg.Host = host
 		cfg.Remote = resolved
 		cfg.ProfileID = p.ProfileID
 	}
-	if err := rp.readopt(ctx, p, cfg, nil, rp.local, *mine); err != nil {
+	taken, err := rp.readopt(ctx, p, cfg, nil, rp.local, *mine)
+	if err != nil {
 		// The session is LIVE and this coordinator could not take it. Said out
 		// loud, because the pane will otherwise open a second shell beside the
 		// one still running, and the only trace of it would be the absence of
@@ -636,6 +706,12 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		rp.registry.log.Warn("a local session that is still running could not be taken back; its pane will open a new shell instead",
 			"session_id", p.SessionID, "error", err)
 		rp.local.Release(p.SessionID)
+		// THE ERROR IS RETURNED BESIDE THE VERDICT, MARKED. The cold path
+		// keeps the `live` verdict it just earned and words the cause itself; a
+		// PANE's reconnect must not open a replacement over a shell that
+		// answered, so it needs the refusal rather than a verdict it would have
+		// to re-derive.
+		return inv, nil, fmt.Errorf("%w: %v", errLocalReattachRefused, err)
 	} else {
 		// THE SESSION ENTERS THIS DAEMON'S SET ON RE-ADOPTION TOO
 		// (nocx-50w7p.5), and it is the same interval open uses: taken back is
@@ -645,7 +721,7 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// holding.
 		rp.local.noteHeld(session.ID(p.SessionID))
 	}
-	return inv, nil
+	return inv, &readoptTook{Open: taken, Config: cfg}, nil
 }
 
 // isLocalBinding reports whether this session's CARRIER is this machine's
@@ -738,7 +814,7 @@ func (rp *readoptPass) readopt(
 	h *hostedShellCarrier,
 	carrier hostedCarrier,
 	entry client.SessionEntry,
-) error {
+) (transport.HostedSessionOpen, error) {
 	sid := session.ID(p.SessionID)
 	// adopted names the interval this function has to be able to undo: it opens
 	// when Adopt puts the session in the registry and closes either when the
@@ -748,6 +824,7 @@ func (rp *readoptPass) readopt(
 	// pump and nothing reading it: a row a restored pane would claim and then
 	// find silent.
 	adopted := false
+	var taken transport.HostedSessionOpen
 	var adoptedSession session.Session
 	var replayCursor *lifecycleCursor
 	var reconciledThrough proto.StreamOffset
@@ -980,6 +1057,7 @@ func (rp *readoptPass) readopt(
 			IntegrationReason: adoption.reason,
 		}
 		adoption.attachTo(&open, attached)
+		taken = open
 		return open, nil
 	})
 	if err == nil && adopted && cfg.Kind == session.KindRemote {
@@ -1018,7 +1096,7 @@ func (rp *readoptPass) readopt(
 		// nothing anywhere is left claiming to hold this session.
 		_ = rp.registry.registry.Close(sid)
 	}
-	return err
+	return taken, err
 }
 
 // readoptSSHConnection restores the same pane binding as an ordinary open.

@@ -53,6 +53,9 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 			Profile       string `json:"profile,omitempty"`
 			HelperCommand string `json:"helperCommand,omitempty"`
 			Fingerprint   string `json:"fingerprint,omitempty"`
+			// The complete route back (design §5.4), omitted when the open
+			// recorded none — "no route" and "an older row" stay one state.
+			Route *SessionRoute `json:"route,omitempty"`
 			// The coordinator's lifecycle cursor (ADR-0077), omitted when
 			// the binding records none — "no record" and "offset 0" are
 			// two states a re-adopt must tell apart.
@@ -65,6 +68,7 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 			Profile:          sess.ProfileID,
 			HelperCommand:    sess.HelperCommand,
 			Fingerprint:      sess.Fingerprint,
+			Route:            sess.Route,
 			LifecycleApplied: sess.LifecycleApplied,
 		}
 		raw, err := json.Marshal(payload)

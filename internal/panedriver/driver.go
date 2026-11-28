@@ -171,6 +171,13 @@ type ShellFailure struct {
 	Message  string
 	Data     any
 	Sequence uint64
+	// Retryable says this refusal is a WAIT (design §5.4, C16): nobody could
+	// be asked whether the pane's shell is still there, so the driver keeps
+	// trying on its own and the surface states a wait rather than asking a
+	// person to press a button. False is an answer — a route that no longer
+	// leads there, a helper that answered and does not hold the shell, one that
+	// would not give it back — and nothing retries those.
+	Retryable bool
 }
 
 // Snapshot is one pane's observation, ready to be carried to the renderer.
@@ -227,11 +234,18 @@ type Driver struct {
 	// to that connection.
 	helpers    HelperSource
 	helperStop func()
+	// retryDelay is how long the automatic attempt loop waits before its next
+	// try, given how many it has made. It is a field rather than a constant
+	// because a test that must not sleep needs it to be zero, and because the
+	// policy is the driver's own — no timer in a test may decide whether the
+	// loop works.
+	retryDelay func(attempt int) time.Duration
 }
 
 // binding is one pane's side: which connection it rides, how many observations
 // it has been given, and the session a shell ended up in when one was adopted.
 type binding struct {
+	paneID       string
 	connectionID string
 	epoch        uint64
 	sessionID    string
@@ -239,6 +253,11 @@ type binding struct {
 	lost         bool
 	replacing    bool
 	shellFailure *ShellFailure
+	// retry is the automatic attempt loop a RETRYABLE refusal starts: how
+	// many attempts it has made, and the channel that ends it. Zero and nil
+	// are the resting state.
+	retry     int
+	retryDone chan struct{}
 	// failures counts what this binding has been told, which is how far
 	// shellFailure.Sequence has got (nocx-oalo1.25).
 	failures uint64
@@ -320,6 +339,7 @@ func (d *Driver) Unbind(paneID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if b := d.panes[paneID]; b != nil {
+		d.stopRetryLocked(b)
 		b.cancel()
 		if c := d.conns[b.connectionID]; c != nil {
 			delete(c.panes, paneID)
@@ -479,7 +499,7 @@ func (d *Driver) Bind(paneID, connectionID string) uint64 {
 		}
 	}
 	if b == nil {
-		b = &binding{}
+		b = &binding{paneID: paneID}
 		b.ctx, b.cancel = context.WithCancel(context.Background())
 		d.panes[paneID] = b
 	}
@@ -570,6 +590,7 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 	b.shellFailure = nil
 	b.lost = false
 	b.replacing = false
+	d.stopRetryLocked(b)
 	c := d.conns[b.connectionID]
 	if c == nil {
 		c = &connection{panes: map[string]struct{}{paneID: {}}}
@@ -588,7 +609,14 @@ func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string
 }
 
 // ShellFailed records the pane-local refusal without changing connection truth.
-func (d *Driver) ShellFailed(ctx context.Context, paneID string, generation uint64, code int, message string, data any) {
+//
+// A RETRYABLE REFUSAL IS A WAIT, NOT AN END (design §5.4, C16). The only thing
+// that answered is "I could not ask", and the shell may be alive and accepting
+// keystrokes; the pane is owed another attempt without a person watching it.
+// The loop below is that attempt: it waits its own backoff, re-reads the
+// binding, and launches the same action the reconnect would — while the pane
+// lives, the connection is still connected, and the refusal is still a wait.
+func (d *Driver) ShellFailed(ctx context.Context, paneID string, generation uint64, code int, message string, data any, retryable bool) {
 	d.mu.Lock()
 	b := d.panes[paneID]
 	if b == nil || b.generation != generation || ctx.Err() != nil {
@@ -606,7 +634,16 @@ func (d *Driver) ShellFailed(ctx context.Context, paneID string, generation uint
 	// sequence is what a surface uses to decide whether it already asked about
 	// this, and two identical refusals must not share one.
 	b.failures++
-	b.shellFailure = &ShellFailure{Code: code, Message: message, Data: data, Sequence: b.failures}
+	b.shellFailure = &ShellFailure{Code: code, Message: message, Data: data, Sequence: b.failures, Retryable: retryable}
+	if retryable {
+		// KEEP THE ATTEMPT COUNT across consecutive waits so the backoff
+		// actually escalates (1 s, 2 s, 4 s, 8 s, 15 s); only stopping the
+		// loop resets it.
+		d.cancelRetryTimerLocked(b)
+		d.armRetryLocked(b, c)
+	} else {
+		d.stopRetryLocked(b)
+	}
 	snap := d.snapshotLocked(paneID, b, c)
 	d.mu.Unlock()
 	d.emit(snap)
@@ -755,6 +792,10 @@ func (d *Driver) RequestReopen(ctx context.Context, paneID string, epoch uint64)
 		d.mu.Unlock()
 		return ErrReconnecting
 	}
+	// A PRESS JOINS THE ATTEMPT, NEVER A SECOND ONE: the automatic loop a
+	// waiting refusal started is ended here, and this call becomes the attempt
+	// in flight.
+	d.stopRetryLocked(b)
 	action := d.action
 	if action == nil {
 		d.mu.Unlock()
@@ -774,6 +815,93 @@ func (d *Driver) launchAction(ctx context.Context, pane string, b *binding, gene
 	if live {
 		go func() { _ = action(ctx, pane, generation) }()
 	}
+}
+
+// cancelRetryTimerLocked ends a pending retry timer without clearing the
+// backoff attempt count, so the next wait continues escalating.
+func (d *Driver) cancelRetryTimerLocked(b *binding) {
+	if b.retryDone != nil {
+		close(b.retryDone)
+		b.retryDone = nil
+	}
+}
+
+// stopRetryLocked ends a running automatic attempt loop, if there is one.
+func (d *Driver) stopRetryLocked(b *binding) {
+	d.cancelRetryTimerLocked(b)
+	b.retry = 0
+}
+
+// armRetryLocked starts the automatic attempt loop for a waiting refusal. The
+// caller holds the lock and has already stopped any predecessor: one loop per
+// binding, so two attempts can never be in flight for one pane.
+func (d *Driver) armRetryLocked(b *binding, c *connection) {
+	if d.action == nil || c.transport.State != proto.ConnectionConnected || !b.lost {
+		return
+	}
+	done := make(chan struct{})
+	b.retryDone = done
+	attempt := b.retry
+	b.retry++
+	ctx := b.ctx
+	pane := b.paneID
+	generation := b.generation
+	go d.retryShell(ctx, pane, generation, attempt, done)
+}
+
+// retryShell is one turn of the automatic attempt loop: wait, then re-read
+// whether the attempt is still wanted and launch the same action a person's
+// press would.
+//
+// EVERY REASON TO STOP IS A STATE THE LOOP READS AGAIN, not a channel someone
+// has to remember to close: a pane that left, a shell that was adopted, a
+// connection that moved on, a refusal that stopped being a wait. That is what
+// makes the loop safe to leave running across a rebind.
+func (d *Driver) retryShell(ctx context.Context, paneID string, generation uint64, attempt int, done chan struct{}) {
+	delay := time.Second
+	if d.retryDelay != nil {
+		delay = d.retryDelay(attempt)
+	} else {
+		// The supervisor's own cap (design §5.3: 15 s of waiting between
+		// attempts), doubled from one second, so a helper that is restarting
+		// is asked nine times in two minutes rather than every second.
+		for i := 0; i < attempt && delay < 15*time.Second; i++ {
+			delay *= 2
+		}
+		if delay > 15*time.Second {
+			delay = 15 * time.Second
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-done:
+		return
+	case <-timer.C:
+	}
+	d.mu.Lock()
+	b := d.panes[paneID]
+	if b == nil || b.generation != generation || b.replacing || b.shellFailure == nil || !b.shellFailure.Retryable || ctx.Err() != nil {
+		d.mu.Unlock()
+		return
+	}
+	c := d.conns[b.connectionID]
+	if c == nil || c.transport.State != proto.ConnectionConnected || !b.lost {
+		d.mu.Unlock()
+		return
+	}
+	// The loop keeps its channel: a successful adoption clears the failure and
+	// stops it, and a further retryable refusal stops and re-arms it.
+	b.replacing = true
+	action := d.action
+	paneCtx := b.ctx
+	d.mu.Unlock()
+	if action == nil {
+		return
+	}
+	go func() { _ = action(paneCtx, paneID, generation) }()
 }
 
 // snapshotLocked mints the pane's next epoch and renders what it is owed. The
@@ -961,4 +1089,18 @@ func fromEvent(ev proto.ConnectionStateEvent) (Transport, *Quality, error) {
 		quality = &Quality{RoundTripMs: ev.RoundTripMs, Slow: ev.Slow}
 	}
 	return t, quality, nil
+}
+
+// SetRetryBackoff installs the automatic attempt loop's wait between tries,
+// given how many attempts it has made. It is a setter rather than a constant
+// so a test that must not sleep can make it zero: the loop's correctness is not
+// a question about wall-clock time, and a test that waited would be asserting
+// the timer rather than the decision.
+func (d *Driver) SetRetryBackoff(fn func(attempt int) time.Duration) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.retryDelay = fn
+	d.mu.Unlock()
 }

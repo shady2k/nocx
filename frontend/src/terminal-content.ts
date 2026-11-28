@@ -2255,10 +2255,22 @@ export class TerminalContent extends BasePaneContent {
 
   /** A replacement is an open answered by notification. Register and wire it
    * synchronously, before the socket can deliver its first frame. */
-  private _adoptReplacement(result: OpenResult): void {
+  private _adoptReplacement(result: OpenResult, newShell: boolean, replayFrom: number): void {
     if (this._disposed) return
-    const session = this.client.adoptOpen(result, this._reportedSize())
-    if (this.session !== null) this.scrollback?.blockManager.markReconnected()
+    // The stream's own resume point rides the answer (AD-9): a taken-back
+    // shell continues where this machine's recording ends, and the client's
+    // cursor has to be that number or its acks name bytes nobody sent.
+    const session = this.client.adoptOpen(result, this._reportedSize(), {
+      takenBack: !newShell,
+      replayFrom,
+    })
+    // THE DIVIDER IS THE BACKEND'S ANSWER, NOT A GUESS (design §5.4). A pane
+    // that took its running shell back re-adopts the SAME host session and its
+    // process never ended, so a boundary line above it would be a claim the
+    // product cannot support. newShell is true only when a replacement shell
+    // was really opened, which is the one case where the previous shell may
+    // still be running on its host.
+    if (newShell) this.scrollback?.blockManager.markReconnected()
     void this._bindSession(new AbortController().signal, 'rebind', session).catch(
       (err: unknown) => {
         log.warn('nocx: the replacement session could not be adopted', {
@@ -2540,7 +2552,9 @@ export class TerminalContent extends BasePaneContent {
     )
     this._connectionClient = new ConnectionClient(this.client)
     this._connectionUnsub = this._connectionStore.onChange(() => this._publishConnectionState())
-    this._openedUnsub = this._connectionStore.onOpened(({ open }) => this._adoptReplacement(open))
+    this._openedUnsub = this._connectionStore.onOpened(({ open, newShell, replayFrom }) =>
+      this._adoptReplacement(open, newShell, replayFrom),
+    )
   }
 
   /**

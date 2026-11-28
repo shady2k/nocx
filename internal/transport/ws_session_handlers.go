@@ -151,7 +151,11 @@ type openMachine interface {
 	// binding installed after the ack would miss the stage the pane exists
 	// for.
 	bindPane(paneID string, wconn *wsConn, state *connState, params openParams)
-	trackUnanswered(sess session.Session)
+	trackUnanswered(sess session.Session, takenBack bool)
+	// rollBackAdoption is the one undo an unaccepted open owns, and its verb
+	// follows where the shell came from: a spawned shell is ended, a shell
+	// this open TOOK BACK is detached and left running (design §5.4, C16).
+	rollBackAdoption(sess session.Session, takenBack bool)
 	enqueueOpenAnswer(sess session.Session, enqueue func() error) error
 	claimClose(sess session.Session) bool
 	releaseClose(id session.ID)
@@ -263,6 +267,17 @@ type openResult struct {
 	// moment — before the first fact — that the two used to be one value
 	// (null).
 	AwaitsIntegration bool `json:"awaitsIntegration"`
+	// NewShell is true when this answer REPLACED a shell rather than taking
+	// the pane's running one back (design §5.4, C16). It is deliberately not
+	// on the open ack: a person's own open always makes a shell, and this is
+	// the replacement path's fact. pane.opened carries the wire spelling.
+	NewShell bool `json:"-"`
+	// ReplayFrom is where this answer's output stream begins (AD-9): zero for
+	// a shell that was just made, and the re-attachment's own resume point for
+	// a shell taken back. The renderer adopts it as its cursor, so the two
+	// sides count from the same byte; omitting it would leave the pane
+	// acknowledging bytes the backend is not sending.
+	ReplayFrom uint64 `json:"-"`
 	// AccessEpoch is the epoch this pane's controller presents with its
 	// intents (nocx-zg3k3.3.1), read from the helper that holds the pane
 	// before this ack is built. A renderer cannot type without it — the
@@ -572,6 +587,20 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			},
 		}
 	}
+	// A RECONNECT ASKS FOR ITS SHELL BACK BEFORE IT SPWNS ONE (design §5.4,
+	// C16). The shell is named by the pane record — the only thing that still
+	// knows which far session this pane had, because a transport loss takes
+	// the session with it — and a pane that never adopted a helper-held shell
+	// asks for nothing, which is the ordinary local or plain replacement.
+	if rec, _ := ctx.Value(paneReconnectOpenKey{}).(*paneRecord); rec != nil {
+		if machine, ok := h.sess.(*WSServer); ok {
+			machine.paneMu.Lock()
+			spec.Reattach = rec.reconnectShell()
+			machine.paneMu.Unlock()
+		} else {
+			spec.Reattach = rec.reconnectShell()
+		}
+	}
 
 	// THE PANE'S ROUTE IS BOUND BEFORE ANYTHING DIALS (design §5.5, §5.6).
 	// The connection's first observation is opening, and it is the pane's
@@ -615,6 +644,9 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			}
 		})
 	}
+	// takenBack records what the opener's dial answered for the rollback
+	// below: only a shell this open MADE is its to end.
+	takenBack := false
 	endUnanswered := func(sess session.Session) {
 		if !h.sess.claimClose(sess) {
 			h.sess.discardLateOpenRegistrations(sess.ID(), sess)
@@ -622,10 +654,17 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		}
 		defer h.sess.releaseClose(sess.ID())
 		h.sess.unregisterLifecycleLanes(sess.ID())
-		h.opener.close(ctx, sess.ID())
+		// THE SHELL'S HISTORY DECIDES THE VERB (design §5.4, C16). A shell
+		// this open took back ran before it and must survive the rollback:
+		// the next reconnect asks the helper for it again. A shell this open
+		// spawned has no other owner once the answer is refused.
+		h.sess.rollBackAdoption(sess, takenBack)
 		h.sess.closeSession(sess.ID(), sess)
 	}
-	opened, err := h.opener.Open(ctx, spec, h.sess.trackUnanswered, endUnanswered)
+	opened, err := h.opener.Open(ctx, spec, func(sess session.Session, wasTakenBack bool) {
+		takenBack = wasTakenBack
+		h.sess.trackUnanswered(sess, wasTakenBack)
+	}, endUnanswered)
 	if err != nil {
 		// THE PROVISIONAL OPENING IS SETTLED BY WHOEVER PUBLISHED IT. A real
 		// bind replaces it before the spawn; every failure before that leaves
@@ -678,6 +717,10 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 			machine.paneMu.Unlock()
 			return openResult{}, context.Canceled
 		}
+		// THE PANE REMEMBERS WHICH SHELL IT HAS. A helper-held shell is the
+		// only thing a later reconnect may ask about; everything else — a local
+		// PTY, a plain shell — replaces what it had, and nil says so.
+		paneRecord.hostedShell = hostedShellOf(sess.ID(), hosted)
 		state.add(sess)
 		machine.paneMu.Unlock()
 	} else {
@@ -687,6 +730,18 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	rx = h.sess.getOrCreateRx(sess)
 	if rx == nil {
 		return openResult{}, errOpenShuttingDown
+	}
+	// WHERE THIS PUSHED STREAM BEGINS (nocx-oalo1.7.2, AD-9). A fresh session
+	// starts at 0 and so does its ring. A RE-ATTACHED one does not: the ring
+	// was rebuilt at the offset this machine's recording ends at, and a
+	// delivery from 0 against a nonzero base needs a reset the ring cannot
+	// give — so the pump would stop before the first byte and the pane would
+	// look alive with a dead stream. The resume point is the ring's own base,
+	// and it is handed to the renderer with the answer, so its cursor and the
+	// backend's are the same number.
+	deliveryStart := uint64(0)
+	if opened.Reattached {
+		deliveryStart = rx.ring.oldestLocked()
 	}
 	step("before-register")
 
@@ -763,6 +818,11 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		Parent:            parentResultFor(sess),
 		AwaitsIntegration: awaitsIntegration,
 		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
+		// THE DIVIDER'S OWN FACT (design §5.4): a reattached shell is the one
+		// that never ended, so nothing is drawn above it. And where its stream
+		// continues (AD-9).
+		NewShell:   !opened.Reattached,
+		ReplayFrom: deliveryStart,
 	}
 	// THE COMMIT POINT IS THE ANSWER IN THE OUTBOUND QUEUE (nocx-oalo1.6.16).
 	// The ack reports that acceptance. Before it, and when the call below
@@ -890,21 +950,35 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 	// AD-7: the ack must precede the session's own traffic in both
 	// directions, otherwise the first prompt races the open result and
 	// the client drops it (its sessionId is still null).
+	//
+	// A RE-ATTACHED SESSION ALREADY HAS ITS PUMP (nocx-oalo1.7.2). The
+	// re-attachment installed the ring, the recorder and the read pump before
+	// it handed the session back (ReadoptHostedSession), and this call also
+	// starts a SECOND recorder — two writers of one recording, and a second
+	// StartOutput refused by the session whose admission the first one holds.
+	//
 	// Background is deliberate — server/session-owned, the canonical member
 	// of that class. Owner: the session and its replay ring, which outlive
 	// every WebSocket (AD-9); the pump must survive a disconnect so the
 	// session's output keeps flowing into the ring for the next reattach.
 	// Closing event: session teardown — closeSession's registry.Close, which
 	// ends the read pump StartOutput started. This call itself returns
-	// immediately: StartOutput installs the handler and starts that pump on
-	// its own goroutine rather than blocking, so nothing may hang off its
-	// return as though it meant "the output is over" (nocx-szb40.5).
-	h.sess.pumpToRing(context.Background(), sess, rx.ring)
+	// immediately: a pump on its own goroutine, never a blocking call.
+	if !opened.Reattached {
+		h.sess.pumpToRing(context.Background(), sess, rx.ring)
+	}
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).
-	rx.monitorOnce.Do(func() {
-		go h.sess.monitorExit(rx, sess)
-	})
+	if !opened.Reattached {
+		rx.monitorOnce.Do(func() {
+			go h.sess.monitorExit(rx, sess)
+		})
+	} else {
+		// The re-attachment's own monitor is already running, and IT is the
+		// one that watches this incarnation: a second one would be a second
+		// teardown owner for one session.
+		rx.monitorOnce.Do(func() {})
+	}
 	monitored = true
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
@@ -917,7 +991,7 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		pumpCtx = conn
 	}
 	if wconn != nil && !socketGone {
-		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
+		go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, deliveryStart)
 	}
 
 	// The screen, for the window the lifecycle replay above covers
@@ -1531,6 +1605,7 @@ func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []met
 		launcher: s.remoteLauncher, installer: s.remoteInstaller,
 		lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
 		ledger: sessionLedger, helper: s.helperSessionOpener,
+		reattacher:    s.paneShellReattacher,
 		laneRegistrar: laneRegistrar,
 		paneOpened:    s.paneOpenedNote,
 		// The server IS the wire ask (RequestConnectionPassword), the same

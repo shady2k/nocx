@@ -1354,6 +1354,101 @@ describe('screen frames (msg-type 0x02)', () => {
   })
 })
 
+describe('a shell taken back after its channel was lost (design §5.4, C16)', () => {
+  // THE FIELD REPORT THIS ROW EXISTS FOR: an interrupted session keeps its
+  // record and blocks every frame and keystroke on purpose, and a
+  // re-attachment is the answer that lifts both. Without this the pane is a
+  // read-only grey rectangle over a shell that is alive and accepting input.
+  const TAKEN_BACK = { instanceId: OPEN_IDENTITY.instanceId, sessionEpoch: 2 }
+  const takenBackOpen = {
+    sessionId: SID,
+    ...TAKEN_BACK,
+    workspaceId: 'ws-1',
+    cwd: '/home/dev',
+    integrationMode: 'auto',
+    effectiveSize: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+    parent: null,
+    awaitsIntegration: false,
+    accessEpoch: 3,
+  }
+
+  function blocked(client: WSClient): { protocolBlocked: boolean; offset: number } {
+    const state = (
+      client as unknown as { sessions: Map<string, { protocolBlocked: boolean; offset: number }> }
+    ).sessions.get(SID)!
+    return { protocolBlocked: state.protocolBlocked, offset: state.offset }
+  }
+
+  it('lifts the interrupt and resumes the stream at the offset the backend names', async () => {
+    const { client, session, ws } = await connectedSession()
+    const frames: unknown[] = []
+    session.onScreenFrame((f) => frames.push(f))
+    const attachments: string[] = []
+    session.onAttachment((a) => attachments.push(a.kind))
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, ...OPEN_IDENTITY, cause: 'interrupted' },
+    })
+    expect(blocked(client).protocolBlocked).toBe(true)
+    expect(attachments[attachments.length - 1]).toBe('unavailable')
+    // Blocked is not "quiet": neither the screen nor the keyboard reaches the
+    // session while the shell's survival is unknown.
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":2}'), MSG_TYPE_METADATA),
+    )
+    const sentBefore = ws.binaryFrames().length
+    client.sendToSession(SID, 'x')
+    expect(ws.binaryFrames().length).toBe(sentBefore)
+    expect(frames).toEqual([])
+
+    // THE SHELL COMES BACK: same session id, new epoch, a nonzero resume
+    // point (this machine's recording of that session ends there).
+    client.adoptOpen(
+      takenBackOpen as never,
+      { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+      {
+        takenBack: true,
+        replayFrom: 4096,
+      },
+    )
+    expect(blocked(client)).toEqual({ protocolBlocked: false, offset: 4096 })
+    expect(attachments[attachments.length - 1]).toBe('attached')
+
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":3}'), MSG_TYPE_METADATA),
+    )
+    expect(frames).toHaveLength(1)
+    client.sendToSession(SID, 'x')
+    expect(ws.binaryFrames().length).toBe(sentBefore + 1)
+    // The bytes are counted from the backend's own resume point, so the ack
+    // names a byte the backend sent rather than one it never had.
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array([0x82, 0xac])))
+    expect(blocked(client).offset).toBe(4096 + 2)
+  })
+
+  it('ignores an exit the previous incarnation sends after the shell came back', async () => {
+    const { client, ws } = await connectedSession()
+    client.adoptOpen(
+      takenBackOpen as never,
+      { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+      {
+        takenBack: true,
+        replayFrom: 7,
+      },
+    )
+    // The OLD shell's end, delivered late (its epoch is the one the interrupt
+    // named). It is not this session's end and must not block it again.
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, ...OPEN_IDENTITY, cause: 'interrupted' },
+    })
+    expect(blocked(client)).toEqual({ protocolBlocked: false, offset: 7 })
+  })
+})
+
 describe('exit notification', () => {
   it('delivers an interrupted exit for a session the backend lost', async () => {
     const { session, ws } = await connectedSession()

@@ -524,6 +524,51 @@ func (s *helperOpenStand) assertNotLive(sid, what string) {
 	}
 }
 
+// exitSession ends a scripted shell with a zero status, in the order the
+// helper's own watch reads it: the wait result first, then Done.
+func (s *scriptedSpawner) exitSession(sid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.procs {
+		if p.id == sid {
+			p.exit(0)
+			return
+		}
+	}
+}
+
+// waitForExitNotification reads the socket until the pane's session.end
+// notification arrives for sessionID. monitorExit emits it LAST, after the
+// pane forgot the shell, so a reconnect begun after this read is a reconnect
+// of a pane with nothing to take back.
+func (s *helperOpenStand) waitForExitNotification(conn *websocket.Conn, sessionID string) {
+	s.t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	for {
+		mt, raw, err := conn.ReadMessage()
+		if err != nil {
+			s.t.Fatalf("reading for the exit of session %s: %v", sessionID, err)
+		}
+		if mt != websocket.TextMessage {
+			continue
+		}
+		var env struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(raw, &env) != nil || env.Method != "exit" {
+			continue
+		}
+		var params struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(env.Params, &params) == nil && params.SessionID == sessionID {
+			return
+		}
+	}
+}
+
 // shutdownWhileHeldInAttach is the second half shared by the open and the
 // reconnect rows: it proves that SHUTDOWN waits for the rollback, instead of a
 // five-second wait in the test standing beside a Shutdown that already
@@ -737,23 +782,33 @@ func TestAnUnacceptedRPCOpenLeavesNoLiveHelperSessionAfterShutdown(t *testing.T)
 	}
 }
 
-// TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown covers the
-// supervisor's entry. It is a real reconnect of a real pane: the first open is
-// accepted and names the pane, the reconnect replays that open, and its Attach
-// is held when shutdown begins.
-func TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown(t *testing.T) {
-	for _, host := range []string{hostOnThisMachine, hostOnFarHelper} {
+// A RE-ATTACHMENT IS NOT A SPAWN, AND THE ROLLBACK IS NOT THE SAME VERB
+// (design §5.4, C16). These two rows are the split the review of
+// nocx-oalo1.7.2 asked for: shutdown must end a shell an unaccepted open
+// MADE, and must leave alone a shell an unaccepted reconnect TOOK BACK.
+//
+// TestAnUnacceptedReconnectKeepsTheShellItTookBack is the re-attachment half.
+// The pane's far shell is still in the helper's inventory, so the reconnect
+// asks for it, the helper holds Attach, and shutdown begins. The process ran
+// before the open and belongs to no open's answer: it must still be running
+// afterwards, and no second shell may have been spawned.
+// THE FAR HELPER IS THE END-TO-END ROW. A shell THIS machine's helper holds
+// takes the same decision through reattachLocal (pane_reattach_test.go drives
+// that branch with a stub route), and its end-to-end form cannot be run here:
+// the daemon is reached over a unix socket named after the helper generation,
+// and this harness's state directory carries the TEST's name — the path
+// exceeds the platform's 103-byte socket limit before a shell is opened.
+func TestAnUnacceptedReconnectKeepsTheShellItTookBack(t *testing.T) {
+	for _, host := range []string{hostOnFarHelper} {
 		t.Run(host, func(t *testing.T) {
 			farMode := hostmode.Helper
-			if host == hostOnThisMachine {
-				// A remote pane whose far host declined is hosted by THIS
-				// machine's helper through spawn-ssh: the reachable route for
-				// a reconnect on the local helper.
-				farMode = hostmode.Raw
-			}
 			stand := newHelperOpenStand(t, host, true, farMode)
 			conn, paneID := seedPane(t, stand.app)
 			generation := openOverWS(t, conn, stand.openSpec(paneID), 7)
+			before := stand.spawner().spawnedSessionIDs()
+			if len(before) != 1 {
+				t.Fatalf("the accepted open spawned %v, want exactly one shell", before)
+			}
 
 			attach := stand.gate().arm(proto.OpAttach)
 			defer attach.releaseNow()
@@ -762,7 +817,66 @@ func TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown(t *testing.
 			done := make(chan error, 1)
 			go func() { done <- stand.app.Transport.ReconnectPane(ctx, paneID, generation) }()
 
-			stand.shutdownWhileHeldInAttach(attach, done)
+			sid := stand.waitForAttach(attach.entered, done)
+			if sid != before[0] {
+				t.Fatalf("the reconnect attached to %q, but the pane's shell is %q: it opened a second shell", sid, before[0])
+			}
+			stand.assertLive(sid, "while the reconnect is held in Attach")
+
+			// Shutdown must return without asking the helper to close it: the
+			// shell predates the open and a later coordinator can take it back.
+			stand.app.Shutdown(context.Background())
+			stand.assertLive(sid, "after shutdown of an unaccepted RE-ATTACHMENT")
+			if after := stand.spawner().spawnedSessionIDs(); len(after) != 1 {
+				t.Fatalf("shutdown left %d spawned shells (%v), want the one the accepted open made", len(after), after)
+			}
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the reconnect did not end although Shutdown returned")
+			}
+			_ = conn
+		})
+	}
+}
+
+// TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown is the
+// REPLACEMENT half of the same split: the pane's shell has ended, so the
+// reconnect opens a new one, and that new shell is an unaccepted open's to
+// end. It is #888's own rule (nocx-1jual), kept exactly where it belongs.
+func TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown(t *testing.T) {
+	for _, host := range []string{hostOnThisMachine, hostOnFarHelper} {
+		t.Run(host, func(t *testing.T) {
+			farMode := hostmode.Helper
+			if host == hostOnThisMachine {
+				farMode = hostmode.Raw
+			}
+			stand := newHelperOpenStand(t, host, true, farMode)
+			conn, paneID := seedPane(t, stand.app)
+			generation := openOverWS(t, conn, stand.openSpec(paneID), 7)
+			first := stand.spawner().spawnedSessionIDs()
+			if len(first) != 1 {
+				t.Fatalf("the accepted open spawned %v, want exactly one shell", first)
+			}
+			// THE SHELL ENDS, AND THE PANE HEARS IT END. The exit
+			// notification is emitted at the end of monitorExit, after the
+			// pane has forgotten the shell, so a reconnect begun after this
+			// read is the ordinary replacement path.
+			stand.spawner().exitSession(first[0])
+			stand.waitForExitNotification(conn, first[0])
+			stand.assertNotLive(first[0], "after its shell ended")
+
+			attach := stand.gate().arm(proto.OpAttach)
+			defer attach.releaseNow()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- stand.app.Transport.ReconnectPane(ctx, paneID, generation) }()
+
+			replacement := stand.shutdownWhileHeldInAttach(attach, done)
+			if replacement == first[0] {
+				t.Fatalf("the replacement open reused the ended shell %q", replacement)
+			}
 		})
 	}
 }

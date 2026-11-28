@@ -213,7 +213,11 @@ package coordinator
 // state. The window reads forwards from tunnel.list even when discovery is
 // unavailable. An older window sends profile IDs and expects forwards in
 // the discovery result, so the handshake refuses that combination.
-const ProtocolVersion = 46
+//
+// 47 (nocx-oalo1.25): pane.connection shellFailure carries a required sequence
+// so the window can recognize a refusal it already answered across repeated
+// notifications and retries. Protocol 46 does not carry that identity.
+const ProtocolVersion = 47
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

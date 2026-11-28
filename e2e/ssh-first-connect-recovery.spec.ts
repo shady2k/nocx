@@ -29,11 +29,11 @@
  * Every assertion is on an observable state — the offer's button, the dialog's
  * title, the editor, the command's own block — and never on a duration.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { appReadyForInput, test, expect, resolveBackend, type Page } from './harness'
-import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
+import { rpc, startSshd, stopSshd, type SshdFixture } from './sshd-fixture'
 import { readStand } from './stand'
 
 const TAB = '.nocx-tab'
@@ -107,11 +107,13 @@ test.describe('first SSH connection: trust the key, then recover in the tab', ()
   test('trusting the key, choosing Helper in the original tab, then reopening with the saved method', async ({
     page,
   }) => {
-    const stand = readStand()
+    // The far helper prunes other generations from its home. Give it a
+    // separate home so it cannot remove the stand's local helper.
+    const remoteHome = mkdtempSync(path.join(readStand().home, 'ssh-first-connect-'))
     let fixture: SshdFixture | null = null
     let profileId: string | null = null
     try {
-      fixture = await startSshd({ home: stand.home, cwd: stand.home })
+      fixture = await startSshd({ home: remoteHome, cwd: remoteHome })
       forgetThisHostOnly(fixture)
 
       await page.goto('/')
@@ -200,7 +202,11 @@ test.describe('first SSH connection: trust the key, then recover in the tab', ()
           // A cleanup that throws would replace the real failure with its own.
         }
       }
-      fixture?.proc.kill('SIGTERM')
+      try {
+        if (fixture !== null) await stopSshd(fixture)
+      } finally {
+        rmSync(remoteHome, { recursive: true, force: true })
+      }
     }
   })
 })

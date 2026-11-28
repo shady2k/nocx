@@ -761,6 +761,17 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	if s.opener == nil {
 		return OpenedSession{}, errors.New("transport: the session opener is not running")
 	}
+	// A BACKEND OPEN IS SHUTDOWN WORK TOO. It reaches the same opener a
+	// renderer's `open` does, and a helper session it spawns has the same
+	// nobody to close it if Stop returns first. Registering it with the
+	// in-flight set makes Stop cancel it and wait, before the registry it
+	// would have adopted into is torn down.
+	tctx, _, release, ok := s.inflight.begin(ctx)
+	if !ok {
+		return OpenedSession{}, errOpenShuttingDown
+	}
+	defer release()
+	ctx = tctx
 	opened, err := s.opener.Open(ctx, spec, nil, func(sess session.Session) {
 		if s.claimClose(sess) {
 			defer s.releaseClose(sess.ID())

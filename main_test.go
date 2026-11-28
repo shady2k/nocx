@@ -32,6 +32,58 @@ import (
 	"github.com/shady2k/nocx/internal/version"
 )
 
+func TestDesktopAssetMiddleware(t *testing.T) {
+	options := desktopAssetOptions()
+	for _, tc := range []struct {
+		method string
+		path   string
+		probe  bool
+	}{
+		{method: http.MethodHead, path: "/wails/custom.js", probe: true},
+		{method: http.MethodGet, path: "/wails/custom.js"},
+		{method: http.MethodGet, path: "/wails/runtime.js"},
+		{method: http.MethodHead, path: "/wails/runtime.js"},
+		{method: http.MethodPost, path: "/wails/runtime"},
+		{method: http.MethodGet, path: "/"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			request := httptest.NewRequest(tc.method, tc.path, nil)
+			response := httptest.NewRecorder()
+			calls := 0
+			var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r != request || r.Method != tc.method || r.URL.RequestURI() != tc.path {
+					t.Errorf("downstream did not receive the original request: %s %s", r.Method, r.URL.RequestURI())
+				}
+				w.Header().Set("X-Downstream", "called")
+				w.WriteHeader(http.StatusNotFound)
+			})
+			if options.Middleware != nil {
+				handler = options.Middleware(handler)
+			}
+			handler.ServeHTTP(response, request)
+
+			if tc.probe {
+				if response.Code != http.StatusNoContent || calls != 0 {
+					t.Errorf("status = %d, downstream calls = %d; want 204 and 0", response.Code, calls)
+				}
+				if contentType := response.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
+					t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", contentType)
+				}
+				if response.Body.Len() != 0 {
+					t.Errorf("body = %q, want empty", response.Body.String())
+				}
+				return
+			}
+
+			if calls != 1 || response.Code != http.StatusNotFound || response.Header().Get("X-Downstream") != "called" {
+				t.Errorf("downstream calls = %d, response = %d %v; want one call and its response",
+					calls, response.Code, response.Header())
+			}
+		})
+	}
+}
+
 func TestRestartWindowStartsInstalledPathBeforeQuitting(t *testing.T) {
 	started := ""
 	quit := 0

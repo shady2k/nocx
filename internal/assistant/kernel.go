@@ -97,15 +97,19 @@ const (
 	// and it is why the refusal comes BEFORE the attempt is opened rather
 	// than after.
 	RefusedExpired PolicyRefusalReason = "refused-expired"
-	// RefusedRemotePane: this call's tool reaches whatever disk the PANE is
-	// on (files.read, files.edit, files.create), and the pane the person asked
-	// from is not this machine. The tools act through the pane's own binding,
-	// but a non-local pane has no route yet — agenttools.localPaneOnly refuses
-	// the capability — so there is nothing that could do the work, and the
-	// call is refused and says the remote file tools are coming: the sentence
-	// a person and a model both read. It is not about this call's arguments,
-	// so proposing the same call differently changes nothing.
-	RefusedRemotePane PolicyRefusalReason = "refused-remote-pane"
+	// RefusedHelperUnavailable: the call could not reach the pane's host at
+	// all — the nocx helper on it is not serving, and its published reason
+	// (mode-raw, connection, helper-lost, …) is the same one the Files panel
+	// shows for that connection. The reason travels with the refusal because
+	// it is the only part a model can act on: a raw host is a setting a person
+	// changes, a lost helper is a connection to refresh, and a model told only
+	// "unavailable" would propose the same call again.
+	//
+	// It names the CALL's outcome, not the connection's: nocx does not probe
+	// the axis before a call (C28), so a call that would have been fine is never
+	// refused for the state another call would have found. What reaches here is
+	// the error a capability's own attempt produced.
+	RefusedHelperUnavailable PolicyRefusalReason = "refused-helper-unavailable"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
 	// not be read again to check (nocx-4h0m7.5). Without substitution there
@@ -165,9 +169,11 @@ func (e *ToolFailedError) Message() string {
 	return e.Err.Error()
 }
 
-// capabilityRefusal reports whether a tool's error is the NARROWED CAPABILITY
-// refusing the call as outside what it holds — the carve-out from
-// ToolFailedError above, and the one place that question is decided.
+// capabilityRefusal says whether a tool's error is a REFUSAL the capability
+// itself made — the carve-out from ToolFailedError above — and which one, since
+// two of them are different answers to a model. It is the one place that
+// question is decided; the sentence stays refusalResult's, so no tool mints
+// one.
 //
 // The distinction is the whole of nocx-4yjwk.3. A tool that FAILED tried and
 // could not: the file was unreadable, the command would not start, the
@@ -177,20 +183,60 @@ func (e *ToolFailedError) Message() string {
 // does not check), so it is a refusal, and "a refusal is an answer"
 // (nocx-uvac6.1) applies to it exactly as it applies to the gate's own no.
 //
-// It reaches here at all only when the LEXICAL predicate the policy uses said
-// yes and the capability's canonical identity said no — a symlink inside the
-// fence resolving outside it. The policy asked, a person answered, and the
-// call then met the enforcement. Nothing about that ordering is wrong: the
-// lexical check is advisory by design and the capability is the enforcement.
-// What would be wrong is ending the run over it.
+// The out-of-scope half reaches here only when the LEXICAL predicate the policy
+// uses said yes and the capability's canonical identity said no — a symlink
+// inside the fence resolving outside it. The policy asked, a person answered,
+// and the call then met the enforcement. Nothing about that ordering is wrong:
+// the lexical check is advisory by design and the capability is the
+// enforcement. What would be wrong is ending the run over it.
+//
+// The helper half is stage 10's (.11.4): a pane on another machine is reached
+// through the nocx helper on it and through nothing else, so a helper that is
+// not serving (mode-raw, helper-lost, consent-denied, …) leaves the call with
+// no route at all. That is the same kind of fact as the fence — nothing this
+// call's arguments could change — and it carries the connection's own reason,
+// which the Files panel shows for the same connection: one source for the
+// token, two surfaces reading it (C28). The axis is never probed ahead of the
+// call; what reaches here is the error this call's own attempt produced.
 //
 // Sentinel, never text: the message names a path and belongs to the provider,
 // and a predicate reading it would break the first time a message was
 // reworded. The list grows by addition — a capability that gains its own
-// out-of-scope sentinel joins it here rather than growing a second answer to
-// this question somewhere else.
-func capabilityRefusal(err error) bool {
-	return errors.Is(err, filesystem.ErrOutOfScope)
+// refusal sentinel joins it here rather than growing a second answer to this
+// question somewhere else.
+func capabilityRefusal(err error) (PolicyRefusalReason, string) {
+	// A conditional write whose answer was lost is NOT this: the host may
+	// have installed the bytes, so "did not run" would be a lie a model could
+	// act on by retrying. ErrUnknownWriteOutcome wraps ErrUnavailable when the
+	// helper went away mid-commit (helperfs), and the editors answer it as
+	// their own result.
+	var unknownOutcome *filesystem.ErrUnknownWriteOutcome
+	if errors.As(err, &unknownOutcome) {
+		return "", ""
+	}
+	var unavailable *filesystem.ErrUnavailable
+	if errors.As(err, &unavailable) {
+		return RefusedHelperUnavailable, helperAxisRefusalDetail(unavailable)
+	}
+	if errors.Is(err, filesystem.ErrOutOfScope) {
+		return RefusedOutOfScope, ""
+	}
+	return "", ""
+}
+
+// helperAxisRefusalDetail is the clause refusalResult's helper sentence carries:
+// the connection's published reason and the action a surface would offer, in
+// the vocabulary the Files panel reads off the same axis.
+func helperAxisRefusalDetail(unavailable *filesystem.ErrUnavailable) string {
+	detail := "the nocx helper on this pane's host is not available"
+	if unavailable == nil || unavailable.Reason == "" {
+		return detail
+	}
+	detail += " (reason " + unavailable.Reason
+	if unavailable.Action != "" {
+		detail += ", action " + unavailable.Action
+	}
+	return detail + ")"
 }
 
 // EgressScreeningError marks a result withheld because the egress gate could
@@ -509,7 +555,6 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		runCtx: agenttools.RunContext{
 			RunID:                 runID,
 			Session:               sessionID,
-			Environment:           runSeams.paneEnvironment,
 			Files:                 runSeams.files,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
@@ -641,7 +686,6 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 		},
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
-			kernelPaneGuard{kernel: k},
 			kernelPolicyGuard{state: state},
 			kernelFloorGuard{kernel: k},
 			kernelEvidenceGuard{state: state},
@@ -918,33 +962,6 @@ func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
 	return refusalResult(call.Tool(), RefusedExpired, ""), true
 }
 
-// kernelPaneGuard refuses a tool that reaches the pane's files when the pane is
-// not this machine (ADR-anntnxdj §5, decision 3). The file tools act through the
-// pane's own binding, and a non-local pane has no route yet: no capability comes
-// into existence for one, so a chain that forgot this link still cannot read or
-// write any disk. What is missing without it is the SENTENCE — the model would
-// read a failure about a constructor where the person and the model should read
-// that the remote file tools are coming.
-//
-// It is a GUARD and not a PreCall because it can only refuse — the policy may
-// well permit this call and that is not the question being asked — and it is
-// the ANSWER half of one fact whose GUARANTEE half is the capability
-// constructor (agenttools.narrow.go's localPaneOnly): the guard is what makes
-// the model read our sentence instead of a failure about a constructor, the
-// same split RefusedExpired uses. A chain that forgot this link still cannot
-// reach the disk, because no capability comes into existence.
-type kernelPaneGuard struct{ kernel *effectKernel }
-
-func (g kernelPaneGuard) Refuse(_ context.Context, call Call) (string, bool) {
-	if !agenttools.ReachesLocalDisk(call.Tool()) {
-		return "", false
-	}
-	if g.kernel.runCtx.Environment.Kind == content.EnvLocal {
-		return "", false
-	}
-	return refusalResult(call.Tool(), RefusedRemotePane, ""), true
-}
-
 // kernelFloorGuard is the fixed floor and the raw-command floor: the operations
 // no policy may enable. It can only refuse, so no answer a person gives can
 // turn one back into permission.
@@ -987,6 +1004,13 @@ func (g kernelEvidenceGuard) Refuse(ctx context.Context, call Call) (string, boo
 		return "", false
 	}
 	if err := k.approvals.VerifyApprovedFileVersions(ctx, k.runCtx.Files, proposal); err != nil {
+		// A re-read that could not reach the host at all is the connection's
+		// answer, not the file's: it names the helper axis the Files panel
+		// shows, and the model is told not to retry rather than told its
+		// file changed.
+		if reason, detail := capabilityRefusal(err); reason != "" {
+			return refusalResult(call.Tool(), reason, "", detail), true
+		}
 		return refusalResult(call.Tool(), RefusedFileChanged, "", err.Error()), true
 	}
 	if shown, ok := k.approvals.ApprovedExpansions(proposal); ok && len(shown) > 0 {
@@ -1238,10 +1262,15 @@ func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
 // the file the call will act on and never this machine's same-named one.
 //
 // files.create treats a missing path as NotApplicable because creating a
-// missing path is its successful precondition; every other capture failure
-// remains Required and therefore fails closed at execution — "the evidence
-// could not be read" is never an approval that covers anything.
+// missing path is its successful precondition, and it resolves the name the way
+// the editor will (the parent's canonical identity plus the base name), so a
+// path the model spelled absolutely but not cleanly is not refused for a
+// spelling the write itself resolves. Every other capture failure remains
+// Required and therefore fails closed at execution — "the evidence could not be
+// read" is never an approval that covers anything — and its CAUSE travels with
+// the record, because the refusal after the answer has to say what stopped it.
 func bindApprovalFileVersions(ctx context.Context, files filesystem.HandleSource, ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
+	create := decl.Name == "files.create"
 	pathCount := 0
 	versions := make([]FileVersion, 0, len(resources))
 	for _, resource := range resources {
@@ -1249,17 +1278,22 @@ func bindApprovalFileVersions(ctx context.Context, files filesystem.HandleSource
 			continue
 		}
 		pathCount++
-		version, err := CaptureFileVersion(ctx, files, resource.ID)
+		capture := CaptureFileVersion
+		if create {
+			capture = CaptureNewFileVersion
+		}
+		version, err := capture(ctx, files, resource.ID)
 		if err != nil {
-			if decl.Name == "files.create" && isNotFound(err) {
+			if create && isNotFound(err) {
 				continue
 			}
 			ap.FileVersionState = FileVersionBindingRequired
+			ap.FileVersionFailure = err
 			return
 		}
 		versions = append(versions, version)
 	}
-	if pathCount == 0 || (decl.Name == "files.create" && len(versions) == 0) {
+	if pathCount == 0 || (create && len(versions) == 0) {
 		ap.FileVersionState = FileVersionBindingNotApplicable
 		return
 	}
@@ -1480,11 +1514,18 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		// keep trying. Only the person can start a turn, so the answer is
 		// to say so in words.
 		return "REFUSED: nocx did not run your call to " + tool + ": the authority this question was given has expired. Nothing further will run under it. Say what you were about to do, in words, so the person can ask again."
-	case RefusedRemotePane:
-		// The sentence names the reason the call has no capability at all,
-		// and what a model can still do: the pane's own shell is reachable
-		// (session.run acts where the pane is), the local disk is not.
-		return "REFUSED: nocx did not run your call to " + tool + ": this pane is on another machine, and nocx's file tools act on the machine nocx runs on — the remote file tools are coming. Use session.run to do the work in the pane, or say in words what you would need."
+	case RefusedHelperUnavailable:
+		// The sentence names the reason the connection published, because the
+		// model's next step depends on which one it is: a Raw host is a
+		// setting, a lost helper is a connection to refresh, a denied consent
+		// is an answer a person gave. What it must NOT say is that the call
+		// was wrong — it was not, and repeating it changes nothing.
+		reason := "the nocx helper on this pane's host is not available"
+		if len(detail) > 0 && detail[0] != "" {
+			reason = detail[0]
+		}
+		return "REFUSED: nocx did not run your call to " + tool + ": " + reason +
+			". nocx reaches a pane on another machine only through that helper, so this call cannot reach the files there. Do not propose it again; session.read and session.run still work on this pane, or say in words what you need from that host."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {
@@ -2051,9 +2092,9 @@ func (k *effectKernel) invokeInvocation(request ToolInvocation, callID string) (
 	// reason: this attempt did not do what it was opened for.
 	// TermAgentDeclined names the agent's own no, which this is not, and
 	// content owns that vocabulary.
-	if runErr != nil && capabilityRefusal(runErr) {
+	if reason, detail := capabilityRefusal(runErr); reason != "" {
 		_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
-		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
+		return modelResult{text: refusalResult(decl.Name, reason, "", detail), kind: modelNocxMessage}, nil
 	}
 
 	// The egress screen ran inside the pipeline, after the tool and before

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/filesystem"
 )
@@ -29,6 +30,12 @@ type FileVersion struct {
 	Canonical string
 	// Version is what the pane reported for the bytes at Canonical.
 	Version filesystem.Version
+	// FromParent says Canonical was resolved from the path's PARENT directory
+	// rather than from the path itself — the resolution ScopedEditor.Create
+	// uses, because a name that does not exist yet cannot be canonicalized
+	// but the directory it will be created in can. Verification resolves the
+	// path the same way, so the two ends compare one identity.
+	FromParent bool
 }
 
 // FileVersionMismatchError means the approved path no longer names the same
@@ -51,32 +58,59 @@ func (e *FileVersionMismatchError) Error() string {
 // that is not regular, a file over filesystem.MaxReadBytes — because an
 // approval that cannot say WHAT it covers must not be able to authorise it.
 // The only caller that reads a failure as an ordinary answer is files.create,
-// whose success precondition is a path that does not exist yet.
+// whose success precondition is a path that does not exist yet; it captures
+// through CaptureNewFileVersion instead.
 //
 // The handle lives for this one read and is released on every path, so a tool
 // never holds a binding between calls.
 func CaptureFileVersion(ctx context.Context, source filesystem.HandleSource, path string) (FileVersion, error) {
+	return captureFileVersion(ctx, source, path, false)
+}
+
+// CaptureNewFileVersion records the evidence for the name files.create will
+// occupy, resolved the way ScopedEditor.Create resolves it: the parent's
+// canonical identity plus the base name. A path the model spelled absolutely
+// but not cleanly (/repo/sub/../new.txt) is refused by no provider — the
+// editor creates /repo/new.txt — so capturing it any other way would ask a
+// person about a refusal the write would never have made.
+func CaptureNewFileVersion(ctx context.Context, source filesystem.HandleSource, path string) (FileVersion, error) {
+	return captureFileVersion(ctx, source, path, true)
+}
+
+func captureFileVersion(ctx context.Context, source filesystem.HandleSource, path string, fromParent bool) (FileVersion, error) {
 	if source == nil {
-		return FileVersion{}, fmt.Errorf("file version %q: no file binding", path)
+		return FileVersion{}, &fileVersionError{Path: path, Detail: "no file binding"}
 	}
 	handle, release, err := source.Acquire(ctx)
 	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: acquire: %w", path, err)
+		return FileVersion{}, fileVersionFailure(path, "acquire", err)
 	}
 	defer release()
-	canonical, err := handle.Canonical(ctx, path)
+	canonical, err := resolveForCapture(ctx, handle, path, fromParent)
 	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: canonical: %w", path, err)
+		return FileVersion{}, fileVersionFailure(path, "canonical", err)
 	}
 	versioned, err := handle.Versioned()
 	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: versioned: %w", path, err)
+		return FileVersion{}, fileVersionFailure(path, "versioned", err)
 	}
 	_, version, err := versioned.ReadVersion(ctx, canonical, filesystem.MaxReadBytes)
 	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: read version: %w", path, err)
+		return FileVersion{}, fileVersionFailure(path, "read version", err)
 	}
-	return FileVersion{Path: path, Canonical: canonical, Version: version}, nil
+	return FileVersion{Path: path, Canonical: canonical, Version: version, FromParent: fromParent}, nil
+}
+
+// resolveForCapture is the one resolution both ends of the evidence use.
+func resolveForCapture(ctx context.Context, handle filesystem.Handle, path string, fromParent bool) (string, error) {
+	if !fromParent {
+		return handle.Canonical(ctx, path)
+	}
+	parent, err := handle.Canonical(ctx, filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 // VerifyFileVersion checks the approved path again, immediately before
@@ -91,27 +125,27 @@ func CaptureFileVersion(ctx context.Context, source filesystem.HandleSource, pat
 // capability is even constructed.
 func VerifyFileVersion(ctx context.Context, source filesystem.HandleSource, version FileVersion) error {
 	if source == nil {
-		return fmt.Errorf("file version %q: no file binding", version.Path)
+		return &fileVersionError{Path: version.Path, Detail: "no file binding"}
 	}
 	handle, release, err := source.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("file version %q: acquire for verification: %w", version.Path, err)
+		return fileVersionFailure(version.Path, "acquire for verification", err)
 	}
 	defer release()
-	canonical, err := handle.Canonical(ctx, version.Path)
+	canonical, err := resolveForCapture(ctx, handle, version.Path, version.FromParent)
 	if err != nil {
-		return fmt.Errorf("file version %q: canonical for verification: %w", version.Path, err)
+		return fileVersionFailure(version.Path, "canonical for verification", err)
 	}
 	if canonical != version.Canonical {
 		return &FileVersionMismatchError{Path: version.Path, Reason: "the path now names a different object"}
 	}
 	versioned, err := handle.Versioned()
 	if err != nil {
-		return fmt.Errorf("file version %q: versioned for verification: %w", version.Path, err)
+		return fileVersionFailure(version.Path, "versioned for verification", err)
 	}
 	_, current, err := versioned.ReadVersion(ctx, canonical, filesystem.MaxReadBytes)
 	if err != nil {
-		return fmt.Errorf("file version %q: read for verification: %w", version.Path, err)
+		return fileVersionFailure(version.Path, "read for verification", err)
 	}
 	if reason := versionDifference(version.Version, current); reason != "" {
 		return &FileVersionMismatchError{Path: version.Path, Reason: reason}
@@ -135,6 +169,68 @@ func versionDifference(want, got filesystem.Version) string {
 	default:
 		return ""
 	}
+}
+
+// fileVersionError is a capture or verification failure told in the caller's
+// vocabulary: the path the CALL named, never the canonical identity the pane
+// resolved it to, plus words for what was wrong with it.
+//
+// WHY THE PROVIDER'S OWN SENTENCE IS NOT REPEATED. A typed provider failure
+// names its own path, and that path is the CANONICAL one. A symlink inside the
+// approved area can resolve to a file outside it, so quoting the provider would
+// put a path the model was never given — and, in ErrByteLimit's text, the size
+// of a file it may not read — into the refusal the model reads. The person
+// answered about the name the call carried; the refusal therefore names that
+// name and CLASSIFIES the cause instead. The typed cause is still wrapped, so a
+// guard that classifies with errors.As — capabilityRefusal's helper axis, its
+// out-of-scope answer, isNotFound — keeps working.
+type fileVersionError struct {
+	Path   string
+	Detail string
+	cause  error
+}
+
+func (e *fileVersionError) Error() string {
+	return fmt.Sprintf("file version %q: %s", e.Path, e.Detail)
+}
+
+func (e *fileVersionError) Unwrap() error { return e.cause }
+
+// fileVersionFailure names the step that failed and the kind of failure, and
+// keeps the typed cause reachable without repeating its text.
+func fileVersionFailure(path, step string, err error) error {
+	return &fileVersionError{Path: path, Detail: step + ": " + fileVersionFailureDetail(err), cause: err}
+}
+
+// fileVersionFailureDetail classifies what stopped a capture or a verification.
+// Every clause describes the KIND of failure, and none carries a path or a size
+// back: what the pane learned by resolving the name is what the caller must not
+// learn.
+func fileVersionFailureDetail(err error) string {
+	var byteLimit *filesystem.ErrByteLimit
+	if errors.As(err, &byteLimit) {
+		return fmt.Sprintf("the file exceeds the %d-byte operation limit", byteLimit.Limit)
+	}
+	var notRegular *filesystem.ErrNotRegular
+	if errors.As(err, &notRegular) {
+		return "the path is not a regular file"
+	}
+	var invalidPath *filesystem.ErrInvalidPath
+	if errors.As(err, &invalidPath) {
+		return "the path is not clean"
+	}
+	var unavailable *filesystem.ErrUnavailable
+	if errors.As(err, &unavailable) {
+		return "the pane's file binding is not available"
+	}
+	var unsupported *filesystem.ErrVersionedUnsupported
+	if errors.As(err, &unsupported) {
+		return "this pane cannot report a file version"
+	}
+	if isNotFound(err) {
+		return "the file does not exist"
+	}
+	return "the pane could not read its version"
 }
 
 // isNotFound reports whether err is the pane saying the path does not exist.

@@ -267,13 +267,14 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 // the same one except where a test is about the relation.
 func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string) *kernelFixture {
 	t.Helper()
-	return middlewareForSeams(t, grant, ledger, approvals, requester, known, turnEntryID, localPaneEnvironment(), newLocalFileSource(t))
+	return middlewareForSeams(t, grant, ledger, approvals, requester, known, turnEntryID, newLocalFileSource(t))
 }
 
-// middlewareForSeams is middlewareForTurn with the two facts a test about the
-// PANE supplies: where the pane is, and the binding its files are read
-// through. Every other caller takes the local pair.
-func middlewareForSeams(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string, pane content.Environment, files filesystem.HandleSource) *kernelFixture {
+// middlewareForSeams is middlewareForTurn with the fact a test about a pane's
+// FILES supplies: the binding those files are read through. Every other caller
+// takes the local one — which machine that binding reaches is its own fact, so
+// nothing here names a pane's kind.
+func middlewareForSeams(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string, files filesystem.HandleSource) *kernelFixture {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
@@ -286,12 +287,11 @@ func middlewareForSeams(t *testing.T, grant content.Grant, ledger AttemptLedger,
 			break
 		}
 	}
-	// Test grants carry the pane identity; production receives it from transport.
 	var screenCapture ScreenCaptureSource
 	if source, ok := requester.(ScreenCaptureSource); ok {
 		screenCapture = source
 	}
-	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: pane, files: files})
+	mw, err := newKernelFixture(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, files: files})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newKernelFixture(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
+	mw2, mwErr := newKernelFixture(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, toolSeams{files: newLocalFileSource(t)})
 	if mwErr != nil {
 		t.Fatalf("newKernelFixture(run-2): %v", mwErr)
 	}
@@ -762,7 +762,7 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	if !found {
 		t.Fatal("files.read declaration not found")
 	}
-	mw, err := newKernelFixture(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment(), files: newLocalFileSource(t)})
+	mw, err := newKernelFixture(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, toolSeams{files: newLocalFileSource(t)})
 	if err != nil {
 		t.Fatalf("newKernelFixture: %v", err)
 	}

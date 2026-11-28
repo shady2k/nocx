@@ -716,9 +716,9 @@ test('a raw host draws the Ports card and never runs the port tool', async ({ pa
     await expect(card).toContainText(RAW_SENTENCE)
     // The same card Git and Files draw: the backend's one action, and no
     // Retry — a reason that offers no remedy draws no button.
-    await expect(page.locator('[data-testid="ports-host-settings"]')).toBeVisible()
-    await expect(page.locator('[data-testid="ports-helper-refresh"]')).toHaveCount(0)
-    await expect(page.locator('#sidebar').getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await expect(card.getByTestId('ports-host-settings')).toBeVisible()
+    await expect(card.getByTestId('ports-helper-refresh')).toHaveCount(0)
+    await expect(card.getByRole('button', { name: 'Retry' })).toHaveCount(0)
     // No wire token reaches a window, and no failure sentence either: a
     // refusal the backend typed is a state, not an error to explain.
     await expect(card).not.toContainText('mode-raw')

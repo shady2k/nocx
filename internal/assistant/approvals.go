@@ -63,6 +63,19 @@ type Approval struct {
 	// or execute — the evidence the question binds, read through the run's
 	// own file binding. They are carriers, not part of the proposal key.
 	FileVersions []FileVersion
+	// FileVersionFailure is why that evidence could not be captured, when it
+	// could not be. It is a carrier like FileVersions, and it exists because
+	// the answer that follows the question must name the cause the person and
+	// the model can act on: a file over the read ceiling, a path the provider
+	// refuses, a host the helper cannot reach. Without it the refusal read
+	// "file version binding is missing", which names nothing.
+	//
+	// Its TEXT is the pane's lexical vocabulary and never the provider's: a
+	// capture or verification failure is classified (fileversion.go) so a
+	// canonical path outside the approved area — one a symlink inside it named
+	// — cannot be disclosed to the model. The typed cause stays wrapped for the
+	// guards that classify on it.
+	FileVersionFailure error
 	// ExpansionValues are the expression→value pairs the person was SHOWN
 	// beside the verbatim command (nocx-4h0m7.5). They are a carrier, never
 	// part of the key, and they are what the re-read immediately before
@@ -94,6 +107,7 @@ type approvalEntry struct {
 	commandInvocation bool
 	fileVersionState  FileVersionBindingState
 	fileVersions      []FileVersion
+	fileVersionErr    error
 	expansionValues   []ExpansionValue
 	outOfScope        *OutOfScopeFact
 }
@@ -275,6 +289,7 @@ func (s *ApprovalStore) Request(ap Approval) {
 		commandInvocation: ap.CommandInvocation || (ap.Invocation.Parsed && ap.Invocation.Commands != nil),
 		fileVersionState:  ap.FileVersionState,
 		fileVersions:      cloneFileVersions(ap.FileVersions),
+		fileVersionErr:    ap.FileVersionFailure,
 		expansionValues:   cloneExpansionValues(ap.ExpansionValues),
 		outOfScope:        ap.OutOfScope,
 	}
@@ -313,6 +328,7 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 		commandInvocation: cur.commandInvocation,
 		fileVersionState:  cur.fileVersionState,
 		fileVersions:      cloneFileVersions(cur.fileVersions),
+		fileVersionErr:    cur.fileVersionErr,
 		// The values the PERSON was shown, from the pending record. The
 		// wire's approve carries none of them, and taking them from the
 		// answer would let a changed question re-authorise itself.
@@ -393,11 +409,17 @@ func (s *ApprovalStore) ApprovedFileVersions(ap Approval) ([]FileVersion, bool) 
 // A missing binding is a failure, not a skip: a captured approval with no
 // source to re-read it through cannot prove the bytes are the ones the person
 // saw, and "could not check" must never read as "unchanged".
+//
+// When the capture itself failed, the error it failed WITH is what comes back,
+// so the refusal after the answer names the cause a person and a model can act
+// on — a file over the read ceiling, a host the helper cannot reach — rather
+// than the bare fact that nothing was recorded.
 func (s *ApprovalStore) VerifyApprovedFileVersions(ctx context.Context, source filesystem.HandleSource, ap Approval) error {
 	s.mu.Lock()
 	entry, ok := s.approved[keyOf(ap)]
 	state := entry.fileVersionState
 	versions := cloneFileVersions(entry.fileVersions)
+	captureFailure := entry.fileVersionErr
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("approval: proposal is not approved")
@@ -410,6 +432,9 @@ func (s *ApprovalStore) VerifyApprovedFileVersions(ctx context.Context, source f
 			return fmt.Errorf("approval: file version binding is marked captured but contains no versions")
 		}
 	default:
+		if captureFailure != nil {
+			return fmt.Errorf("approval: the file version this approval binds could not be read: %w", captureFailure)
+		}
 		return fmt.Errorf("approval: file version binding is missing")
 	}
 	for _, version := range versions {

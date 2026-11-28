@@ -372,8 +372,7 @@ func capabilityOver(t *testing.T, provider filesystem.Provider, fx queryFixture,
 		t.Fatalf("%s is not in the registry", name)
 	}
 	capability, err := tool.Narrow(fx.grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, agenttools.RunContext{
-		Environment: localPaneEnvironment(),
-		Files:       source,
+		Files: source,
 	})
 	if err != nil {
 		t.Fatalf("Narrow %s: %v", name, err)

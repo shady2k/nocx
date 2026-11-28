@@ -130,14 +130,6 @@ type toolSeams struct {
 	// machine (stage 10, ADR-anntnxdj §5). Nil is a run with no binding, which
 	// builds no file capability at all.
 	files filesystem.HandleSource
-	// paneEnvironment is where the pane this run was asked in is, derived
-	// from the session's own facts by the adapter that admitted the caller
-	// (the transport's environmentForSession) — never from a call's
-	// parameters and never from the renderer's idea of where it is. The
-	// zero value names no pane, which the file tools refuse: a capability
-	// that cannot prove the pane is this machine must not reach this disk
-	// (ADR-anntnxdj §5, decision 3).
-	paneEnvironment content.Environment
 	// questioner is the authority seam to the approval service (Questioner,
 	// kernel.go): an Ask blocks the call on the person's answer. Nil is a
 	// caller with no person to ask, where every ask is refused.
@@ -991,7 +983,7 @@ func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.
 	}
 	result, err := editor.Edit(ctx, p.Path, p.Revision, p.Patch)
 	if err != nil {
-		if capabilityRefusal(err) {
+		if reason, _ := capabilityRefusal(err); reason != "" {
 			return "", err
 		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
@@ -1016,7 +1008,7 @@ func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args jso
 	}
 	result, err := editor.Create(ctx, p.Path, p.Content)
 	if err != nil {
-		if capabilityRefusal(err) {
+		if reason, _ := capabilityRefusal(err); reason != "" {
 			return "", err
 		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})

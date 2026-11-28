@@ -499,7 +499,6 @@ func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
 	tools, err := assistant.BindRunTools(context.Background(), client, assistant.AskParams{
 		Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
 		RunID: "real-chain", SessionID: string(stand.sess.ID()), Attempt: 1,
-		Environment:   content.Environment{Kind: content.EnvLocal},
 		Files:         localFilesForTest(t, stand.sess.ID()),
 		AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: secret}, Approvals: store, Questioner: person,
 	}, nil)

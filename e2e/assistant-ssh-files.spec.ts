@@ -1,0 +1,608 @@
+/**
+ * e2e: on an ssh pane the assistant reads, lists, searches and edits THAT
+ * server's files, and never this machine's same-named ones (nocx-a62cl.11.4,
+ * stage 10's DONE WHEN).
+ *
+ * # The stand
+ *
+ * A real backend with its own disposable home (this machine, "L"), the
+ * `sshd-fixture` host with its own home (the far machine, "R"), a host record
+ * in Helper mode, `FakeOpenAI` and real pi. The two filesystems are two temp
+ * trees, and every fixture file has a same-NAMED twin under each home:
+ *
+ *   R/proj/{permit.conf, ask.conf, src/a.go: "needle-remote"}
+ *   L/proj/{permit.conf, ask.conf, src/a.go: "needle-local", local-only.txt}
+ *
+ * The absolute paths therefore differ (R is not L), which is what the stand can
+ * do; the assertion that the tools never reach L is what it must do, and it is
+ * made on L's bytes and modification times after every scenario.
+ *
+ * # Why this file's job cannot be done by a Go test alone
+ *
+ * A Go test can hand the tools a fake provider and call it an ssh pane. What
+ * it cannot do is put a REAL helper on a real ssh connection, a real pane on
+ * the screen, a real person in front of the approval prompt, and a real `pi`
+ * behind the model. Every scenario below is a person's gesture and its
+ * observable result; the transport acceptance test
+ * (internal/transport/assistant_files_remote_test.go) is the proof about the
+ * local disk, and this file is the proof about the product.
+ *
+ * # Policy
+ *
+ * `policy.set`, the product's own control-plane write, before the first ask:
+ * `observe` permits reads under R/proj. The permit case scopes
+ * `mutate-reversible` to R/proj/permit.conf. The approval cases set the
+ * mutation row to `ask`, which offers Allow once for an edit of ask.conf.
+ *
+ * # No timing
+ *
+ * Every wait is on an observable state: a frame on the wire, a request the fake
+ * recorded, an element on screen, an attribute on a block. Nothing waits out a
+ * duration.
+ */
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { expect, type Page } from '@playwright/test'
+
+import {
+  standalone as base,
+  appReadyForInput,
+  bindEndpoint,
+  ensureAssistantVault,
+  promptReady,
+  VaultBackend,
+  type BackendEndpoint,
+} from './harness'
+import { FakeOpenAI } from './fake-openai'
+import { configurePiHome } from './pi-home'
+import {
+  captureAppSocket,
+  hostKeyFingerprint,
+  recordHostMethod,
+  rpc,
+  rpcOnAppSocket,
+  startSshd,
+  type SshdFixture,
+} from './sshd-fixture'
+import { readStand } from './stand'
+import { askFromPrompt, chatRequests, toolResults } from './ask-gesture'
+
+const test = base
+
+const TAB = '.nocx-tab'
+const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
+const QUICK_CONNECT_ITEM = '.quick-connect__item'
+const APPROVAL_TITLE = 'This action needs your approval'
+const ANSWER_BODY = '.cmd-output[data-answer-body]'
+
+const serverBin = () => readStand().server
+
+let fake: FakeOpenAI
+let backend: VaultBackend
+let endpoint: BackendEndpoint
+let fixture: SshdFixture
+/** The far machine's home — what the pane's shell calls `~`. */
+let remoteHome: string
+/** This machine's home for this backend: the disposable one. */
+let localHome: string
+/** R's project directory, the absolute path the model is given. */
+let remoteProj: string
+/** L's twin of it. */
+let localProj: string
+
+/** L's bytes as seeded, and what "untouched" is measured against. */
+const seededLocal = new Map<string, { body: string; size: number; mtimeMs: number }>()
+
+test.describe.configure({ mode: 'serial' })
+
+function seed(path: string, body: string): void {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, body)
+}
+
+/** Every file under L/proj as it stands now: bytes, length and mtime. */
+function localState(dir: string): Map<string, { body: string; size: number; mtimeMs: number }> {
+  const out = new Map<string, { body: string; size: number; mtimeMs: number }>()
+  const walk = (at: string): void => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      const child = join(at, entry.name)
+      if (entry.isDirectory()) {
+        walk(child)
+        continue
+      }
+      const stat = statSync(child)
+      out.set(child, {
+        body: readFileSync(child, 'utf8'),
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      })
+    }
+  }
+  walk(dir)
+  return out
+}
+
+test.beforeAll(async () => {
+  fake = new FakeOpenAI()
+  await fake.start()
+
+  remoteHome = mkdtempSync(join(tmpdir(), 'nocx-ssh-files-host-'))
+  // mkdtempSync creates the leaf; home-isolation creates `<root>/home` itself,
+  // so the local twin is seeded after the backend has started (start() is what
+  // derives it), from the path the boundary will use.
+  remoteProj = join(remoteHome, 'proj')
+  seed(join(remoteProj, 'permit.conf'), 'permit remote\n')
+  seed(join(remoteProj, 'ask.conf'), 'ask remote\n')
+  seed(join(remoteProj, 'src', 'a.go'), 'package a\n// needle-remote\n')
+
+  fixture = await startSshd({ home: remoteHome, cwd: remoteHome })
+
+  const root = mkdtempSync(join(tmpdir(), 'nocx-ssh-files-'))
+  backend = new VaultBackend(serverBin(), { root })
+  endpoint = await backend.start(configurePiHome(root, fake.baseUrl()))
+
+  localHome = join(root, 'home')
+  localProj = join(localHome, 'proj')
+  seed(join(localProj, 'permit.conf'), 'permit local\n')
+  seed(join(localProj, 'ask.conf'), 'ask local\n')
+  seed(join(localProj, 'src', 'a.go'), 'package a\n// needle-local\n')
+  seed(join(localProj, 'local-only.txt'), 'only here\n')
+  for (const [path, state] of localState(localProj)) seededLocal.set(path, state)
+
+  const sshDir = join(backend.isolatedHome, '.ssh')
+  mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
+})
+
+test.afterAll(async () => {
+  fixture?.proc.kill('SIGTERM')
+  backend?.stop()
+  await fake?.stop()
+})
+
+/** Permit reads under R/proj and set the mutation policy for this scenario. */
+async function configureFilePolicy(page: Page, write: 'permit' | 'ask'): Promise<void> {
+  const ask = { decision: 'ask', scopes: [] }
+  const res = await rpc<{ applied: boolean }>(page, endpoint, 'policy.set', {
+    policy: {
+      observe: { decision: 'permit', scopes: [{ kind: 'path', id: remoteProj }] },
+      'mutate-reversible':
+        write === 'permit'
+          ? { decision: 'permit', scopes: [{ kind: 'path', id: join(remoteProj, 'permit.conf') }] }
+          : ask,
+      'mutate-destructive': ask,
+      'privilege-change': ask,
+      disclose: ask,
+      'cross-boundary': ask,
+      delegate: ask,
+    },
+    runs: 'ask',
+  })
+  expect(res.applied).toBe(true)
+}
+
+/** Open the profile's saved connection through the product's own quick-connect.
+ *
+ *  HOW THE HOST CONNECTS IS WRITTEN FIRST, and never answered in a dialog. The
+ *  connect-time ask is shown once per host key and remembered afterwards, so a
+ *  suite that relied on it would find it in the first test and nowhere else —
+ *  and the backend is shared by every test in this file (beforeAll).
+ *  `connections.setIntegrationMethod` is the same write the dialog performs,
+ *  including the helper grant, which is how ssh-panels.spec.ts opens its
+ *  panes (e2e/ssh-panels.spec.ts:259). */
+async function openPane(page: Page, profileName: string, method: 'raw' | 'helper'): Promise<void> {
+  await recordHostMethod(page, endpoint, hostKeyFingerprint(fixture.knownHosts), method)
+  const tabs = page.locator(TAB)
+  const beforeTabs = await tabs.count()
+  await page.keyboard.press('Control+Shift+P')
+  const search = page.locator(QUICK_CONNECT_SEARCH)
+  await expect(search).toBeVisible({ timeout: 30_000 })
+  await search.fill(profileName)
+  await expect(page.locator(QUICK_CONNECT_ITEM, { hasText: profileName })).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.keyboard.press('Enter')
+  await expect(tabs).toHaveCount(beforeTabs + 1, { timeout: 120_000 })
+}
+
+/** Open a pane to the fixture host in Helper mode and wait for its editor. */
+async function openHelperPane(page: Page, profileName: string): Promise<void> {
+  await openPane(page, profileName, 'helper')
+  await promptReady(page)
+}
+
+/** Create the saved connection this file opens, once per test that needs it:
+ *  the profile name carries the test's own nonce so two tests cannot collide
+ *  in the palette. */
+async function createProfile(page: Page, name: string): Promise<string> {
+  await rpc(page, endpoint, 'profiles.create', {
+    type: 'ssh',
+    name,
+    options: {
+      host: fixture.host,
+      port: fixture.port,
+      user: fixture.user,
+      keyPath: fixture.userKey,
+    },
+  })
+  return name
+}
+
+/** A fresh page on this backend with its first tab ready. */
+async function openApp(page: Page): Promise<void> {
+  await bindEndpoint(page, endpoint)
+  await page.goto('/')
+  const firstTab = page.locator(TAB).first()
+  await expect(firstTab).toBeVisible()
+  await appReadyForInput(page)
+  await ensureAssistantVault(page, endpoint, 'disposable-ssh-assistant-passphrase')
+  await firstTab.click()
+}
+
+function answerBlock(page: Page, question: string) {
+  return page.locator('.cmd-block').filter({ hasText: question })
+}
+
+/** Success is silent (2026-09-14 §3.1): the outcome attribute is the
+ *  observable, the word `completed` never reaches the DOM. */
+async function answerFinished(page: Page, question: string): Promise<void> {
+  await expect(answerBlock(page, question)).toHaveAttribute('data-outcome', 'success', {
+    timeout: 60_000,
+  })
+}
+
+/** L/proj is exactly as it was seeded: every byte, every length, every
+ *  modification time. A tool that read or wrote this machine's twin instead
+ *  of the host's file would move one of them. */
+function expectLocalUntouched(): void {
+  const now = localState(localProj)
+  expect([...now.keys()].sort()).toEqual([...seededLocal.keys()].sort())
+  for (const [path, was] of seededLocal) {
+    expect(
+      now.get(path),
+      `${path} was touched by a call that should have reached the host`,
+    ).toEqual(was)
+  }
+}
+
+test.describe('the assistant acts on the ssh pane’s own files', () => {
+  test.use({ viewport: { width: 1280, height: 900 } })
+
+  test('files.list and files.search answer from the host, not from here', async ({ page }) => {
+    test.setTimeout(600_000)
+    await openApp(page)
+    await configureFilePolicy(page, 'permit')
+    await openHelperPane(page, await createProfile(page, `e2e-ssh-files-list-${Date.now()}`))
+
+    // Both calls in ONE turn: the listing proves the host's names, and the
+    // search proves its bytes. The answer is DERIVED from what the model was
+    // sent, so the person's answer is evidence about the product rather than
+    // about the fake.
+    fake.setScript({
+      chunks: [],
+      toolCalls: [
+        { name: 'files.list', arguments: { path: remoteProj } },
+        { name: 'files.search', arguments: { path: remoteProj, pattern: 'needle' } },
+      ],
+    })
+    fake.setScript({ chunks: (body) => answerFrom(body) })
+
+    const QUESTION = 'List the project and search it for the needle.'
+    const before = fake.requests().length
+    await askFromPrompt(page, QUESTION)
+    await answerFinished(page, QUESTION)
+
+    const answered = fake
+      .requests()
+      .slice(before)
+      .map((request) => request.body)
+    const results = answered.flatMap(toolResults)
+    const listing =
+      results.find(
+        (result) => result.includes('local-only.txt') || result.includes('permit.conf'),
+      ) ?? ''
+    const search = results.find((result) => result.includes('needle')) ?? ''
+
+    // 1. THE LISTING IS THE HOST'S: its own names, and none of the file only
+    //    this machine has.
+    expect(listing).toContain('permit.conf')
+    expect(listing).toContain('ask.conf')
+    expect(listing).not.toContain('local-only.txt')
+
+    // 2. THE SEARCH SAW THE HOST'S BYTES, and never this machine's twin.
+    expect(search).toContain('needle-remote')
+    expect(search).not.toContain('needle-local')
+
+    // And the person's answer repeats it, so the result really reached the
+    // model and the surface really showed it.
+    await expect(answerBlock(page, QUESTION).locator(ANSWER_BODY)).toContainText('needle-remote')
+
+    expectLocalUntouched()
+  })
+
+  test('files.edit under a permit row changes the host’s file and not this machine’s', async ({
+    page,
+  }) => {
+    test.setTimeout(600_000)
+    await openApp(page)
+    await configureFilePolicy(page, 'permit')
+    await openHelperPane(page, await createProfile(page, `e2e-ssh-files-permit-${Date.now()}`))
+
+    const target = join(remoteProj, 'permit.conf')
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'files.read', arguments: { path: target } }],
+    })
+    // The revision is what the READ actually answered, never one this spec
+    // invented: a made-up token would be refused and the scenario would pass
+    // for the wrong reason.
+    fake.setScript({
+      chunks: [],
+      toolCalls: (body) => [
+        {
+          name: 'files.edit',
+          arguments: {
+            path: target,
+            revision: revisionOf(body),
+            patch: 'PUT 1.=1:\n+permit remote, edited',
+          },
+        },
+      ],
+    })
+    fake.setScript({ chunks: (body) => answerFrom(body) })
+
+    const QUESTION = 'Read permit.conf and change its first line.'
+    await askFromPrompt(page, QUESTION)
+    await answerFinished(page, QUESTION)
+
+    // 3. THE HOST'S FILE CHANGED, with no question asked: the row permits this
+    //    one path.
+    expect(readFileSync(target, 'utf8')).toBe('permit remote, edited\n')
+    // And this machine's twin is byte for byte, mtime for mtime, as it was.
+    expectLocalUntouched()
+  })
+
+  test('an edit the policy asks about changes the host’s file after the answer', async ({
+    page,
+  }) => {
+    test.setTimeout(600_000)
+    await openApp(page)
+    await configureFilePolicy(page, 'ask')
+    await openHelperPane(page, await createProfile(page, `e2e-ssh-files-ask-${Date.now()}`))
+
+    const target = join(remoteProj, 'ask.conf')
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'files.read', arguments: { path: target } }],
+    })
+    fake.setScript({
+      chunks: [],
+      toolCalls: (body) => [
+        {
+          name: 'files.edit',
+          arguments: {
+            path: target,
+            revision: revisionOf(body),
+            patch: 'PUT 1.=1:\n+ask remote, edited',
+          },
+        },
+      ],
+    })
+    fake.setScript({ chunks: (body) => answerFrom(body) })
+
+    const QUESTION = 'Read ask.conf and change its first line.'
+    await askFromPrompt(page, QUESTION)
+
+    // 4. THE QUESTION, and then the edit: the person's yes is what authorises
+    //    a write outside the permit scope.
+    const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
+    await expect(prompt).toBeVisible({ timeout: 60_000 })
+    await expect(prompt).toContainText('files.edit')
+    await prompt.getByRole('button', { name: /^Allow once/ }).click()
+    await expect(prompt).toHaveCount(0)
+
+    await answerFinished(page, QUESTION)
+    expect(readFileSync(target, 'utf8')).toBe('ask remote, edited\n')
+    expectLocalUntouched()
+  })
+
+  test('a change made while the question is open is refused and nothing is installed', async ({
+    page,
+  }) => {
+    test.setTimeout(600_000)
+    await openApp(page)
+    await configureFilePolicy(page, 'ask')
+    await openHelperPane(page, await createProfile(page, `e2e-ssh-files-changed-${Date.now()}`))
+
+    const target = join(remoteProj, 'ask.conf')
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'files.read', arguments: { path: target } }],
+    })
+    fake.setScript({
+      chunks: [],
+      toolCalls: (body) => [
+        {
+          name: 'files.edit',
+          arguments: {
+            path: target,
+            revision: revisionOf(body),
+            patch: 'PUT 1.=1:\n+ask remote, edited',
+          },
+        },
+      ],
+    })
+    fake.setScript({ chunks: (body) => answerFrom(body) })
+
+    const QUESTION = 'Read ask.conf and change its first line, again.'
+    const before = fake.requests().length
+    await askFromPrompt(page, QUESTION)
+
+    const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
+    await expect(prompt).toBeVisible({ timeout: 60_000 })
+    // 5. THE WINDOW: while the question is open, somebody else writes the file
+    //    on the host. The approval the person is about to give covers bytes
+    //    that no longer exist, and the call must refuse rather than install.
+    writeFileSync(target, 'third-party\n')
+    await prompt.getByRole('button', { name: /^Allow once/ }).click()
+    await expect(prompt).toHaveCount(0)
+    await answerFinished(page, QUESTION)
+
+    // The model was told, and the refusal names the change rather than a
+    // missing binding.
+    const results = fake
+      .requests()
+      .slice(before)
+      .flatMap((request) => toolResults(request.body))
+    const refusal = results.find((result) => result.startsWith('REFUSED')) ?? ''
+    expect(refusal).toContain('files.edit')
+    expect(refusal).toContain('changed since approval')
+
+    // The outsider's bytes are what remains on the host, and this machine's
+    // twin was never involved.
+    expect(readFileSync(target, 'utf8')).toBe('third-party\n')
+    expectLocalUntouched()
+  })
+
+  test('a host whose helper is not serving refuses files.* with its reason', async ({ page }) => {
+    test.setTimeout(600_000)
+    // The question about this pane travels the CONTROL channel (below), so the
+    // page's own socket has to be the one it travels on.
+    await captureAppSocket(page)
+    await openApp(page)
+    // A raw host runs no helper at all, and the reason the panel shows for
+    // such a connection is `mode-raw`. Reads are permitted outright here so
+    // that what stops the call is the axis and never the policy.
+    const ask = { decision: 'ask', scopes: [] }
+    const applied = await rpc<{ applied: boolean }>(page, endpoint, 'policy.set', {
+      policy: {
+        observe: { decision: 'permit', scopes: [] },
+        'mutate-reversible': ask,
+        'mutate-destructive': ask,
+        'privilege-change': ask,
+        disclose: ask,
+        'cross-boundary': ask,
+        delegate: ask,
+      },
+      runs: 'ask',
+    })
+    expect(applied.applied).toBe(true)
+    const name = await createProfile(page, `e2e-ssh-files-raw-${Date.now()}`)
+    await openPane(page, name, 'raw')
+    // The attribute is published only once the ssh handshake has completed, so
+    // it is awaited rather than read once the tab exists.
+    await expect(page.locator('.pane.active')).toHaveAttribute('data-session-id', /.+/, {
+      timeout: 60_000,
+    })
+    const sessionId = await page.locator('.pane.active').getAttribute('data-session-id')
+    if (sessionId === null) {
+      throw new Error('the raw pane published no session for the question to name')
+    }
+
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'files.read', arguments: { path: join(remoteProj, 'permit.conf') } }],
+    })
+    // 6. THE SCREEN READ STILL WORKS: its content does not come through the
+    //    helper, so a host with no helper loses its FILES and not the pane.
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
+    })
+    fake.setScript({ chunks: (body) => answerFrom(body) })
+
+    const QUESTION = 'Read permit.conf on this host, then read the screen.'
+    const before = fake.requests().length
+    await askOnThePanesOwnSession(page, sessionId, QUESTION)
+
+    // No DOM block is the observable here, and that is the product's own
+    // reason: a raw pane has no block for OSC 133 to close, so the composer
+    // refuses the chord with `no-running-command` (frontend/src/
+    // terminal-content.ts, canSummonEditor). What the model was SENT is the
+    // proof: the two calls ran, in order, in the pane's own session.
+    // Every request carries the results the model has been sent SO FAR, so the
+    // turn is read as one request holding both answers rather than as a count
+    // of results across requests, which grows 0 → 1 → 2 as the turn proceeds.
+    await expect
+      .poll(
+        () =>
+          chatRequests(fake, before).some((request) => {
+            const sent = toolResults(request.body)
+            return (
+              sent.some((result) => result.startsWith('REFUSED')) &&
+              sent.some((result) => result.includes('"screen"'))
+            )
+          }),
+        {
+          message: 'the turn never reported both a refusal and a screen read',
+          timeout: 120_000,
+        },
+      )
+      .toBe(true)
+
+    const last = chatRequests(fake, before).at(-1)
+    if (last === undefined) throw new Error('the turn sent no request to read its results from')
+    const results = toolResults(last.body)
+
+    const refused = results.find((result) => result.startsWith('REFUSED')) ?? ''
+    expect(refused).toContain('files.read')
+    expect(refused).toContain('mode-raw')
+    // And the run went on: the screen read answered about THIS pane, so one
+    // call was refused for the axis and the other was served by the pane.
+    const screen = results.find((result) => result.includes('"screen"')) ?? ''
+    expect(screen).toContain('"state":"screen"')
+    expect(screen).toContain(sessionId)
+    expect(screen.startsWith('REFUSED')).toBe(false)
+
+    expectLocalUntouched()
+  })
+})
+
+/** The revision the read actually answered, taken from the tool result the
+ *  model was sent. A missing token throws rather than silently proposing an
+ *  edit the backend would refuse. */
+function revisionOf(body: string): string {
+  const result = toolResults(body).find((text) => text.includes('"revision"'))
+  const match = result?.match(/"revision":"([^"]+)"/)
+  if (!match) throw new Error('the read answered no revision to edit under')
+  return match[1]
+}
+
+/** The model's answer, derived from what it was actually sent: the markers the
+ *  scenarios assert on can only be there if the tool results reached it. */
+function answerFrom(body: string): string[] {
+  const results = toolResults(body)
+  if (results.length === 0) return ['I was given no result.']
+  return ['Here is what I found: ', results.join(' ')]
+}
+
+/** Ask the assistant a question about ONE pane, over the control channel, in
+ *  that pane's own session.
+ *
+ *  Why not the composer. A question asked with ⌘/Ctrl+Enter carries the block
+ *  the person is looking at, and a raw ssh pane has none: no OSC 133, so no
+ *  running item, so `canSummonEditor` answers `no-running-command` and the
+ *  chord is consumed silently (frontend/src/terminal-content.ts). The product
+ *  therefore offers no gesture on that pane, and a spec that waited for one
+ *  would be waiting for a surface the mode deliberately does not have. The
+ *  call still has to name the pane's session, which is owned by the socket
+ *  that opened it — hence the app's own socket, not `rpc`'s fresh one.
+ *
+ *  The run outlives the response (`agent.ask` answers as soon as the turn is
+ *  recorded), so the caller waits on what the turn produced, never on this.
+ */
+async function askOnThePanesOwnSession(
+  page: Page,
+  sessionId: string,
+  question: string,
+): Promise<void> {
+  await rpcOnAppSocket(page, 'agent.ask', {
+    askId: `e2e-ssh-files-raw-${Date.now()}`,
+    sessionId,
+    question,
+    attachedContent: [],
+    cwd: remoteHome,
+  })
+}

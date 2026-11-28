@@ -72,17 +72,6 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
-	// Environment is where the pane this run was asked in is: the identity
-	// the admitting adapter derived from the session's own facts — the
-	// transport's environmentForSession, the one owner of "where is this
-	// session" — never anything a call's parameters could name.
-	//
-	// The zero value names no pane. The file tools refuse it rather than
-	// assume this machine: they act through the pane's own binding
-	// (RunContext.Files below), and a run that never said where its pane is
-	// has not said it is here. localPaneOnly is that refusal, and
-	// it keeps a non-local pane out until the stage can reach one (.11.4).
-	Environment content.Environment
 	// Participant is the worker participant this run IS, when the run belongs
 	// to a worker rather than to a coordinator. Empty for every ordinary run,
 	// and that emptiness is what narrowWorkerParticipant refuses on.
@@ -119,8 +108,7 @@ type RunContext struct {
 	//
 	// Nil means no adapter bound one — a build with no files composition, or a
 	// caller that never wired it — and the file tools then build no capability
-	// at all rather than reaching this machine's disk by default. That default
-	// is the same guarantee localPaneOnly gives a non-local pane: a capability
+	// at all rather than reaching this machine's disk by default: a capability
 	// that cannot prove where it acts must not act.
 	Files filesystem.HandleSource
 	// PaneAccess is the DescendantPaneAccess capability (internal/app) bound
@@ -426,7 +414,7 @@ type Registry struct {
 var declarations = []Declaration{
 	{
 		Name:             "files.list",
-		Description:      "List the entries of a directory on this machine, and with recursive descend into its subdirectories; reach for this to find out what files exist rather than to read one whose name you already know. Symlinks are reported and never followed, and .git directories are skipped.",
+		Description:      "List the entries of a directory on the pane's host, and with recursive descend into its subdirectories; reach for this to find out what files exist rather than to read one whose name you already know. Symlinks are reported and never followed, and .git directories are skipped.",
 		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -440,7 +428,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "files.search",
-		Description:      "Search the CONTENTS of the files under a directory for a regular expression (RE2) and return the matching lines with their line numbers; reach for this when you know what the text says but not which file holds it. Binary files, symlinks and .git directories are skipped.",
+		Description:      "Search the CONTENTS of the files under a directory on the pane's host for a regular expression (RE2) and return the matching lines with their line numbers; reach for this when you know what the text says but not which file holds it. Binary files, symlinks and .git directories are skipped.",
 		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -454,7 +442,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "files.read",
-		Description:      "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
+		Description:      "Read the text of a file on the pane's host and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
 		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -634,7 +622,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "files.edit",
-		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
+		Description:      "Apply a strict line-addressed patch to a file you have read on the pane's host; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
 		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
@@ -648,7 +636,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:             "files.create",
-		Description:      "Create a new file if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
+		Description:      "Create a new file on the pane's host if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
 		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},

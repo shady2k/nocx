@@ -63,6 +63,17 @@ func desktopAssetOptions() application.AssetOptions {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
+				// `frame-ancestors` is the one CSP directive a document may not
+				// deliver from a <meta> element (CSP Level 3 §2.3.1): a browser or
+				// WebView ignores it there, and WebKit reports the refusal as a
+				// console error on every load (nocx-ifn4a). A response header is
+				// where it belongs, so the policy finally applies instead of being
+				// dropped — and only the app document carries it, because every
+				// other response is not a page that can be framed. The rest of the
+				// policy stays in frontend/index.html's <meta>.
+				if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+					w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+				}
 				next.ServeHTTP(w, r)
 			})
 		},

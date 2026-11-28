@@ -38,13 +38,19 @@ func TestDesktopAssetMiddleware(t *testing.T) {
 		method string
 		path   string
 		probe  bool
+		// document marks the two spellings of the app document: the response
+		// that carries the frame-ancestors policy no <meta> element may carry.
+		document bool
 	}{
 		{method: http.MethodHead, path: "/wails/custom.js", probe: true},
 		{method: http.MethodGet, path: "/wails/custom.js"},
 		{method: http.MethodGet, path: "/wails/runtime.js"},
 		{method: http.MethodHead, path: "/wails/runtime.js"},
 		{method: http.MethodPost, path: "/wails/runtime"},
-		{method: http.MethodGet, path: "/"},
+		{method: http.MethodGet, path: "/", document: true},
+		{method: http.MethodHead, path: "/", document: true},
+		{method: http.MethodGet, path: "/index.html", document: true},
+		{method: http.MethodHead, path: "/index.html", document: true},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			request := httptest.NewRequest(tc.method, tc.path, nil)
@@ -74,6 +80,20 @@ func TestDesktopAssetMiddleware(t *testing.T) {
 					t.Errorf("body = %q, want empty", response.Body.String())
 				}
 				return
+			}
+
+			// The app document is the only response allowed to claim frames:
+			// WebKit ignores frame-ancestors in a <meta> element and reports it
+			// as an error on every load, so the policy has to arrive as a
+			// header. Nothing else may be framed, and no other response is
+			// touched: the handler's own Content-Security-Policy would be
+			// overwritten by a blanket Set.
+			wantPolicy := ""
+			if tc.document {
+				wantPolicy = "frame-ancestors 'none'"
+			}
+			if got := response.Header().Get("Content-Security-Policy"); got != wantPolicy {
+				t.Errorf("Content-Security-Policy = %q, want %q", got, wantPolicy)
 			}
 
 			if calls != 1 || response.Code != http.StatusNotFound || response.Header().Get("X-Downstream") != "called" {

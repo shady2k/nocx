@@ -156,6 +156,10 @@ export const Dialog: Component<DialogProps> = (props) => {
     panel.style.height = ''
     panel.style.transition = ''
     panel.removeAttribute('data-animating')
+    // Back under observation now that the panel is `auto` again. A size change
+    // that landed while it was pinned is only visible here — this is what
+    // re-measures content that changed after it was already measured.
+    ro?.observe(panel)
   }
 
   /**
@@ -171,10 +175,15 @@ export const Dialog: Component<DialogProps> = (props) => {
    * rather than overflow.
    *
    * The size changes this animation itself causes (the pin, the transition)
-   * re-fire the observer every frame; `animating` suppresses those. A content
-   * change mid-transition is caught at transitionend: releasing to `auto`
-   * changes the size again and the observer re-runs this from the new
-   * settled height.
+   * are changes to the very element this observer watches, and an observer may
+   * not resize its own target: the engine reports "ResizeObserver loop
+   * completed with undelivered notifications" (WebKit does exactly that on a
+   * dialog step transition — nocx-ifn4a), and `animating` alone does not stop
+   * the notification, only this function's re-entry. So the observation is
+   * suspended for the pin and resumed by `releasePanelHeight` once the panel is
+   * `auto` again. A content change mid-transition is therefore NOT observed
+   * while pinned; it is measured at the transitionend that follows the
+   * release, or on the observer's first notification after it.
    */
   const syncPanelHeight = () => {
     const p = panel
@@ -189,6 +198,11 @@ export const Dialog: Component<DialogProps> = (props) => {
       return
     }
     animating = true
+    // Suspend measurement BEFORE touching the observed element: the pin, the
+    // forced reflow and the new target are all size changes of this element,
+    // and delivering them to our own callback is what the engine refuses to do
+    // quietly.
+    ro?.unobserve(p)
     // Marks the window in which the panel is pinned to the OLD height while its
     // content is already the NEW size. The body is a scroll container, so for
     // exactly that window it overflows and flashes a scrollbar — the most

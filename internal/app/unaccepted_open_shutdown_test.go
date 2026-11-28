@@ -597,6 +597,9 @@ func (s *helperOpenStand) shutdownWhileHeldInAttach(attach *gateArm, openDone <-
 func seedPane(t *testing.T, a *App) (*websocket.Conn, string) {
 	t.Helper()
 	conn := dialAppWS(t, a)
+	// Keep the renderer connected through Shutdown. The pane and its in-flight
+	// open depend on this socket even after the test stops reading from it.
+	t.Cleanup(func() { _ = conn.Close() })
 	state := callAppWS(t, conn, "layout.read", map[string]any{}, 1)
 	if state.Error != nil {
 		t.Fatalf("layout.read: %+v", state.Error)
@@ -664,7 +667,7 @@ func openOverWS(t *testing.T, conn *websocket.Conn, spec transport.OpenSpec, id 
 			continue
 		}
 		var env struct {
-			ID     uint64          `json:"id"`
+			ID     int             `json:"id"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 			Result json.RawMessage `json:"result"`
@@ -688,7 +691,7 @@ func openOverWS(t *testing.T, conn *websocket.Conn, spec transport.OpenSpec, id 
 			}
 			continue
 		}
-		if env.ID != uint64(id) {
+		if env.ID != id {
 			continue
 		}
 		if env.Error != nil {

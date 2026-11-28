@@ -50,7 +50,12 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		ObservedAt: s.ObservedAt.UTC().Format(time.RFC3339),
 	}
 	if s.ShellFailure != nil {
-		p.ShellFailure = &transport.PaneShellFailure{Code: s.ShellFailure.Code, Message: s.ShellFailure.Message, Data: s.ShellFailure.Data}
+		p.ShellFailure = &transport.PaneShellFailure{
+			Code:     s.ShellFailure.Code,
+			Message:  s.ShellFailure.Message,
+			Data:     s.ShellFailure.Data,
+			Sequence: s.ShellFailure.Sequence,
+		}
 	}
 	if s.Transport.HasLook {
 		p.Transport.LookAnsweredAt = s.Transport.LookAnsweredAt.UTC().Format(time.RFC3339)
@@ -63,9 +68,13 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 	}
 	// THE OFFER'S PRESENCE IS THE BUTTON (design §5.8): a nil object means no
 	// action is shown, so an empty one could never stand for "offered, ends
-	// nothing".
+	// nothing". WHAT the press does rides along untouched: the driver decided
+	// it, and the transport routes on it (panedriver.Reconnect.Reopens).
 	if s.Reconnect != nil {
-		p.Reconnect = &transport.PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
+		p.Reconnect = &transport.PaneConnectionReconnect{
+			EndsShells:  s.Reconnect.EndsShells,
+			ReopensPane: s.Reconnect.Reopens,
+		}
 	}
 	return p
 }

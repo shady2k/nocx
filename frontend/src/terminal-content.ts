@@ -553,22 +553,31 @@ export interface HelperConsentAnswer {
 
 function helperConsentAskFromOpenError(err: unknown): HelperConsentAskEvidence | null {
   if (!(err instanceof RpcError)) return null
-  const data: unknown = err.data
+  return helperConsentAskFromData(err.data)
+}
+
+/**
+ * The same evidence, read from the ask's own DATA — the shape both carriers
+ * share: an `open` refusal and a pane's failed-reopen report (`shellFailure`)
+ * carry `open.helperConsent.schema.json`'s object, so one reader serves both
+ * and a second one cannot drift (nocx-oalo1.25).
+ */
+function helperConsentAskFromData(raw: unknown): HelperConsentAskEvidence | null {
   if (
-    !data ||
-    typeof data !== 'object' ||
-    !('helperAsk' in data) ||
-    data.helperAsk !== true ||
-    !('host' in data) ||
-    typeof data.host !== 'string' ||
-    !('fingerprint' in data) ||
-    typeof data.fingerprint !== 'string'
+    !raw ||
+    typeof raw !== 'object' ||
+    !('helperAsk' in raw) ||
+    raw.helperAsk !== true ||
+    !('host' in raw) ||
+    typeof raw.host !== 'string' ||
+    !('fingerprint' in raw) ||
+    typeof raw.fingerprint !== 'string'
   ) {
     return null
   }
   let hostKey: HostKeyErrorEvidence | null = null
-  if ('hostKey' in data && data.hostKey && typeof data.hostKey === 'object') {
-    const hk: unknown = data.hostKey
+  if ('hostKey' in raw && raw.hostKey && typeof raw.hostKey === 'object') {
+    const hk: unknown = raw.hostKey
     if (
       typeof hk === 'object' &&
       hk !== null &&
@@ -600,10 +609,9 @@ function helperConsentAskFromOpenError(err: unknown): HelperConsentAskEvidence |
     }
   }
   return {
-    host: data.host,
-    fingerprint: data.fingerprint,
-    profileId:
-      'profileId' in data && typeof data.profileId === 'string' ? data.profileId : undefined,
+    host: raw.host,
+    fingerprint: raw.fingerprint,
+    profileId: 'profileId' in raw && typeof raw.profileId === 'string' ? raw.profileId : undefined,
     hostKey,
   }
 }
@@ -2044,6 +2052,23 @@ export class TerminalContent extends BasePaneContent {
   private _heldTypeAhead: SessionIntent[] = []
   /** One refusal line per loss, not one per keystroke (nocx-oalo1.5.1). */
   private _inputRefusalAnnounced = false
+  /** THE REFUSAL WHOSE METHOD QUESTION WAS ALREADY ASKED (nocx-oalo1.25).
+   *  The refusal's own sequence, never the observation's epoch: a pane keeps
+   *  its last refusal on every frame until a replacement shell is adopted, so
+   *  the epoch moves while the question stays the same — and an epoch-keyed ask
+   *  raised the dialog a second time after the person had just answered it.
+   *  A genuinely new refusal carries a new sequence and is asked again. */
+  private _reopenAskedFailure: number | null = null
+  /** The question this pane is asking about that refusal, and the offer it was
+   *  drawn from (nocx-oalo1.25). Held so the dialog can be closed when a newer
+   *  fact makes it stale, and so its answer can press only the offer the person
+   *  was actually shown. */
+  private _reopenAsk: {
+    failure: number
+    endsShells: number
+    abort: AbortController
+    detach: () => void
+  } | null = null
 
   /** What this pane looks like right now, for the wake diagnostic
    *  (wake-report.ts). Measurements only — nothing here decides or repairs,
@@ -2078,6 +2103,92 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
+   * A RECONNECT'S OWN REFUSAL CAN BE THE METHOD QUESTION (nocx-oalo1.25).
+   *
+   * The press is a fresh open of the pane, and a fresh open of a host whose
+   * helper use nobody has answered refuses with the connect-time ask. On the
+   * FIRST open that ask arrives as the `open` RPC's refusal and the loop below
+   * raises the dialog. A press has no such round trip to hang it on: the
+   * backend registers the reopen, runs it, and reports the outcome on this
+   * channel — so the same ask arrives as the pane's `shellFailure`, carrying
+   * the same data.
+   *
+   * THE QUESTION BELONGS TO ONE REFUSAL, NOT TO ONE FRAME. The refusal stays on
+   * every observation until a replacement shell is adopted (deliberately: the
+   * way out must stay on screen while the retry is in flight), so it is
+   * republished under a new epoch each time the pane binds again — and asking
+   * per epoch put a second dialog in front of a shell the person had already
+   * answered for. `sequence` is the refusal's own identity, minted by the
+   * driver, so this asks once per refusal and once more only when the backend
+   * names a new one.
+   *
+   * THE ANSWER BELONGS TO THE QUESTION THAT ASKED IT. Its dialog may outlive
+   * the refusal — the connection can come back and open a shell while the
+   * person is still reading — so the answer presses only while the same refusal
+   * still stands, and only the offer it was drawn from. A late answer that
+   * found a different action would otherwise press a button nobody was looking
+   * at, which on a stalled connection ends the shells that appeared meanwhile.
+   */
+  private _maybeAskForTheReopensMethod(observation: PaneConnection | null): void {
+    const failure = observation?.shellFailure
+    const ask = helperConsentAskFromData(failure?.data)
+    if (failure === undefined || ask === null) {
+      // The refusal is gone: the attempt it ended is over, so the next one is
+      // a new question rather than a stale answer waiting to be applied.
+      this._reopenAskedFailure = null
+      this._endReopenAsk()
+      return
+    }
+    if (this._reopenAskedFailure === failure.sequence) return
+    const offer = this._connectionStore.offer()
+    if (offer === null || this.hooks.onHelperConsentAsk === undefined) return
+    this._endReopenAsk()
+    this._reopenAskedFailure = failure.sequence
+    const abort = new AbortController()
+    const mountSignal = this.mountAbortController?.signal
+    const forward = (): void => abort.abort()
+    if (mountSignal !== undefined) {
+      if (mountSignal.aborted) return
+      mountSignal.addEventListener('abort', forward, { once: true })
+    }
+    const question = {
+      failure: failure.sequence,
+      endsShells: offer.endsShells,
+      abort,
+      detach: () => mountSignal?.removeEventListener('abort', forward),
+    }
+    this._reopenAsk = question
+    const answer = this.hooks.onHelperConsentAsk(ask, abort.signal)
+    void answer.then((given) => {
+      // The question was closed under this answer: a newer fact made it stale,
+      // and an answer to a question nobody is asking must not act.
+      if (this._reopenAsk !== question) return
+      this._reopenAsk = null
+      question.detach()
+      if (given === null) return
+      // The same refusal, and the same action the dialog was drawn from. A
+      // different one means the pane has moved on and this answer is history.
+      const now = this._connectionStore.current()?.observation.shellFailure
+      const standing = this._connectionStore.offer()
+      if (now?.sequence !== question.failure) return
+      if (standing === null || standing.endsShells !== question.endsShells) return
+      this._connectionHead?.note(given.note ?? null)
+      void this.pressReconnect()
+    })
+  }
+
+  /** End the question this pane is asking, if any: the refusal it belongs to
+   *  has been replaced or is gone, so the dialog must not answer for it. */
+  private _endReopenAsk(): void {
+    const question = this._reopenAsk
+    this._reopenAsk = null
+    if (question !== null) {
+      question.detach()
+      question.abort.abort()
+    }
+  }
+
+  /**
    * Restate the one observation to every surface that draws it (design §5.1's
    * "status fold").
    *
@@ -2106,6 +2217,7 @@ export class TerminalContent extends BasePaneContent {
       this._discardQueuedIntents()
       this.session?.cancelPendingIntents()
     }
+    this._maybeAskForTheReopensMethod(observation)
     this._applyTypeAhead(previous)
     if (this._connectionGate() === 'send') void this.drainSessionCallQueue()
   }

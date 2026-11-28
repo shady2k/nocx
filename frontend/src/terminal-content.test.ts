@@ -36,7 +36,12 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMMAND_BLOCK_SURFACE_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
-import type { HelperConsentAskEvidence, PaneIdentity, PaneScreenReading } from './terminal-content'
+import type {
+  HelperConsentAnswer,
+  HelperConsentAskEvidence,
+  PaneIdentity,
+  PaneScreenReading,
+} from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
@@ -26053,6 +26058,222 @@ describe('a repeated block.closed reads the stored rows again', () => {
       reads[1](artifact('echo'))
       await Promise.all([first, second])
       await vi.waitFor(() => expect(rec.storedRows?.lines).toHaveLength(1))
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The method question a RECONNECT can raise (nocx-oalo1.25)
+//
+// On the first connection the ask arrives as the `open` refusal and the mount
+// loop raises the dialog. A press has no such round trip: the backend registers
+// the reopen, runs it, and reports the outcome on this channel. So the same
+// question arrives as the pane's shellFailure — and it must raise the same
+// dialog, or the person is left with a Retry button that asks forever, which is
+// exactly the state ALX-2046 measured.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a reconnect whose own open needs the method answer', () => {
+  const askData = {
+    host: 'db.example.com:22',
+    fingerprint: 'SHA256:trusted',
+    helperAsk: true,
+    profileId: 'ssh:test:1',
+  }
+
+  /** The observation the backend sends after a press whose reopen found the
+   *  host's helper use unanswered: the release it came from, the offer it still
+   *  stands for, and the refusal the reopen produced. A failed shell carries no
+   *  session (there is none any more). The refusal is REPUBLISHED on every
+   *  later frame until a shell is adopted, under a new epoch each time — that
+   *  republication is what the identity exists for. */
+  function publishReopenRefused(client: ClientFake, content: TerminalContent, sequence = 1): void {
+    publishConnection(client, content, {
+      sessionId: undefined,
+      transport: { state: 'ended', cause: 'released', stateMs: 40 },
+      reconnect: { endsShells: 0 },
+      shellFailure: {
+        code: -32603,
+        message: 'nocx has not been told whether it may use its helper on db.example.com:22',
+        data: askData,
+        sequence,
+      },
+    })
+  }
+
+  it('raises the same ask and presses again once the person has answered', async () => {
+    const client = makeClient()
+    const onHelperConsentAsk = vi.fn().mockResolvedValue({ method: 'helper' })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'db.example.com' }, hooks: { onHelperConsentAsk } },
+      client,
+    )
+    try {
+      // The connection was released with nobody holding it: the offer stands,
+      // and pressing it runs the pane's own open again (the reported state).
+      publishConnection(client, content, {
+        transport: { state: 'ended', cause: 'released', stateMs: 40 },
+        reconnect: { endsShells: 0 },
+      })
+      const pressesBefore = client.dispatcher.call.mock.calls.filter(
+        ([method]) => method === 'pane.reconnect',
+      ).length
+
+      publishReopenRefused(client, content)
+
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+      expect(onHelperConsentAsk.mock.calls[0]?.[0]).toEqual({
+        host: 'db.example.com:22',
+        fingerprint: 'SHA256:trusted',
+        profileId: 'ssh:test:1',
+        hostKey: null,
+      })
+      // THE ANSWER TURNS INTO THE PRESS, not into a message the person has to
+      // act on: the dialog recorded the host's method, and the same press is
+      // made again against a host that has now answered.
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(([method]) => method === 'pane.reconnect')
+            .length,
+        ).toBeGreaterThan(pressesBefore),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // THE DEFECT THE FIRST CANDIDATE SHIPPED (ALX-2085 finding 1): every new
+  // connectionEpoch was read as a new question, and the pane republishes its
+  // retained refusal on every frame — a bind after the press included. So a
+  // dialog could come back in front of a shell the person had already answered
+  // for. The question belongs to the refusal, whose identity the backend mints.
+  it('does not ask again when the same refusal is republished under a new epoch', async () => {
+    const client = makeClient()
+    // A dialog nobody has answered yet: the person is still reading it when the
+    // pane binds again, which is the moment the second dialog used to appear.
+    const onHelperConsentAsk = vi.fn(() => new Promise<HelperConsentAnswer | null>(() => {}))
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'db.example.com' }, hooks: { onHelperConsentAsk } },
+      client,
+    )
+    try {
+      publishConnection(client, content, {
+        transport: { state: 'ended', cause: 'released', stateMs: 40 },
+        reconnect: { endsShells: 0 },
+      })
+      publishReopenRefused(client, content)
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+      // The same refusal arrives twice more, under new epochs each time: the
+      // one open question must not become three dialogs.
+      publishReopenRefused(client, content)
+      publishReopenRefused(client, content)
+      await Promise.resolve()
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks again about a refusal the backend names for the first time', async () => {
+    const client = makeClient()
+    const onHelperConsentAsk = vi.fn().mockResolvedValue(null)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'db.example.com' }, hooks: { onHelperConsentAsk } },
+      client,
+    )
+    try {
+      publishConnection(client, content, {
+        transport: { state: 'ended', cause: 'released', stateMs: 40 },
+        reconnect: { endsShells: 0 },
+      })
+      publishReopenRefused(client, content)
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+      // The person closed the dialog. The next press refuses again — a NEW
+      // refusal with the same words, which is the case an identity by content
+      // could not tell apart and an epoch identity got wrong the other way.
+      await Promise.resolve()
+      publishReopenRefused(client, content, 2)
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  // ALX-2085 finding 2: the dialog outlives the refusal. The connection can
+  // come back and open shells while the person is still reading, and an answer
+  // that pressed then would take an action nobody agreed to.
+  it('does not press when the offer changed while the answer was pending', async () => {
+    const client = makeClient()
+    let answer: ((value: HelperConsentAnswer | null) => void) | null = null
+    const onHelperConsentAsk = vi.fn(
+      () => new Promise<HelperConsentAnswer | null>((resolve) => (answer = resolve)),
+    )
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'db.example.com' }, hooks: { onHelperConsentAsk } },
+      client,
+    )
+    try {
+      publishConnection(client, content, {
+        transport: { state: 'ended', cause: 'released', stateMs: 40 },
+        reconnect: { endsShells: 0 },
+      })
+      publishReopenRefused(client, content)
+      expect(onHelperConsentAsk).toHaveBeenCalledTimes(1)
+      const presses = (): number =>
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'pane.reconnect').length
+      const before = presses()
+      // The shell this pane was waiting for is alive, and its transport has
+      // since stalled: the offer now ends two shells. The refusal is still on
+      // the frame — the backend keeps it until a replacement shell is adopted
+      // — so the question is still outstanding and only the offer moved.
+      publishConnection(client, content, {
+        sessionId: undefined,
+        transport: { state: 'stalled', stateMs: 45_000, plainShells: 2 },
+        reconnect: { endsShells: 2 },
+        shellFailure: {
+          code: -32603,
+          message: 'nocx has not been told whether it may use its helper on db.example.com:22',
+          data: askData,
+          sequence: 1,
+        },
+      })
+      await vi.waitFor(() => expect(answer).not.toBeNull())
+      answer!({ method: 'helper' })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(presses()).toBe(before)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('says nothing about a shell failure that is not the method ask', async () => {
+    const client = makeClient()
+    const onHelperConsentAsk = vi.fn()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ssh:test:1', host: 'db.example.com' }, hooks: { onHelperConsentAsk } },
+      client,
+    )
+    try {
+      publishConnection(client, content, {
+        sessionId: undefined,
+        transport: { state: 'connected', stateMs: 1000, plainShells: 1 },
+        reconnect: { endsShells: 0 },
+        shellFailure: {
+          code: -32001,
+          message: 'Unlock the vault',
+          data: { reason: 'vault-sealed' },
+          sequence: 1,
+        },
+      })
+      await Promise.resolve()
+      expect(onHelperConsentAsk).not.toHaveBeenCalled()
     } finally {
       teardown()
     }

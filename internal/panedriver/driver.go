@@ -62,8 +62,17 @@ type Quality struct {
 // Reconnect is the one action a person may take on this pane (design §5.6,
 // §5.8). Its PRESENCE is the offer; EndsShells is how many shells would end if
 // it is pressed, hops included (design §5.4).
+//
+// Reopens says WHAT the press is: the pane's own open run again, rather than a
+// claim on the connection's transport. It is true exactly when nothing holds
+// the connection any more, so no claim could succeed — the pane is the only
+// interest left, and pressing it dials (and asks) afresh. Whoever carries a
+// press has to keep the two apart: a claim that meets a held connection is
+// asked of the supervisor, and a claim that meets nothing is the refusal this
+// offer exists to make impossible.
 type Reconnect struct {
 	EndsShells int
+	Reopens    bool
 }
 
 // HelperState is the far helper axis as pane.connection carries it: the
@@ -150,10 +159,18 @@ type Attempt struct {
 }
 
 // ShellFailure is the actionable refusal of a pane shell, not its connection.
+//
+// Sequence is the REFUSAL's own identity (nocx-oalo1.25). A pane keeps its last
+// refusal on every observation until a replacement shell is adopted, so the
+// same refusal is published many times under many epochs. A surface that asks
+// the person something about it has to be able to tell that republication from
+// a genuinely new refusal — the method question is raised once per answer, and
+// a frame that names a new sequence is the only thing that may raise it again.
 type ShellFailure struct {
-	Code    int
-	Message string
-	Data    any
+	Code     int
+	Message  string
+	Data     any
+	Sequence uint64
 }
 
 // Snapshot is one pane's observation, ready to be carried to the renderer.
@@ -222,8 +239,11 @@ type binding struct {
 	lost         bool
 	replacing    bool
 	shellFailure *ShellFailure
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// failures counts what this binding has been told, which is how far
+	// shellFailure.Sequence has got (nocx-oalo1.25).
+	failures uint64
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 // connection is the newest observation of one connection, with the panes
@@ -582,7 +602,11 @@ func (d *Driver) ShellFailed(ctx context.Context, paneID string, generation uint
 	}
 	b.sessionID = ""
 	b.replacing = false
-	b.shellFailure = &ShellFailure{Code: code, Message: message, Data: data}
+	// A NEW REFUSAL IS A NEW FACT, never a republication of the last one: the
+	// sequence is what a surface uses to decide whether it already asked about
+	// this, and two identical refusals must not share one.
+	b.failures++
+	b.shellFailure = &ShellFailure{Code: code, Message: message, Data: data, Sequence: b.failures}
 	snap := d.snapshotLocked(paneID, b, c)
 	d.mu.Unlock()
 	d.emit(snap)
@@ -693,8 +717,17 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	}
 }
 
-// RequestShellRetry claims the same pane-owned action used after transport return.
-func (d *Driver) RequestShellRetry(ctx context.Context, paneID string, epoch uint64) error {
+// RequestReopen carries out a press that re-opens the pane: the action used
+// after a transport return, and the one used by an offer whose connection has
+// nobody left to claim it (Reconnect.Reopens).
+//
+// BOTH SHAPES ARE ONE ACTION and that is why they are one method. A shell the
+// far side refused leaves a live connection with no shell on it; a connection
+// whose last holder let go leaves a pane with no connection. In either case the
+// pane's own open run is what comes next, and the other route — claiming the
+// supervisor — either has nothing to claim or would tear down a transport that
+// is doing fine.
+func (d *Driver) RequestReopen(ctx context.Context, paneID string, epoch uint64) error {
 	d.mu.Lock()
 	b := d.panes[paneID]
 	if b == nil || ctx.Err() != nil || b.ctx.Err() != nil {
@@ -706,7 +739,15 @@ func (d *Driver) RequestShellRetry(ctx context.Context, paneID string, epoch uin
 		return ErrStaleEpoch
 	}
 	c := d.conns[b.connectionID]
-	if b.shellFailure == nil || c == nil || c.transport.State != proto.ConnectionConnected {
+	if c == nil {
+		d.mu.Unlock()
+		return ErrNoOffer
+	}
+	// A refused shell is pressable while its connection still works; a
+	// connection nobody holds is pressable whatever it ended on, because the
+	// press starts a new connection rather than claiming this one.
+	retryShell := b.shellFailure != nil && c.transport.State == proto.ConnectionConnected
+	if !retryShell && !releasedRest(c.transport) {
 		d.mu.Unlock()
 		return ErrNoOffer
 	}
@@ -742,7 +783,7 @@ func (d *Driver) snapshotLocked(paneID string, b *binding, c *connection) Snapsh
 	b.epoch++
 	offer := offerFor(c.transport)
 	if b.shellFailure != nil && c.transport.State == proto.ConnectionConnected {
-		offer = &Reconnect{EndsShells: 0}
+		offer = &Reconnect{EndsShells: 0, Reopens: true}
 	}
 	return Snapshot{
 		Generation:         b.generation,
@@ -787,6 +828,15 @@ func (d *Driver) emit(s Snapshot) {
 //   - reconnecting, failed, ended: the connection is not usable; pressing is
 //     the way out (§5.3, "Reconnect is the way out").
 //   - opening, waiting_person, connected: nothing to reconnect.
+//
+// AN ENDED CONNECTION NOBODY HOLDS REOPENS THE PANE (nocx-oalo1.25). `ended`
+// with cause `released` is the last holder letting go, and the supervisor's own
+// claim is refused when it has no holder — which is what a person met on the
+// first SSH connection: the probe-only connection of a helper-consent refusal
+// is released on purpose (its own open run answers the question), the pane
+// stays and is offered the button, and pressing it asked a supervisor that had
+// nothing left to give. The offer is right — the person's work is that pane —
+// so the press is the pane's open again rather than a claim on the transport.
 func offerFor(t Transport) *Reconnect {
 	switch t.State {
 	case proto.ConnectionStalled:
@@ -799,9 +849,15 @@ func offerFor(t Transport) *Reconnect {
 		if t.HasPlainShells {
 			ends = t.PlainShells
 		}
-		return &Reconnect{EndsShells: ends}
+		return &Reconnect{EndsShells: ends, Reopens: releasedRest(t)}
 	}
 	return nil
+}
+
+// releasedRest reports whether an ended connection is the last holder letting
+// go, which is the one state in which nothing can be claimed on it.
+func releasedRest(t Transport) bool {
+	return t.State == proto.ConnectionEnded && t.Cause == "released"
 }
 
 // fromEvent converts the helper protocol's event into this package's neutral

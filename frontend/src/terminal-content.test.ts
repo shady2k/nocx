@@ -26098,6 +26098,7 @@ describe('a reconnect whose own open needs the method answer', () => {
         message: 'nocx has not been told whether it may use its helper on db.example.com:22',
         data: askData,
         sequence,
+        retryable: false,
       },
     })
   }
@@ -26240,6 +26241,7 @@ describe('a reconnect whose own open needs the method answer', () => {
           message: 'nocx has not been told whether it may use its helper on db.example.com:22',
           data: askData,
           sequence: 1,
+          retryable: false,
         },
       })
       await vi.waitFor(() => expect(answer).not.toBeNull())
@@ -26270,6 +26272,7 @@ describe('a reconnect whose own open needs the method answer', () => {
           message: 'Unlock the vault',
           data: { reason: 'vault-sealed' },
           sequence: 1,
+          retryable: false,
         },
       })
       await Promise.resolve()

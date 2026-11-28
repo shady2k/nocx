@@ -163,7 +163,7 @@ describe('parsePaneConnection', () => {
   it('admits a connected transport whose shell failed with its retry offer', () => {
     const value = observation({
       transport: { state: 'connected', stateMs: 10, plainShells: 0 },
-      shellFailure: { code: -32603, sequence: 1, message: 'no builtin' },
+      shellFailure: { code: -32603, sequence: 1, message: 'no builtin', retryable: false },
       reconnect: { endsShells: 0 },
     })
     expect(parsePaneConnection(value)).not.toBeNull()
@@ -189,17 +189,17 @@ describe('parsePaneConnection', () => {
       // failure without an offer, and a failed shell carrying a session id.
       observation({
         transport: { state: 'connected', stateMs: 1, plainShells: 1 },
-        shellFailure: { code: 1, sequence: 1, message: 'x' },
+        shellFailure: { code: 1, sequence: 1, message: 'x', retryable: false },
         reconnect: { endsShells: 2 },
       }),
       observation({
         transport: { state: 'connected', stateMs: 1, plainShells: 1 },
-        shellFailure: { code: 1, sequence: 1, message: 'x' },
+        shellFailure: { code: 1, sequence: 1, message: 'x', retryable: false },
       }),
       observation({
         transport: { state: 'connected', stateMs: 1, plainShells: 0 },
         sessionId: 's',
-        shellFailure: { code: 1, sequence: 1, message: 'x' },
+        shellFailure: { code: 1, sequence: 1, message: 'x', retryable: false },
         reconnect: { endsShells: 0 },
       }),
       // An unknown extra key: additionalProperties is false in the schema.
@@ -315,7 +315,12 @@ describe('ConnectionStore', () => {
       observation({
         connectionEpoch: 2,
         transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-        shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
+        shellFailure: {
+          code: -32603,
+          sequence: 1,
+          message: 'the shell could not start',
+          retryable: false,
+        },
         reconnect: { endsShells: 0 },
       }),
     )

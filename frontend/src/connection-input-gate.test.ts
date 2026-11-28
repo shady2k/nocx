@@ -272,7 +272,12 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
     publish({ sessionId })
     publish({
       transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-      shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
+      shellFailure: {
+        code: -32603,
+        sequence: 1,
+        message: 'the shell could not start',
+        retryable: false,
+      },
       reconnect: { endsShells: 0 },
     })
     expect(press()).toBe(false)
@@ -305,6 +310,8 @@ describe('the connection input gate (nocx-oalo1.5.1)', () => {
     client._fireNotification('pane.opened', {
       paneId: 'pane-gate',
       generation: 1,
+      newShell: true,
+      replayFrom: 0,
       open: { ...automatic, instanceId: 'instance-gate' },
     })
     await vi.waitFor(() =>

@@ -47,6 +47,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
+	"github.com/shady2k/nocx/internal/transport"
 )
 
 func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
@@ -180,7 +181,7 @@ func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T)
 		routes:   &stubRoutes{host: "somewhere.else", cfg: &ssh.ConnectConfig{User: "alice"}},
 	}
 
-	_, err := rp.readoptLocal(context.Background(), content.PendingSession{
+	_, _, err := rp.readoptLocal(context.Background(), content.PendingSession{
 		SessionID: "sess-1", Generation: "gen-1", PaneID: "pane-1",
 		Host: "host.example", Account: "alice", ProfileID: "ssh:1",
 	})
@@ -271,7 +272,7 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 		routes:   &stubRoutes{host: "host.example", cfg: &ssh.ConnectConfig{User: "dev"}},
 	}
 
-	if _, rerr := rp.readoptLocal(ctx, content.PendingSession{
+	if _, _, rerr := rp.readoptLocal(ctx, content.PendingSession{
 		SessionID: string(sid), Generation: gen, PaneID: "pane-1",
 		Host: opened.Host, Account: opened.Account, ProfileID: "ssh:readopt",
 	}); rerr != nil {
@@ -350,7 +351,7 @@ func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, rerr := rp.readoptLocal(ctx, content.PendingSession{
+	if _, _, rerr := rp.readoptLocal(ctx, content.PendingSession{
 		SessionID: "sess-gone", Generation: gen, PaneID: "pane-1",
 		Host: "host.example", Account: "dev", ProfileID: "ssh:1",
 	}); rerr != nil {
@@ -465,5 +466,137 @@ func TestTheReadoptPredicateAnswersForTheCarrierNotTheDestination(t *testing.T) 
 		if got := isLocalBinding(c.p); got != c.want {
 			t.Errorf("%s: isLocalBinding = %v, want %v (HelperCommand=%q)", c.name, got, c.want, c.p.HelperCommand)
 		}
+	}
+}
+
+// A TYPED ROUTE IS A ROUTE (design §5.4). The sibling above re-adopts a binding
+// whose saved connection names its destination. A pane a person opened by
+// typing `ssh dev@host` has no saved connection at all, and until the binding
+// carried the route its open resolved, that shell was unreachable to every
+// later coordinator: the pass demanded a ProfileID a typed route does not have,
+// and the pane opened a second shell.
+//
+// THE ROUTE IS THE ONE THE OPEN RESOLVED — canonical host, effective port and
+// account — and the identity is whatever `ssh` itself offers for that host. So
+// this pass runs with NO route resolver at all: `routes: nil` makes the
+// profile path an error rather than a silent fallback, and the adoption proving
+// out is the proof that the recorded route carried it.
+func TestATypedRouteIsReAdoptedFromItsRecordedRoute(t *testing.T) {
+	home := storagetest.IsolateWithHome(t)
+	src := fakeArtifacts{payload: syntheticPayload}
+	gen := src.hash()
+	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
+
+	logger := log.NewSlogAdapter(discardLogger(t))
+	lg := discardLogger(t)
+	newOpener := func(reg *session.Reg) *localHelperOpener {
+		rc, err := ssh.NewReal(logger)
+		if err != nil {
+			t.Fatalf("ssh.NewReal: %v", err)
+		}
+		return &localHelperOpener{
+			log: lg, registry: reg, dir: endpoint.Dir(home), sshTargets: rc,
+			installed: helperlocal.Installed{
+				Binary: "/nonexistent/nocx-helper", Generation: proto.GenerationID(gen),
+			},
+		}
+	}
+
+	firstReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, firstReg)
+	first := newOpener(firstReg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	opened, selected, err := first.OpenHosted(ctx, session.Config{
+		Kind: session.KindRemote, Host: "host.example",
+		Remote: &ssh.ConnectConfig{
+			User: "dev", Port: 22, AuthMode: "password",
+			Secrets: rememberedPassword{value: openPasswordFixturePassword}, SecretID: "sec:typed:1",
+			AuthorizedEndpoint: "host.example:22",
+		},
+	}, "")
+	if err != nil || !selected {
+		t.Fatalf("opening the typed-route ssh pane: selected=%v err=%v", selected, err)
+	}
+	sid := opened.Session.ID()
+	first.close()
+
+	secondReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, secondReg)
+	second := newOpener(secondReg)
+	rp := &readoptPass{
+		registry: &helperRegistry{registry: secondReg, log: lg},
+		adopter:  &stubAdopter{},
+		local:    second,
+		// NO RESOLVER: a typed route is resolved from its own facts, and a
+		// pass that reached for a profile here would fail loudly.
+		routes: nil,
+	}
+	route := &content.SessionRoute{Host: opened.Host, Port: 22, User: opened.Account}
+	if _, _, rerr := rp.readoptLocal(ctx, content.PendingSession{
+		SessionID: string(sid), Generation: gen, PaneID: "pane-typed",
+		Host: opened.Host, Account: opened.Account, Route: route,
+	}); rerr != nil {
+		t.Fatalf("re-adopting a typed route from its recorded route: %v", rerr)
+	}
+	sess, err := secondReg.Get(sid)
+	if err != nil {
+		t.Fatalf("the replacement's registry does not hold the typed-route session: %v", err)
+	}
+	if got := sess.Host(); got != opened.Host {
+		t.Fatalf("the re-adopted typed route reports host %q, want the recorded destination %q", got, opened.Host)
+	}
+	if !second.holds(sid) {
+		t.Fatal("the replacement does not hold the shell it just took back")
+	}
+}
+
+// A PROFILE EDITED DURING THE LOSS IS OUT OF REACH, AND NOTHING IS ASKED OR
+// SPAWNED (design §5.4). The live reconnect resolves the profile AGAIN before
+// it asks, so a host or an account that moved between the open and the
+// reconnect describes a different machine; asking it about this shell's id
+// space and then, on an "absent" answer, spawning there would move a person's
+// build to a host nobody recorded.
+func TestAProfileEditedDuringTheLossLeavesTheOldShellOutOfReach(t *testing.T) {
+	f := newReattachFixture(t)
+	before, ok := shellOnHost(t, f.svc, f.binding)
+	if !ok {
+		t.Fatalf("the fixture's shell %q is not on the host", f.binding)
+	}
+	f.lose(t)
+
+	// The profile now resolves to another machine. The carrier still holds the
+	// route the shell was opened with, so the carrier's own connect would
+	// succeed — the refusal has to come from the comparison, before the ask.
+	moved := f.route()
+	moved.Host = "elsewhere.example"
+	taken, counted, err := f.reattacher.ReattachPaneShell(context.Background(), f.spec(f.binding), moved)
+	if err == nil || counted || taken.Session != nil {
+		t.Fatalf("a moved profile took the shell back: ok=%t err=%v", counted, err)
+	}
+	if !strings.Contains(err.Error(), "out of reach") {
+		t.Fatalf("the refusal is %q, want one saying the old shell is out of reach", err)
+	}
+	// NOT A WAIT: a retry cannot change what a profile says.
+	var waiting *transport.PaneShellWait
+	if errors.As(err, &waiting) {
+		t.Fatalf("a moved profile answered a retryable wait (%v), so the loop would never stop", err)
+	}
+	after, ok := shellOnHost(t, f.svc, f.binding)
+	if !ok || after.startedAt != before.startedAt {
+		t.Fatalf("the moved-profile refusal changed the host's shell: before %+v after %+v", before, after)
+	}
+	if _, gerr := f.coordinator.sess.Get(session.ID(f.binding)); gerr == nil {
+		t.Fatal("a refused reconnect adopted the shell anyway")
+	}
+
+	// A port edit on the same hostname is also a different endpoint: refused
+	// before asking the helper and not treated as a retryable wait.
+	movedPort := f.route()
+	movedPort.Remote = &ssh.ConnectConfig{User: "alice", Port: 2222}
+	if taken, counted, perr := f.reattacher.ReattachPaneShell(context.Background(), f.spec(f.binding), movedPort); perr == nil || counted || taken.Session != nil {
+		t.Fatalf("a port-edited profile took the shell back: ok=%t err=%v", counted, perr)
+	} else if !strings.Contains(perr.Error(), "out of reach") || errors.As(perr, &waiting) {
+		t.Fatalf("port-edited refusal = %v, want non-retryable out of reach", perr)
 	}
 }

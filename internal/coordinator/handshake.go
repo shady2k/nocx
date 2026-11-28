@@ -217,7 +217,16 @@ package coordinator
 // 47 (nocx-oalo1.25): pane.connection shellFailure carries a required sequence
 // so the window can recognize a refusal it already answered across repeated
 // notifications and retries. Protocol 46 does not carry that identity.
-const ProtocolVersion = 47
+//
+// 48 (nocx-oalo1.7.2): pane.opened carries newShell and replayFrom — whether
+// the answer is a SECOND shell beside the pane's old one, and where its output
+// stream begins — and pane.connection's shellFailure carries `retryable`, which
+// tells a wait nobody could answer from a refusal a person must act on. A 47
+// window reads a re-attachment as a replacement, resumes its cursor at zero
+// over a nonzero stream, and reports a helper nobody could ask as a hard
+// failure; all three are wrong statements about one reconnect, so the number
+// moves with the contracts.
+const ProtocolVersion = 48
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

@@ -871,7 +871,7 @@ func TestARefusedShellKeepsItsIdentityAcrossRebindsAndMovesForANewOne(t *testing
 	d, out := newDriver(t)
 	apply(d, connected(1, 0))
 	first := d.Bind("pane-1", "conn-a")
-	d.ShellFailed(context.Background(), "pane-1", first, -32001, "the method is not decided", map[string]any{"helperAsk": true})
+	d.ShellFailed(context.Background(), "pane-1", first, -32001, "the method is not decided", map[string]any{"helperAsk": true}, false)
 	refused := out.last()
 	if refused.ShellFailure == nil || refused.ShellFailure.Sequence != 1 {
 		t.Fatalf("first refusal = %+v, want sequence 1", refused.ShellFailure)
@@ -890,7 +890,7 @@ func TestARefusedShellKeepsItsIdentityAcrossRebindsAndMovesForANewOne(t *testing
 
 	// The retried open fails with the same words. That is a NEW refusal: the
 	// person must be asked again, and only an identity that counts can say so.
-	d.ShellFailed(context.Background(), "pane-1", second, -32001, "the method is not decided", map[string]any{"helperAsk": true})
+	d.ShellFailed(context.Background(), "pane-1", second, -32001, "the method is not decided", map[string]any{"helperAsk": true}, false)
 	if got := out.last().ShellFailure; got == nil || got.Sequence != 2 {
 		t.Fatalf("second refusal = %+v, want sequence 2", got)
 	}

@@ -359,6 +359,33 @@ const (
 // the defect the design spends most of its length avoiding. The ledger still
 // reads it through sessions.workspace_id; it no longer writes it.
 
+// SessionRoute is one session's route back to the host that owns its id
+// space, as an open resolved it (design §5.4). It carries the ROUTE, never
+// the material that authenticates it: a saved connection is named by
+// ProfileID and its keys stay in the vault, and a typed host is named by the
+// host `ssh` resolves, whose keys are that machine's own configuration.
+//
+// Every field here is one the resolver PRODUCED, not one it was handed: the
+// canonical hostname, the effective port and account, and the first jump hop.
+// That matters for the one comparison this type exists to make possible — a
+// profile edited to another endpoint between the open and the re-adoption
+// resolves to a route that differs from this one, and the difference is the
+// refusal ("the shell is out of reach"), never a silent replacement.
+type SessionRoute struct {
+	Host string
+	Port int
+	User string
+	// The first hop, when the route was dialled through one. It is a REFERENCE
+	// (host/port/account) and not a credential store: the hop's own keys are
+	// the profile's or the host's, exactly as the target's are.
+	JumpHost string
+	JumpPort int
+	JumpUser string
+	// ProfileID is the saved connection this route came from, or empty for a
+	// route resolved from the request itself (a typed host).
+	ProfileID string
+}
+
 // Session is a restore key, never a recall filter (ADR-0019 §5): it names
 // "that tab". An entry outlives its session (ON DELETE SET NULL).
 type Session struct {
@@ -402,6 +429,24 @@ type Session struct {
 	// a helper-hosted session's channel is not closed by an uninstall
 	// whether it was opened or taken back.
 	Fingerprint string
+	// Route is the complete route BACK to this session's host, as the open
+	// that spawned it resolved it (design §5.4): host, port, account, the
+	// first jump hop and the saved profile when there was one. Nil for a
+	// session no route was recorded for.
+	//
+	// IT EXISTS FOR THE ROUTE NO PROFILE NAMES. A typed host is a route a
+	// person can reconnect to after a transport loss — the coordinator still
+	// holds its carrier — but not after a RESTART, because Readopt used to
+	// demand a ProfileID and a typed route has none. With this, the cold path
+	// can ask the same host about the same id space again.
+	//
+	// NO SECRET IS IN IT, and none may ever be. Identity material is a
+	// REFERENCE at most: a saved route names the profile that holds the key
+	// (ProfileID), and a typed route names the host `ssh` itself resolves —
+	// its configuration files, its agent and its password prompt are the
+	// reference, and repeating that resolution is exactly what the person's
+	// own `ssh` does.
+	Route *SessionRoute
 	// LifecycleApplied is the coordinator's own lifecycle cursor (ADR-0077):
 	// the helper's lifecycle stream offset one past the last frame whose
 	// effect this coordinator stored. A binding records it at 0 — the leg is
@@ -1959,6 +2004,29 @@ type LedgerRepository interface {
 	// LifecycleReconciled clears this incarnation's restart-unknown marker after
 	// the re-adopted lifecycle stream has been applied through its retained head.
 	LifecycleReconciled(ctx context.Context, sessionID string) error
+	// LifecycleCursor reads the binding's stored lifecycle cursor (ADR-0077):
+	// the stream offset one past the last frame whose effect this coordinator
+	// applied, where an attachment that must resume the same stream continues.
+	// ok is false for a session with no binding row and for one whose binding
+	// records no cursor — "no record" and "offset 0" are different facts, and
+	// the offset 0 is a real answer (nothing has been applied yet).
+	//
+	// IT IS A READER BECAUSE ONE OTHER PATH NEEDS IT (nocx-oalo1.7.2): a
+	// re-attachment after a TRANSPORT LOSS happens inside the process that was
+	// applying the stream, so the restart path's PendingSession is not there to
+	// carry the cursor, and re-delivering frames this coordinator already
+	// applied would record every command of a bounded window twice.
+	LifecycleCursor(ctx context.Context, sessionID string) (uint64, bool, error)
+	// SessionRoute reads the complete route a binding recorded at open
+	// (design §5.4), or nil when it recorded none.
+	//
+	// IT IS A READER BECAUSE THE RECONNECT THAT NEEDS IT DOES NOT HOLD IT: a
+	// transport loss inside one process keeps the carrier for a FAR helper,
+	// and that carrier's own options are the route — but a pane hosted by THIS
+	// machine's helper has no such carrier, and the route it must be asked
+	// about is the one its open wrote down. Reading the binding is what keeps
+	// one route (the recorded one) instead of a second copy on the pane.
+	SessionRoute(ctx context.Context, sessionID string) (*SessionRoute, bool, error)
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its
 	// session, ADR-0019 §5).

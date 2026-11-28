@@ -68,6 +68,7 @@ func (c *readoptChannel) Read(p []byte) (int, error) {
 }
 
 func (c *readoptChannel) Write(p []byte) (int, error) { return len(p), nil }
+
 func (c *readoptChannel) Close() error {
 	select {
 	case <-c.done:

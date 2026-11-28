@@ -194,7 +194,7 @@ func readoptAndReadTheAttach(t *testing.T, binding content.PendingSession, route
 	adopter := &stubAdopter{}
 	t.Cleanup(adopter.endAdopted)
 	pass := &readoptPass{registry: second.reg, adopter: adopter, local: route}
-	if _, err := pass.readoptLocal(ctx, binding); err != nil {
+	if _, _, err := pass.readoptLocal(ctx, binding); err != nil {
 		t.Fatalf("readopt: %v", err)
 	}
 	attach, ok := route.lastAttach()

@@ -25,13 +25,95 @@ type PaneConnectionPolicy interface {
 
 // paneShellPolicy is the pane action owner's failure and reopen boundary.
 type paneShellPolicy interface {
-	ShellFailed(context.Context, string, uint64, int, string, any)
+	// retryable says the refusal is a WAIT rather than an answer (design
+	// §5.4, C16): nobody could be asked whether the shell is still there, so
+	// the automatic attempt loop keeps trying instead of leaving the pane to a
+	// person's press.
+	ShellFailed(ctx context.Context, paneID string, generation uint64, code int, message string, data any, retryable bool)
 	RequestReopen(context.Context, string, uint64) error
 }
+
+// PaneShellWait is the refusal a reattacher answers when it could not ASK: no
+// connection to the helper, an inventory that timed out, a daemon that would
+// not answer. It is not a verdict about the shell (C16's whole point) and not
+// something a person can fix: it is the state in which the pane waits and the
+// automatic attempt loop tries again.
+type PaneShellWait struct {
+	Reason string
+}
+
+func (w *PaneShellWait) Error() string { return w.Reason }
 
 // WithPaneConnectionPolicy wires the connection policy's notices.
 func WithPaneConnectionPolicy(p PaneConnectionPolicy) WSServerOption {
 	return func(s *WSServer) { s.paneConnectionPolicy = p }
+}
+
+// PaneShellRef names the helper-held shell a pane had before its transport
+// was lost, as far as the TRANSPORT knows it: which shell, which helper
+// generation may answer about it, and the host and account that shell was on.
+//
+// IT IS THE PANE'S MEMORY, NOT A ROUTE. The route itself belongs to the
+// coordinator — a far helper's hosted carrier holds the options the open
+// dialled with, and a shell this machine's helper holds is described by the
+// binding its open recorded. What travels here is what the pane record already
+// keeps so the question can be asked at all: a transport loss removes the
+// session object, and with it everything that named the shell.
+type PaneShellRef struct {
+	Session    session.ID
+	Host       string
+	Account    string
+	Generation string
+}
+
+// PaneShellReattach is one shell taken back: the session the helper still
+// holds, the facts a caller finishes its half with, and nothing else — the
+// transport builds the pane's answer itself, from the session it is given.
+type PaneShellReattach struct {
+	Session session.Session
+	Config  session.Config
+	Hosted  HostedSessionOpen
+}
+
+// PaneShellReattacher is the coordinator's half of design §5.4's first answer:
+// "the far helper holds the shell — reattach, same shell, no divider".
+//
+// THE TRANSPORT ASKS AND THE COORDINATOR ANSWERS, because the two own
+// different halves: the transport knows which shell this pane had and builds
+// the answer the renderer reads, while the helper connection, the inventory
+// question and the adoption all belong to the process that opened it. Folding
+// either half into the other would put a helper client in transport or a
+// second open path in app, and both are what AD-8 forbids.
+//
+// THE ANSWER IS THREE-VALUED AND C16 IS WHY (ADR-ydcx00yd). "The helper answered and does not
+// hold it" is the ONLY answer that justifies another shell; "nobody could be
+// asked" must leave the pane waiting, because a slow helper would otherwise
+// cost a person a second shell beside a live one.
+type PaneShellReattacher interface {
+	// ReattachPaneShell takes the shell spec.Reattach names back for this
+	// open.
+	//
+	//	(r, true, nil)   taken back — the registry holds it again
+	//	(zero, false, nil)  the helper ANSWERED and does not hold it
+	//	(zero, false, err)  nobody could be asked, or the route no longer
+	//	                    leads there: nothing may be opened
+	//
+	// It also BINDS the pane's restored connection, through
+	// BindPaneConnection, and that is not optional: the generation it answers
+	// is the one this open's answer carries, and an open whose binding did not
+	// move is refused as one that no longer owns its pane.
+	ReattachPaneShell(ctx context.Context, spec OpenSpec, cfg session.Config) (PaneShellReattach, bool, error)
+}
+
+// SetPaneShellReattacher attaches the coordinator's re-adoption half after the
+// server exists, which is the order the composition root has: the reattacher
+// adopts THROUGH this server (ReadoptHostedSession), so it cannot be built
+// before it.
+func (s *WSServer) SetPaneShellReattacher(r PaneShellReattacher) {
+	s.paneShellReattacher = r
+	if s.opener != nil {
+		s.opener.reattacher = r
+	}
 }
 
 // The reconnect's refusals, each a different thing for a surface to do.
@@ -47,6 +129,24 @@ type paneOpened struct {
 	PaneID     string     `json:"paneId"`
 	Generation uint64     `json:"generation"`
 	Open       openResult `json:"open"`
+	// NewShell says whether this replacement is a SECOND shell beside the one
+	// the pane had (design §5.4): true when the previous shell was confirmed
+	// gone and a new one was opened, false when the coordinator took the
+	// running shell back and the person is where they were.
+	//
+	// IT IS THE DIVIDER'S OWN FACT, and it is deliberately not derived from
+	// the session id: a reattach after a transport loss re-adopts the same
+	// helper session and so keeps its id, but a helper that answers "gone"
+	// and a coordinator that could not ask at all both replace a shell whose
+	// id is new — only the second of which means the old shell may still be
+	// running. The reattacher is the only thing that knows which happened.
+	NewShell bool `json:"newShell"`
+	// ReplayFrom is the output-stream offset this pane's next bytes begin at
+	// (AD-9). A fresh shell answers 0; a shell taken back answers the offset
+	// the re-attachment resumed the host's stream at, which is where the ring
+	// on this side starts too. The renderer adopts it as its own cursor, so
+	// one stream has one coordinate across a transport loss.
+	ReplayFrom uint64 `json:"replayFrom"`
 }
 
 type paneReconnectResult struct {
@@ -151,7 +251,13 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 		if policy, ok := s.paneConnectionPolicy.(paneShellPolicy); ok {
 			capture := &openFailureCapture{}
 			(openHandlers{}).answerOpenFailure(ctx, capture, jsonrpcRequest{}, resultErr)
-			policy.ShellFailed(rec.ctx, paneID, attemptGeneration, capture.failure.Code, capture.failure.Message, capture.failure.Data)
+			// A WAIT IS NOT A REFUSAL TO KEEP (design §5.4, C16). A helper
+			// nobody could ask leaves the pane on the automatic loop; a route
+			// that no longer leads there, or a helper that answered and would
+			// not give the shell back, needs a person and stops.
+			var waiting *PaneShellWait
+			retryable := errors.As(resultErr, &waiting)
+			policy.ShellFailed(rec.ctx, paneID, attemptGeneration, capture.failure.Code, capture.failure.Message, capture.failure.Data, retryable)
 		}
 	}()
 	var replaced []session.Session
@@ -160,16 +266,33 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 			replaced = append(replaced, sess)
 		}
 	}
-	rec.state.mu.Lock()
-	for _, sess := range replaced {
-		delete(rec.state.sessions, sess.ID())
+	// A PANE THAT MAY STILL HAVE A RUNNING SHELL IS NOT TORN DOWN FIRST
+	// (§5.4, C16). Ending a helper-held session asks its helper to end the
+	// SHELL, so end-then-open could only ever produce a replacement: the shell
+	// would be gone before anything asked whether it was still there. Such a
+	// pane keeps its sessions until the open has answered, and a session that
+	// came back is the same id and is left alone.
+	//
+	// A pane with nothing to ask about — a local shell, a plain one, one that
+	// never adopted a helper-held shell — replaces as it always did: end, then
+	// open. The two orders are one question and it is asked once, here.
+	askFirst := rec.reconnectShell() != nil
+	if !askFirst {
+		rec.state.mu.Lock()
+		for _, sess := range replaced {
+			delete(rec.state.sessions, sess.ID())
+		}
+		rec.state.mu.Unlock()
 	}
-	rec.state.mu.Unlock()
 	s.paneMu.Unlock()
-	// Only the captured lifetime's sessions may end. A new pane with the same
-	// id can open while an external Close is waiting.
-	for _, sess := range replaced {
-		s.endPaneSession(sess)
+	if !askFirst {
+		// Only the captured lifetime's sessions may end, and only outside the
+		// lock: ending one waits on its own teardown. A new pane with the same
+		// id can open while an external Close is waiting.
+		for _, sess := range replaced {
+			s.endPaneSession(sess)
+		}
+		replaced = nil
 	}
 	h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 	openCtx, cancel := context.WithCancel(rec.ctx)
@@ -178,15 +301,38 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBin
 	bindCtx := context.WithValue(openCtx, paneBindingKey{}, func(generation uint64) {
 		attemptGeneration = generation
 	})
+	answered := openResult{}
 	_, err := h.openInto(context.WithValue(bindCtx, paneReconnectOpenKey{}, rec), rec.wconn, rec.state, rec.params, func(result openResult) error {
 		// openInto holds the pane binding and shutdown fences across this
 		// enqueue, just as it does for an RPC result.
+		answered = result
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return rec.wconn.TryNotify("pane.opened", mustMarshal(paneOpened{PaneID: paneID, Generation: attemptGeneration, Open: result}))
+		return rec.wconn.TryNotify("pane.opened", mustMarshal(paneOpened{
+			PaneID: paneID, Generation: attemptGeneration, Open: result,
+			NewShell: result.NewShell, ReplayFrom: result.ReplayFrom,
+		}))
 	})
-	return err
+	if err != nil {
+		// NOTHING WAS ENDED, so a helper that could not answer — or that still
+		// holds the shell and would not give it back — leaves the pane exactly
+		// as it was: waiting, with the reason, and one shell.
+		return err
+	}
+	// WHAT THE PANE HELD AND DID NOT GET BACK. A closed pane's session can
+	// outlive the attempt that replaced it, so this runs on the captured
+	// lifetime's sessions and skips the one the open answered with.
+	for _, sess := range replaced {
+		if answered.SessionID != "" && sess.ID() == session.ID(answered.SessionID) {
+			// THE SAME SHELL CAME BACK, so it must not be ended: it is the
+			// pane's shell, and ending it would close what the person is
+			// typing into.
+			continue
+		}
+		s.endPaneSession(sess)
+	}
+	return nil
 }
 
 // helperReconnectRegistrar registers the supervisor operation, not a shell.

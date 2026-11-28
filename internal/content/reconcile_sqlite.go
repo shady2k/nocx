@@ -34,6 +34,7 @@ type pendingSession struct {
 	paneID        string
 	profileID     string
 	helperCommand string
+	route         *SessionRoute
 	fingerprint   string
 	// lifecycleApplied is the binding's stored lifecycle cursor (ADR-0077);
 	// nil when the binding never recorded one.
@@ -73,13 +74,14 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 			return nil, fmt.Errorf("content: carry-over sessions: %w", scanErr)
 		}
 		var metadata struct {
-			Generation    string `json:"generation"`
-			Host          string `json:"host"`
-			Account       string `json:"account"`
-			Pane          string `json:"pane"`
-			Profile       string `json:"profile"`
-			HelperCommand string `json:"helperCommand"`
-			Fingerprint   string `json:"fingerprint"`
+			Generation    string        `json:"generation"`
+			Host          string        `json:"host"`
+			Account       string        `json:"account"`
+			Pane          string        `json:"pane"`
+			Profile       string        `json:"profile"`
+			HelperCommand string        `json:"helperCommand"`
+			Fingerprint   string        `json:"fingerprint"`
+			Route         *SessionRoute `json:"route"`
 			// LifecycleApplied is ADR-0077's cursor; a pointer so a binding
 			// that never recorded one reads as absent rather than as 0.
 			LifecycleApplied *uint64 `json:"lifecycleApplied"`
@@ -92,6 +94,7 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 			id: id, host: metadata.Host, account: metadata.Account,
 			generation: metadata.Generation, paneID: metadata.Pane,
 			profileID: metadata.Profile, helperCommand: metadata.HelperCommand,
+			route:            metadata.Route,
 			fingerprint:      metadata.Fingerprint,
 			lifecycleApplied: metadata.LifecycleApplied,
 			sinceMs:          sinceMs, cause: CauseNotYetAsked,
@@ -171,6 +174,7 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 			PaneID:           p.paneID,
 			ProfileID:        p.profileID,
 			HelperCommand:    p.helperCommand,
+			Route:            p.route,
 			Fingerprint:      p.fingerprint,
 			LifecycleApplied: p.lifecycleApplied,
 			Since:            time.UnixMilli(p.sinceMs),
@@ -243,6 +247,59 @@ func (s *sqliteContent) Apply(ctx context.Context, j SessionJudgement) error {
 	default:
 		return fmt.Errorf("content: unknown session verdict %q", j.Verdict)
 	}
+}
+
+// LifecycleCursor reads one binding's stored lifecycle cursor, and answers
+// absent for a row that records none.
+//
+// ABSENT IS THE ERROR-FREE MISS, deliberately: a binding whose lifecycle leg
+// never started has no offset to resume at, and answering 0 would claim a
+// stream that begins at its start. json_type rather than json_extract because
+// a NULL there would scan into a uint64 and read as a real 0.
+func (s *sqliteContent) LifecycleCursor(ctx context.Context, id string) (uint64, bool, error) {
+	var kind sql.NullString
+	if err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT json_type(payload, '$.lifecycleApplied') FROM sessions WHERE id = ?`, id).Scan(&kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !kind.Valid || kind.String != "integer" {
+		return 0, false, nil
+	}
+	var cursor uint64
+	if err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT json_extract(payload, '$.lifecycleApplied') FROM sessions WHERE id = ?`, id).Scan(&cursor); err != nil {
+		return 0, false, err
+	}
+	return cursor, true, nil
+}
+
+// SessionRoute reads the route a binding's open recorded, and answers absent
+// for a row that records none. The route is stored under the payload's own
+// key rather than in columns, like every other binding fact, and a NULL there
+// is "no route" rather than an empty one.
+func (s *sqliteContent) SessionRoute(ctx context.Context, id string) (*SessionRoute, bool, error) {
+	var raw sql.NullString
+	if err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT json_extract(payload, '$.route') FROM sessions WHERE id = ?`, id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, false, nil
+	}
+	var route SessionRoute
+	if err := json.Unmarshal([]byte(raw.String), &route); err != nil {
+		return nil, false, fmt.Errorf("content: decode the session's route: %w", err)
+	}
+	if route.Host == "" {
+		return nil, false, nil
+	}
+	return &route, true, nil
 }
 
 // LifecycleReconciled ends the unknown interval once re-adoption has replayed

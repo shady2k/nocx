@@ -240,7 +240,9 @@ was left alone.
 | ba6xet1b | 2026-11-13 | [A connection fact has one owner, and a check keeps it that way](ba6xet1b-a-connection-fact-has-one-owner.md) | Accepted (owner decision, 2026-11-13, «Должен быть архитектурный запрет на вторые поверхности»; `nocx-oalo1.3.4`; extends ADR-akhhb098, proposes no supersession — the Go half is `.githooks/check-connection-owners.mjs`, the renderer half is `nocx-oalo1.3.5`) |
 | sr71cdyt | 2026-11-14 | [The harness keeps process identity until group signals finish](sr71cdyt-harness-keeps-process-identity-until-group-signals-finish.md) | Accepted |
 | 4khgzeyp | 2026-11-14 | [An agent process lives for its conversation, and the agent ends its turn](4khgzeyp-an-agent-process-lives-for-its-conversation-and-the-agent-ends-its-turn.md) | Accepted; supersedes parts of ADR-anntnxdj |
+| ydcx00yd | 2026-11-28 | [A reconnect asks the helper that already holds the shell, and asks it through the carrier](ydcx00yd-a-reconnect-asks-the-helper-that-holds-the-shell-through-the-carrier.md) | Accepted (`nocx-oalo1.7.2`; design §5.4, C16; decides the ask order and the in-memory route, leaves the persisted route for an unsaved route across a restart) |
 | 727g63tr | 2026-11-16 | [The far helper is a fact of the connection, and panels reach the host only through it](727g63tr-the-far-helper-is-a-fact-of-the-connection-and-panels-reach-the-host-only-through-it.md) | Accepted (`nocx-oalo1.6.1`; owner decisions of 2026-11-16; supersedes part of ADR-0069 and of ADR-0068's first paragraph, extends ADR-akhhb098 and ADR-ba6xet1b) |
+| amhn5ecr | 2026-11-28 | [A reconnect that could not ask keeps waiting, and the route it asks about is recorded](amhn5ecr-a-reconnect-that-cannot-ask-waits-and-the-route-it-asks-about-is-recorded.md) | Accepted (`nocx-oalo1.7.2` review round; design §5.4, C16; completes ADR-ydcx00yd — the persisted route, the retryable wait, the resume point and the incarnation fence) |
 
 ## Adding one
 

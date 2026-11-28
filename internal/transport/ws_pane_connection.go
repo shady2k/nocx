@@ -30,7 +30,11 @@ package transport
 // subscriber lookup. The composition root adapts one to the other, which keeps
 // this package out of the connection state machine (design §5.1.1).
 
-import "context"
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/session"
+)
 
 // PaneShellFailure carries the same actionable refusal as the open RPC.
 //
@@ -46,6 +50,13 @@ type PaneShellFailure struct {
 	Message  string `json:"message"`
 	Data     any    `json:"data,omitempty"`
 	Sequence uint64 `json:"sequence"`
+	// Retryable says this refusal is a WAIT (design §5.4, C16): nobody could
+	// be asked whether the shell is still there, so the automatic attempt loop
+	// is still running and the surface says so instead of asking a person to
+	// press Reconnect. A false refusal is an answer: a route that no longer
+	// leads there, a helper that answered and does not hold the shell, or one
+	// that would not give it back.
+	Retryable bool `json:"retryable"`
 }
 
 // PaneConnection is the wire payload, declared once
@@ -177,6 +188,79 @@ type paneRecord struct {
 	// socket's queue keeps its session (AD-9, nocx-oalo1.6.16), so the two
 	// cancellations must be told apart by whoever evaluates the record next.
 	socketGone bool
+	// hostedShell names the far-helper shell this pane's newest open adopted,
+	// or nil when that open made nothing a helper holds. It is the ONE fact a
+	// reconnect needs and cannot re-derive: after a transport loss the session
+	// itself is gone from this process, so whoever replaces it has nothing to
+	// ask about unless the pane remembered which shell it had (design §5.4,
+	// C16).
+	//
+	// It is the LAST adopted shell rather than a set: a pane is the pipe of one
+	// session at a time, and a replacement open overwrites it with what it
+	// actually got.
+	hostedShell *hostedPaneShell
+}
+
+// hostedPaneShell is the identity of a shell a helper keeps, as far as the
+// TRANSPORT needs it: enough to name it back to the coordinator, and no route
+// facts — those belong to the coordinator that opened it, and the helper
+// connection it kept is where they live.
+type hostedPaneShell struct {
+	Session    session.ID
+	Host       string
+	Account    string
+	Generation string
+}
+
+// hostedShellOf derives what a pane should remember from one open's answer.
+// Nil for every open that made no helper-held shell — a local PTY, a plain
+// shell — which is what makes the reconnect path fall back to replacing a
+// shell rather than asking about nothing.
+//
+// THE GENERATION IS THE WHOLE TEST, and HelperCommand deliberately is not.
+// That field names the helper BINARY on a far host, and this machine's own
+// helper has none to name: it is the process asking, not a binary the open
+// execs (helper_local.go's local route leaves the command empty and its
+// generation set). Reading the command as the discriminator made every pane
+// hosted by this machine's helper report "nothing to ask about" and take the
+// replace-anyway path — the second shell C16 forbids, on the route a person
+// reaches by opening an ssh alias whose far host declined.
+func hostedShellOf(sid session.ID, hosted *HostedSessionOpen) *hostedPaneShell {
+	if hosted == nil || hosted.Generation == "" {
+		return nil
+	}
+	return &hostedPaneShell{Session: sid, Host: hosted.Host, Account: hosted.Account, Generation: hosted.Generation}
+}
+
+// reconnectShell is the shell this open should try to take back, read under
+// the pane's lock. Nil is "this pane has nothing to ask about".
+func (r *paneRecord) reconnectShell() *PaneShellRef {
+	if r == nil || r.hostedShell == nil {
+		return nil
+	}
+	return &PaneShellRef{
+		Session: r.hostedShell.Session, Host: r.hostedShell.Host,
+		Account: r.hostedShell.Account, Generation: r.hostedShell.Generation,
+	}
+}
+
+// forgetHostedShell drops the pane's memory of a helper-held shell, for the one
+// event that makes the memory wrong: the helper reported the shell's own exit.
+// It matches on the session so a late end for a shell the pane has already
+// replaced cannot forget the replacement.
+func (s *WSServer) forgetHostedShell(sess session.Session) {
+	if s == nil || sess == nil {
+		return
+	}
+	paneID := sess.PaneID()
+	if paneID == "" {
+		return
+	}
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	if rec := s.paneRecords[paneID]; rec != nil && rec.hostedShell != nil && rec.hostedShell.Session == sess.ID() {
+		rec.hostedShell = nil
+	}
 }
 
 // bindPane records that this connection is the one a pane's notifications go

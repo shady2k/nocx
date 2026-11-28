@@ -178,7 +178,12 @@ describe('the connection head', () => {
       'pane.connection',
       observation({
         transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-        shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
+        shellFailure: {
+          code: -32603,
+          sequence: 1,
+          message: 'the shell could not start',
+          retryable: false,
+        },
         reconnect: { endsShells: 0 },
       }),
     )
@@ -189,6 +194,33 @@ describe('the connection head', () => {
     expect(
       target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-shell-failure'),
     ).toBe('true')
+  })
+
+  // A WAIT IS NOT A FAILURE (design §5.4, C16). A helper whose inventory did
+  // not answer says nothing about whether the shell is still there; the loop is
+  // still trying, and a line reading "Shell failed" over a shell that may be
+  // alive and accepting input is the product contradicting itself.
+  it('says a refusal that is a wait as one, and keeps the retry beside it', () => {
+    mount()
+    wire.deliver(
+      'pane.connection',
+      observation({
+        transport: { state: 'connected', stateMs: 500, plainShells: 0 },
+        shellFailure: {
+          code: -32000,
+          sequence: 1,
+          message: "the helper's inventory did not answer",
+          retryable: true,
+        },
+        reconnect: { endsShells: 0 },
+      }),
+    )
+    expect(line()).toBe("Waiting for the host to answer · the helper's inventory did not answer")
+    expect(
+      target.querySelector('[data-testid="connection-head"]')?.getAttribute('data-shell-failure'),
+    ).toBe('true')
+    const button = target.querySelector('.ui-button')
+    expect(button?.textContent).toBe('Retry shell')
   })
 
   it('says the host record it could not remember in the same line, and marks the state a warning', () => {
@@ -315,7 +347,12 @@ describe('the connection head', () => {
       'pane.connection',
       observation({
         transport: { state: 'connected', stateMs: 500, plainShells: 0 },
-        shellFailure: { code: -32603, sequence: 1, message: 'the shell could not start' },
+        shellFailure: {
+          code: -32603,
+          sequence: 1,
+          message: 'the shell could not start',
+          retryable: false,
+        },
         reconnect: { endsShells: 0 },
         helper: { state: 'unavailable', reason: 'mode-script', action: 'host-settings' },
       }),

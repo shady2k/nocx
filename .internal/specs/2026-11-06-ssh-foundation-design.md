@@ -337,7 +337,11 @@ The driver asks, in order:
 2. **Inventory unavailable:** keep trying and say so. Only **confirmed absence** justifies another shell, or a slow helper costs a person a second shell beside a live one.
 3. **Confirmed absent, or no far helper:** the open order again, with a divider saying this is a new shell and that what the old one started may still be running.
 
-`session_readopt.go:318` requires a `ProfileID` and refuses a route that changed. So a pane row persists its complete route (host, port, account, identity reference, jump route, profile id when there is one), and the path gains the same refusal for an unsaved route. A profile edited to another machine still refuses: that shell is reported as out of reach, not replaced silently.
+`session_readopt.go:318` requires a `ProfileID` and refuses a route that changed. So the session binding persists its complete route (canonical host, port, account, the first jump hop, identity **reference**, and the profile id when there is one), and the path gains the same refusal for an unsaved route. A profile edited to another machine still refuses: that shell is reported as out of reach, not replaced silently — and the refusal happens before any inventory query or spawn at the new destination.
+
+No secret is in the route. A saved route names the profile that holds the key; a typed route names the host `ssh` itself resolves, whose configuration files and agent are the reference and are re-resolved at re-adoption.
+
+**Delivered (`nocx-oalo1.7.2`).** The ask happens BEFORE the pane is torn down — ending a helper-held session asks its helper to end the shell — and the three answers (taken back, answered-and-absent, nobody could ask) are what `pane.opened`'s `newShell` reports. A transport loss inside one process takes its route from the hosted carrier that opened the shell; a cold start takes it from the binding's recorded route, so an unsaved route is re-adopted too. "Nobody could ask" is a `retryable` refusal: the pane says it is waiting and the automatic attempt loop keeps asking with its own backoff. A re-attachment delivers from its own resume point (`pane.opened`'s `replayFrom`), with one recorder, one pump and an incarnation-fenced teardown. Decided in ADR-ydcx00yd and ADR-amhn5ecr.
 
 Commands are never re-run. The drafted line in the editor stays and is not sent.
 

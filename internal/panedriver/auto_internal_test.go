@@ -3,6 +3,7 @@ package panedriver_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/panedriver"
@@ -108,12 +109,12 @@ func TestShellFailurePreservesConnectionAndOffersShellRetryUntilAdopted(t *testi
 	apply(d, connected(1, 0))
 	generation := d.Bind("pane", "conn-a")
 	reporter, ok := any(d).(interface {
-		ShellFailed(context.Context, string, uint64, int, string, any)
+		ShellFailed(context.Context, string, uint64, int, string, any, bool)
 	})
 	if !ok {
 		t.Fatal("driver cannot publish shell failures")
 	}
-	reporter.ShellFailed(context.Background(), "pane", generation, -32001, "Unlock the vault", map[string]any{"reason": "vault-sealed"})
+	reporter.ShellFailed(context.Background(), "pane", generation, -32001, "Unlock the vault", map[string]any{"reason": "vault-sealed"}, false)
 	snap := out.last()
 	if snap.Transport.State != proto.ConnectionConnected || snap.Reconnect == nil || snap.Reconnect.EndsShells != 0 {
 		t.Fatalf("failure did not offer shell-only retry: %+v", snap)
@@ -136,8 +137,81 @@ func TestOlderShellFailureCannotSettleNewerBinding(t *testing.T) {
 	newer := d.Bind("pane", "conn-a")
 	d.AdoptSession("pane", "conn-a", "new-shell", "instance", newer)
 	before := len(out.all())
-	d.ShellFailed(context.Background(), "pane", older, -32001, "old failure", nil)
+	d.ShellFailed(context.Background(), "pane", older, -32001, "old failure", nil, false)
 	if len(out.all()) != before || out.last().SessionID != "new-shell" {
 		t.Fatal("stale shell failure replaced newer shell")
+	}
+}
+
+// A REFUSAL THAT COULD NOT ASK KEEPS TRYING BY ITSELF (design §5.4, C16).
+//
+// The backend says "nobody could be asked whether the shell is there" — the far
+// helper's inventory timed out, say. That is not a verdict, and leaving the pane
+// to a person's press would strand a shell that is still running; the driver
+// re-asks on its own, with its own backoff, until the answer changes.
+func TestARefusalThatCouldNotAskKeepsTryingByItself(t *testing.T) {
+	d, out := newDriver(t)
+	attempts := make(chan uint64, 8)
+	d.SetAction(func(_ context.Context, _ string, generation uint64) error {
+		attempts <- generation
+		return nil
+	})
+	// The loop's own wait is the test's to decide, and its CALL is the loop's
+	// observable step: a zero delay makes the retry deterministic, and counting
+	// the calls is how the test knows whether another attempt is coming without
+	// waiting for one that will not.
+	retryWaits := make(chan int, 8)
+	d.SetRetryBackoff(func(attempt int) time.Duration {
+		retryWaits <- attempt
+		return 0
+	})
+	waitForRetryStart := func(what string) int {
+		t.Helper()
+		select {
+		case attempt := <-retryWaits:
+			return attempt
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the automatic loop did not schedule another attempt", what)
+			return -1
+		}
+	}
+	apply(d, connected(1, 2))
+	generation := d.Bind("pane", "conn-a")
+	d.AdoptSession("pane", "conn-a", "shell", "instance", generation)
+	apply(d, reconnecting(2, 1, "lost-link"))
+	apply(d, connected(3, 2))
+	waittest.WaitFor(t, "the reconnect's first attempt", func() bool { return len(attempts) == 1 })
+	<-attempts
+
+	// The attempt answered "nobody could be asked" — a WAIT.
+	d.ShellFailed(context.Background(), "pane", generation, -32000, "the helper's inventory did not answer", nil, true)
+	if failure := out.last().ShellFailure; failure == nil || !failure.Retryable {
+		t.Fatalf("a wait was not published as retryable: %+v", failure)
+	}
+	if first := waitForRetryStart("after first wait"); first != 0 {
+		t.Fatalf("first retry attempt = %d, want 0", first)
+	}
+	waittest.WaitFor(t, "the automatic loop's next attempt", func() bool { return len(attempts) == 1 })
+	<-attempts
+
+	// A second consecutive wait must advance the backoff attempt count rather
+	// than resetting to 0 forever.
+	d.ShellFailed(context.Background(), "pane", generation, -32000, "the helper's inventory still did not answer", nil, true)
+	if second := waitForRetryStart("after second wait"); second != 1 {
+		t.Fatalf("second retry attempt = %d, want 1", second)
+	}
+	waittest.WaitFor(t, "the automatic loop's second attempt", func() bool { return len(attempts) == 1 })
+	<-attempts
+
+	// AN ANSWER ENDS THE LOOP: a refusal a retry cannot change schedules no
+	// further attempt at all.
+	d.ShellFailed(context.Background(), "pane", generation, -32602, "the shell is not on this host", nil, false)
+	if failure := out.last().ShellFailure; failure == nil || failure.Retryable {
+		t.Fatalf("an answer was published as a wait: %+v", failure)
+	}
+	select {
+	case attempt := <-retryWaits:
+		t.Fatalf("a refusal a retry cannot change scheduled attempt %d", attempt)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

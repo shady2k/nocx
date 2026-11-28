@@ -88,6 +88,18 @@ type OpenSpec struct {
 	// pane beside an existing one reads it from that owner. This field
 	// carries the answer; it does not decide it.
 	Cwd string
+	// Reattach names the helper-held shell this pane had before its transport
+	// was lost, when this open is the reconnect that follows (§5.4, C16).
+	// Nil turns the open into an ATTEMPT TO TAKE THAT EXACT SHELL BACK before
+	// anything is spawned: the coordinator's reattacher asks the helper that
+	// owned it whether it is still there, and only a confirmed absence falls
+	// through to an ordinary open.
+	//
+	// It is a REQUEST and never a promise. The shell may be gone, the helper
+	// may not answer, and the coordinator may no longer hold a route to it;
+	// each of those is answered by the reattacher, and a nil here means
+	// "nothing to take back" rather than "the same shell".
+	Reattach *PaneShellRef
 }
 
 // OpenedSession is a session that exists, together with the facts a caller
@@ -107,6 +119,15 @@ type OpenedSession struct {
 	// owned by this backend; callers must not treat it as a valid pid.
 	OwnedProcessPID int
 	WorkspaceID     string
+	// Reattached says this open TOOK BACK a shell that was already running
+	// instead of making one (design §5.4, C16). The session id and pid are
+	// the ones the helper kept; nothing was spawned.
+	//
+	// It rides the open result rather than a second notification because the
+	// two answers describe the same moment: `pane.opened` says newShell false
+	// for exactly this open, and a renderer that had to learn it separately
+	// could draw the new-shell divider over a shell that never ended.
+	Reattached bool
 }
 
 // openRefusal is an answer the open path produced ITSELF, as distinct from a
@@ -183,6 +204,11 @@ type sessionOpener struct {
 	// (nocx-xn63t.1.4). Nil is the ordinary shape for a server nobody wired
 	// a note into; the open neither fails nor slows for its absence.
 	paneOpened paneOpenedNote
+	// reattacher is the coordinator's half of "take this pane's far shell
+	// back" (design §5.4, C16). Nil is a legitimate wiring — a build with no
+	// far helper at all — and then an open asked to reattach answers as it
+	// always did: a new shell.
+	reattacher PaneShellReattacher
 	// passwordAsk raises the connection-password dialog for a DIRECT-HOST
 	// open (nocx-1ebrs.44). A saved profile's config carries the connection
 	// resolver's own asker (AskerFor, remember included); a hand-typed host
@@ -243,7 +269,7 @@ func (o *sessionOpener) workspaceForOpen(ctx context.Context, paneID string) (st
 // returned, so reconciliation can never observe a live helper session without
 // the generation that qualifies its id space; a failed write closes the
 // session rather than exposing one no inventory may safely judge.
-func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(session.Session), endFailedOpen func(session.Session)) (_ OpenedSession, err error) {
+func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(session.Session, bool), endFailedOpen func(session.Session)) (_ OpenedSession, err error) {
 	// THE OPEN'S RECORD (nocx-3an1s.1.8). Begin is a no-op for a caller with
 	// no dispatcher record (a backend open, a test), so this costs one nil
 	// check there. The connection label is minted per destination and is the
@@ -324,11 +350,35 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(ses
 
 	// PHASE TWO — dial, with no domain gate held.
 	var (
-		sess   session.Session
-		hosted *HostedSessionOpen
+		sess       session.Session
+		hosted     *HostedSessionOpen
+		reattached bool
 	)
 	endDial := diagnostics.Stage(ctx, diagnostics.StageDial)
 	dialErr := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		// A RECONNECT TRIES TO TAKE ITS OWN SHELL BACK FIRST (§5.4, C16), and
+		// the order is the whole rule: the helper is asked BEFORE anything is
+		// ended or spawned, so a helper that cannot answer costs the pane a
+		// wait and never a second shell beside a live one.
+		//
+		// The three answers are deliberately not a boolean. "Taken back"
+		// finishes this open with the shell that never exited; "answered and
+		// does not hold it" falls through to the open below, which is the one
+		// case that justifies a replacement; "nobody could be asked" refuses
+		// the open entire, so nothing is ended, spawned or drawn.
+		if spec.Reattach != nil && o.reattacher != nil {
+			taken, took, rerr := o.reattacher.ReattachPaneShell(ctx, spec, cfg)
+			if rerr != nil {
+				return rerr
+			}
+			if took {
+				if taken.Session == nil {
+					return errors.New("re-attachment returned no session")
+				}
+				sess, hosted, reattached = taken.Session, &taken.Hosted, true
+				return nil
+			}
+		}
 		// THE HELPER IS ASKED FIRST, for both kinds of destination.
 		if o.helper != nil {
 			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
@@ -384,16 +434,28 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(ses
 	}
 	endDial(nil)
 	if onDial != nil {
-		onDial(sess)
+		// THE SECOND ARGUMENT IS THE ROLLBACK'S OWN FACT (design §5.4, C16):
+		// a shell this open took back ran before the open and must not be
+		// ended by an open nobody accepted. The caller takes the claim here,
+		// while the answer is still this open's.
+		onDial(sess, reattached)
 	}
 	if hosted != nil {
 		diagnostics.NotePublish(ctx, publishNote(hosted))
 		diagnostics.NoteIntegration(ctx, hosted.IntegrationStatus)
 	}
 
-	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID, claim); err != nil {
-		endFailedOpen(sess)
-		return OpenedSession{}, err
+	// A RE-ATTACHED SHELL HAS ITS BINDING ALREADY. The row was written by the
+	// open that spawned it, and the statement that writes it inserts; a second
+	// write for the same id would fail the open it is meant to complete. What
+	// the row still names is right — the session, its generation, its route —
+	// because nothing about any of them changed: the same helper holds the same
+	// process.
+	if !reattached {
+		if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID, claim); err != nil {
+			endFailedOpen(sess)
+			return OpenedSession{}, err
+		}
 	}
 	// Both renderer and backend opens leave here with handover armed,
 	// before either caller can start pumping the lifecycle leg.
@@ -425,8 +487,10 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(ses
 	}
 	// The note rides SUCCESS and only success (nocx-xn63t.1.4): a pane nocx
 	// failed to open is not a pane nocx has open, and no receiver should hear
-	// that one does.
-	if o.paneOpened != nil {
+	// that one does. A RE-ADOPTED shell is not a new one either: the pane was
+	// open throughout, and telling its owner that a pane arrived would be news
+	// about a thing that never left.
+	if o.paneOpened != nil && !reattached {
 		o.paneOpened(spec, sess.ID())
 	}
 	return OpenedSession{
@@ -435,6 +499,7 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec, onDial func(ses
 		Hosted:          hosted,
 		OwnedProcessPID: ownedPID,
 		WorkspaceID:     workspaceID,
+		Reattached:      reattached,
 	}, nil
 }
 
@@ -615,6 +680,12 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 		ProfileID:     cfg.ProfileID,
 		HelperCommand: hosted.HelperCommand,
 		Fingerprint:   hosted.Fingerprint,
+		// THE COMPLETE ROUTE, in the same statement (design §5.4). The
+		// profile id above says WHICH saved connection this session was
+		// opened on; a typed host has none, and that is the route a cold
+		// start could not take back at all until the route itself was
+		// recorded.
+		Route: sessionRouteOf(cfg),
 		// THE LIFECYCLE CURSOR IS BORN WITH THE BINDING (ADR-0077), at 0:
 		// the leg attaches at the stream's start and its bridge starts only
 		// after this write, so no frame is applied yet. From here the
@@ -638,6 +709,33 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 	// The caller claims and ends this failed open; detaching it instead
 	// would strand the helper's session budget (nocx-isjh4).
 	return fmt.Errorf("recording the helper binding: %w", err)
+}
+
+// sessionRouteOf records the route an open actually dialled, as the resolver
+// answered it (design §5.4). Nil for anything that is not a remote open, and
+// nil for a remote open whose destination was never resolved — an empty route
+// is never guessed at.
+//
+// IT HOLDS NO SECRET. Port, account and the first jump hop are the connection's
+// own addressing; the material that authenticates it stays where it was — in
+// the saved profile the route names, or in the ssh configuration and agent the
+// typed host is resolved through again.
+func sessionRouteOf(cfg session.Config) *content.SessionRoute {
+	if cfg.Kind != session.KindRemote || cfg.Host == "" {
+		return nil
+	}
+	route := &content.SessionRoute{Host: cfg.Host, ProfileID: cfg.ProfileID}
+	if remote := cfg.Remote; remote != nil {
+		route.Port = remote.Port
+		route.User = remote.User
+		route.JumpHost = remote.JumpHost
+		route.JumpPort = remote.JumpPort
+		route.JumpUser = remote.JumpUser
+		if route.ProfileID == "" {
+			route.ProfileID = remote.ProfileID
+		}
+	}
+	return route
 }
 
 // claimSpawn writes the pane's durable claim on the spawn it is about to ask

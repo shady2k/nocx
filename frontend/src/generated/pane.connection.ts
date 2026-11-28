@@ -155,7 +155,7 @@ export type PaneConnection = {
         stateMs: number
       }
   /**
-   * The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25).
+   * The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25). retryable says which kind of refusal it is (design §5.4, C16): true means NOBODY COULD BE ASKED whether the shell is still there — the helper's inventory timed out or would not answer — so the pane is waiting and the automatic attempt loop keeps trying; false means the backend has an ANSWER (a route that no longer leads there, a helper that answered and does not hold it, one that would not give it back) and a person's Reconnect is the way forward.
    */
   shellFailure?: {
     code: number
@@ -165,6 +165,10 @@ export type PaneConnection = {
      * Which refusal this is, counting from 1 for the pane's binding. Two frames carrying the same sequence are the same refusal however many epochs apart they were published.
      */
     sequence: number
+    /**
+     * Whether this refusal is a WAIT rather than an answer. True while the automatic attempt loop is still running because nobody could be asked; false once the backend has a verdict a retry cannot change.
+     */
+    retryable: boolean
   }
   /**
    * The newest round-trip measurement and its grade, exactly as session.liveness carries them. ABSENT when nothing measured one: an unanswered probe has no duration, and absent and zero are the same statement — no measurement, never instant. slow is the backend's grade with hysteresis; a reader holding only the milliseconds cannot reproduce it.

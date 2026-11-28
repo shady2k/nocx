@@ -182,6 +182,23 @@ function factsFor(
       // only the shell; saying "Connected" here would hide the pane's one
       // problem behind a green word.
       if (observation.shellFailure !== undefined) {
+        // AND A WAIT SAYS SO (design §5.4, C16): `retryable` means nobody
+        // could be asked whether the shell is still there, the automatic loop
+        // is still trying, and the pane is waiting rather than failed. Saying
+        // "Shell failed" over a shell that may be alive and accepting input is
+        // the soft degrade the product may not show; the offer stays, so a
+        // person who does not want to wait can still press.
+        if (observation.shellFailure.retryable) {
+          return {
+            state: 'connected',
+            text: `${t('connection.shellWaiting', 'Waiting for the host to answer')} \u00b7 ${
+              observation.shellFailure.message
+            }`,
+            tone: 'busy',
+            busy: true,
+            offer,
+          }
+        }
         return {
           state: 'connected',
           text: `${t('connection.shellFailed', 'Shell failed')} \u00b7 ${

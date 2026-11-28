@@ -51,10 +51,11 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 	}
 	if s.ShellFailure != nil {
 		p.ShellFailure = &transport.PaneShellFailure{
-			Code:     s.ShellFailure.Code,
-			Message:  s.ShellFailure.Message,
-			Data:     s.ShellFailure.Data,
-			Sequence: s.ShellFailure.Sequence,
+			Code:      s.ShellFailure.Code,
+			Message:   s.ShellFailure.Message,
+			Data:      s.ShellFailure.Data,
+			Sequence:  s.ShellFailure.Sequence,
+			Retryable: s.ShellFailure.Retryable,
 		}
 	}
 	if s.Transport.HasLook {

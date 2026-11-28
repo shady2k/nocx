@@ -7,22 +7,52 @@
   "allOf": [
     {
       "if": {
-        "properties": { "transport": { "properties": { "state": { "const": "connected" } } } },
+        "properties": {
+          "transport": {
+            "properties": {
+              "state": {
+                "const": "connected"
+              }
+            }
+          }
+        },
         "required": ["reconnect"]
       },
       "then": {
         "required": ["shellFailure"],
-        "properties": { "reconnect": { "properties": { "endsShells": { "const": 0 } } } }
+        "properties": {
+          "reconnect": {
+            "properties": {
+              "endsShells": {
+                "const": 0
+              }
+            }
+          }
+        }
       }
     },
     {
       "if": {
-        "properties": { "transport": { "properties": { "state": { "const": "connected" } } } },
+        "properties": {
+          "transport": {
+            "properties": {
+              "state": {
+                "const": "connected"
+              }
+            }
+          }
+        },
         "required": ["shellFailure"]
       },
-      "then": { "required": ["reconnect"] }
+      "then": {
+        "required": ["reconnect"]
+      }
     },
-    { "not": { "required": ["shellFailure", "sessionId"] } }
+    {
+      "not": {
+        "required": ["shellFailure", "sessionId"]
+      }
+    }
   ],
   "additionalProperties": false,
   "required": [
@@ -46,8 +76,14 @@
           "required": ["state", "action"],
           "description": "A decision that is still running. A surface shows a quiet starting mark, and no action.",
           "properties": {
-            "state": { "type": "string", "const": "starting" },
-            "action": { "type": "string", "const": "none" }
+            "state": {
+              "type": "string",
+              "const": "starting"
+            },
+            "action": {
+              "type": "string",
+              "const": "none"
+            }
           }
         },
         {
@@ -56,8 +92,14 @@
           "required": ["state", "action"],
           "description": "A reachable far helper. Nothing is missing, so there is no reason and nothing to offer.",
           "properties": {
-            "state": { "type": "string", "const": "serving" },
-            "action": { "type": "string", "const": "none" }
+            "state": {
+              "type": "string",
+              "const": "serving"
+            },
+            "action": {
+              "type": "string",
+              "const": "none"
+            }
           }
         },
         {
@@ -66,9 +108,18 @@
           "required": ["state", "reason", "action"],
           "description": "The transport is not connected and the far helper was serving or would serve. The axis is paused, not absent: the decision did not change, and the return redials the helper already installed.",
           "properties": {
-            "state": { "type": "string", "const": "paused" },
-            "reason": { "type": "string", "const": "connection" },
-            "action": { "type": "string", "const": "none" }
+            "state": {
+              "type": "string",
+              "const": "paused"
+            },
+            "reason": {
+              "type": "string",
+              "const": "connection"
+            },
+            "action": {
+              "type": "string",
+              "const": "none"
+            }
           }
         },
         {
@@ -77,9 +128,18 @@
           "required": ["state", "reason", "action"],
           "description": "The host's recorded mode does not allow a far helper. The one useful action is opening the host record's mode, and it is not an install.",
           "properties": {
-            "state": { "type": "string", "const": "unavailable" },
-            "reason": { "type": "string", "enum": ["mode-raw", "mode-script"] },
-            "action": { "type": "string", "const": "host-settings" }
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": ["mode-raw", "mode-script"]
+            },
+            "action": {
+              "type": "string",
+              "const": "host-settings"
+            }
           }
         },
         {
@@ -88,9 +148,18 @@
           "required": ["state", "reason", "action"],
           "description": "A far helper that was serving on this connection and is gone with the transport still up. Refresh redials the helper already installed and never installs; during an uninstall window the same reason is published with no action.",
           "properties": {
-            "state": { "type": "string", "const": "unavailable" },
-            "reason": { "type": "string", "const": "helper-lost" },
-            "action": { "type": "string", "enum": ["refresh", "none"] }
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "const": "helper-lost"
+            },
+            "action": {
+              "type": "string",
+              "enum": ["refresh", "none"]
+            }
           }
         },
         {
@@ -99,7 +168,10 @@
           "required": ["state", "reason", "action"],
           "description": "A decision no button can change: an absent or refused consent, a platform without an artifact, a failed install, a refused exec, a version mismatch, or a connection that is gone. A person changes it through the connection's own settings, never by pressing a retry here (the owner's decision of 2026-11-16).",
           "properties": {
-            "state": { "type": "string", "const": "unavailable" },
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
             "reason": {
               "type": "string",
               "enum": [
@@ -112,7 +184,10 @@
                 "connection"
               ]
             },
-            "action": { "type": "string", "const": "none" }
+            "action": {
+              "type": "string",
+              "const": "none"
+            }
           }
         }
       ]
@@ -334,18 +409,26 @@
       ]
     },
     "shellFailure": {
-      "description": "The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25).",
+      "description": "The pane shell failed while transport may remain healthy. Carries the same actionable refusal as open; retained until a replacement session is adopted, so the same refusal is republished under many epochs and a rebind during a retry keeps it on purpose. sequence is the refusal's own identity, monotonic per pane: it is what tells a republication of the refusal a person has already answered apart from a genuinely new one (nocx-oalo1.25). retryable says which kind of refusal it is (design §5.4, C16): true means NOBODY COULD BE ASKED whether the shell is still there — the helper's inventory timed out or would not answer — so the pane is waiting and the automatic attempt loop keeps trying; false means the backend has an ANSWER (a route that no longer leads there, a helper that answered and does not hold it, one that would not give it back) and a person's Reconnect is the way forward.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "sequence"],
+      "required": ["code", "message", "sequence", "retryable"],
       "properties": {
-        "code": { "type": "integer" },
-        "message": { "type": "string" },
+        "code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
         "data": {},
         "sequence": {
           "description": "Which refusal this is, counting from 1 for the pane's binding. Two frames carrying the same sequence are the same refusal however many epochs apart they were published.",
           "type": "integer",
           "minimum": 1
+        },
+        "retryable": {
+          "description": "Whether this refusal is a WAIT rather than an answer. True while the automatic attempt loop is still running because nobody could be asked; false once the backend has a verdict a retry cannot change.",
+          "type": "boolean"
         }
       }
     },

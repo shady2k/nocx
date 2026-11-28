@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
@@ -336,7 +337,20 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	endSpawn(err)
 	if err != nil {
 		abortLifecycleNow("open-rollback:attach")
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
+		// THE SESSION THIS SPAWN MADE HAS NO OTHER NAME. A cancelled open is
+		// the ordinary case here (shutdown, a closed pane, a lost renderer),
+		// so the close must not inherit that cancellation; a helper that did
+		// not answer at all is left to its own unclaimed-session sweep, as the
+		// far route does. A refused close is reported rather than swallowed.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+			cerr := h.client.CloseSession(rollbackCtx, entry.HostSessionID)
+			cancelRollback()
+			if cerr != nil {
+				log.From(ctx).Warn("local pane: the unaccepted session could not be closed; the helper's unclaimed-session sweep is the remaining bound",
+					"session", entry.HostSessionID.Session, "error", cerr)
+			}
+		}
 		return hostedSpawnResult{}, err
 	}
 	if cursor != nil {
@@ -382,7 +396,13 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		stopBlockRows()
 		_ = attached.Close()
 		abortLifecycleNow("open-rollback:adopt")
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
+		rollbackCtx, cancelRollback := unacceptedSessionRollback(ctx)
+		cerr := h.client.CloseSession(rollbackCtx, entry.HostSessionID)
+		cancelRollback()
+		if cerr != nil {
+			log.From(ctx).Warn("local pane: the unaccepted session could not be closed after a failed adoption",
+				"session", entry.HostSessionID.Session, "error", cerr)
+		}
 		return hostedSpawnResult{}, err
 	}
 	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)

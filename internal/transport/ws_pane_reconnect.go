@@ -95,6 +95,17 @@ func (s *WSServer) endPaneSession(sess session.Session) {
 
 // ReconnectPane replaces a held shell after the supervisor restores transport.
 func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBinding uint64) (resultErr error) {
+	// THE RECONNECT IS AN OPEN, and the transport entry a supervisor calls
+	// reaches the opener directly rather than through a method submission.
+	// Without this registration Stop could return while a reconnect was still
+	// dialing, and the helper session it spawns would have no owner left to
+	// close it. begin refuses work once shutdown has started.
+	tctx, _, release, ok := s.inflight.begin(ctx)
+	if !ok {
+		return errOpenShuttingDown
+	}
+	defer release()
+	ctx = tctx
 	s.paneMu.Lock()
 	rec := s.paneRecords[paneID]
 	if rec == nil || expectedBinding == 0 || rec.bindingGeneration != expectedBinding {

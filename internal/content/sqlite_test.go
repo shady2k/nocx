@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -413,6 +414,19 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 // actionable error instead of a panic, and the store stays usable after the
 // condition clears.
 func TestDiskFullProducesActionableError(t *testing.T) {
+	// RLIMIT_FSIZE and SIGXFSZ belong to a process, not this test. In the
+	// suite process the cap can also truncate Go's test-cache log, causing
+	// a package failure after every assertion has passed.
+	const childEnv = "NOCX_CONTENT_DISK_FULL_CHILD"
+	if os.Getenv(childEnv) != "1" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestDiskFullProducesActionableError$") //nolint:gosec // this test binary, fixed test selector
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("isolated disk-full check: %v\n%s", err, output)
+		}
+		return
+	}
+
 	db, _ := newTestStore(t)
 	ctx := context.Background()
 	hist := db.Ledger()

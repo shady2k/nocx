@@ -10,10 +10,21 @@ package app
 // transport, a real helper service through the helper's own wire) and hold
 // ATTACH at the helper, which is after the spawn has answered. They then ask a
 // SEPARATE helper connection what the helper holds.
+//
+// THE ROLLBACK IS HELD TOO, on its own barrier, in the rows about shutdown:
+// holding only the attach let a row call Shutdown and then wait five seconds
+// for the open before reading the inventory — which passes for a close the
+// helper processed after Shutdown had already returned. Holding close-session
+// is what lets a row assert that Shutdown itself waited for the answer.
+//
+// Each helper has its own gate, and every gate event carries the session id
+// that operation's own params named, so a row observes the helper and the
+// session it is asking about rather than whichever helper happened to move.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -35,75 +46,102 @@ import (
 	"github.com/shady2k/nocx/internal/transport"
 )
 
-// attachGate holds the helper's session.attach operation until the test has
-// seen it. Spawn has necessarily answered by then: the client sends attach
-// only after it has the spawn's result.
-type attachGate struct {
-	mu       sync.Mutex
-	armed    bool
-	entered  chan struct{}
-	enteredO *sync.Once
-	release  chan struct{}
-	releaseO *sync.Once
+// helperGate holds selected operations of ONE helper until the test has seen
+// them, and reports the SESSION each held operation named. One instance per
+// helper, deliberately: both helpers used to share one gate and one spawn
+// counter, so an attach on the other helper could wake a row whose own helper
+// had spawned nothing — and the row then observed the wrong event and could
+// not tell. The session id in the event is what lets a row say which helper
+// and which session it is talking about.
+type helperGate struct {
+	mu   sync.Mutex
+	arms map[string]*gateArm
 }
 
-func newAttachGate() *attachGate { return &attachGate{} }
+func newHelperGate() *helperGate { return &helperGate{arms: map[string]*gateArm{}} }
 
-// arm starts holding the next attach and answers the channel that closes when
-// one is held, plus the release the caller must run to let it finish.
-func (g *attachGate) arm() (<-chan struct{}, func()) {
+// gateArm is one armed operation kind: the session id the held call named
+// (entered), the point at which the real service ANSWERED it (answered, closed
+// only for a call this gate held), and the release the row runs to let the
+// call finish.
+type gateArm struct {
+	entered  chan string
+	answered chan struct{}
+	release  chan struct{}
+
+	taken        bool
+	releaseOnce  sync.Once
+	answeredOnce sync.Once
+}
+
+// arm holds the next op of this kind. A held close also reports when the
+// helper answered it, which is the fact that proves Shutdown waited for the
+// rollback instead of the test waiting five seconds beside it.
+func (g *helperGate) arm(op string) *gateArm {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	g.armed = true
-	g.entered = entered
-	g.enteredO = &sync.Once{}
-	g.release = release
-	g.releaseO = &sync.Once{}
-	return entered, func() { g.unarm() }
+	a := &gateArm{
+		entered:  make(chan string, 1),
+		answered: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	g.arms[op] = a
+	return a
 }
 
-func (g *attachGate) unarm() {
-	g.mu.Lock()
-	releaseO := g.releaseO
-	g.armed = false
-	g.mu.Unlock()
-	if releaseO != nil {
-		releaseO.Do(func() { close(g.release) })
-	}
+// releaseNow lets a held call finish. Idempotent, so a row's own release and a
+// failing row's defer cannot close it twice.
+func (a *gateArm) releaseNow() {
+	a.releaseOnce.Do(func() { close(a.release) })
 }
 
-// holdAttach parks an attach before the real service sees it, and reports
-// whether it parked. Every other operation runs untouched.
-func (g *attachGate) holdAttach(op string) {
-	if op != proto.OpAttach {
-		return
-	}
+// hold parks the FIRST operation of an armed kind, after reporting the session
+// id its params name, and lets every later one — and every other op — run
+// untouched.
+func (g *helperGate) hold(op string, params json.RawMessage) *gateArm {
 	g.mu.Lock()
-	if !g.armed {
+	a := g.arms[op]
+	if a == nil || a.taken {
 		g.mu.Unlock()
-		return
+		return nil
 	}
-	entered, enteredO := g.entered, g.enteredO
-	release := g.release
+	a.taken = true
 	g.mu.Unlock()
-	if enteredO != nil {
-		enteredO.Do(func() { close(entered) })
+	a.entered <- sessionIDNamedBy(op, params)
+	<-a.release
+	return a
+}
+
+// sessionIDNamedBy is the session an operation's OWN params name. It is read
+// from the wire shape rather than inferred from what the row expected, so a
+// row can prove the helper saw the session it is asking about.
+func sessionIDNamedBy(op string, params json.RawMessage) string {
+	switch op {
+	case proto.OpAttach:
+		var p proto.AttachParams
+		if json.Unmarshal(params, &p) == nil {
+			return p.Session.Session
+		}
+	case proto.OpCloseSession:
+		var p proto.CloseSessionParams
+		if json.Unmarshal(params, &p) == nil {
+			return p.Session.Session
+		}
 	}
-	<-release
+	return ""
 }
 
-// attachHoldingService is the real helper service with one operation held. It
-// is registered on the helper host exactly as the real service is, so the wire
-// under test is the production wire.
-type attachHoldingService struct {
+// gateService is the real helper service with selected operations held. It is
+// registered on the helper host exactly as the real service is, so the wire
+// under test is the production wire. The probe connection is built on the
+// plain service, so no row's gate can hold the question "what do you hold".
+type gateService struct {
 	*helpersession.Service
-	gate *attachGate
+	gate *helperGate
 }
 
-func (s *attachHoldingService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
-	s.gate.holdAttach(op)
+func (s *gateService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	held := s.gate.hold(op, params)
 	if op == proto.OpSpawnSSH {
 		// The wire's ssh spawn asks for a credential reference this test's
 		// direct-host open never had. The interactive identity is the one the
@@ -117,7 +155,13 @@ func (s *attachHoldingService) Call(ctx context.Context, op string, params json.
 			}
 		}
 	}
-	return s.Service.Call(ctx, op, params)
+	result, err := s.Service.Call(ctx, op, params)
+	if held != nil {
+		// THE ANSWER EXISTS NOW and the host writes it next: this is the last
+		// moment the barrier can say the helper ANSWERED the call it held.
+		held.answeredOnce.Do(func() { close(held.answered) })
+	}
+	return result, err
 }
 
 // fakeSSHService answers the ssh operations the coordinator's pre-selection
@@ -171,18 +215,22 @@ func (staticSSHTarget) ResolveTarget(_ context.Context, host string, _ ...ssh.Co
 
 // helperOpenStand is the shipped App backed by a real in-process helper
 // service. localSvc is reached through the App's own local opener; farSvc is
-// reached through the App's far-helper registry and its scripted lane.
+// reached through the App's far-helper registry and its scripted lane. Each
+// service has its OWN gate and its OWN spawner, so a row's evidence names one
+// helper and one session rather than "some helper, something spawned".
 type helperOpenStand struct {
-	t        *testing.T
-	app      *App
-	host     string
-	remote   bool
-	farMode  hostmode.Mode
-	localSvc *helpersession.Service
-	farSvc   *helpersession.Service
-	spawner  *scriptedSpawner
-	gate     *attachGate
-	probe    *helperclient.Client
+	t            *testing.T
+	app          *App
+	host         string
+	remote       bool
+	farMode      hostmode.Mode
+	localSvc     *helpersession.Service
+	farSvc       *helpersession.Service
+	localSpawner *scriptedSpawner
+	farSpawner   *scriptedSpawner
+	localGate    *helperGate
+	farGate      *helperGate
+	probe        *helperclient.Client
 }
 
 const (
@@ -190,41 +238,62 @@ const (
 	hostOnFarHelper   = "the far helper"
 )
 
+// gate is the gate of the helper this stand's opens land on.
+func (s *helperOpenStand) gate() *helperGate {
+	if s.host == hostOnFarHelper {
+		return s.farGate
+	}
+	return s.localGate
+}
+
+// spawner is that same helper's own spawner: "a session was spawned" has to be
+// a fact about THIS helper, which a counter shared by both helpers could not
+// say.
+func (s *helperOpenStand) spawner() *scriptedSpawner {
+	if s.host == hostOnFarHelper {
+		return s.farSpawner
+	}
+	return s.localSpawner
+}
+
 func newHelperOpenStand(t *testing.T, host string, remote bool, farMode hostmode.Mode) *helperOpenStand {
 	t.Helper()
 	// A disposable HOME is what the shipped App's own paths and backgrounds
 	// resolve against. The helper here is in-process, so nothing forks a
 	// shell, but the App still owns per-user files.
 	storagetest.IsolateWithHome(t)
-	gate := newAttachGate()
-	spawner := &scriptedSpawner{}
-	stand := &helperOpenStand{t: t, host: host, remote: remote, farMode: farMode, spawner: spawner, gate: gate}
+	stand := &helperOpenStand{
+		t: t, host: host, remote: remote, farMode: farMode,
+		localSpawner: &scriptedSpawner{}, farSpawner: &scriptedSpawner{},
+		localGate: newHelperGate(), farGate: newHelperGate(),
+	}
 
-	makeHelper := func() (*helpersession.Service, *helperclient.Client) {
+	makeHelper := func(spawner *scriptedSpawner, gate *helperGate) (*helpersession.Service, *helperclient.Client) {
 		base := helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(syntheticArtifactHash),
 			Spawner:    spawner,
 			SSHSpawner: spawner,
 			Log:        discardLogger(t),
 		})
-		svc := &attachHoldingService{Service: base, gate: gate}
+		svc := &gateService{Service: base, gate: gate}
 		t.Cleanup(base.Close)
-		client := dialGateHelper(t, svc)
+		client := dialHelper(t, svc)
 		return base, client
 	}
 
 	var localClient *helperclient.Client
-	stand.localSvc, localClient = makeHelper()
-	stand.farSvc, _ = makeHelper()
+	stand.localSvc, localClient = makeHelper(stand.localSpawner, stand.localGate)
+	stand.farSvc, _ = makeHelper(stand.farSpawner, stand.farGate)
 
 	// The probe is a SEPARATE helper connection to the service that owns the
 	// open: it is the question "what does the helper hold", asked by somebody
-	// who is not the coordinator that asked for the session.
+	// who is not the coordinator that asked for the session — and it is built
+	// on the PLAIN service, so no row's gate can hold the question itself.
 	probeSvc := stand.localSvc
 	if host == hostOnFarHelper {
 		probeSvc = stand.farSvc
 	}
-	stand.probe = dialGateHelper(t, &attachHoldingService{Service: probeSvc, gate: gate})
+	stand.probe = dialHelper(t, probeSvc)
 
 	app, err := newTestApp(t)
 	if err != nil {
@@ -232,7 +301,7 @@ func newHelperOpenStand(t *testing.T, host string, remote bool, farMode hostmode
 	}
 	stand.app = app
 	installTestLocalHelper(t, app, localClient)
-	installTestFarHelper(t, app, stand.farSvc, gate, farMode)
+	installTestFarHelper(t, app, stand.farSvc, stand.farGate, farMode)
 
 	// Explicit shutdown is the subject of the test; the App's own cleanup is
 	// only a safety net for a fatal before it is reached.
@@ -265,11 +334,11 @@ func installTestLocalHelper(t *testing.T, a *App, client *helperclient.Client) {
 }
 
 // installTestFarHelper wires the registry's far route to the scripted lane.
-func installTestFarHelper(t *testing.T, a *App, svc *helpersession.Service, gate *attachGate, mode hostmode.Mode) {
+func installTestFarHelper(t *testing.T, a *App, svc *helpersession.Service, gate *helperGate, mode hostmode.Mode) {
 	t.Helper()
 	provider := &fakeLaneProvider{
 		owner: t.Name(),
-		peer:  helperPeerWithGate(t, &attachHoldingService{Service: svc, gate: gate}),
+		peer:  helperPeerWithGate(t, &gateService{Service: svc, gate: gate}),
 		home:  t.TempDir(),
 	}
 	store, _ := testConsentStores(t)
@@ -286,7 +355,7 @@ func installTestFarHelper(t *testing.T, a *App, svc *helpersession.Service, gate
 }
 
 // helperPeerWithGate serves one scripted lane over a real helper host.
-func helperPeerWithGate(t testing.TB, svc *attachHoldingService) func(in io.Reader, out io.Writer) int {
+func helperPeerWithGate(t testing.TB, svc *gateService) func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := helperhost.New(in, out, syntheticArtifactHash, "instance-1", discardLogger(t))
 		h.Register(fakeSSHService{})
@@ -300,9 +369,17 @@ func helperPeerWithGate(t testing.TB, svc *attachHoldingService) func(in io.Read
 	}
 }
 
-// dialInProcessHelper opens one real helper connection over a socket pair,
-// with the real hello handshake and the real session service behind it.
-func dialGateHelper(t *testing.T, svc *attachHoldingService) *helperclient.Client {
+// dialableService is the shipped helper service as these tests register it:
+// the host's dispatch, plus the connection binding the session service keeps
+// for its sinks.
+type dialableService interface {
+	helperhost.Service
+	Bind(helpersession.Sink) func()
+}
+
+// dialHelper opens one real helper connection over a socket pair, with the
+// real hello handshake and the real session service behind it.
+func dialHelper(t *testing.T, svc dialableService) *helperclient.Client {
 	t.Helper()
 	server, client := net.Pipe()
 	h := helperhost.New(server, server, syntheticArtifactHash, "instance-1", discardLogger(t))
@@ -342,22 +419,67 @@ func (s *helperOpenStand) openSpec(paneID string) transport.OpenSpec {
 	return transport.OpenSpec{Kind: "local", PaneID: paneID, Cols: 80, Rows: 24}
 }
 
-// waitForAttach proves the gate is holding an attach, which is after spawn.
-func (s *helperOpenStand) waitForAttach(entered <-chan struct{}, done <-chan error) {
+// waitForAttach proves THIS helper is holding an attach, and answers the
+// session that attach names. The session must be one this helper's own spawner
+// launched: spawn has necessarily answered before the client could send attach.
+func (s *helperOpenStand) waitForAttach(entered <-chan string, done <-chan error) string {
 	s.t.Helper()
+	var sid string
 	select {
-	case <-entered:
+	case sid = <-entered:
 	case err := <-done:
 		s.t.Fatalf("the open ended before Attach was held: %v", err)
 	case <-time.After(30 * time.Second):
-		s.t.Fatalf("timed out waiting for the helper to be holding Attach (%d spawns so far)", s.spawner.spawnCount())
+		s.t.Fatalf("timed out waiting for the helper to be holding Attach (spawned %v so far)", s.spawner().spawnedSessionIDs())
 	}
-	if got := s.spawner.spawnCount(); got < 1 {
-		s.t.Fatal("Attach was held before the helper had spawned a session")
-	}
+	s.assertSpawnedHere(sid)
+	return sid
 }
 
-// helperSessions asks the SEPARATE probe connection what the helper holds.
+// waitForAttachOnly is waitForAttach for an entry with no error channel of its
+// own: a renderer's JSON-RPC open answers on the socket, not to a caller.
+func (s *helperOpenStand) waitForAttachOnly(entered <-chan string) string {
+	s.t.Helper()
+	var sid string
+	select {
+	case sid = <-entered:
+	case <-time.After(30 * time.Second):
+		s.t.Fatalf("timed out waiting for the helper to be holding Attach (spawned %v so far)", s.spawner().spawnedSessionIDs())
+	}
+	s.assertSpawnedHere(sid)
+	return sid
+}
+
+// assertSpawnedHere proves the session a held operation names is one THIS
+// helper's own spawner launched — not the other helper's, and not a session
+// that was never spawned at all.
+func (s *helperOpenStand) assertSpawnedHere(sid string) {
+	s.t.Helper()
+	if sid == "" {
+		s.t.Fatal("the held operation named no session")
+	}
+	for _, spawned := range s.spawner().spawnedSessionIDs() {
+		if spawned == sid {
+			return
+		}
+	}
+	s.t.Fatalf("the held operation named session %s, which this helper did not spawn: it spawned %v", sid, s.spawner().spawnedSessionIDs())
+}
+
+// spawnedSessionIDs is what this helper's own spawner actually launched.
+func (s *scriptedSpawner) spawnedSessionIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.procs))
+	for _, p := range s.procs {
+		ids = append(ids, p.id)
+	}
+	return ids
+}
+
+// helperSessions asks the SEPARATE probe connection what the helper holds. The
+// inventory keeps sessions that have finished, so presence alone says nothing
+// about liveness: Exit is the field that does.
 func (s *helperOpenStand) helperSessions() []helperclient.SessionEntry {
 	s.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -369,32 +491,104 @@ func (s *helperOpenStand) helperSessions() []helperclient.SessionEntry {
 	return entries
 }
 
-func (s *helperOpenStand) assertHoldsNoSession(what string) {
+// liveEntry answers the entry for sid that the helper still reports as live.
+func (s *helperOpenStand) liveEntry(sid string) *helperclient.SessionEntry {
+	entries := s.helperSessions()
+	for i := range entries {
+		if entries[i].HostSessionID.Session == sid && entries[i].Exit == nil {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// assertLive proves the exact session named by a held operation is running on
+// its helper. Without it "no live session afterwards" could be satisfied by a
+// session that never existed.
+func (s *helperOpenStand) assertLive(sid, what string) {
 	s.t.Helper()
-	if entries := s.helperSessions(); len(entries) != 0 {
-		s.t.Fatalf("%s: the helper still holds %d session(s): %+v", what, len(entries), entries)
+	if s.liveEntry(sid) == nil {
+		s.t.Fatalf("%s: session %s is not live on the helper: %+v", what, sid, s.helperSessions())
 	}
 }
 
-// spawnCount is the scripted spawner's count under its own lock.
-func (s *scriptedSpawner) spawnCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.spawned
+// assertNotLive proves the exact session is not running on its helper. A
+// finished entry may remain in the inventory; Exit is what tells the two apart.
+func (s *helperOpenStand) assertNotLive(sid, what string) {
+	s.t.Helper()
+	entries := s.helperSessions()
+	for _, entry := range entries {
+		if entry.HostSessionID.Session == sid && entry.Exit == nil {
+			s.t.Fatalf("%s: session %s is still live on the helper: %+v", what, sid, entries)
+		}
+	}
 }
 
-// waitForAttachOnly is waitForAttach for an entry with no error channel of its
-// own: a renderer's JSON-RPC open answers on the socket, not to a caller.
-func (s *helperOpenStand) waitForAttachOnly(entered <-chan struct{}) {
+// shutdownWhileHeldInAttach is the second half shared by the open and the
+// reconnect rows: it proves that SHUTDOWN waits for the rollback, instead of a
+// five-second wait in the test standing beside a Shutdown that already
+// returned.
+func (s *helperOpenStand) shutdownWhileHeldInAttach(attach *gateArm, openDone <-chan error) string {
 	s.t.Helper()
+	sid := s.waitForAttach(attach.entered, openDone)
+	// The session the held attach names exists and is running: spawn answered,
+	// and this is the session the rollback owes a close.
+	s.assertLive(sid, "while the open is held in Attach")
+
+	// The close gate is armed BEFORE shutdown: the rollback is what shutdown's
+	// cancellation sets in motion.
+	closeArm := s.gate().arm(proto.OpCloseSession)
+	defer closeArm.releaseNow()
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		s.app.Shutdown(context.Background())
+		close(shutdownDone)
+	}()
+
+	var closed string
 	select {
-	case <-entered:
+	case closed = <-closeArm.entered:
+	case <-shutdownDone:
+		s.t.Fatal("Shutdown returned without the helper being asked to close the unaccepted session")
 	case <-time.After(30 * time.Second):
-		s.t.Fatalf("timed out waiting for the helper to be holding Attach (%d spawns so far)", s.spawner.spawnCount())
+		s.t.Fatal("timed out waiting for the rollback's close-session to reach the helper")
 	}
-	if got := s.spawner.spawnCount(); got < 1 {
-		s.t.Fatal("Attach was held before the helper had spawned a session")
+	if closed != sid {
+		s.t.Fatalf("the rollback closed session %q, but the held attach named %q", closed, sid)
 	}
+	// AND SHUTDOWN IS STILL PARKED IN IT. This is the assertion these rows
+	// exist for: a Shutdown that returned here did not wait for the close the
+	// open owed, and the inventory read below would be taken over a rollback
+	// still in flight.
+	select {
+	case <-shutdownDone:
+		s.t.Fatal("Shutdown returned before the helper answered the close of the unaccepted session")
+	default:
+	}
+
+	closeArm.releaseNow()
+	select {
+	case <-closeArm.answered:
+	case <-time.After(30 * time.Second):
+		s.t.Fatal("the helper never answered the close of the unaccepted session")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(30 * time.Second):
+		s.t.Fatal("Shutdown did not return after the helper answered the close")
+	}
+
+	// READ IMMEDIATELY, before joining the open: what the probe reports now is
+	// the state Shutdown left behind, not one the test waited into existence.
+	s.assertNotLive(sid, "after shutdown")
+
+	select {
+	case <-openDone:
+	case <-time.After(30 * time.Second):
+		s.t.Fatal("the open did not end although Shutdown returned")
+	}
+	return sid
 }
 
 // seedPane makes a real pane in the App's own layout store. An open that names
@@ -528,13 +722,14 @@ func TestAnUnacceptedRPCOpenLeavesNoLiveHelperSessionAfterShutdown(t *testing.T)
 		t.Run(host, func(t *testing.T) {
 			stand := newHelperOpenStand(t, host, host == hostOnFarHelper, hostmode.Helper)
 			conn, paneID := seedPane(t, stand.app)
-			entered, release := stand.gate.arm()
-			defer release()
+			attach := stand.gate().arm(proto.OpAttach)
+			defer attach.releaseNow()
 
 			writeOpenOverWS(t, conn, stand.openSpec(paneID), 7)
-			stand.waitForAttachOnly(entered)
+			sid := stand.waitForAttachOnly(attach.entered)
+			stand.assertLive(sid, "while the renderer's open is held in Attach")
 			stand.app.Shutdown(context.Background())
-			stand.assertHoldsNoSession("after shutdown")
+			stand.assertNotLive(sid, "after shutdown")
 		})
 	}
 }
@@ -557,23 +752,14 @@ func TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown(t *testing.
 			conn, paneID := seedPane(t, stand.app)
 			generation := openOverWS(t, conn, stand.openSpec(paneID), 7)
 
-			entered, release := stand.gate.arm()
-			defer release()
+			attach := stand.gate().arm(proto.OpAttach)
+			defer attach.releaseNow()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- stand.app.Transport.ReconnectPane(ctx, paneID, generation) }()
 
-			stand.waitForAttach(entered, done)
-			stand.app.Shutdown(context.Background())
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				cancel()
-				<-done
-				t.Fatal("Shutdown returned while the reconnect was still held in Attach: ReconnectPane is not part of the transport's in-flight drain")
-			}
-			stand.assertHoldsNoSession("after shutdown")
+			stand.shutdownWhileHeldInAttach(attach, done)
 		})
 	}
 }
@@ -581,13 +767,13 @@ func TestAnUnacceptedReconnectLeavesNoLiveHelperSessionAfterShutdown(t *testing.
 // TestAnUnacceptedOpenLeavesNoLiveHelperSessionAfterShutdown is the defect.
 // The spawn has answered, Attach is held, and then the App shuts down. The
 // rollback that ends the session it made must not carry shutdown's own
-// cancellation to the helper.
+// cancellation to the helper, and Shutdown must WAIT for that close.
 func TestAnUnacceptedOpenLeavesNoLiveHelperSessionAfterShutdown(t *testing.T) {
 	for _, host := range []string{hostOnThisMachine, hostOnFarHelper} {
 		t.Run(host, func(t *testing.T) {
 			stand := newHelperOpenStand(t, host, host == hostOnFarHelper, hostmode.Helper)
-			entered, release := stand.gate.arm()
-			defer release()
+			attach := stand.gate().arm(proto.OpAttach)
+			defer attach.releaseNow()
 
 			openCtx, cancelOpen := context.WithCancel(context.Background())
 			defer cancelOpen()
@@ -597,22 +783,58 @@ func TestAnUnacceptedOpenLeavesNoLiveHelperSessionAfterShutdown(t *testing.T) {
 				done <- err
 			}()
 
-			stand.waitForAttach(entered, done)
-			stand.app.Shutdown(context.Background())
-			// SHUTDOWN MUST HAVE CANCELLED AND JOINED THIS OPEN, not merely
-			// returned beside it. That join is what runs the rollback before
-			// the helpers it rides are torn down.
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				cancelOpen()
-				<-done
-				t.Fatal("Shutdown returned while the backend open was still held in Attach: OpenSession is not part of the transport's in-flight drain")
-			}
-
-			stand.assertHoldsNoSession("after shutdown")
+			stand.shutdownWhileHeldInAttach(attach, done)
 		})
 	}
+}
+
+// TestAnOpenWhoseCallerDeadlineExpiresLeavesNoLiveHelperSessionAfterShutdown
+// is the LOCAL route's own case, and it needs no shutdown to fail. The
+// caller's deadline expires while the helper is holding the attach — the
+// helper is answering, and the spawn's answer already gave this coordinator
+// the session's only name. A local guard that read the deadline as "the helper
+// did not answer" skipped the close and left a shell nobody could name.
+//
+// ON THE FAR ROUTE THIS SCENARIO KEEPS THE GUARD ON PURPOSE: a far helper that
+// did not answer the attach will not answer the close either, and waiting out
+// another answer budget there is the bound the task preserves. So there is no
+// far subtest here: it would assert the opposite of the route's deliberate
+// behaviour.
+func TestAnOpenWhoseCallerDeadlineExpiresLeavesNoLiveHelperSessionAfterShutdown(t *testing.T) {
+	stand := newHelperOpenStand(t, hostOnThisMachine, false, hostmode.Helper)
+	attach := stand.gate().arm(proto.OpAttach)
+	defer attach.releaseNow()
+
+	// A real deadline short enough to expire while Attach is held, so the
+	// failure the open sees is the CALLER giving up, not shutdown.
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelOpen()
+	done := make(chan error, 1)
+	go func() {
+		_, err := stand.app.Transport.OpenSession(openCtx, stand.openSpec(""))
+		done <- err
+	}()
+
+	// The session EXISTS and is live while the attach is held: this is the
+	// state the defect leaves behind, and the premise that makes the check
+	// after shutdown about a session that was really there.
+	sid := stand.waitForAttach(attach.entered, done)
+	stand.assertLive(sid, "while the caller's deadline is still in the future")
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the open answered %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the open did not end when its own deadline expired")
+	}
+
+	// The rollback ran during that open — the close is part of it, on the
+	// local route, whichever way the attach failed. Shutdown must not be what
+	// closes the session.
+	stand.app.Shutdown(context.Background())
+	stand.assertNotLive(sid, "after shutdown")
 }
 
 // TestAnAcceptedSessionRemainsLiveOnItsHelperAfterShutdown is the other half:
@@ -632,16 +854,9 @@ func TestAnAcceptedSessionRemainsLiveOnItsHelperAfterShutdown(t *testing.T) {
 
 			stand.app.Shutdown(context.Background())
 
-			entries := stand.helperSessions()
-			var live bool
-			for _, entry := range entries {
-				if entry.HostSessionID.Session == sid {
-					live = true
-				}
-			}
-			if !live {
-				t.Fatalf("an accepted session %s is not live on its helper after shutdown: %+v", sid, entries)
-			}
+			// The inventory keeps finished sessions, so presence alone is not
+			// liveness: this must be the SAME session id, still running.
+			stand.assertLive(sid, "an accepted session after shutdown")
 			// End it through the separate connection, so the helper does not
 			// keep a session for a coordinator the test removed.
 			if closeErr := stand.probe.CloseSession(context.Background(), helperclient.HostSessionID{

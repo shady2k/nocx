@@ -167,7 +167,7 @@ func TestDepartedBulkCaptureHasNoPerCellGraphemeAllocation(t *testing.T) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 	allocs := testing.AllocsPerRun(10, func() {
-		row, err := gt.historyRow(0)
+		row, err := gt.historyRow(0, &historyRowScratch{})
 		if err != nil || row.Cells[119].Grapheme != "A" {
 			t.Fatalf("full ASCII history row: %+v, %v", row, err)
 		}

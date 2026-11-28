@@ -317,10 +317,24 @@ func TestHistoryRowsCarryCellsAndStyles(t *testing.T) {
 		t.Fatalf("active row 0: %v", err)
 	}
 
-	histFeed(t, term, histNumbered(12))
+	const following = "different cells fill this row 界"
+	histFeed(t, term, strings.Repeat(following+"\r\n", 12))
 	page := histPage(t, term, 0, 50)
 	if page.Total != 4 {
 		t.Fatalf("total history rows: %d, want 4", page.Total)
+	}
+	// Later rows in this same read overwrite the bridge scratch, including
+	// the earlier row's multi-byte grapheme. They must not inherit its style
+	// or change the owned cells and strings returned for it.
+	for _, later := range page.Rows[1:] {
+		if got := histText(later); got != following {
+			t.Fatalf("following history row: text %q, want %q", got, following)
+		}
+		for _, cell := range later.Cells {
+			if cell.Style != (emulator.Style{}) {
+				t.Fatalf("following unstyled row inherited style: %+v", cell.Style)
+			}
+		}
 	}
 	row := page.Rows[0]
 	if got, want := histText(row), "BOLDRED plain 日"; got != want {
@@ -390,6 +404,31 @@ func TestHistoryRowsCostOneGridResolutionPerRow(t *testing.T) {
 	if spent := after - before; spent != rows {
 		t.Fatalf("reading %d rows of 80 columns spent %d grid-reference resolutions, want exactly %d (one per row)",
 			rows, spent, rows)
+	}
+}
+
+func TestHistoryRowsReuseGrownScratchForLongGraphemes(t *testing.T) {
+	term := histTerm(t, 1, 2)
+	accents := strings.Repeat("\u0301", 40)
+	first, second := "e"+accents, "a"+accents
+	histFeed(t, term, first+"\r\n"+second+"\r\n\r\n")
+
+	before := ghosttytest.GridResolutions()
+	page := histPage(t, term, 0, 2)
+	spent := ghosttytest.GridResolutions() - before
+	if len(page.Rows) != 2 {
+		t.Fatalf("rows returned: %d, want 2", len(page.Rows))
+	}
+	if got := histText(page.Rows[0]); got != first {
+		t.Errorf("first history row = %q, want %q", got, first)
+	}
+	if got := histText(page.Rows[1]); got != second {
+		t.Errorf("second history row = %q, want %q", got, second)
+	}
+	// Each grapheme is 81 bytes. The first row retries with 256 bytes;
+	// the second must use that buffer rather than retrying at 64 bytes.
+	if spent != 3 {
+		t.Errorf("history read spent %d grid resolutions, want 3", spent)
 	}
 }
 

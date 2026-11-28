@@ -987,8 +987,9 @@ func (t *terminal) noteDepartedLocked() {
 // rows after it are ordered after it, and reading past a hole would report
 // the rest as though the hole were not there.
 func (t *terminal) captureDepartedLocked(from, to int) {
+	var scratch historyRowScratch
 	for y := from; y < to; y++ {
-		row, err := t.historyRow(y)
+		row, err := t.historyRow(y, &scratch)
 		if err != nil {
 			t.failDeparted(fmt.Errorf("ghostty: departed row %d of %d..%d: %w", y, from, to, err))
 			return
@@ -1056,8 +1057,9 @@ func (t *terminal) captureHistoryErasedLocked(firstRow, count int) {
 	from := startOriginal - prunedBefore
 	to := endOriginal - prunedBefore
 	if t.departedErr == nil {
+		var scratch historyRowScratch
 		for y := from; y < to; y++ {
-			row, err := t.historyRow(y)
+			row, err := t.historyRow(y, &scratch)
 			if err != nil {
 				t.failDeparted(fmt.Errorf("ghostty: history-erased row %d of %d..%d: %w", y, firstRow, firstRow+count, err))
 				break
@@ -1226,8 +1228,9 @@ func (t *terminal) HistoryRows(start, count int) (emulator.HistoryPage, error) {
 		end = start + count
 	}
 	rows := make([]emulator.Row, 0, max(end-start, 0))
+	var scratch historyRowScratch
 	for y := start; y < end; y++ {
-		row, err := t.historyRow(y)
+		row, err := t.historyRow(y, &scratch)
 		if err != nil {
 			// The rows read so far go out with the failure, exactly as a
 			// departure report does: what was read is ordered, and the
@@ -1604,6 +1607,14 @@ func (t *terminal) readGrapheme(ref *C.GhosttyGridRef) (string, error) {
 	return sb.String(), nil
 }
 
+// historyRowScratch belongs to one locked history-read batch, not the terminal.
+// The bridge rewrites every facts record; returned cells and strings own their
+// storage and never retain either temporary buffer.
+type historyRowScratch struct {
+	cells     []C.nocxRowCellFacts
+	graphemes []byte
+}
+
 // historyRow reads one row of the active buffer's scrollback through the
 // bridge's row traversal. The bridge resolves the row ONCE — the page-list
 // walk a history lookup pays — and reads every cell of the row off the
@@ -1611,16 +1622,22 @@ func (t *terminal) readGrapheme(ref *C.GhosttyGridRef) (string, error) {
 // resolution and not N. Bounds belong to the caller, as rowAt's do: history
 // is bounded by what has not been evicted, and only the caller knows the
 // range it asked for.
-func (t *terminal) historyRow(y int) (emulator.Row, error) {
+func (t *terminal) historyRow(y int, scratch *historyRowScratch) (emulator.Row, error) {
 	cols := t.geom.Cols
-	cells := make([]C.nocxRowCellFacts, cols)
+	if len(scratch.cells) != cols {
+		scratch.cells = make([]C.nocxRowCellFacts, cols)
+	}
+	cells := scratch.cells
 	var wrap, cont C.bool
 	// Clusters ride one row-wide UTF-8 buffer. The first budget is what a
 	// full row of the port's largest clusters costs; a row of clusters past
 	// even that re-runs the whole traversal on a fourfold budget rather than
 	// truncating — the bridge holds no state between attempts, and each
 	// attempt pays its own one resolution.
-	graphemes := make([]byte, cols*maxGraphemeCodepoints*4)
+	if len(scratch.graphemes) < cols*maxGraphemeCodepoints*4 {
+		scratch.graphemes = make([]byte, cols*maxGraphemeCodepoints*4)
+	}
+	graphemes := scratch.graphemes
 	for {
 		r := C.nocxHistoryRow(t.t, C.uint32_t(y), C.uint16_t(cols), &cells[0],
 			(*C.uint8_t)(unsafe.Pointer(&graphemes[0])), C.size_t(len(graphemes)), &wrap, &cont)
@@ -1630,6 +1647,7 @@ func (t *terminal) historyRow(y int) (emulator.Row, error) {
 					y, len(graphemes), emulator.ErrExhausted)
 			}
 			graphemes = make([]byte, len(graphemes)*4)
+			scratch.graphemes = graphemes
 			continue
 		}
 		if r != C.GHOSTTY_SUCCESS {

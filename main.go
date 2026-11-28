@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -48,6 +49,25 @@ const appName = "nocx"
 // long a window can sit blank before it either has a backend or says why it
 // has not: never a hang, always an answer (design §4).
 const launchTimeout = 45 * time.Second
+
+func desktopAssetOptions() application.AssetOptions {
+	return application.AssetOptions{
+		// The bundled handler also serves /wails/runtime.js.
+		Handler: application.BundledAssetFileServer(assets),
+		Middleware: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Wails probes for an optional script at startup and loads it
+				// only when the response advertises JavaScript.
+				if r.Method == http.MethodHead && r.URL.Path == "/wails/custom.js" {
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		},
+	}
+}
 
 func main() {
 	// THE WINDOW'S OWN LOG HAS A FILE, BEFORE ANYTHING WRITES A LINE
@@ -108,11 +128,7 @@ func main() {
 	shell := application.New(application.Options{
 		Name:        appName,
 		Description: "A local-first, Warp-style terminal",
-		Assets: application.AssetOptions{
-			// Bundled, not plain: it serves /wails/runtime.js, which the v3
-			// frontend runtime's HTTP transport fetches for every call.
-			Handler: application.BundledAssetFileServer(assets),
-		},
+		Assets:      desktopAssetOptions(),
 		Services: []application.Service{
 			application.NewService(&desktopIdentityService{}),
 			application.NewService(wailsApp),
